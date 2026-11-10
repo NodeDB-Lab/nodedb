@@ -207,6 +207,7 @@ mod tests {
         let subquery = SqlExpr::Subquery(Box::new(crate::types::SqlPlan::ConstantResult {
             columns: vec!["n".into()],
             values: vec![SqlValue::Int(1)],
+            cast_types: vec![None],
             volatile: true,
         }));
         assert!(!contains_sequence_accessor(&subquery));

@@ -5,7 +5,6 @@
 pub(super) mod apply;
 pub(super) mod columnar_insert;
 pub(in crate::data::executor) mod crdt_collection;
-pub(in crate::data::executor) mod crdt_row;
 pub(super) mod document;
 pub(super) mod document_fts;
 pub(in crate::data::executor::handlers) mod document_outcome;

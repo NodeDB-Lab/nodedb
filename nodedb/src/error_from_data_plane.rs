@@ -167,14 +167,18 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
             NodeDbError::numeric_value_out_of_range(detail)
         }
         ErrorCode::BadRequest { detail } => NodeDbError::bad_request(detail),
-        // The public class `code_for_sqlstate` gives `22P02`, `22007`,
-        // `22008` and `42804`.
-        ErrorCode::InvalidTextRepresentation { detail }
-        | ErrorCode::InvalidDatetimeFormat { detail }
-        | ErrorCode::DatetimeFieldOverflow { detail } => NodeDbError::data_exception(detail),
-        ErrorCode::DatatypeMismatch { detail } => {
-            NodeDbError::from_wire(PublicCode::BAD_REQUEST, detail)
+        ErrorCode::InvalidArgumentForLogarithm { detail } => {
+            NodeDbError::invalid_argument_for_logarithm(detail)
         }
+        ErrorCode::InvalidArgumentForPowerFunction { detail } => {
+            NodeDbError::invalid_argument_for_power_function(detail)
+        }
+        ErrorCode::InvalidTextRepresentation { detail } => {
+            NodeDbError::invalid_text_representation(detail)
+        }
+        ErrorCode::InvalidDatetimeFormat { detail } => NodeDbError::invalid_datetime_format(detail),
+        ErrorCode::DatetimeFieldOverflow { detail } => NodeDbError::datetime_field_overflow(detail),
+        ErrorCode::DatatypeMismatch { detail } => NodeDbError::datatype_mismatch(detail),
         ErrorCode::TransactionRollback { detail } => NodeDbError::transaction_rollback(detail),
         // A first-committer-wins refusal: the retriable class the SQL
         // surfaces send as `40001`.
@@ -320,6 +324,33 @@ mod tests {
             })
             .is_rate_exceeded()
         );
+    }
+
+    #[test]
+    fn math_domain_codes_keep_their_public_code() {
+        let log = data_plane_code_to_public(ErrorCode::InvalidArgumentForLogarithm {
+            detail: "cannot take logarithm of zero".into(),
+        });
+        assert_eq!(log.code(), PublicCode::INVALID_ARGUMENT_FOR_LOGARITHM);
+        let power = data_plane_code_to_public(ErrorCode::InvalidArgumentForPowerFunction {
+            detail: "cannot take square root of a negative number".into(),
+        });
+        assert_eq!(
+            power.code(),
+            PublicCode::INVALID_ARGUMENT_FOR_POWER_FUNCTION
+        );
+        let text =
+            data_plane_code_to_public(ErrorCode::InvalidTextRepresentation { detail: "x".into() });
+        assert_eq!(text.code(), PublicCode::INVALID_TEXT_REPRESENTATION);
+        let format =
+            data_plane_code_to_public(ErrorCode::InvalidDatetimeFormat { detail: "x".into() });
+        assert_eq!(format.code(), PublicCode::INVALID_DATETIME_FORMAT);
+        let overflow =
+            data_plane_code_to_public(ErrorCode::DatetimeFieldOverflow { detail: "x".into() });
+        assert_eq!(overflow.code(), PublicCode::DATETIME_FIELD_OVERFLOW);
+        let mismatch =
+            data_plane_code_to_public(ErrorCode::DatatypeMismatch { detail: "x".into() });
+        assert_eq!(mismatch.code(), PublicCode::DATATYPE_MISMATCH);
     }
 
     #[test]

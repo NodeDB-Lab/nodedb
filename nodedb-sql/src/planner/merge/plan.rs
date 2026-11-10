@@ -21,6 +21,19 @@ use crate::types::*;
 
 /// Plan a `MERGE INTO target USING source ON ... WHEN ... THEN ...` statement.
 pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    let plans = plan_merge_rows(stmt, catalog)?;
+    let ast::Statement::Merge(merge) = stmt else {
+        return Ok(plans);
+    };
+    let items = match &merge.output {
+        Some(ast::OutputClause::Returning { select_items, .. }) => Some(select_items.as_slice()),
+        Some(ast::OutputClause::Output { .. }) | None => None,
+    };
+    let (_, alias) = extract_table_factor_name_alias(&merge.table)?;
+    crate::planner::returning::attach_returning(plans, items, alias.as_deref(), catalog)
+}
+
+fn plan_merge_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     let ast::Statement::Merge(merge) = stmt else {
         return Err(SqlError::Parse {
             detail: "expected MERGE statement".into(),
@@ -94,7 +107,7 @@ pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec
         // `RETURNING ...` into one `output` field. Only the RETURNING form
         // sends rows back to the client; `OUTPUT ... INTO` redirects them into
         // another table and must not be reported as a row-returning statement.
-        returning: matches!(&merge.output, Some(ast::OutputClause::Returning { .. })),
+        returning: None,
     })
 }
 

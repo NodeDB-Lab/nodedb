@@ -111,7 +111,6 @@ impl CoreLoop {
             UndoEntry::SpatialRow(undo) => self.apply_undo_spatial_row(entry_index, *undo),
             UndoEntry::VectorWrite(undo) => self.apply_undo_vector_write(entry_index, *undo),
             UndoEntry::CrdtCollection(undo) => self.apply_undo_crdt_collection(entry_index, *undo),
-            UndoEntry::CrdtRow(undo) => self.apply_undo_crdt_row(entry_index, *undo),
             UndoEntry::ArrayTiles { array_id, snapshot } => self
                 .array_engine
                 .restore_tiles(&array_id, snapshot)

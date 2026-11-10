@@ -151,7 +151,6 @@ impl<'a> StatementExecutor<'a> {
                             self.tenant_id,
                             self.database_id,
                             &security.context(self.state),
-                            None,
                         )
                         .await?;
                     let planned = tasks.len();

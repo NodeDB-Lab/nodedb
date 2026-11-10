@@ -29,17 +29,6 @@ fn is_identity_column(
     }
 }
 
-/// Whether `updates` assigns any identity column of the collection.
-pub(in crate::data::executor) fn assigns_identity(
-    strict_schema: Option<&StrictSchema>,
-    declared_primary_key: Option<&str>,
-    updates: &[(String, UpdateValue)],
-) -> bool {
-    updates
-        .iter()
-        .any(|(field, _)| is_identity_column(strict_schema, declared_primary_key, field))
-}
-
 /// The pre-update values of the identity columns an UPDATE assigns. Empty,
 /// and allocation-free, when the UPDATE assigns none.
 pub(in crate::data::executor) struct IdentitySnapshot {
@@ -128,17 +117,17 @@ mod tests {
 
     #[test]
     fn schemaless_identity_is_id_unless_a_key_is_declared() {
-        assert!(assigns_identity(None, None, &set("id")));
-        assert!(!assigns_identity(None, None, &set("v")));
-        assert!(assigns_identity(None, Some("sku"), &set("sku")));
-        assert!(!assigns_identity(None, Some("sku"), &set("id")));
+        assert!(is_identity_column(None, None, "id"));
+        assert!(!is_identity_column(None, None, "v"));
+        assert!(is_identity_column(None, Some("sku"), "sku"));
+        assert!(!is_identity_column(None, Some("sku"), "id"));
     }
 
     #[test]
     fn strict_identity_is_the_schema_primary_key() {
         let schema = strict();
-        assert!(assigns_identity(Some(&schema), None, &set("k")));
-        assert!(!assigns_identity(Some(&schema), None, &set("v")));
+        assert!(is_identity_column(Some(&schema), None, "k"));
+        assert!(!is_identity_column(Some(&schema), None, "v"));
     }
 
     #[test]

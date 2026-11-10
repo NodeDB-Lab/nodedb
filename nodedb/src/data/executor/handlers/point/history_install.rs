@@ -331,7 +331,7 @@ mod tests {
         core.apply_scope
             .bitemporal_stamps
             .remove(&SURROGATE.as_u32());
-        assert_eq!(outcome.version_sys_from, sys_from);
+        assert_eq!(outcome.installed.version.sys_from, sys_from);
         outcome.history.is_some()
     }
 

@@ -94,3 +94,133 @@ pub fn group_key_row_name(key: &SqlExpr, index: usize) -> String {
         | SqlExpr::Wildcard => computed_group_key_name(index),
     }
 }
+
+/// The key each GROUP BY key ends under in a final aggregate row, once its
+/// SELECT alias applies.
+///
+/// `row_names` holds each key's row name and `aliases` is parallel to it. A
+/// missing entry, a `None` entry, or an alias equal to the row name keeps
+/// the row name. `aggregate_names` are the keys the aggregates end under.
+///
+/// SQL output names can repeat (`SELECT a AS x, b AS x ... GROUP BY a, b`),
+/// and a row holds one cell per key. An alias therefore renames its key only
+/// when no other cell of the row ends under that name: an aggregate, a key
+/// that keeps its row name, or an earlier renamed key. A key whose alias is
+/// taken keeps its row name, and the alias names its output column only, as
+/// an aliased column of a plain SELECT does.
+pub fn group_key_final_names(
+    row_names: &[String],
+    aliases: &[Option<String>],
+    aggregate_names: &[&str],
+) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let wanted: Vec<Option<&str>> = row_names
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            aliases
+                .get(index)
+                .and_then(|alias| alias.as_deref())
+                .filter(|alias| alias != row)
+        })
+        .collect();
+    let mut renamed: Vec<bool> = wanted.iter().map(Option::is_some).collect();
+    // A refused rename leaves its row name in the row, which can take an
+    // alias an earlier pass granted. Refusals only grow, so this ends.
+    loop {
+        let mut taken: HashSet<&str> = aggregate_names.iter().copied().collect();
+        taken.extend(
+            row_names
+                .iter()
+                .zip(&renamed)
+                .filter(|(_, renamed)| !**renamed)
+                .map(|(row, _)| row.as_str()),
+        );
+        let mut changed = false;
+        for (index, alias) in wanted.iter().enumerate() {
+            let Some(alias) = alias else { continue };
+            if !renamed[index] {
+                continue;
+            }
+            if !taken.insert(*alias) {
+                renamed[index] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    row_names
+        .iter()
+        .zip(wanted.iter().zip(&renamed))
+        .map(|(row, (alias, renamed))| match (alias, renamed) {
+            (Some(alias), true) => (*alias).to_string(),
+            _ => row.clone(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod final_name_tests {
+    use super::group_key_final_names;
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn aliases(aliases: &[Option<&str>]) -> Vec<Option<String>> {
+        aliases.iter().map(|a| a.map(str::to_string)).collect()
+    }
+
+    #[test]
+    fn distinct_aliases_rename_their_keys() {
+        assert_eq!(
+            group_key_final_names(&names(&["a", "b"]), &aliases(&[Some("x"), None]), &["n"]),
+            names(&["x", "b"])
+        );
+    }
+
+    #[test]
+    fn a_repeated_alias_renames_only_the_first_key() {
+        assert_eq!(
+            group_key_final_names(&names(&["a", "b"]), &aliases(&[Some("x"), Some("x")]), &[]),
+            names(&["x", "b"])
+        );
+    }
+
+    #[test]
+    fn an_alias_an_aggregate_or_a_kept_key_holds_keeps_the_row_name() {
+        assert_eq!(
+            group_key_final_names(&names(&["a"]), &aliases(&[Some("n")]), &["n"]),
+            names(&["a"])
+        );
+        assert_eq!(
+            group_key_final_names(&names(&["a", "b"]), &aliases(&[Some("b"), None]), &[]),
+            names(&["a", "b"])
+        );
+    }
+
+    #[test]
+    fn swapped_aliases_both_apply() {
+        assert_eq!(
+            group_key_final_names(&names(&["a", "b"]), &aliases(&[Some("b"), Some("a")]), &[]),
+            names(&["b", "a"])
+        );
+    }
+
+    #[test]
+    fn a_refused_rename_frees_no_name_another_rename_took() {
+        // `b AS n` is refused by the aggregate `n`, so `b` stays in the row
+        // and `a AS b` must not take it.
+        assert_eq!(
+            group_key_final_names(
+                &names(&["a", "b"]),
+                &aliases(&[Some("b"), Some("n")]),
+                &["n"]
+            ),
+            names(&["a", "b"])
+        );
+    }
+}

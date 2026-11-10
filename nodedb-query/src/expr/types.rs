@@ -87,24 +87,7 @@ pub enum BinaryOp {
     Concat,
 }
 
-/// Target types for CAST.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-#[msgpack(c_enum)]
-pub enum CastType {
-    Int,
-    Float,
-    String,
-    Bool,
-}
+pub use super::cast_type::CastType;
 
 /// A computed projection column: alias + expression.
 #[derive(

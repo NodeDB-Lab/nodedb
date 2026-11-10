@@ -301,6 +301,7 @@ fn malformed_redo_payload_aborts_replay() {
 #[test]
 fn write_group_origin_uses_the_effective_lsn_instead_of_its_part_lsn() {
     let group = WriteGroupRecord {
+        schemas: Vec::new(),
         group: super::super::group::WriteGroup::part_of(7, 1, 1),
         ops: vec![RedoSubRecord {
             record_type: RecordType::FtsIndex as u32,

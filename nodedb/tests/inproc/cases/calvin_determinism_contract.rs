@@ -153,6 +153,7 @@ fn document_schemaless_non_bitemporal_byte_identical() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             })
         })
         .collect();
@@ -328,6 +329,7 @@ fn document_bitemporal_byte_identical() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             })
         })
         .collect();

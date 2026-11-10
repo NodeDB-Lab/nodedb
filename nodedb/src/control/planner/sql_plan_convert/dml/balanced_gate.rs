@@ -115,6 +115,7 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn balanced_batch_task(
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

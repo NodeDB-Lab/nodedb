@@ -151,6 +151,12 @@ pub enum CrdtError {
     #[error("loro error: {0}")]
     Loro(String),
 
+    /// A Loro binary value is not the tagged MessagePack of one NodeDB
+    /// value, or a value does not encode as one. See
+    /// [`crate::loro_value`] for the encoding.
+    #[error("CRDT typed value malformed: {detail}")]
+    TypedValueMalformed { detail: String },
+
     /// Dead-letter queue is full.
     #[error("dead-letter queue full: capacity {capacity}, pending {pending}")]
     DlqFull { capacity: usize, pending: usize },

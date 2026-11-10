@@ -142,6 +142,12 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::DivisionByZero => Self::DivisionByZero,
             ErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             ErrorCode::DataException { detail } => Self::DataException { detail },
+            ErrorCode::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            ErrorCode::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
+            }
             ErrorCode::NumericValueOutOfRange { detail } => Self::NumericValueOutOfRange { detail },
             ErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
             ErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
@@ -345,6 +351,12 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::DatetimeFieldOverflow { detail } => {
                 Self::DatetimeFieldOverflow { detail }
             }
+            DataPlaneErrorCode::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            DataPlaneErrorCode::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
+            }
             DataPlaneErrorCode::UndefinedObject { object } => Self::UndefinedObject { object },
             DataPlaneErrorCode::ObjectNotInPrerequisiteState { object, detail } => {
                 Self::ObjectNotInPrerequisiteState { object, detail }
@@ -447,6 +459,12 @@ mod tests {
                 detail: detail.clone(),
             },
             ErrorCode::DatetimeFieldOverflow {
+                detail: detail.clone(),
+            },
+            ErrorCode::InvalidArgumentForLogarithm {
+                detail: detail.clone(),
+            },
+            ErrorCode::InvalidArgumentForPowerFunction {
                 detail: detail.clone(),
             },
         ] {

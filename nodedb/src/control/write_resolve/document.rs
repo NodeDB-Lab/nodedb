@@ -117,6 +117,9 @@ impl EngineWriteResolver for DocumentWriteResolver {
         op: PhysicalPlan,
     ) -> crate::Result<ResolvedRows> {
         let collection = &self.collection;
+        // The resolved mutations carry the write's own body, and every
+        // replica installs them: its volatile DEFAULTs bind here, once.
+        let op = bind_resolve_op(state, ctx, op)?;
         let resp =
             dispatch_local(state, ctx.tenant_id, ctx.database_id, collection, op, None).await?;
         if resp.status != Status::Ok {
@@ -169,4 +172,27 @@ impl EngineWriteResolver for DocumentWriteResolver {
             }),
         }
     }
+}
+
+/// `op`, a `ResolveWrite`, with the volatile DEFAULTs its wrapped write
+/// leaves unset bound. Any other plan passes unchanged.
+fn bind_resolve_op(
+    state: &SharedState,
+    ctx: WriteResolveContext,
+    op: PhysicalPlan,
+) -> crate::Result<PhysicalPlan> {
+    let PhysicalPlan::Document(DocumentOp::ResolveWrite(inner)) = &op else {
+        return Ok(op);
+    };
+    Ok(
+        match super::volatile_defaults::bind_document_op(
+            state,
+            ctx.tenant_id,
+            ctx.database_id,
+            inner,
+        )? {
+            Some(bound) => PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(bound))),
+            None => op,
+        },
+    )
 }

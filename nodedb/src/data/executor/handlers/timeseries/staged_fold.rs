@@ -15,6 +15,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::timeseries::columnar_memtable::{
     ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
 };
+use crate::engine::timeseries::declared_cell::{declared_value, typed_value_cell};
 use crate::engine::timeseries::grouped_scan::{GroupedAggResult, aggregate_memtable};
 use crate::engine::timeseries::resolved_ingest::empty_value;
 use crate::types::{DatabaseId, TenantId};
@@ -127,5 +128,13 @@ fn column_value(name: &str, column_type: ColumnType, value: &Value) -> crate::Re
             Value::String(s) => ColumnValue::Symbol(s.clone()),
             _ => return Err(mismatch()),
         },
+        // The one reader a committed ingest and a staged row share: a
+        // DECIMAL fitted to its typmod, a UUID read as its 16 bytes.
+        ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => {
+            declared_value(name, column_type, value)?
+                .as_ref()
+                .and_then(typed_value_cell)
+                .ok_or_else(mismatch)?
+        }
     })
 }

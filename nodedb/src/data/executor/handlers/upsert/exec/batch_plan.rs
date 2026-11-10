@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The judge pass of a `DocumentOp::BatchUpsert` page. It computes each
-//! key's post-image and the write policy's verdict on it, and writes nothing.
+//! Pure merging of a `DocumentOp::BatchUpsert` page into per-key candidate bodies.
 
 use std::collections::HashMap;
 
@@ -12,7 +11,6 @@ use nodedb_types::columnar::StrictSchema;
 use super::merge_body::{decode_stored_row, merge_upsert_body};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::rls_write_gate;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// One key the page writes: its rows, the row the key held before the page,
@@ -38,7 +36,6 @@ pub(super) struct PageScope<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub strict_schema: Option<&'a StrictSchema>,
-    pub identity_column: &'a str,
 }
 
 /// The rows of a page and the clause every row merges with.
@@ -46,13 +43,11 @@ pub(super) struct PageRows<'a> {
     pub documents: &'a [(String, Vec<u8>)],
     pub surrogates: &'a [Surrogate],
     pub on_conflict_updates: &'a [(String, UpdateValue)],
-    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 impl CoreLoop {
-    /// Judge every row of the page: the key's post-image, merged as
-    /// `execute_upsert` merges it, and the write policy's verdict on it.
-    /// Writes nothing. Keys come back in first-row order.
+    /// Merge page inputs without materializing defaults, generators, or policies.
+    /// Keys return in first-row order.
     pub(super) fn plan_upsert_page<'a>(
         &self,
         scope: &PageScope<'_>,
@@ -62,7 +57,6 @@ impl CoreLoop {
             documents,
             surrogates,
             on_conflict_updates,
-            rls_write_check,
         } = rows;
         let mut keys: Vec<PageKey<'a>> = Vec::new();
         let mut slot_of: HashMap<Surrogate, usize> = HashMap::new();
@@ -125,23 +119,6 @@ impl CoreLoop {
                     });
                 }
             }
-        }
-        // The policy decides the body each key persists: the incoming row
-        // when it was absent, the merge when it was stored.
-        for key in &keys {
-            rls_write_gate::admit_stored_row(
-                rls_write_check,
-                rls_write_gate::GatedRow {
-                    body: &key.post,
-                    identity: &key.identity,
-                    strict_schema: None,
-                    identity_column: scope.identity_column,
-                },
-                scope.tid,
-                scope.collection,
-                &self.crs_context(),
-            )
-            .map_err(ErrorCode::from)?;
         }
         Ok(keys)
     }

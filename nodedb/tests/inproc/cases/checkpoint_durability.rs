@@ -304,12 +304,24 @@ fn checkpoint_reads_drop_page_cache() {
         "nodedb/src/data/executor/crdt_checkpoint/load.rs",
         "nodedb/src/data/executor/kv_checkpoint/load.rs",
         "nodedb/src/data/executor/sync_hwm_checkpoint/load.rs",
-        "nodedb/src/data/executor/columnar_checkpoint/load.rs",
+        // The columnar load path reads its bytes in the manifest and
+        // generation-restore readers, not in `load.rs`.
+        "nodedb/src/data/executor/columnar_checkpoint/manifest.rs",
+        "nodedb/src/data/executor/columnar_checkpoint/restore.rs",
         "nodedb/src/data/executor/graph_label_checkpoint/load.rs",
         // The timeseries loader reads one `partition.meta` per partition to
         // rebuild the registry at boot. They are consumed once and superseded
         // by the in-memory registry, exactly like every checkpoint blob above.
         "nodedb/src/data/executor/timeseries_checkpoint/load.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/stamp.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/series_catalog.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/schema.rs",
+        // Durable timeseries sidecars and the sequencer snapshot are read
+        // once at boot or recovery, then superseded by in-memory state.
+        "nodedb/src/data/executor/handlers/timeseries/cagg_persist.rs",
+        "nodedb/src/data/executor/handlers/timeseries/merge_commit.rs",
+        "nodedb/src/data/executor/handlers/timeseries/flush_commit.rs",
+        "nodedb/src/control/cluster/sequencer_snapshot.rs",
     ] {
         let src = read(rel);
         assert!(

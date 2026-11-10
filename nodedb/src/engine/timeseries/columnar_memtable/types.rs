@@ -9,6 +9,8 @@ use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_types::timeseries::{SeriesId, SymbolDictionary};
 use serde::{Deserialize, Serialize};
 
+pub use super::column_data::ColumnData;
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -57,6 +59,54 @@ pub enum ColumnType {
     /// String field: not a series dimension. It is stored as u32 ids into a
     /// per-column dictionary, like a symbol, without the tag cardinality cap.
     Text,
+    /// Exact decimal field, stored as `rust_decimal::Decimal`. `Some`
+    /// carries the declared `DECIMAL(p,s)` typmod every ingested value is
+    /// fitted to. `None` is a plain `DECIMAL`.
+    Decimal(Option<TsDecimalTypmod>),
+    /// UUID field, stored as its 16 bytes.
+    Uuid,
+    /// Boolean field.
+    Bool,
+}
+
+/// The precision and scale a timeseries `DECIMAL(p,s)` column declares.
+///
+/// The memtable type is `Copy` and travels in every timeseries checkpoint,
+/// so it holds the two digits counts. [`Self::typmod`] turns them back into
+/// the validated `DecimalTypmod` the strict and columnar engines fit with.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct TsDecimalTypmod {
+    pub precision: u8,
+    pub scale: u8,
+}
+
+impl TsDecimalTypmod {
+    /// The digit counts of a validated typmod.
+    pub fn of(typmod: nodedb_types::columnar::DecimalTypmod) -> Self {
+        Self {
+            precision: typmod.precision(),
+            scale: typmod.scale(),
+        }
+    }
+
+    /// The validated typmod. `Err` when the stored digit counts are not a
+    /// typmod, a corrupt schema.
+    pub fn typmod(
+        self,
+    ) -> Result<nodedb_types::columnar::DecimalTypmod, nodedb_types::columnar::DecimalTypmodError>
+    {
+        nodedb_types::columnar::DecimalTypmod::new(i64::from(self.precision), i64::from(self.scale))
+    }
 }
 
 impl ColumnType {
@@ -83,6 +133,9 @@ impl ColumnType {
             ColumnType::Int64 => "BIGINT",
             ColumnType::Symbol => "SYMBOL",
             ColumnType::Text => "VARCHAR",
+            ColumnType::Decimal(_) => "DECIMAL",
+            ColumnType::Uuid => "UUID",
+            ColumnType::Bool => "BOOLEAN",
         }
     }
 }
@@ -134,140 +187,6 @@ impl ColumnarSchema {
         self.columns
             .iter()
             .position(|(n, _)| n == nodedb_types::columnar::schema::TS_SERIES)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Column storage
-// ---------------------------------------------------------------------------
-
-/// A single column of data in the memtable.
-#[derive(Debug)]
-pub enum ColumnData {
-    Timestamp(Vec<i64>),
-    Float64(Vec<f64>),
-    Int64(Vec<i64>),
-    Symbol(Vec<u32>),
-    /// Dictionary-encoded string column for low-cardinality tags.
-    ///
-    /// Predicates operate on compact integer IDs rather than string bytes —
-    /// an `O(dict_size * string_len + N)` win over `O(N * string_len)`.
-    DictEncoded {
-        /// Row-level symbol IDs (index into `dictionary`).
-        ids: Vec<u32>,
-        /// ID → string value.
-        dictionary: Vec<String>,
-        /// Reverse lookup: string → ID.
-        reverse: std::collections::HashMap<String, u32>,
-        /// Validity bitmap: false = null row.
-        valid: Vec<bool>,
-    },
-}
-
-impl ColumnData {
-    pub(super) fn new(ty: ColumnType) -> Self {
-        match ty {
-            ColumnType::Timestamp(_) => Self::Timestamp(Vec::with_capacity(4096)),
-            ColumnType::Float64 => Self::Float64(Vec::with_capacity(4096)),
-            ColumnType::Int64 => Self::Int64(Vec::with_capacity(4096)),
-            ColumnType::Symbol | ColumnType::Text => Self::Symbol(Vec::with_capacity(4096)),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Timestamp(v) => v.len(),
-            Self::Float64(v) => v.len(),
-            Self::Int64(v) => v.len(),
-            Self::Symbol(v) => v.len(),
-            Self::DictEncoded { ids, .. } => ids.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Approximate memory usage in bytes.
-    pub(super) fn memory_bytes(&self) -> usize {
-        match self {
-            Self::Timestamp(v) => v.capacity() * 8,
-            Self::Float64(v) => v.capacity() * 8,
-            Self::Int64(v) => v.capacity() * 8,
-            Self::Symbol(v) => v.capacity() * 4,
-            Self::DictEncoded {
-                ids,
-                dictionary,
-                reverse,
-                valid,
-            } => {
-                ids.capacity() * 4
-                    + dictionary.iter().map(|s| s.len() + 24).sum::<usize>()
-                    + reverse.len() * 56 // rough HashMap entry cost
-                    + valid.capacity()
-            }
-        }
-    }
-
-    /// Deep clone the column data.
-    pub fn clone_data(&self) -> Self {
-        match self {
-            Self::Timestamp(v) => Self::Timestamp(v.clone()),
-            Self::Float64(v) => Self::Float64(v.clone()),
-            Self::Int64(v) => Self::Int64(v.clone()),
-            Self::Symbol(v) => Self::Symbol(v.clone()),
-            Self::DictEncoded {
-                ids,
-                dictionary,
-                reverse,
-                valid,
-            } => Self::DictEncoded {
-                ids: ids.clone(),
-                dictionary: dictionary.clone(),
-                reverse: reverse.clone(),
-                valid: valid.clone(),
-            },
-        }
-    }
-
-    /// Get timestamp column as slice. Type mismatch is unreachable in correct usage.
-    pub(crate) fn as_timestamps(&self) -> &[i64] {
-        match self {
-            Self::Timestamp(v) => v,
-            _ => unreachable!(
-                "invariant: ColumnarMemtable columns are constructed by ColumnData::new(ty) keyed to schema; Timestamp type mismatch is impossible"
-            ),
-        }
-    }
-
-    /// Get f64 column as slice. Type mismatch is unreachable in correct usage.
-    pub(crate) fn as_f64(&self) -> &[f64] {
-        match self {
-            Self::Float64(v) => v,
-            _ => unreachable!(
-                "invariant: ColumnarMemtable columns are constructed by ColumnData::new(ty) keyed to schema; Float64 type mismatch is impossible"
-            ),
-        }
-    }
-
-    /// Get i64 column as slice. Type mismatch is unreachable in correct usage.
-    pub(crate) fn as_i64(&self) -> &[i64] {
-        match self {
-            Self::Int64(v) => v,
-            _ => unreachable!(
-                "invariant: ColumnarMemtable columns are constructed by ColumnData::new(ty) keyed to schema; Int64 type mismatch is impossible"
-            ),
-        }
-    }
-
-    /// Get symbol column as slice. Type mismatch is unreachable in correct usage.
-    pub(crate) fn as_symbols(&self) -> &[u32] {
-        match self {
-            Self::Symbol(v) => v,
-            _ => unreachable!(
-                "invariant: ColumnarMemtable columns are constructed by ColumnData::new(ty) keyed to schema; Symbol type mismatch is impossible"
-            ),
-        }
     }
 }
 
@@ -324,10 +243,22 @@ pub enum ColumnValue {
     Float64(f64),
     Int64(i64),
     Symbol(String),
-    /// SQL NULL. A symbol column stores [`NULL_SYMBOL_ID`] and a float
-    /// column stores NaN. Integer and time columns have no NULL and refuse
-    /// it.
+    /// An exact decimal, as `rust_decimal::Decimal::serialize` writes it.
+    Decimal([u8; 16]),
+    /// A UUID as its 16 bytes.
+    Uuid([u8; 16]),
+    Bool(bool),
+    /// SQL NULL. A symbol column stores [`NULL_SYMBOL_ID`], a float column
+    /// stores NaN, and a decimal, UUID or boolean column stores its NULL
+    /// cell. Integer and time columns have no NULL and refuse it.
     Null,
+}
+
+impl ColumnValue {
+    /// The cell an exact decimal ingests as.
+    pub fn decimal(d: rust_decimal::Decimal) -> Self {
+        Self::Decimal(d.serialize())
+    }
 }
 
 /// Result of draining the columnar memtable.

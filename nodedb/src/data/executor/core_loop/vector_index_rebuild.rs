@@ -85,7 +85,7 @@ impl CoreLoop {
                 let normalized = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                     value,
                     body_format.as_format_ref(),
-                );
+                )?;
                 docs.push((doc_id.surrogate(), normalized.into_owned()));
                 Ok(std::ops::ControlFlow::Continue(()))
             });

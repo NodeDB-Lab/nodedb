@@ -83,8 +83,16 @@ pub(super) fn plan_select(
         let projection = convert_projection(&select.projection, &scope)?;
         let mut columns = Vec::new();
         let mut values = Vec::new();
+        let mut cast_types = Vec::new();
         let mut volatile = false;
         for (i, proj) in projection.iter().enumerate() {
+            cast_types.push(match proj {
+                Projection::Computed {
+                    expr: SqlExpr::Cast { to_type, .. },
+                    ..
+                } => Some(to_type.clone()),
+                _ => None,
+            });
             match proj {
                 Projection::Computed { expr, alias } => {
                     columns.push(alias.clone());
@@ -107,6 +115,7 @@ pub(super) fn plan_select(
             plan: SqlPlan::ConstantResult {
                 columns,
                 values,
+                cast_types,
                 volatile,
             },
             scope,
@@ -245,6 +254,7 @@ pub(super) fn plan_select(
                 Box::new(SqlPlan::ConstantResult {
                     columns: Vec::new(),
                     values: Vec::new(),
+                    cast_types: Vec::new(),
                     volatile: false,
                 }),
             );

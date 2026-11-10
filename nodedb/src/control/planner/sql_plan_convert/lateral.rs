@@ -54,9 +54,9 @@ pub(super) fn convert_lateral_top_k(
         ctx,
     } = params;
     let outer_task = single_outer_task(outer, tenant_id, ctx)?;
-    let outer_vshard = outer_task.vshard_id;
     let outer_collection_name = collection_name_from_plan(outer).unwrap_or_default();
     let outer_alias_str = outer_alias.unwrap_or(&outer_collection_name).to_string();
+    let vshard_id = inner_vshard(ctx, inner_collection);
 
     let inner_filter_bytes = serialize_filters(inner_filters)?;
     let order_by_spec = sort_keys_to_spec(inner_order_by);
@@ -66,7 +66,7 @@ pub(super) fn convert_lateral_top_k(
 
     Ok(vec![PhysicalTask {
         tenant_id,
-        vshard_id: outer_vshard,
+        vshard_id,
         database_id: ctx.database_id,
         plan: PhysicalPlan::Query(QueryOp::LateralTopK {
             outer_plan: Box::new(outer_task.plan),
@@ -117,7 +117,6 @@ pub(super) fn convert_lateral_loop(
         ctx,
     } = params;
     let outer_task = single_outer_task(outer, tenant_id, ctx)?;
-    let outer_vshard = outer_task.vshard_id;
     let outer_collection_name = collection_name_from_plan(outer).unwrap_or_default();
     let outer_alias_str = outer_alias.unwrap_or(&outer_collection_name).to_string();
 
@@ -137,7 +136,7 @@ pub(super) fn convert_lateral_loop(
 
     Ok(vec![PhysicalTask {
         tenant_id,
-        vshard_id: outer_vshard,
+        vshard_id: inner_vshard(ctx, &inner_collection),
         database_id: ctx.database_id,
         plan: PhysicalPlan::Query(QueryOp::LateralLoop {
             outer_plan: Box::new(outer_task.plan),
@@ -154,6 +153,13 @@ pub(super) fn convert_lateral_loop(
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
+}
+
+/// The vShard a LATERAL task runs on: the one that owns its inner
+/// collection. The Data Plane scans the inner side on the core it runs on,
+/// and the coordinator materializes the outer side into rows first.
+fn inner_vshard(ctx: &ConvertContext, inner_collection: &str) -> nodedb_types::id::VShardId {
+    nodedb_types::CollectionKey::from_bare(ctx.database_id, inner_collection).vshard()
 }
 
 /// The one task a LATERAL join's outer side lowers to.
@@ -296,6 +302,7 @@ mod tests {
         let inner = SqlPlan::ConstantResult {
             columns: vec!["x".to_string()],
             values: vec![SqlValue::Int(1)],
+            cast_types: vec![None],
             volatile: false,
         };
         assert!(matches!(

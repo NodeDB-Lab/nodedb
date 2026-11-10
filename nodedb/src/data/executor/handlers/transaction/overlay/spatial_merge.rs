@@ -61,24 +61,38 @@ pub(in crate::data::executor) struct SpatialOverlayMergeParams<'a> {
 
 /// Decode a staged spatial-collection overlay body into a full (unprojected)
 /// `Value::Object`, handling both possible staged shapes (see module doc).
-/// Returns `Ok(None)` for a `Value::Array` staged row whose collection has no
-/// known columnar schema, and for a body of any other shape: neither is a
-/// row this search can match. A body that does not decode fails with
-/// `Serialization`: the transaction staged it, so it is corrupt. A
-/// computed-column projection error propagates.
+/// A `Value::Array` staged row whose collection has no known columnar
+/// schema, and a body of any other shape, fail with `Codec`. A body that
+/// does not decode fails with `Serialization`: the transaction staged it, so
+/// it is corrupt. A computed-column projection error propagates.
 fn decode_staged_spatial_row(
     body: &[u8],
     schema: Option<&ColumnarSchema>,
 ) -> crate::Result<Option<Value>> {
-    let value =
-        nodedb_types::value_from_msgpack(body).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".to_string(),
-            detail: format!("staged spatial row does not decode: {e}"),
-        })?;
+    // A columnar row and a sync geometry document stage plain; a native
+    // object body keeps its field types.
+    let value = if crate::data::executor::response_codec::is_native_row(body) {
+        nodedb_types::object_msgpack::decode_object(body)
+    } else {
+        nodedb_types::value_from_msgpack(body)
+    }
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".to_string(),
+        detail: format!("staged spatial row does not decode: {e}"),
+    })?;
     Ok(match value {
-        Value::Array(row) => schema.map(|schema| row_to_value(&row, schema)),
+        Value::Array(row) => Some(row_to_value(
+            &row,
+            schema.ok_or_else(|| crate::Error::Codec {
+                detail: "staged spatial array row has no columnar schema".into(),
+            })?,
+        )),
         obj @ Value::Object(_) => Some(obj),
-        _ => None,
+        _ => {
+            return Err(crate::Error::Codec {
+                detail: "staged spatial row is not an object or positional row".into(),
+            });
+        }
     })
 }
 
@@ -218,5 +232,26 @@ impl CoreLoop {
             seen.insert(surrogate);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::decode_staged_spatial_row;
+    use nodedb_types::Value;
+
+    #[test]
+    fn staged_native_spatial_object_retains_rich_fields() {
+        let value = Value::Decimal("123456789.123456789".parse().expect("decimal"));
+        let doc = Value::Object([("amount".into(), value)].into_iter().collect());
+        let bytes = zerompk::to_msgpack_vec(&doc).expect("native object");
+        assert_eq!(
+            decode_staged_spatial_row(&bytes, None).expect("decode"),
+            Some(doc)
+        );
+        assert!(decode_staged_spatial_row(&[0x92, 255, 0xc0], None).is_err());
+        let positional =
+            zerompk::to_msgpack_vec(&Value::Array(vec![Value::Integer(1)])).expect("array");
+        assert!(decode_staged_spatial_row(&positional, None).is_err());
     }
 }

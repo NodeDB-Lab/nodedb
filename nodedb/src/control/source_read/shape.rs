@@ -26,9 +26,11 @@ impl RowShaper {
         Ok(Self { columns })
     }
 
-    /// Shape one msgpack source row. A source column absent from the row
-    /// yields SQL NULL, as on every other projection path. A division by zero
-    /// in a bound expression fails the statement instead of writing NULL.
+    /// Shape one msgpack source row. The row is a document body, a plain map
+    /// or a native object, and its fields keep their native types. A source
+    /// column absent from the row yields SQL NULL, as on every other
+    /// projection path. A division by zero in a bound expression fails the
+    /// statement instead of writing NULL.
     pub(crate) fn shape(
         &self,
         row: Vec<u8>,
@@ -37,11 +39,10 @@ impl RowShaper {
         if self.columns.is_empty() {
             return Ok(row);
         }
-        let row =
-            nodedb_types::value_from_msgpack(&row).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("source row: {e}"),
-            })?;
+        let row = nodedb_types::decode_object(&row).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("source row of {} bytes does not decode: {e}", row.len()),
+        })?;
         self.shape_value(&row, crs)
     }
 
@@ -62,8 +63,10 @@ impl RowShaper {
     }
 }
 
+/// Encode a shaped row as a native object, so the write keeps each value's
+/// type: a Decimal stays a Decimal, never its text.
 fn encode_row(row: &nodedb_types::Value) -> crate::Result<Vec<u8>> {
-    nodedb_types::value_to_msgpack(row).map_err(|e| crate::Error::Serialization {
+    zerompk::to_msgpack_vec(row).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("shaped source row: {e}"),
     })
@@ -84,7 +87,7 @@ mod tests {
     }
 
     fn decode(bytes: &[u8]) -> Value {
-        nodedb_types::value_from_msgpack(bytes).expect("decode row")
+        nodedb_types::decode_object(bytes).expect("decode row")
     }
 
     #[test]
@@ -135,5 +138,55 @@ mod tests {
             panic!("shaped row is not an object");
         };
         assert_eq!(map.get("target"), Some(&Value::Null));
+    }
+
+    /// A native source row keeps its field types through a column map, a
+    /// plain array field stays an array, and a malformed native row fails.
+    #[test]
+    fn a_native_row_keeps_its_types() {
+        let decimal = Value::Decimal("123.45".parse().expect("decimal"));
+        let uuid = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let at = Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+            1_700_000_000_000_000,
+        ));
+        let nested = Value::Object([("k".to_owned(), Value::Integer(1))].into());
+        let tags = Value::Array(vec![Value::Integer(7), Value::String("x".into())]);
+        let source = Value::Object(
+            [
+                ("price".to_owned(), decimal.clone()),
+                ("uid".to_owned(), uuid.clone()),
+                ("at".to_owned(), at.clone()),
+                ("meta".to_owned(), nested.clone()),
+                ("tags".to_owned(), tags.clone()),
+            ]
+            .into(),
+        );
+        let columns: Vec<ComputedColumn> = ["price", "uid", "at", "meta", "tags"]
+            .into_iter()
+            .map(|name| ComputedColumn {
+                alias: name.into(),
+                expr: SqlExpr::Column(name.into()),
+            })
+            .collect();
+        let bytes = zerompk::to_msgpack_vec(&columns).expect("encode map");
+        let shaper = RowShaper::decode(&bytes).expect("decode map");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+
+        let native = zerompk::to_msgpack_vec(&source).expect("encode native row");
+        let shaped = shaper.shape(native, &crs).expect("shape native row");
+        assert_eq!(decode(&shaped), source);
+
+        let plain = nodedb_types::value_to_msgpack(&source).expect("encode plain row");
+        let from_plain = shaper.shape(plain.clone(), &crs).expect("shape plain row");
+        assert_eq!(
+            decode(&from_plain),
+            nodedb_types::value_from_msgpack(&plain).expect("decode plain row")
+        );
+
+        let malformed = vec![0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
+        assert!(matches!(
+            shaper.shape(malformed, &crs),
+            Err(crate::Error::Serialization { .. })
+        ));
     }
 }

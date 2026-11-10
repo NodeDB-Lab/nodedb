@@ -155,16 +155,19 @@ pub(crate) async fn handle_graph_match(
         return data_plane_response_to_native(ctx, seq, &plan_for_response, &response).await;
     }
 
-    // Unwrap the `{rows, frontier, resume}` envelope into a bare rows array.
-    // This single-shard path does not consume frontier or resume metadata.
-    let unwrapped =
-        match crate::control::server::graph_dispatch::unwrap_match_envelope(&response.payload) {
-            Ok(envelope) => Response {
-                payload: envelope.rows_payload,
-                ..response
-            },
-            Err(error) => return error_to_native(seq, &error),
-        };
+    // Unwrap the `{rows, frontier, resume}` envelope into a bare rows array,
+    // then apply the query's DISTINCT / ORDER BY / OFFSET / LIMIT to the rows
+    // and strip their hidden keys. This single-shard path does not consume
+    // frontier or resume metadata.
+    let finished = crate::control::server::graph_dispatch::unwrap_match_envelope(&response.payload)
+        .and_then(|envelope| finish_rows(&plan_for_response, &envelope.rows_payload));
+    let unwrapped = match finished {
+        Ok(payload) => Response {
+            payload,
+            ..response
+        },
+        Err(error) => return error_to_native(seq, &error),
+    };
     let native = data_plane_response_to_native(ctx, seq, &plan_for_response, &unwrapped).await;
     // Metered only on the success path — `data_plane_response_to_native`
     // above already decoded the row envelope to shape the response, so
@@ -237,13 +240,35 @@ async fn match_across_shards(
                     .into(),
             },
         ),
-        Ok(outcome) => data_plane_response_to_native(
-            ctx,
-            seq,
-            plan,
-            &crate::control::server::dispatch_utils::ok_payload_response(outcome.rows_payload),
-        )
-        .await,
+        Ok(outcome) => match finish_rows(plan, &outcome.rows_payload) {
+            Ok(payload) => {
+                data_plane_response_to_native(
+                    ctx,
+                    seq,
+                    plan,
+                    &crate::control::server::dispatch_utils::ok_payload_response(payload),
+                )
+                .await
+            }
+            Err(error) => error_to_native(seq, &error),
+        },
         Err(error) => error_to_native(seq, &error),
     }
+}
+
+/// The merged rows of `plan`'s MATCH with its window applied: DISTINCT,
+/// ORDER BY, OFFSET, LIMIT, and no hidden key.
+fn finish_rows(
+    plan: &crate::bridge::envelope::PhysicalPlan,
+    rows: &crate::bridge::envelope::Payload,
+) -> crate::Result<crate::bridge::envelope::Payload> {
+    let crate::bridge::envelope::PhysicalPlan::Graph(
+        nodedb_physical::physical_plan::GraphOp::Match { query, .. },
+    ) = plan
+    else {
+        return Err(crate::Error::Internal {
+            detail: "a native MATCH built a plan that is not a MATCH".into(),
+        });
+    };
+    crate::control::server::graph_dispatch::finish_match_payload(query, rows)
 }

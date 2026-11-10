@@ -16,6 +16,7 @@
 use tracing::warn;
 
 use nodedb_types::filter::MetadataFilter;
+use nodedb_types::sync::wire::ShapeSnapshotRefusal;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -27,6 +28,8 @@ use crate::control::server::response_shape::redaction::{
 use crate::control::server::sync::shape::handler::ShapeSnapshotData;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
+
+use super::snapshot::SnapshotFailure;
 
 /// Resolve the subscriber's redaction inputs for one snapshot dispatch.
 ///
@@ -61,7 +64,7 @@ pub(super) fn snapshot_redaction(
 /// resolves an aggregate over a redacted column.
 ///
 /// An undecodable predicate reports `None`: it names no field this can act on,
-/// and [`finalize_snapshot`] already fails it closed to an empty snapshot.
+/// and [`finalize_snapshot`] refuses it with a snapshot reject.
 pub(super) fn predicate_redacted_field(
     predicate_bytes: &[u8],
     redaction: &QueryRedaction,
@@ -133,24 +136,46 @@ pub(super) struct SnapshotPayload<'a> {
 /// redacted column — for every predicate that survives that gate, the fields it
 /// tests are untouched by redaction and the two orders select identical rows.
 ///
-/// Returns `None` when the payload cannot be delivered safely; the caller then
-/// sends no snapshot at all. An empty snapshot is not a substitute: it asserts
-/// the shape matches nothing, and a client that believes it holds a complete
-/// baseline never asks again.
-pub(super) fn finalize_snapshot(req: SnapshotPayload<'_>) -> Option<ShapeSnapshotData> {
+/// Returns a [`SnapshotFailure`] when the payload cannot be delivered
+/// safely. The caller then answers a snapshot reject and sends no snapshot.
+/// An empty snapshot is not a substitute: it asserts the shape matches
+/// nothing, and a client that believes it holds a complete baseline never
+/// asks again.
+pub(super) fn finalize_snapshot(
+    req: SnapshotPayload<'_>,
+) -> Result<ShapeSnapshotData, SnapshotFailure> {
     use crate::control::server::sync::shape::handler::decode_document_or_empty;
     use crate::data::executor::response_codec::{
-        decode_raw_scan_to_docs, encode_raw_document_rows,
+        RowContext, encode_raw_document_rows, scan_rows_in_context,
     };
     use nodedb_query::metadata_filter::matches_metadata_filter;
+
+    // A shape snapshot is a document scan: `{id, data}` envelopes. A payload
+    // in no envelope shape cannot be delivered safely, so the subscriber is
+    // told its snapshot failed.
+    let docs = match scan_rows_in_context(&req.payload, RowContext::ScanEnvelope) {
+        Ok(docs) => docs,
+        Err(err) => {
+            warn!(
+                shape_id = req.shape_id,
+                error = %err,
+                "shape snapshot: the scan payload does not split into rows; sending a \
+                 snapshot reject"
+            );
+            return Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::MalformedRows,
+                format!("the scan payload does not split into rows: {err}"),
+            ));
+        }
+    };
 
     let redacting = req.redaction.has_any_rule(req.store);
 
     // Nothing to rewrite and nothing to filter: the payload is delivered
     // byte-identical, never round-tripped through a decode.
     if req.predicate.is_empty() && !redacting {
-        let doc_count = decode_raw_scan_to_docs(&req.payload).len();
-        return Some(ShapeSnapshotData {
+        let doc_count = docs.len();
+        return Ok(ShapeSnapshotData {
             data: req.payload,
             doc_count,
         });
@@ -165,15 +190,17 @@ pub(super) fn finalize_snapshot(req: SnapshotPayload<'_>) -> Option<ShapeSnapsho
                 warn!(
                     shape_id = req.shape_id,
                     error = %err,
-                    "shape snapshot: failed to decode predicate; sending empty snapshot"
+                    "shape snapshot: failed to decode predicate; sending a snapshot reject"
                 );
-                return Some(ShapeSnapshotData::empty());
+                return Err(SnapshotFailure::new(
+                    ShapeSnapshotRefusal::InvalidPredicate,
+                    format!("the shape predicate does not decode: {err}"),
+                ));
             }
         }
     };
 
     let row_redaction = redacting.then_some(req.redaction);
-    let docs = decode_raw_scan_to_docs(&req.payload);
     let mut matching: Vec<(String, Vec<u8>)> = Vec::new();
 
     for (doc_id, mut data_bytes) in docs {
@@ -181,9 +208,12 @@ pub(super) fn finalize_snapshot(req: SnapshotPayload<'_>) -> Option<ShapeSnapsho
             warn!(
                 shape_id = req.shape_id,
                 "shape snapshot: a row covered by a redaction policy could not be \
-                 rewritten; sending no snapshot"
+                 rewritten; sending a snapshot reject"
             );
-            return None;
+            return Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::MalformedRows,
+                "a row covered by a redaction policy could not be rewritten",
+            ));
         }
         let matches = match &filter {
             Some(filter) => matches_metadata_filter(&decode_document_or_empty(&data_bytes), filter),
@@ -196,16 +226,19 @@ pub(super) fn finalize_snapshot(req: SnapshotPayload<'_>) -> Option<ShapeSnapsho
 
     let doc_count = matching.len();
     match encode_raw_document_rows(&matching) {
-        Ok(data) => Some(ShapeSnapshotData { data, doc_count }),
+        Ok(data) => Ok(ShapeSnapshotData { data, doc_count }),
         Err(err) => {
-            // Fail closed: a re-encode failure must not ship a header whose
-            // doc_count disagrees with its (empty) body.
+            // Fail closed: a re-encode failure ships no rows, and an empty
+            // snapshot would assert the shape matches nothing.
             warn!(
                 shape_id = req.shape_id,
                 error = %err,
-                "shape snapshot: failed to encode filtered rows; sending empty snapshot"
+                "shape snapshot: failed to encode filtered rows; sending a snapshot reject"
             );
-            Some(ShapeSnapshotData::empty())
+            Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::MalformedRows,
+                format!("the filtered rows do not encode: {err}"),
+            ))
         }
     }
 }
@@ -216,7 +249,7 @@ mod tests {
 
     use crate::control::security::redaction::{RedactionMode, RedactionPolicy, RedactionRule};
     use crate::data::executor::response_codec::{
-        decode_raw_scan_to_docs, encode_raw_document_rows,
+        RowContext, encode_raw_document_rows, scan_rows_in_context,
     };
 
     use super::*;
@@ -261,7 +294,8 @@ mod tests {
     }
 
     fn rows_of(snapshot: &ShapeSnapshotData) -> Vec<(String, serde_json::Value)> {
-        decode_raw_scan_to_docs(&snapshot.data)
+        scan_rows_in_context(&snapshot.data, RowContext::ScanEnvelope)
+            .expect("snapshot rows split")
             .into_iter()
             .map(|(id, data)| {
                 (
@@ -277,7 +311,7 @@ mod tests {
         predicate: &[u8],
         redaction: &QueryRedaction,
         store: &RedactionStore,
-    ) -> Option<ShapeSnapshotData> {
+    ) -> Result<ShapeSnapshotData, SnapshotFailure> {
         finalize_snapshot(SnapshotPayload {
             payload,
             predicate,
@@ -443,9 +477,60 @@ mod tests {
         let payload =
             encode_raw_document_rows(&[("u1".to_string(), not_a_row)]).expect("encode payload");
 
-        assert!(
-            finalize(payload, &[], &redaction_for("users", "support"), &store).is_none(),
-            "an unredactable row must send no snapshot at all"
+        assert_eq!(
+            finalize(payload, &[], &redaction_for("users", "support"), &store)
+                .expect_err("an unredactable row must send no snapshot")
+                .refusal,
+            ShapeSnapshotRefusal::MalformedRows
         );
+    }
+
+    /// A scan payload that does not split into `{id, data}` rows is a typed
+    /// failure the subscriber receives as a `ShapeSnapshotReject` frame,
+    /// never a skipped or empty snapshot. This holds on the byte-identical
+    /// path too, with no policy and no predicate.
+    #[test]
+    fn a_malformed_payload_is_a_snapshot_reject() {
+        use crate::control::server::sync::wire::{SyncFrame, SyncMessageType};
+        use nodedb_types::sync::wire::ShapeSnapshotRejectMsg;
+
+        let flat = encode_raw_document_rows(&[]).expect("encode empty payload");
+        let store = RedactionStore::new();
+        assert!(finalize(flat, &[], &redaction_for("users", "support"), &store).is_ok());
+
+        let not_envelopes =
+            nodedb_types::json_to_msgpack(&serde_json::json!([{"k": 1}])).expect("encode rows");
+        let failure = finalize(
+            not_envelopes,
+            &[],
+            &redaction_for("users", "support"),
+            &RedactionStore::new(),
+        )
+        .expect_err("rows with no envelope are refused");
+        assert_eq!(failure.refusal, ShapeSnapshotRefusal::MalformedRows);
+
+        let frame = failure.reject_frame("sh1").expect("reject frame encodes");
+        assert_eq!(frame.msg_type, SyncMessageType::ShapeSnapshotReject);
+        let reject: ShapeSnapshotRejectMsg = SyncFrame::from_bytes(&frame.to_bytes())
+            .expect("frame decodes")
+            .decode_body()
+            .expect("reject decodes");
+        assert_eq!(reject.shape_id, "sh1");
+        assert_eq!(reject.refusal, ShapeSnapshotRefusal::MalformedRows);
+    }
+
+    /// An undecodable shape predicate is refused, never answered with an
+    /// empty snapshot that claims the shape matches nothing.
+    #[test]
+    fn an_undecodable_predicate_is_a_snapshot_reject() {
+        let payload = scan_payload(&[("u1", serde_json::json!({"status": "active"}))]);
+        let failure = finalize(
+            payload,
+            &[0xc1],
+            &redaction_for("users", "support"),
+            &RedactionStore::new(),
+        )
+        .expect_err("an undecodable predicate is refused");
+        assert_eq!(failure.refusal, ShapeSnapshotRefusal::InvalidPredicate);
     }
 }

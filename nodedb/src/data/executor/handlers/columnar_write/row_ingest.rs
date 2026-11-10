@@ -675,4 +675,97 @@ mod tests {
         ));
         assert_eq!(live_rows(&core), 0);
     }
+
+    const DECIMAL_COLLECTION: &str = "decimal_rows";
+
+    /// Insert `amount` text into `decimal_rows`, declared
+    /// `id TEXT PRIMARY KEY, amount DECIMAL`.
+    fn insert_amount(
+        core: &mut CoreLoop,
+        id: &str,
+        amount: &str,
+    ) -> crate::bridge::envelope::Response {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::required("amount", ColumnType::Decimal(None)),
+        ])
+        .expect("valid schema");
+        let schema = zerompk::to_msgpack_vec(&schema).expect("encode schema");
+        let row = Value::Object(std::collections::HashMap::from([
+            ("id".to_string(), Value::String(id.into())),
+            ("amount".to_string(), Value::String(amount.into())),
+        ]));
+        let payload =
+            nodedb_types::value_to_msgpack(&Value::Array(vec![row])).expect("encode rows");
+        core.execute_columnar_insert(
+            &task(),
+            ColumnarInsertParams {
+                collection: DECIMAL_COLLECTION,
+                payload: &payload,
+                format: "msgpack",
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: &[],
+                surrogates: &[],
+                schema_bytes: &schema,
+                provenance: None,
+                system_from: None,
+                restored_versions: &[],
+                rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
+                returning: None,
+                rls_filters: &[],
+                spatial_undo: None,
+            },
+        )
+    }
+
+    fn decimal_engine(core: &CoreLoop) -> Option<&nodedb_columnar::MutationEngine> {
+        core.columnar_engines.get(&(
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            DECIMAL_COLLECTION.to_string(),
+        ))
+    }
+
+    /// Text `"1.50"` into a DECIMAL column stores the Decimal 1.50 exactly,
+    /// scale included. Text that is no decimal is refused before the batch
+    /// mutates anything.
+    #[test]
+    fn decimal_text_coerces_exactly_and_invalid_text_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+
+        let stored = insert_amount(&mut core, "a", "1.50");
+        assert_eq!(stored.status, Status::Ok, "{:?}", stored.error_code);
+        let engine = decimal_engine(&core).expect("collection created");
+        let row = engine
+            .memtable()
+            .get_row(0)
+            .expect("row reads")
+            .expect("row present");
+        let amount = row
+            .iter()
+            .find_map(|cell| match cell {
+                Value::Decimal(d) => Some(*d),
+                _ => None,
+            })
+            .expect("amount stored as a Decimal");
+        assert_eq!(amount.to_string(), "1.50");
+        assert_eq!(amount.scale(), 2);
+        assert_eq!(engine.live_row_count(), 1);
+
+        let refused = insert_amount(&mut core, "b", "one fifty");
+        assert_eq!(
+            refused.status,
+            Status::Error,
+            "invalid DECIMAL text is refused"
+        );
+        assert_eq!(
+            decimal_engine(&core)
+                .expect("collection kept")
+                .live_row_count(),
+            1,
+            "the refused batch mutates nothing"
+        );
+    }
 }

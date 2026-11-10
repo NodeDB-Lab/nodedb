@@ -188,15 +188,18 @@ impl CoreLoop {
                 document_id,
                 list_path,
                 index,
-                fields_json,
-                surrogate: _,
+                fields,
+                surrogate,
             } => self.execute_crdt_list_insert(
                 task,
-                collection.as_str(),
-                document_id,
-                list_path,
+                crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                    collection: collection.as_str(),
+                    document_id,
+                    list_path,
+                    surrogate: *surrogate,
+                },
                 *index,
-                fields_json,
+                fields,
             ),
 
             CrdtOp::ListDelete {
@@ -204,12 +207,15 @@ impl CoreLoop {
                 document_id,
                 list_path,
                 index,
-                surrogate: _,
+                surrogate,
             } => self.execute_crdt_list_delete(
                 task,
-                collection.as_str(),
-                document_id,
-                list_path,
+                crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                    collection: collection.as_str(),
+                    document_id,
+                    list_path,
+                    surrogate: *surrogate,
+                },
                 *index,
             ),
 
@@ -219,12 +225,15 @@ impl CoreLoop {
                 list_path,
                 from_index,
                 to_index,
-                surrogate: _,
+                surrogate,
             } => self.execute_crdt_list_move(
                 task,
-                collection.as_str(),
-                document_id,
-                list_path,
+                crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                    collection: collection.as_str(),
+                    document_id,
+                    list_path,
+                    surrogate: *surrogate,
+                },
                 *from_index,
                 *to_index,
             ),
@@ -232,7 +241,7 @@ impl CoreLoop {
             CrdtOp::DocUpsert {
                 collection,
                 document_id,
-                fields_json,
+                fields,
                 surrogate,
                 partial,
                 // Decides the client's command tag only; the write is the same.
@@ -244,7 +253,7 @@ impl CoreLoop {
                 crate::data::executor::handlers::control::crdt_doc::CrdtDocUpsert {
                     collection: collection.as_str(),
                     document_id,
-                    fields_json,
+                    fields,
                     surrogate: *surrogate,
                     partial: *partial,
                     returning: returning.as_ref(),

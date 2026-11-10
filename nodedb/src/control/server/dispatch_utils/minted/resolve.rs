@@ -207,11 +207,22 @@ mod tests {
         let mut accepted = refusal();
         accepted
             .write_set
-            .push(crate::bridge::envelope::WriteSetEntry::put(
+            .push(crate::bridge::envelope::WriteSetEntry::installed_put(
                 1,
                 nodedb_types::RowIdentity::from_user_key("accepted"),
-                vec![1],
-                crate::bridge::envelope::RowVersion::open(1),
+                crate::types::installed_document::InstalledDocument {
+                    canonical: vec![0x80],
+                    stored: vec![0x80],
+                    version: crate::bridge::envelope::RowVersion::open(1),
+                    schema: std::sync::Arc::new(
+                        nodedb_physical::physical_plan::StorageMode::Schemaless,
+                    ),
+                    chain_head: None,
+                },
+                crate::types::document_event::DocumentPutEvent {
+                    new_value: vec![0x80],
+                    old_value: None,
+                },
             ));
         resolve_on_response(&wal, owner(), 0, &accepted, minted)
             .await

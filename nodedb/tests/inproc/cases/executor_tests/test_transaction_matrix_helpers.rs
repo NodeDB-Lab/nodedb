@@ -3,6 +3,7 @@
 //! Plan builders shared by the cross-engine transaction rollback matrices.
 
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
+use nodedb_test_support::tx_batch_helpers::doc_body;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -11,17 +12,18 @@ use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
 /// The bound identity of "doc1", shared by every plan that names it.
 const DOC1: nodedb_types::Surrogate = nodedb_types::Surrogate::new(1);
 
-/// A document PointPut for "doc1" in collection `coll`.
-pub fn doc_put(coll: &str, val: &[u8]) -> PhysicalPlan {
+/// A document PointPut of `{"v": text}` for "doc1" in collection `coll`.
+pub fn doc_put(coll: &str, text: &str) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointPut {
         collection: nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, coll),
         document_id: "doc1".into(),
-        value: val.to_vec(),
+        value: doc_body(text),
         surrogate: DOC1,
         pk_bytes: Vec::new(),
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -50,6 +52,7 @@ pub fn doc_insert_conflict(coll: &str) -> PhysicalPlan {
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 

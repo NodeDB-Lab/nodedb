@@ -4,8 +4,6 @@
 
 use tracing::{debug, warn};
 
-use std::collections::HashMap;
-
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -152,6 +150,8 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            edge_cut: *scope,
+            staged_edges: view.staged_edges.as_ref(),
         };
         let overlay = view.overlay;
         match crate::engine::graph::pattern::executor::execute(
@@ -225,21 +225,25 @@ impl CoreLoop {
         };
 
         // Deserialize the accumulated partial bindings.
-        let mut seed_row: HashMap<String, String> = match zerompk::from_msgpack(partial_row_bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(core = self.core_id, error = %e, "failed to deserialize partial_row");
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("invalid continuation partial_row: {e}"),
-                    },
-                );
-            }
-        };
+        let mut seed_row: crate::engine::graph::pattern::executor::BindingRow =
+            match zerompk::from_msgpack(partial_row_bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(core = self.core_id, error = %e, "failed to deserialize partial_row");
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("invalid continuation partial_row: {e}"),
+                        },
+                    );
+                }
+            };
         // Seed the source binding so the resumed triple resolves its source
         // from the bound variable rather than free-ranging.
-        seed_row.insert(source_binding.to_string(), source_node.to_string());
+        seed_row.insert(
+            source_binding.to_string(),
+            nodedb_types::Value::String(source_node.to_string()),
+        );
 
         // An absent partition means this tenant has no graph state on this
         // shard — return the empty row set rather than error.
@@ -269,6 +273,8 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            edge_cut: *scope,
+            staged_edges: view.staged_edges.as_ref(),
         };
         // The transaction's staged edge overlay (a live read whose task
         // carries a `txn_id`) lets the resumed pattern observe
@@ -377,6 +383,8 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            edge_cut: *scope,
+            staged_edges: view.staged_edges.as_ref(),
         };
         // The transaction's staged edge overlay (a live read whose task
         // carries a `txn_id`) lets the resumed variable-length expansion

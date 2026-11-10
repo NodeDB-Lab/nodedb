@@ -254,6 +254,42 @@ mod tests {
         ));
     }
 
+    /// An absence read (the predicate on a collection name no catalog row
+    /// holds) commits when nothing changed, and fails once a concurrent
+    /// transaction creates and populates the collection above the snapshot,
+    /// even after the empty slice was cached.
+    #[test]
+    fn an_absence_read_fails_once_the_collection_is_created_and_populated() {
+        let (mut core, _, _, _dir) = make_core();
+        let absent = || entry(EngineTag::Document, "later", ReadKeyIdent::Predicate);
+        assert!(unchanged(&mut core, absent(), 100), "no change commits");
+        // A row written before the snapshot was already visible to it.
+        doc_version(&core, "later", 1, 90);
+        core.track_newest_write(
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "later",
+            Some(&KeyRepr::Surrogate(1)),
+            collection_vshard(DatabaseId::DEFAULT, "later").unwrap(),
+        )
+        .unwrap();
+        assert!(unchanged(&mut core, absent(), 100));
+        // The concurrent create-and-insert commits above the snapshot.
+        doc_version(&core, "later", 2, 140);
+        core.track_newest_write(
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "later",
+            Some(&KeyRepr::Surrogate(2)),
+            collection_vshard(DatabaseId::DEFAULT, "later").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !unchanged(&mut core, absent(), 100),
+            "the concurrent create conflicts"
+        );
+    }
+
     /// A predicate read fails when any row of its collection changed, and
     /// the cached value tracks the change.
     #[test]

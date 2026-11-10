@@ -57,7 +57,9 @@ pub(in crate::data::executor::handlers) fn retain_having(
     }
     let mut kept = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
-        let mp = nodedb_types::value_to_msgpack(&row).map_err(|e| crate::Error::Codec {
+        // A native row keeps each aggregate's type, so a Decimal sum compares
+        // by value, never as its text.
+        let mp = zerompk::to_msgpack_vec(&row).map_err(|e| crate::Error::Codec {
             detail: format!("HAVING row encode: {e}"),
         })?;
         if ScanFilter::all_match_binary(predicates, &mp, crs)? {

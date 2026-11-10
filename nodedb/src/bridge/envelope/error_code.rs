@@ -176,6 +176,13 @@ pub enum ErrorCode {
     /// different dimensions, an argument of the wrong type, a malformed
     /// JSONPath. Surfaces as SQLSTATE `22000` (`data_exception`).
     DataException { detail: String },
+    /// `ln` or `log` of zero or a negative number. SQLSTATE `2201E`
+    /// (`invalid_argument_for_logarithm`).
+    InvalidArgumentForLogarithm { detail: String },
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number. SQLSTATE `2201F`
+    /// (`invalid_argument_for_power_function`).
+    InvalidArgumentForPowerFunction { detail: String },
     /// A computed value lies outside the range of its result type, such as
     /// an exact integer SUM past the decimal range. SQLSTATE `22003`
     /// (`numeric_value_out_of_range`).

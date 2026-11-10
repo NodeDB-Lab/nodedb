@@ -191,9 +191,10 @@ fn install(
 /// A timeseries batch whose line names another measurement than its
 /// collection: it passes validation and fails while it installs.
 ///
-/// The payload is the six-element ingest tuple every timeseries ingest record
-/// takes: `("timeseries", collection, payload, provenance, format,
-/// default_timestamp_ms)`.
+/// The payload is the seven-element ingest tuple every timeseries ingest
+/// record takes: `("timeseries", collection, payload, provenance, format,
+/// default_timestamp_ms, rls_write_check)`. A committed record's write policy
+/// was decided when the transaction committed.
 fn failing_install_sub_record() -> RedoSubRecord {
     let lines = zerompk::to_msgpack_vec(&vec!["other_probe,host=a value=1 1".to_string()])
         .expect("encode lines");
@@ -206,6 +207,7 @@ fn failing_install_sub_record() -> RedoSubRecord {
             None::<&nodedb_types::sync::wire::SyncProvenance>,
             "ilp-msgpack",
             0i64,
+            nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         ))
         .expect("encode ingest"),
     }

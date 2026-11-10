@@ -7,6 +7,7 @@
 pub mod gather;
 pub mod partition_scan;
 pub mod row_emit;
+pub mod row_form;
 pub mod scan;
 
 pub(in crate::data::executor) use gather::TsGatherParams;

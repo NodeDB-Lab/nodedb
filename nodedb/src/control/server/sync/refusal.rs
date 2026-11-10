@@ -69,6 +69,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::InvalidTextRepresentation { .. }
             | ErrorCode::DatatypeMismatch { .. }
             | ErrorCode::InvalidDatetimeFormat { .. }
+            | ErrorCode::InvalidArgumentForLogarithm { .. }
+            | ErrorCode::InvalidArgumentForPowerFunction { .. }
             | ErrorCode::DatetimeFieldOverflow { .. }
             | ErrorCode::UndefinedObject { .. }
             | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -143,6 +145,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableSchemaChanged { .. }
@@ -314,6 +318,8 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::ExecutionLimitExceeded { .. }
@@ -416,6 +422,8 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedObject { .. }
         | ErrorCode::ObjectNotInPrerequisiteState { .. }

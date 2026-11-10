@@ -22,9 +22,12 @@
 //! is shared with per-batch lazy streaming callers, which have an
 //! already-decoded batch and only need the envelope-unwrap + projection logic.
 
+use crate::bridge::envelope::describe_row_context;
 use crate::control::sequence::SequenceAccess;
 use crate::control::server::response_translate::dispatch::translate_search_response;
-use crate::data::executor::response_codec::decode_payload_value;
+use crate::data::executor::response_codec::{
+    RowContext, decode_payload_value, decode_row_payload_value,
+};
 use nodedb_types::NodeDbError;
 
 use super::super::kv::apply_kv_wrap;
@@ -85,12 +88,13 @@ pub async fn shape_response_materialized(
 
     // The plan-dependent transforms run before any decode or shape step:
     // KV wrap, then walk wrap, then search naming.
-    let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload))?;
+    let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload)?)?;
     let translated =
         translate_search_response(&wrapped, plan, state, database_id, tenant_id).await?;
     shape_translated(
         &translated,
         plan_kind,
+        describe_row_context(plan),
         projection,
         redaction,
         sequences.map(|s| s as &dyn SequenceAccess),
@@ -122,7 +126,7 @@ pub fn shape_returning_materialized(
         }
         .into());
     }
-    let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload))?;
+    let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload)?)?;
     shape_returning_rows(
         &wrapped,
         projection,
@@ -136,6 +140,7 @@ pub fn shape_returning_materialized(
 fn shape_translated(
     translated: &[u8],
     plan_kind: PlanKind,
+    context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
@@ -153,9 +158,9 @@ fn shape_translated(
         PlanKind::ReturningRows => {
             shape_returning_rows(translated, projection, redaction, sequences, crs_set)?
         }
-        PlanKind::SingleDocument | PlanKind::MultiRow => {
-            shape_generic_rows(translated, projection, redaction, sequences, crs_set)?
-        }
+        PlanKind::SingleDocument | PlanKind::MultiRow => shape_generic_rows(
+            translated, context, projection, redaction, sequences, crs_set,
+        )?,
         // The callers return early for these; kept exhaustive (no catch-all,
         // no panic) so a future PlanKind desync degrades to passthrough
         // rather than crashing the connection.
@@ -175,6 +180,9 @@ fn shape_translated(
 /// plan-dependent `apply_kv_wrap` / `translate_search_response` transforms those
 /// callers never ran.
 ///
+/// `context` is the row shape of the payload's producer, which the caller
+/// states: a merged or cluster payload names it from what produced its rows.
+///
 /// `sequences` resolves the sequence accessors of the projection's
 /// Control-Plane computed columns. A caller with no session in scope passes
 /// `None`. A column that calls an accessor then fails rather than shipping
@@ -182,6 +190,7 @@ fn shape_translated(
 pub fn shape_payload_no_plan(
     payload: &[u8],
     plan_kind: PlanKind,
+    context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
@@ -201,7 +210,7 @@ pub fn shape_payload_no_plan(
             payload, projection, redaction, sequences, crs_set,
         )?),
         PlanKind::SingleDocument | PlanKind::MultiRow => ShapeOutcome::Rows(shape_generic_rows(
-            payload, projection, redaction, sequences, crs_set,
+            payload, context, projection, redaction, sequences, crs_set,
         )?),
     })
 }
@@ -209,11 +218,14 @@ pub fn shape_payload_no_plan(
 /// Shape a `SingleDocument` / `MultiRow` response: decode the payload to a
 /// typed value, then hand it to the pure [`shape_decoded_rows`] core.
 ///
-/// A payload that decodes as neither msgpack nor JSON falls back to a single
-/// "result" column holding its lossy UTF-8 text, matching pgwire's
-/// single-row fallback.
+/// Rows decode in row context, so a native object row keeps its field types
+/// (see [`crate::data::executor::response_codec::decode_row_payload_value`]).
+/// A native row that does not decode fails the call. A payload that decodes
+/// as neither msgpack nor JSON falls back to a single "result" column holding
+/// its lossy UTF-8 text, matching pgwire's single-row fallback.
 fn shape_generic_rows(
     payload: &[u8],
+    context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
@@ -222,8 +234,11 @@ fn shape_generic_rows(
     if payload.is_empty() {
         return Ok(empty_shaped());
     }
-    match decode_payload_value(payload) {
-        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences, crs_set),
+    match decode_row_payload_value(payload, context) {
+        Ok(value) => shape_decoded_rows(value, context, projection, redaction, sequences, crs_set),
+        // Readable msgpack or JSON whose row decode failed holds a corrupt
+        // native row: that is an error, never shown as text.
+        Err(error) if decode_payload_value(payload).is_ok() => Err(error),
         Err(_) => Ok(single_result_row(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -313,6 +328,7 @@ mod tests {
         let no_plan = shape_payload_no_plan(
             &payload,
             kind,
+            RowContext::Flat,
             None,
             None,
             None,
@@ -347,6 +363,7 @@ mod tests {
         let ShapeOutcome::Rows(shaped) = shape_payload_no_plan(
             &payload,
             PlanKind::MultiRow,
+            RowContext::Flat,
             None,
             None,
             None,
@@ -361,3 +378,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "materialized_native_tests.rs"]
+mod native_tests;

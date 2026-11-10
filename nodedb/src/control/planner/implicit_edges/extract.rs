@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Implicit-edge extraction primitives shared by the INSERT / DELETE / UPDATE
-//! lifecycle paths: msgpack edge-field decode, label-default resolution, and
+//! lifecycle paths: edge-field decode, label-default resolution, and
 //! weight-property encoding.
 
 use memchr::memmem;
@@ -20,48 +20,43 @@ pub(super) struct ImplicitEdge {
     pub(super) weight: Option<f64>,
 }
 
-/// Decode a standard-msgpack document `value` and extract an implicit edge
-/// when it carries `_from` and `_to` string fields.
+/// Read a document body `value` and extract an implicit edge when it carries
+/// `_from` and `_to` string fields.
 ///
-/// A cheap byte pre-filter skips the msgpack decode for the overwhelming
-/// majority of documents that are not edges. `_type` defaults to `"edge"`;
-/// `weight` is carried only when present and finite.
+/// The body is an object context: a plain msgpack map from a SQL write or a
+/// native tagged object from a native document put. Both read through
+/// [`nodedb_types::ObjectView`].
+///
+/// A cheap byte pre-filter skips the decode for the overwhelming majority of
+/// documents that are not edges. `_type` defaults to `"edge"`; `weight` is
+/// carried only when present, numeric and finite.
 pub(super) fn extract_edge(collection: &str, value: &[u8]) -> Option<ImplicitEdge> {
-    // Pre-filter: an edge document's msgpack always contains the literal key
+    // Pre-filter: an edge document's body always contains the literal key
     // bytes `_from`. Avoid decoding non-edge documents on the hot path.
     memmem::find(value, b"_from")?;
 
-    let decoded = crate::util::bounded_msgpack::read_value(value).ok()?;
-    let rmpv::Value::Map(entries) = decoded else {
-        return None;
-    };
-
+    let view = nodedb_types::ObjectView::new(value).ok()?;
     let mut src: Option<String> = None;
     let mut dst: Option<String> = None;
     let mut label: Option<String> = None;
     let mut weight: Option<f64> = None;
-    for (k, v) in &entries {
-        let key = match k {
-            rmpv::Value::String(s) => match s.as_str() {
-                Some(s) => s,
-                None => continue,
-            },
-            _ => continue,
+    for entry in view.fields() {
+        let (key, bytes) = entry.ok()?;
+        if !matches!(key, "_from" | "_to" | "_type" | "weight") {
+            continue;
+        }
+        let value = view.decode_value(bytes).ok()?;
+        let text = || match &value {
+            nodedb_types::Value::String(s) => Some(s.clone()),
+            _ => None,
         };
         match key {
-            "_from" => src = v.as_str().map(str::to_string),
-            "_to" => dst = v.as_str().map(str::to_string),
-            "_type" => label = v.as_str().map(str::to_string),
-            "weight" => {
-                weight = match v {
-                    rmpv::Value::F64(f) => Some(*f),
-                    rmpv::Value::F32(f) => Some(*f as f64),
-                    rmpv::Value::Integer(i) => i.as_f64(),
-                    _ => None,
-                }
-                .filter(|w| w.is_finite());
+            "_from" => src = text(),
+            "_to" => dst = text(),
+            "_type" => label = text(),
+            _ => {
+                weight = nodedb_graph::property_weight(&value).filter(|w| w.is_finite());
             }
-            _ => {}
         }
     }
 
@@ -84,25 +79,18 @@ pub(super) fn resolve_edge_label(label: Option<&str>) -> String {
     label.unwrap_or(DEFAULT_EDGE_LABEL).to_owned()
 }
 
-/// Encode `{"weight": <w>}` as a standard-msgpack map.
-///
-/// The bytes are a 1-entry msgpack map with a fixstr key `"weight"` and an
-/// F64 value, exactly the shape `extract_weight_from_properties`
-/// (`nodedb-graph` `csr/weights.rs`, which decodes via `rmpv`) reads to derive
-/// the CSR edge weight.
-pub(super) fn weight_properties(weight: f64) -> Vec<u8> {
-    let map = rmpv::Value::Map(vec![(
-        rmpv::Value::String("weight".into()),
-        rmpv::Value::F64(weight),
-    )]);
-    let mut buf = Vec::new();
-    // Writing a fully-owned `rmpv::Value` to a `Vec` is infallible; on the
-    // impossible error path emit empty properties (weight defaults to 1.0)
-    // rather than panicking in library code.
-    if rmpv::encode::write_value(&mut buf, &map).is_err() {
-        return Vec::new();
-    }
-    buf
+/// Encode `{"weight": <w>}` as the stored edge-property object: the native
+/// tagged object `nodedb_graph::encode_edge_properties` writes and
+/// `extract_weight_from_properties` reads to derive the CSR edge weight.
+pub(super) fn weight_properties(weight: f64) -> crate::Result<Vec<u8>> {
+    nodedb_graph::encode_edge_properties(std::collections::HashMap::from([(
+        "weight".to_string(),
+        nodedb_types::Value::Float(weight),
+    )]))
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("implicit edge weight properties: {e}"),
+    })
 }
 
 #[cfg(test)]
@@ -164,13 +152,34 @@ mod tests {
 
     #[test]
     fn weight_properties_round_trip_through_extractor() {
-        let props = weight_properties(7.5);
+        let props = weight_properties(7.5).expect("encode");
         assert_eq!(extract_weight_from_properties(&props), 7.5);
     }
 
     #[test]
     fn empty_properties_default_to_unit_weight() {
         assert_eq!(extract_weight_from_properties(&[]), 1.0);
+    }
+
+    /// A native document put stores a native tagged body. Its edge fields
+    /// read as a plain map's do, and a Decimal weight is a weight.
+    #[test]
+    fn a_native_body_carries_its_edge() {
+        use nodedb_types::Value;
+        let body = zerompk::to_msgpack_vec(&Value::Object(std::collections::HashMap::from([
+            ("_from".to_string(), Value::String("a".into())),
+            ("_to".to_string(), Value::String("b".into())),
+            ("_type".to_string(), Value::String("ROAD".into())),
+            (
+                "weight".to_string(),
+                Value::Decimal("12.50".parse().expect("decimal")),
+            ),
+        ])))
+        .expect("encode native body");
+        let e = extract_edge("links", &body).expect("edge");
+        assert_eq!((e.src.as_str(), e.dst.as_str()), ("a", "b"));
+        assert_eq!(e.label, "ROAD");
+        assert_eq!(e.weight, Some(12.5));
     }
 
     #[test]
@@ -188,7 +197,7 @@ mod tests {
         ]);
         let e = extract_edge("links", &v).expect("edge");
         assert_eq!(e.weight, Some(3.0));
-        let props = weight_properties(e.weight.unwrap());
+        let props = weight_properties(e.weight.unwrap()).expect("encode");
         assert_eq!(extract_weight_from_properties(&props), 3.0);
     }
 }

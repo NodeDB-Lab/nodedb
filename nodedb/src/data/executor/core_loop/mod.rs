@@ -27,10 +27,18 @@ mod graph_view;
 pub(in crate::data::executor) mod hash_chain_state;
 pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
+#[cfg(test)]
+mod installed_event_tests;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
+#[cfg(test)]
+mod materialized_policy_tests;
+#[cfg(test)]
+mod merge_atomic_tests;
 pub(in crate::data::executor) mod newest_ordinals;
 mod open;
+#[cfg(test)]
+mod prepared_update_tests;
 pub mod pressure;
 pub(in crate::data::executor) mod priority_queues;
 mod read_vshards;

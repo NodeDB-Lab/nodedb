@@ -171,7 +171,7 @@ impl CoreLoop {
             }
         }
 
-        match response_codec::encode_value_vec(&hit_rows(results)) {
+        match response_codec::encode_native_rows(&hit_rows(results)) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),
         }

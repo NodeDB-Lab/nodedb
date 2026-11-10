@@ -215,7 +215,12 @@ pub(super) async fn handle_zrange(
             // member's primary key — the same column a KV scan lists, so the
             // same rule covers it here.
             for row in &mut rows {
-                redact_envelope_row(redaction.as_ref(), &state.redaction, row);
+                redact_envelope_row(
+                    redaction.as_ref(),
+                    &state.redaction,
+                    crate::data::executor::response_codec::RowContext::Flat,
+                    row,
+                );
             }
             let total = rows.len() as i64;
 
@@ -294,7 +299,12 @@ pub(super) async fn handle_zscore(
             // ZADD stores the ordering value under, so a rule on `score`
             // covers this read the same way it covers a SELECT of that column.
             let mut json = payload_json(&resp.payload);
-            redact_envelope_row(redaction.as_ref(), &state.redaction, &mut json);
+            redact_envelope_row(
+                redaction.as_ref(),
+                &state.redaction,
+                crate::data::executor::response_codec::RowContext::Flat,
+                &mut json,
+            );
             if let Some(serde_json::Value::String(score)) = json.get("score") {
                 if score == "null" {
                     return RespValue::nil();

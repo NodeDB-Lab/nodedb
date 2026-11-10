@@ -11,6 +11,7 @@ pub mod columnar_segment;
 pub mod compound_filter;
 pub mod compress;
 pub mod continuous_agg;
+pub mod declared_cell;
 pub mod gap_fill;
 pub mod gorilla;
 pub mod grouped_filter;

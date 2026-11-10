@@ -52,7 +52,7 @@ impl TenantCrdtEngine {
         };
         match state.read_at_version(loro_root(collection), document_id, &vv) {
             Ok(Some(val)) => {
-                let json = crate::engine::document::crdt_store::loro_value_to_json(&val);
+                let json = crate::engine::document::crdt_store::loro_value_to_json(&val)?;
                 sonic_rs::to_vec(&json)
                     .map(Some)
                     .map_err(|e| crate::Error::Internal {

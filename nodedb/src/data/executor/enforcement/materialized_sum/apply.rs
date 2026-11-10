@@ -94,14 +94,8 @@ pub(in crate::data::executor) struct TargetWrite {
     /// target declares one, else its decimal surrogate. The redo entry and the
     /// target row's event both name the row by it.
     pub identity: RowIdentity,
-    /// The MessagePack body this write handed to `apply_point_put` — NOT the
-    /// bytes that reached storage.
-    ///
-    /// A durable redo record replays through `apply_point_put`, which encodes
-    /// the body into whatever the target collection stores. Journalling the
-    /// STORED bytes would hand a strict target's Binary Tuple back to the
-    /// encoder on replay and store a tuple of a tuple.
-    pub body: Vec<u8>,
+    /// The prepared public post-image shared by live events and replay.
+    pub event: crate::types::document_event::DocumentPutEvent,
     /// Everything the derived write mutated: the pre-image, the versioned and
     /// secondary index tuples, the vector and spatial inserts, the column-stats
     /// pre-images. A transactional caller reverses a target write with exactly
@@ -236,6 +230,7 @@ impl CoreLoop {
         self.apply_balance_delta(
             txn,
             &BalanceRmw {
+                target_unique: ctx.target_unique,
                 database_id: ctx.database_id,
                 tid: ctx.tid,
                 target_collection: &binding.target_collection,
@@ -398,6 +393,7 @@ mod tests {
             core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -572,6 +568,7 @@ mod tests {
             &mut core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -627,6 +624,7 @@ mod tests {
             &mut core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -707,6 +705,7 @@ mod tests {
             &mut core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -1079,6 +1078,7 @@ mod tests {
                 rls_filters: &[],
                 resolved_sum_targets: &resolved,
                 deferred_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
 
@@ -1310,6 +1310,7 @@ mod tests {
             &mut core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -1435,6 +1436,7 @@ mod tests {
             core,
             &txn,
             EnforcementCtx {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id: DB,
                 tid: TID,
                 collection: SOURCE,
@@ -1594,6 +1596,7 @@ mod tests {
                     SURROGATE_A,
                 )],
                 deferred_sum_targets: vec![REMOTE_TARGET.to_string()],
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         )];
 
@@ -1652,6 +1655,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: vec![ResolvedSumTarget::new(TARGET, ACCOUNT_A, SURROGATE_A)],
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         )];
 
@@ -1698,6 +1702,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: vec![ResolvedSumTarget::new(TARGET, ACCOUNT_A, SURROGATE_A)],
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         )];
 

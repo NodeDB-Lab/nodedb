@@ -211,7 +211,16 @@ fn refresh_rows_where(
                         state.add_int(ts, *x);
                     }
                 }
-                Some(ColumnData::Symbol(_)) | Some(ColumnData::DictEncoded { .. }) | None => {}
+                Some(ColumnData::Decimal(v)) => {
+                    if let Some(Some(d)) = v.get(row) {
+                        state.add_decimal(ts, *d);
+                    }
+                }
+                Some(ColumnData::Symbol(_))
+                | Some(ColumnData::DictEncoded { .. })
+                | Some(ColumnData::Uuid(_))
+                | Some(ColumnData::Bool(_))
+                | None => {}
             }
         }
     }

@@ -81,6 +81,21 @@ impl RegistryShuffleProducer {
             .map(|e| (e.part, e.node_id))
             .collect();
 
+        // The row shape the produced scan emits, from its plan: a document
+        // scan answers `{id, data}` envelopes, a computed producer flat rows.
+        let row_context = match nodedb_physical::physical_plan::wire::decode(&req.plan_bytes) {
+            Ok(plan) => crate::bridge::envelope::describe_row_context(&plan),
+            Err(e) => {
+                return ShuffleProduceResponse {
+                    error: Some(TypedClusterError::Internal {
+                        code: 0,
+                        message: format!("shuffle produce plan does not decode: {e}"),
+                    }),
+                    read_vshards: Vec::new(),
+                };
+            }
+        };
+
         let mut sink = ShuffleFanoutSink::new(
             transport,
             Arc::clone(&self.state.shuffle_registry),
@@ -92,6 +107,7 @@ impl RegistryShuffleProducer {
                 producer_count: req.producer_count,
                 keys: req.keys.clone(),
                 part_node_map: &part_node_map,
+                row_context,
             },
         );
 

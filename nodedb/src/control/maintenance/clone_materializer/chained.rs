@@ -99,11 +99,14 @@ pub(super) async fn materialize_chained_collection(
                      stamp"
                 ))
             })?;
-            let doc = nodedb_types::json_from_msgpack(&body).map_err(|e| {
-                clone_error(format!(
-                    "row {doc_id_hex} of hash-chained '{source_qualified}' does not decode: {e}"
-                ))
-            })?;
+            // A native body reads as its plain form, so the chain hash
+            // agrees with the plain body of the same values.
+            let doc = crate::data::executor::response_codec::decode_body_plain_json(&body)
+                .map_err(|e| {
+                    clone_error(format!(
+                        "row {doc_id_hex} of hash-chained '{source_qualified}' does not decode: {e}"
+                    ))
+                })?;
             let seq = doc
                 .get(CHAIN_SEQ_FIELD)
                 .and_then(|seq| seq.as_u64())

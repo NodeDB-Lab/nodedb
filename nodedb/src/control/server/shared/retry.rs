@@ -130,6 +130,8 @@ impl RetryableSchemaChange for Error {
             | Error::InvalidTextRepresentation { .. }
             | Error::DatatypeMismatch { .. }
             | Error::InvalidDatetimeFormat { .. }
+            | Error::InvalidArgumentForLogarithm { .. }
+            | Error::InvalidArgumentForPowerFunction { .. }
             | Error::DatetimeFieldOverflow { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }

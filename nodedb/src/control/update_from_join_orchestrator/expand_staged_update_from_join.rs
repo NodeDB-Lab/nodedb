@@ -97,6 +97,7 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
                 // The op owns the statement's projection; expanded puts answer no client.
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: rls_write_check.clone(),
                 // Filled by the caller's sum and period-lock pass. It reads
                 // the stored row, so a join-column rewrite debits the target
                 // the row leaves as well as crediting the one it joins.

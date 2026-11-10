@@ -87,6 +87,7 @@ impl WalAppender<'_> {
                 vs,
                 db,
                 &crate::wal::WriteGroupRecord {
+                    schemas: Vec::new(),
                     group,
                     ops,
                     redo: Some(split.metadata.clone()),

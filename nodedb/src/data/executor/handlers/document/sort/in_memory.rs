@@ -2,17 +2,8 @@
 
 //! In-memory document sort.
 
+use super::compare::{SortValues, compare_sort_values, eval_sort_values};
 use nodedb_physical::physical_plan::SortKeySpec;
-use nodedb_query::msgpack_scan;
-
-use super::compare::{
-    SortValues, all_column_keys, compare_cells, compare_sort_values, eval_sort_values,
-    is_decimal_key, is_null_range,
-};
-
-/// Pre-extracted sort key offsets for a single row.
-/// Each entry is `Option<(usize, usize)>` — byte range of the sort key value.
-type SortKeyOffsets = Vec<Option<(usize, usize)>>;
 
 /// Sort stored rows by the ORDER BY terms. `decimal_keys` flags the keys
 /// `decimal_sort_keys` found `DECIMAL`, and is empty for a collection with
@@ -27,55 +18,11 @@ pub(in crate::data::executor) fn sort_rows(
         return Ok(());
     }
 
-    if all_column_keys(sort_keys) {
-        return sort_rows_by_column(rows, sort_keys, decimal_keys);
-    }
-    sort_rows_by_expression(rows, sort_keys, decimal_keys, crs)
+    sort_rows_by_values(rows, sort_keys, decimal_keys, crs)
 }
 
-/// Zero-decode path: every key names a stored field, so ordering is decided
-/// straight from the msgpack bytes.
-fn sort_rows_by_column(
-    rows: &mut [(String, Vec<u8>)],
-    sort_keys: &[SortKeySpec],
-    decimal_keys: &[bool],
-) -> crate::Result<()> {
-    // Pre-extract sort key offsets for all rows — one scan per row instead
-    // of O(N log N) scans during comparisons.
-    let key_offsets: Vec<SortKeyOffsets> = rows
-        .iter()
-        .map(|(_, bytes)| {
-            sort_keys
-                .iter()
-                .map(|k| {
-                    k.as_column()
-                        .and_then(|f| msgpack_scan::extract_field(bytes, 0, f))
-                })
-                .collect()
-        })
-        .collect();
-
-    let mut indices: Vec<usize> = (0..rows.len()).collect();
-    indices.sort_by(|&ai, &bi| {
-        compare_with_preextracted(
-            &rows[ai].1,
-            &key_offsets[ai],
-            &rows[bi].1,
-            &key_offsets[bi],
-            sort_keys,
-            decimal_keys,
-        )
-    });
-
-    // Apply permutation in-place. `key_offsets` is no longer needed after
-    // sorting the index; it is dropped here.
-    drop(key_offsets);
-    apply_permutation(rows, indices)
-}
-
-/// Computed-key path: evaluate every key once per row, then order by the
-/// resulting values.
-fn sort_rows_by_expression(
+/// Evaluate native keys once per row before comparison.
+fn sort_rows_by_values(
     rows: &mut [(String, Vec<u8>)],
     sort_keys: &[SortKeySpec],
     decimal_keys: &[bool],
@@ -92,39 +39,6 @@ fn sort_rows_by_expression(
 
     drop(values);
     apply_permutation(rows, indices)
-}
-
-/// Compare two docs using pre-extracted sort key offsets.
-fn compare_with_preextracted(
-    a_bytes: &[u8],
-    a_offsets: &[Option<(usize, usize)>],
-    b_bytes: &[u8],
-    b_offsets: &[Option<(usize, usize)>],
-    sort_keys: &[SortKeySpec],
-    decimal_keys: &[bool],
-) -> std::cmp::Ordering {
-    for (i, key) in sort_keys.iter().enumerate() {
-        let ordered = match key.order_nulls(
-            is_null_range(a_bytes, a_offsets[i]),
-            is_null_range(b_bytes, b_offsets[i]),
-        ) {
-            Some(ord) => ord,
-            None => match (a_offsets[i], b_offsets[i]) {
-                (Some(ar), Some(br)) => key.direct(compare_cells(
-                    a_bytes,
-                    ar,
-                    b_bytes,
-                    br,
-                    is_decimal_key(decimal_keys, i),
-                )),
-                _ => std::cmp::Ordering::Equal,
-            },
-        };
-        if ordered != std::cmp::Ordering::Equal {
-            return ordered;
-        }
-    }
-    std::cmp::Ordering::Equal
 }
 
 /// Apply a permutation to rows using the sorted index order.
@@ -351,5 +265,113 @@ mod tests {
     fn apply_permutation_out_of_range_index_errors() {
         let mut rows = rows_with_vals(&[("a", 1), ("b", 2)]);
         apply_permutation(&mut rows, vec![0, 5]).expect_err("out-of-range index must error");
+    }
+    fn native_rows(values: &[(&str, nodedb_types::Value)]) -> Vec<(String, Vec<u8>)> {
+        values
+            .iter()
+            .map(|(id, value)| {
+                let doc = nodedb_types::Value::Object(
+                    [("val".into(), value.clone())].into_iter().collect(),
+                );
+                (
+                    (*id).to_string(),
+                    zerompk::to_msgpack_vec(&doc).expect("native body"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn native_numeric_keys_keep_exact_order_and_stable_ties() {
+        use nodedb_types::Value;
+        let mut rows = native_rows(&[
+            (
+                "high",
+                Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                    90071992547409930001,
+                    4,
+                )),
+            ),
+            ("integer", Value::Integer(9_007_199_254_740_993)),
+            ("float", Value::Float(9_007_199_254_740_992.0)),
+            ("tie", Value::Integer(9_007_199_254_740_993)),
+        ]);
+        sort_rows(
+            &mut rows,
+            &[col("val", true)],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["float", "integer", "tie", "high"]
+        );
+    }
+
+    #[test]
+    fn native_and_plain_mixed_keys_retain_each_sort_strategy() {
+        use nodedb_types::Value;
+        let values = [
+            ("integer", Value::Integer(3)),
+            ("string", Value::String("2".into())),
+            ("null", Value::Null),
+            ("false", Value::Bool(false)),
+        ];
+        for computed in [false, true] {
+            let mut keys = vec![col("val", true)];
+            if computed {
+                keys.push(SortKeySpec {
+                    expr: nodedb_query::SqlExpr::Literal(Value::Integer(1)),
+                    ascending: true,
+                    nulls_first: false,
+                });
+            }
+            let mut native = native_rows(&values);
+            native.push((
+                "missing".into(),
+                zerompk::to_msgpack_vec(&Value::Object(Default::default())).expect("missing"),
+            ));
+            let mut plain = values
+                .iter()
+                .map(|(id, value)| {
+                    let doc = Value::Object([("val".into(), value.clone())].into_iter().collect());
+                    (
+                        (*id).to_string(),
+                        nodedb_types::value_to_msgpack(&doc).expect("plain"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            plain.push(("missing".into(), encode(&serde_json::json!({}))));
+            for rows in [&mut native, &mut plain] {
+                sort_rows(rows, &keys, &[], &nodedb_crs::CrsContext::builtin_only()).expect("sort");
+                let expected = if computed {
+                    vec!["string", "integer", "false", "null", "missing"]
+                } else {
+                    vec!["false", "integer", "string", "null", "missing"]
+                };
+                assert_eq!(
+                    rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_native_body_errors_before_rows_move() {
+        let mut rows = native_rows(&[("valid", nodedb_types::Value::Integer(1))]);
+        rows.push(("invalid".into(), vec![0x92, 0x01]));
+        let before = rows.clone();
+        assert!(
+            sort_rows(
+                &mut rows,
+                &[col("val", true)],
+                &[],
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
+        assert_eq!(rows, before);
     }
 }

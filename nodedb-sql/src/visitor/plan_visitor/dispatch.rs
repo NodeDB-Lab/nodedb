@@ -100,6 +100,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             projection: _,
         }) => visitor.range_scan(collection, field, lower.as_ref(), upper.as_ref(), *limit),
         SqlPlan::Insert(InsertPlan {
+            returning,
             collection,
             engine,
             route,
@@ -109,6 +110,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             column_schema,
             primary_key,
         }) => visitor.insert(InsertVisitArgs {
+            returning: returning.as_ref(),
             collection,
             engine: *engine,
             route: *route,
@@ -118,14 +120,23 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             primary_key: primary_key.as_deref(),
         }),
         SqlPlan::KvInsert(KvInsertPlan {
+            returning,
             collection,
             entries,
             ttl_secs,
             intent,
             on_conflict_updates,
             ..
-        }) => visitor.kv_insert(collection, entries, *ttl_secs, *intent, on_conflict_updates),
+        }) => visitor.kv_insert(
+            collection,
+            entries,
+            *ttl_secs,
+            *intent,
+            on_conflict_updates,
+            returning.as_ref(),
+        ),
         SqlPlan::Upsert(UpsertPlan {
+            returning,
             collection,
             engine,
             route,
@@ -135,6 +146,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             column_schema,
             primary_key,
         }) => visitor.upsert(UpsertVisitArgs {
+            returning: returning.as_ref(),
             collection,
             engine: *engine,
             route: *route,
@@ -144,11 +156,18 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             primary_key: primary_key.as_deref(),
         }),
         SqlPlan::InsertSelect {
+            returning,
             target,
             source,
             column_map,
             source_columns,
-        } => visitor.insert_select(target, source, column_map, source_columns),
+        } => visitor.insert_select(
+            target,
+            source,
+            column_map,
+            source_columns,
+            returning.as_ref(),
+        ),
         SqlPlan::Update {
             collection,
             engine,
@@ -162,7 +181,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             assignments,
             filters,
             target_keys,
-            *returning,
+            returning.as_ref(),
         ),
         SqlPlan::UpdateFrom {
             collection,
@@ -183,14 +202,21 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             source_join_col,
             assignments,
             target_filters,
-            returning: *returning,
+            returning: returning.as_ref(),
         }),
         SqlPlan::Delete {
+            returning,
             collection,
             engine,
             filters,
             target_keys,
-        } => visitor.delete(collection, *engine, filters, target_keys),
+        } => visitor.delete(
+            collection,
+            *engine,
+            filters,
+            target_keys,
+            returning.as_ref(),
+        ),
         SqlPlan::Truncate {
             collection,
             engine,
@@ -269,10 +295,11 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             output,
         }),
         SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
+            returning,
             collection,
             rows,
             volatile_defaults: _,
-        }) => visitor.timeseries_ingest(collection, rows),
+        }) => visitor.timeseries_ingest(collection, rows, returning.as_ref()),
         SqlPlan::VectorSearch {
             collection,
             field,

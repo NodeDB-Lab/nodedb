@@ -166,12 +166,15 @@ impl CoreLoop {
                 let passes = if predicates.is_empty() {
                     true // Cross join.
                 } else {
-                    let merged = merge_join_docs_binary(
+                    let merged = match merge_join_docs_binary(
                         left_bytes,
                         Some(right_bytes),
                         left_qualifier,
                         right_qualifier,
-                    );
+                    ) {
+                        Ok(row) => row,
+                        Err(error) => return self.response_error(task, ErrorCode::from(error)),
+                    };
                     match crate::bridge::scan_filter::ScanFilter::all_match_binary(
                         &predicates,
                         &merged,
@@ -187,23 +190,29 @@ impl CoreLoop {
                 if passes {
                     left_matched = true;
                     right_matched[ri] = true;
-                    results.push(merge_join_docs_binary(
-                        left_bytes,
-                        Some(right_bytes),
-                        left_qualifier,
-                        right_qualifier,
-                    ));
+                    results.push(
+                        match merge_join_docs_binary(
+                            left_bytes,
+                            Some(right_bytes),
+                            left_qualifier,
+                            right_qualifier,
+                        ) {
+                            Ok(row) => row,
+                            Err(error) => return self.response_error(task, ErrorCode::from(error)),
+                        },
+                    );
                 }
             }
 
             // LEFT/FULL: emit unmatched left rows.
             if !left_matched && is_left {
-                results.push(merge_join_docs_binary(
-                    left_bytes,
-                    None,
-                    left_qualifier,
-                    right_qualifier,
-                ));
+                results.push(
+                    match merge_join_docs_binary(left_bytes, None, left_qualifier, right_qualifier)
+                    {
+                        Ok(row) => row,
+                        Err(error) => return self.response_error(task, ErrorCode::from(error)),
+                    },
+                );
             }
         }
 
@@ -214,12 +223,12 @@ impl CoreLoop {
                     break;
                 }
                 if !right_matched[ri] {
-                    results.push(merge_join_docs_binary(
-                        &[],
-                        Some(right_bytes),
-                        "",
-                        right_qualifier,
-                    ));
+                    results.push(
+                        match merge_join_docs_binary(&[], Some(right_bytes), "", right_qualifier) {
+                            Ok(row) => row,
+                            Err(error) => return self.response_error(task, ErrorCode::from(error)),
+                        },
+                    );
                 }
             }
         }

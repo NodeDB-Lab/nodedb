@@ -10,14 +10,16 @@ use crate::resolver::expr::value::{convert_value, parse_interval_to_micros};
 use crate::types::*;
 
 use super::entry::convert_expr_depth;
+use super::typed_literal::TypedKind;
 
 pub(super) fn convert_value_expr(val: &ValueWithSpan) -> Result<SqlExpr> {
     Ok(SqlExpr::Literal(convert_value(&val.value)?))
 }
 
+/// `TYPE '...'`. A timestamp, UUID, bytea or decimal type resolves to its
+/// typed value, refusing text that spells none. Any other type keeps the
+/// text.
 pub(super) fn convert_typed_string(ts: &TypedString) -> Result<SqlExpr> {
-    // TIMESTAMP '...' and TIMESTAMPTZ '...' typed string literals.
-    let type_str = format!("{}", ts.data_type).to_ascii_uppercase();
     let raw = match &ts.value.value {
         Value::SingleQuotedString(s) => s.clone(),
         other => {
@@ -26,23 +28,10 @@ pub(super) fn convert_typed_string(ts: &TypedString) -> Result<SqlExpr> {
             });
         }
     };
-    match type_str.as_str() {
-        "TIMESTAMP" => {
-            let dt = nodedb_types::NdbDateTime::parse(&raw).ok_or_else(|| SqlError::Parse {
-                detail: format!("cannot parse TIMESTAMP literal: '{raw}'"),
-            })?;
-            return Ok(SqlExpr::Literal(SqlValue::Timestamp(dt)));
-        }
-        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => {
-            let dt = nodedb_types::NdbDateTime::parse(&raw).ok_or_else(|| SqlError::Parse {
-                detail: format!("cannot parse TIMESTAMPTZ literal: '{raw}'"),
-            })?;
-            return Ok(SqlExpr::Literal(SqlValue::Timestamptz(dt)));
-        }
-        _ => {}
+    match TypedKind::of(&ts.data_type)? {
+        Some(kind) => Ok(SqlExpr::Literal(kind.parse_text(&raw)?)),
+        None => Ok(SqlExpr::Literal(SqlValue::String(raw))),
     }
-    // Fall through: return as a generic literal string.
-    Ok(SqlExpr::Literal(SqlValue::String(raw)))
 }
 
 pub(super) fn convert_cast(
@@ -59,24 +48,21 @@ pub(super) fn convert_cast(
     if type_str == "tsvector" || type_str == "tsquery" {
         return convert_expr_depth(expr, depth, scope);
     }
-    // `'...'::TIMESTAMP` and `'...'::TIMESTAMPTZ` — promote string literals
-    // to typed SqlValue when the inner expression is a string literal.
-    let upper = type_str.to_uppercase();
-    if (upper == "TIMESTAMP" || upper == "TIMESTAMPTZ" || upper == "TIMESTAMP WITH TIME ZONE")
-        && let Expr::Value(v) = expr
-        && let Value::SingleQuotedString(s) = &v.value
+    let inner = convert_expr_depth(expr, depth, scope)?;
+    // Resolved for every cast, so a `DECIMAL(p,s)` typmod that is not valid
+    // is refused here, never at run time.
+    let kind = TypedKind::of(data_type)?;
+    // A literal cast to a timestamp, UUID, bytea or decimal type resolves to
+    // the typed value here, so `'...'::uuid` stores a UUID, never its text,
+    // and `12.50::decimal` the exact decimal, never a float.
+    if let SqlExpr::Literal(value) = &inner
+        && let Some(kind) = kind
+        && let Some(typed) = kind.cast(value.clone())?
     {
-        let dt = nodedb_types::NdbDateTime::parse(s).ok_or_else(|| SqlError::Parse {
-            detail: format!("cannot parse timestamp cast: '{s}'"),
-        })?;
-        return Ok(SqlExpr::Literal(if upper == "TIMESTAMP" {
-            SqlValue::Timestamp(dt)
-        } else {
-            SqlValue::Timestamptz(dt)
-        }));
+        return Ok(SqlExpr::Literal(typed));
     }
     Ok(SqlExpr::Cast {
-        expr: Box::new(convert_expr_depth(expr, depth, scope)?),
+        expr: Box::new(inner),
         to_type: format!("{data_type}"),
     })
 }

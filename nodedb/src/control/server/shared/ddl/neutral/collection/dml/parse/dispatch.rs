@@ -16,7 +16,6 @@ use crate::control::server::shared::clone_write::{
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
-use crate::control::server::shared::returning;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::txn_route::{
     StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task,
@@ -53,17 +52,8 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     txn_ctx: &DmlTxnCtx<'_>,
     fire_triggers: bool,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    // The clause is stripped from the rebuilt statement before planning. The
-    // planner resolves the item text against the planned target and attaches
-    // the Data-Plane spec to every task before they come back here.
-    let (sql, returning_items) = returning::strip_returning(sql).map_err(|error| {
-        let (_, sqlstate, message) = error_to_sqlstate(&error);
-        ddl_err(sqlstate, message)
-    })?;
-    let source = StatementSource::Sql {
-        sql: sql.as_str(),
-        returning_items: returning_items.as_deref(),
-    };
+    let sql = sql.to_owned();
+    let source = StatementSource::Sql { sql: sql.as_str() };
     let planned = plan_statement(state, identity, tenant_id, database_id, source, txn_ctx).await?;
     dispatch_planned(
         state,

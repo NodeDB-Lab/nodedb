@@ -50,6 +50,10 @@ pub(super) struct ResolvedSchema {
     pub group_cols: Vec<(usize, ColumnType)>,
     pub agg_cols: Vec<AggColInfo>,
     pub ts_idx: usize,
+    /// The representative value of each code of an interned DECIMAL or UUID
+    /// GROUP BY column, keyed by GROUP BY position
+    /// ([`super::exact_keys`]).
+    pub group_reps: HashMap<usize, ColumnData>,
 }
 
 pub(super) enum AggColInfo {
@@ -61,7 +65,8 @@ pub(super) enum AggColInfo {
 }
 
 /// Whether row `row_idx` of `column` holds SQL NULL: NaN for a float, the
-/// NULL symbol id for a symbol. Integer and time cells are never NULL.
+/// NULL symbol id for a symbol, the empty cell of a decimal, UUID or
+/// boolean. Integer and time cells are never NULL.
 #[inline]
 fn cell_is_null(column: Option<&ColumnData>, row_idx: usize) -> bool {
     match column {
@@ -70,6 +75,9 @@ fn cell_is_null(column: Option<&ColumnData>, row_idx: usize) -> bool {
             ids.get(row_idx).is_none_or(|id| *id == NULL_SYMBOL_ID)
         }
         Some(ColumnData::Int64(_)) | Some(ColumnData::Timestamp(_)) => false,
+        Some(ColumnData::Decimal(v)) => v.get(row_idx).is_none_or(Option::is_none),
+        Some(ColumnData::Uuid(v)) => v.get(row_idx).is_none_or(Option::is_none),
+        Some(ColumnData::Bool(v)) => v.get(row_idx).is_none_or(Option::is_none),
         None => true,
     }
 }
@@ -113,10 +121,14 @@ pub(super) fn resolve_schema(
                     AggColInfo::CountField(idx)
                 } else {
                     match ty {
-                        ColumnType::Float64 | ColumnType::Int64 | ColumnType::Timestamp(_) => {
-                            AggColInfo::Numeric(idx)
-                        }
-                        ColumnType::Symbol | ColumnType::Text => AggColInfo::Skip,
+                        ColumnType::Float64
+                        | ColumnType::Int64
+                        | ColumnType::Timestamp(_)
+                        | ColumnType::Decimal(_) => AggColInfo::Numeric(idx),
+                        ColumnType::Symbol
+                        | ColumnType::Text
+                        | ColumnType::Uuid
+                        | ColumnType::Bool => AggColInfo::Skip,
                     }
                 }
             } else if op == "count" {
@@ -131,6 +143,7 @@ pub(super) fn resolve_schema(
         group_cols,
         agg_cols,
         ts_idx,
+        group_reps: HashMap::new(),
     })
 }
 
@@ -160,6 +173,12 @@ pub(super) fn accumulate_row(
                     }
                     Some(ColumnData::Int64(v)) | Some(ColumnData::Timestamp(v)) => {
                         accums[agg_idx].feed_int(v[row_idx])
+                    }
+                    // A decimal cell feeds exactly. A NULL cell feeds nothing.
+                    Some(ColumnData::Decimal(v)) => {
+                        if let Some(d) = v[row_idx] {
+                            accums[agg_idx].feed_decimal(d);
+                        }
                     }
                     _ => {}
                 }

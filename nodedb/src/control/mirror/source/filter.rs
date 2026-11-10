@@ -119,6 +119,7 @@ mod tests {
                 resolved_sum_targets: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         )
     }

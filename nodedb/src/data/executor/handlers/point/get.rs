@@ -176,15 +176,21 @@ impl CoreLoop {
         // declared-key row gains no `id`. The client still gets the stored
         // body, which never gains a field it did not have.
         let transcoded = {
-            let normalized = sparse_body_to_msgpack(&data, body_format.as_format_ref());
+            let normalized = match sparse_body_to_msgpack(&data, body_format.as_format_ref()) {
+                Ok(normalized) => normalized,
+                Err(error) => return self.response_error(task, error),
+            };
             if !rls_filters.is_empty() {
                 let identity_column = self.identity_column(database_id, tid, collection);
-                let (_, gated) = sparse_row_to_doc(
+                let gated = match sparse_row_to_doc(
                     &storage_key,
                     &data,
                     body_format.as_format_ref(),
                     &identity_column,
-                );
+                ) {
+                    Ok((_, gated)) => gated,
+                    Err(error) => return self.response_error(task, error),
+                };
                 if !super::super::rls_eval::rls_check_msgpack_bytes(
                     rls_filters,
                     &gated,

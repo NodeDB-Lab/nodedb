@@ -28,9 +28,9 @@ impl CoreLoop {
         head: &ChainHead,
         encode: &dyn Fn(&[u8]) -> crate::Result<Vec<u8>>,
     ) -> crate::Result<Vec<u8>> {
-        let doc = doc_format::decode_document(value)?;
+        let mut doc = doc_format::decode_document_value(value)?;
         let placeholder = head.next(GENESIS_HASH.to_string());
-        let probe = encode(&hash_chain::link_body(&doc, &placeholder)?)?;
+        let probe = encode(&native_link_body(&mut doc, &placeholder)?)?;
         let view = self.decode_stored_document(config, &probe)?;
         let contents = hash_chain::canonical_contents(&view);
         let link = head.next(hash_chain::compute_chain_hash(
@@ -38,7 +38,7 @@ impl CoreLoop {
             placeholder.seq,
             &contents,
         ));
-        hash_chain::link_body(&doc, &link)
+        native_link_body(&mut doc, &link)
     }
 
     /// The stored body of a row re-applied with its durable bytes `stored`.
@@ -101,4 +101,30 @@ impl CoreLoop {
         let view = self.decode_stored_document(config, &stored)?;
         Ok(hash_chain::canonical_contents(&view))
     }
+}
+
+/// Inject chain metadata without converting user fields through JSON.
+fn native_link_body(doc: &mut nodedb_types::Value, link: &ChainHead) -> crate::Result<Vec<u8>> {
+    let nodedb_types::Value::Object(fields) = doc else {
+        return Err(crate::Error::Serialization {
+            format: "document".into(),
+            detail: "hash-chain document body must be an object".into(),
+        });
+    };
+    fields.insert(
+        hash_chain::CHAIN_HASH_FIELD.into(),
+        nodedb_types::Value::String(link.hash.clone()),
+    );
+    let seq = i64::try_from(link.seq).map_err(|error| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("hash-chain sequence {}: {error}", link.seq),
+    })?;
+    fields.insert(
+        hash_chain::CHAIN_SEQ_FIELD.into(),
+        nodedb_types::Value::Integer(seq),
+    );
+    zerompk::to_msgpack_vec(doc).map_err(|error| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: error.to_string(),
+    })
 }

@@ -14,8 +14,8 @@ use super::entry::Resolved;
 use super::hash_join_arm::HashJoinFields;
 use super::post_process_arm::PostProcessFields;
 use super::{
-    aggregate_input_arm, by_name_join_arm, gather_arm, hash_join_arm, post_process_arm, set_op_arm,
-    shuffle_arm,
+    aggregate_input_arm, by_name_join_arm, gather_arm, hash_join_arm, lateral_arm,
+    post_process_arm, set_op_arm, shuffle_arm,
 };
 
 /// Resolve any `Exchange` nodes in `plan`.
@@ -28,8 +28,12 @@ use super::{
 ///   a typed error.
 /// - `Aggregate{input: Some}` → materialize the child on the coordinator and
 ///   embed it as `ProviderScan{None, rows}`, return `Resolved::Plan`.
-/// - `SetOp{inputs, op}` → materialize every branch, merge with `op`, and
+/// - `SetOp{inputs, op, columns}` → materialize every branch, merge with `op`
+///   by each branch's column positions, and
 ///   embed as `ProviderScan{None, rows}`, return `Resolved::Plan`.
+/// - `LateralTopK` / `LateralLoop` whose outer plan only the coordinator can
+///   run → materialize the outer plan and embed it as `ProviderScan{None,
+///   rows}`, return `Resolved::Plan`.
 /// - Anything else → `Resolved::Plan` unchanged.
 ///
 /// `captures` accumulates one [`DistributedReadCapture`] per base collection an
@@ -216,15 +220,24 @@ pub(super) async fn resolve_exchange(
         // SetOp: materialize every branch on the coordinator, merge with the
         // set operation, and lower to a `ProviderScan` of the merged rows.
         // The node is coordinator-local, so the root Gather arm never sees it.
-        PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) => {
-            set_op_arm::resolve_set_op(state, ctx, captures, inputs, op).await
-        }
+        PhysicalPlan::Query(QueryOp::SetOp {
+            inputs,
+            op,
+            columns,
+        }) => set_op_arm::resolve_set_op(state, ctx, captures, inputs, op, columns).await,
 
         // Nested-loop and sort-merge joins: inside a transaction each
         // by-name side reads through its gathered engine scan.
         join @ PhysicalPlan::Query(
             QueryOp::NestedLoopJoin { .. } | QueryOp::SortMergeJoin { .. },
         ) => by_name_join_arm::resolve_by_name_join(state, ctx, captures, join).await,
+
+        // LATERAL: an outer side only the coordinator can run is
+        // materialized into rows the Data Plane joins in process.
+        lateral
+        @ PhysicalPlan::Query(QueryOp::LateralTopK { .. } | QueryOp::LateralLoop { .. }) => {
+            lateral_arm::resolve_lateral_outer(state, ctx, captures, lateral).await
+        }
 
         // All other plan variants: pass through unchanged.
         other => Ok(Resolved::Plan(Box::new(other))),

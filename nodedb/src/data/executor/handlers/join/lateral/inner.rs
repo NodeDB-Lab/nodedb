@@ -6,11 +6,10 @@
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::JoinProjection;
 
-use super::shared::{MAX_RESULT_ROWS, build_row, unwrap_data_field};
+use super::shared::{MAX_RESULT_ROWS, build_row, inner_rows};
 
 /// One outer row of a LATERAL join and the inner scan it correlates with.
 pub(super) struct OuterRowJoin<'a> {
@@ -54,18 +53,8 @@ impl CoreLoop {
                 if matches!(resp.status, Status::Error) {
                     return Err(resp);
                 }
-                if resp.payload.as_ref().is_empty() {
-                    Vec::new()
-                } else {
-                    response_codec::decode_response_to_docs(&resp).ok_or_else(|| {
-                        self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: "LATERAL inner scan payload did not decode".into(),
-                            },
-                        )
-                    })?
-                }
+                inner_rows(resp.payload.as_ref(), plan)
+                    .map_err(|error| self.response_error(task, ErrorCode::from(error)))?
             }
         };
 
@@ -87,24 +76,30 @@ impl CoreLoop {
 
         if inner_docs.is_empty() {
             if row.left_join {
-                push(build_row(
-                    row.flat_outer,
-                    None,
-                    row.outer_alias,
-                    row.lateral_alias,
-                    row.projection,
-                ))?;
+                push(
+                    build_row(
+                        row.flat_outer,
+                        None,
+                        row.outer_alias,
+                        row.lateral_alias,
+                        row.projection,
+                    )
+                    .map_err(|error| self.response_error(task, ErrorCode::from(error)))?,
+                )?;
             }
             return Ok(());
         }
-        for (_inner_id, inner_bytes) in &inner_docs {
-            push(build_row(
-                row.flat_outer,
-                Some(unwrap_data_field(inner_bytes)),
-                row.outer_alias,
-                row.lateral_alias,
-                row.projection,
-            ))?;
+        for inner_body in &inner_docs {
+            push(
+                build_row(
+                    row.flat_outer,
+                    Some(inner_body.as_slice()),
+                    row.outer_alias,
+                    row.lateral_alias,
+                    row.projection,
+                )
+                .map_err(|error| self.response_error(task, ErrorCode::from(error)))?,
+            )?;
         }
         Ok(())
     }

@@ -2,9 +2,8 @@
 
 //! Cross-join and semi-join tests with inline scalar aggregate subqueries.
 
-use super::super::helpers::{make_ctx, send_ok};
+use super::super::helpers::{make_ctx, rows_json, send_ok};
 use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
-use nodedb::data::executor::response_codec;
 use nodedb_physical::physical_plan::{
     AggregateSpec, DocumentOp, JoinProjection, PhysicalPlan, QueryOp,
 };
@@ -43,6 +42,7 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -116,7 +116,7 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 
@@ -163,6 +163,7 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -236,7 +237,7 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 
@@ -276,6 +277,7 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -312,6 +314,7 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -411,7 +414,7 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 

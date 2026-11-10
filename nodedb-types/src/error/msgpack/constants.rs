@@ -91,6 +91,12 @@
 // |  86 | DependentObjectsExist     |
 // |  87 | AuthenticationFailed      |
 // |  88 | MirrorSyncTimeout         |
+// |  89 | InvalidArgumentForLogarithm |
+// |  90 | InvalidArgumentForPowerFunction |
+// |  91 | InvalidTextRepresentation |
+// |  92 | InvalidDatetimeFormat |
+// |  93 | DatetimeFieldOverflow |
+// |  94 | DatatypeMismatch |
 
 pub(super) const TAG_CONSTRAINT_VIOLATION: u16 = 1;
 pub(super) const TAG_WRITE_CONFLICT: u16 = 2;
@@ -178,3 +184,9 @@ pub(super) const TAG_ACTIVE_SQL_TRANSACTION: u16 = 85;
 pub(super) const TAG_DEPENDENT_OBJECTS_EXIST: u16 = 86;
 pub(super) const TAG_AUTHENTICATION_FAILED: u16 = 87;
 pub(super) const TAG_MIRROR_SYNC_TIMEOUT: u16 = 88;
+pub(super) const TAG_INVALID_ARGUMENT_FOR_LOGARITHM: u16 = 89;
+pub(super) const TAG_INVALID_ARGUMENT_FOR_POWER_FUNCTION: u16 = 90;
+pub(super) const TAG_INVALID_TEXT_REPRESENTATION: u16 = 91;
+pub(super) const TAG_INVALID_DATETIME_FORMAT: u16 = 92;
+pub(super) const TAG_DATETIME_FIELD_OVERFLOW: u16 = 93;
+pub(super) const TAG_DATATYPE_MISMATCH: u16 = 94;

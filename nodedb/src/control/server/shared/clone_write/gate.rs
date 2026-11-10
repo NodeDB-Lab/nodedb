@@ -227,8 +227,12 @@ pub async fn intercept_and_authorize(
     {
         return Ok(CloneCheckedOutcome::Handled(resp));
     }
+    // This outcome carries a response only. The pgwire and statement paths
+    // intercept clone reads before this gate, so their transactions keep the
+    // distributed captures. The streaming paths decline clone reads before
+    // this gate (`exchange::streamable::open_streamable_scan`).
     if required_permission(&task.plan) == Permission::Read
-        && let super::super::clone_read::CloneReadOutcome::Handled(resp) =
+        && let super::super::clone_read::CloneReadOutcome::Handled(answer) =
             super::super::clone_read::maybe_intercept_clone_read(
                 super::super::clone_read::CloneReadInterceptParams {
                     state,
@@ -238,11 +242,12 @@ pub async fn intercept_and_authorize(
                     permissions,
                     roles,
                     emitter,
+                    linearizable: super::super::session::read_scope::linearizable(),
                 },
             )
             .await?
     {
-        return Ok(CloneCheckedOutcome::Handled(resp));
+        return Ok(CloneCheckedOutcome::Handled(answer.response));
     }
     let authorized = authorize_task_set(
         identity,
@@ -268,12 +273,26 @@ pub async fn intercept_and_authorize(
 /// the shape every read-only internal DDL scan needs (`ANALYZE`, `COPY TO`,
 /// CHECK subquery evaluation, `VALIDATE TYPEGUARD`): no branching on the
 /// capability besides "run it".
+///
+/// Provider relations fill their rows for the caller's identity first. The
+/// dispatch below resolves without an identity, so an unfilled provider
+/// answers no rows there.
 pub async fn intercept_authorize_and_dispatch(
-    params: InterceptAndAuthorizeParams<'_>,
+    mut params: InterceptAndAuthorizeParams<'_>,
     trace_id: TraceId,
 ) -> crate::Result<Response> {
     let state = params.state;
-    match intercept_and_authorize(params).await? {
+    // Boxed: provider materialization and the clone read both reach back
+    // into dispatch, and the unboxed future nests past the layout limit.
+    params.task = Box::pin(
+        crate::control::server::exchange::resolve::materialize_task_providers(
+            state,
+            params.identity,
+            params.task,
+        ),
+    )
+    .await?;
+    match Box::pin(intercept_and_authorize(params)).await? {
         CloneCheckedOutcome::Handled(resp) => Ok(resp),
         CloneCheckedOutcome::Proceed(checked) => {
             crate::control::server::dispatch_utils::dispatch_authorized_to_data_plane(

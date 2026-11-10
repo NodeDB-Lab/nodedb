@@ -184,8 +184,9 @@ fn restart_replay_applies_the_journalled_fold_rows_not_the_stamp() {
     .expect("plan parts");
     let count = parts.count().expect("part count");
     let mut records = vec![wal_record(RecordType::TransactionRedo, LSN, redo.clone())];
-    for (part, (_, ops)) in (1..=count).zip(parts.runs) {
+    for (part, (_, ops, schemas)) in (1..=count).zip(parts.runs) {
         let group = WriteGroupRecord {
+            schemas,
             group: WriteGroup::part_of(LSN, part, count),
             ops,
             redo: None,

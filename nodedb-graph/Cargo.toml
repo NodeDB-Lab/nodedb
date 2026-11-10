@@ -17,7 +17,6 @@ categories = ["algorithms", "data-structures"]
 nodedb-types = { workspace = true }
 nodedb-mem = { workspace = true }
 serde = { workspace = true }
-rmpv = { workspace = true }
 zerompk = { workspace = true }
 rkyv = { workspace = true }
 tracing = { workspace = true }

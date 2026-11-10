@@ -213,7 +213,8 @@ pub(super) fn repartition_side<S: AsRef<str>>(
 /// frame — one row resident at a time), compute each row's sub-partition index
 /// via `partition_hash_seeded(row, keys, seed) % sub_p`, and hand `(sp, value)`
 /// to `sink`. Consumes `src`. The `sp` index is always `< sub_p` (modulo result),
-/// so `sink` can index safely; it returns `Err` only on a genuine I/O failure.
+/// so `sink` can index safely. It returns `Err` on an I/O error or a row that is
+/// not a decodable object.
 fn route_rows<S, F>(
     src: PartitionSource,
     keys: &[S],
@@ -228,14 +229,14 @@ where
     match src {
         PartitionSource::InMemory(rows) => {
             for (_, value) in rows {
-                let sp = (partition_hash_seeded(&value, keys, seed) % sub_p as u64) as usize;
+                let sp = (partition_hash_seeded(&value, keys, seed)? % sub_p as u64) as usize;
                 sink(sp, &value)?;
             }
         }
         PartitionSource::Spilled(path) => {
             let mut reader = FrameStreamReader::open(&path)?;
             while let Some(value) = reader.next_row()? {
-                let sp = (partition_hash_seeded(&value, keys, seed) % sub_p as u64) as usize;
+                let sp = (partition_hash_seeded(&value, keys, seed)? % sub_p as u64) as usize;
                 sink(sp, &value)?;
             }
         }

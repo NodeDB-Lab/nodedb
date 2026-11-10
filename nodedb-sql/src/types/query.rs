@@ -31,7 +31,12 @@ pub enum JoinType {
     Right,
     Full,
     Semi,
+    /// `NOT EXISTS`: left rows with no match. A NULL key only fails to match.
     Anti,
+    /// `NOT IN (subquery)`: SQL null-aware anti join. A NULL key in a
+    /// non-empty subquery rejects every outer row, and an outer NULL key is
+    /// rejected unless the subquery is empty.
+    AntiNullAware,
     Cross,
 }
 
@@ -44,6 +49,7 @@ impl JoinType {
             Self::Full => "full",
             Self::Semi => "semi",
             Self::Anti => "anti",
+            Self::AntiNullAware => "anti_null_aware",
             Self::Cross => "cross",
         }
     }

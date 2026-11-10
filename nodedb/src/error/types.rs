@@ -392,6 +392,17 @@ pub enum Error {
     #[error("{detail}")]
     DataException { detail: String },
 
+    /// `ln` or `log` of zero or a negative number. Rendered as SQLSTATE
+    /// `2201E` (invalid_argument_for_logarithm) at the pgwire layer.
+    #[error("{detail}")]
+    InvalidArgumentForLogarithm { detail: String },
+
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number. Rendered as SQLSTATE
+    /// `2201F` (invalid_argument_for_power_function) at the pgwire layer.
+    #[error("{detail}")]
+    InvalidArgumentForPowerFunction { detail: String },
+
     /// A geometry's SRID differs from the SRID of the spatial index it
     /// writes to or queries. The index SRID is fixed by its first entry, and
     /// no implicit transform runs. Rendered as SQLSTATE `22000`

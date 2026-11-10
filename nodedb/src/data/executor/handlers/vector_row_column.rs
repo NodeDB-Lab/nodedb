@@ -27,16 +27,17 @@ pub(in crate::data::executor) fn with_vector_column(
     field: &str,
     vector: &[f32],
 ) -> crate::Result<Vec<u8>> {
-    let mut value = nodedb_types::value_from_msgpack(row).map_err(|e| crate::Error::Codec {
-        detail: format!("vector-primary row decode: {e}"),
-    })?;
+    let mut value =
+        nodedb_types::object_msgpack::decode_object(row).map_err(|e| crate::Error::Codec {
+            detail: format!("vector-primary row decode: {e}"),
+        })?;
     let Value::Object(map) = &mut value else {
         return Err(crate::Error::Internal {
             detail: "a vector-primary row is not a map".into(),
         });
     };
     map.insert(field.to_string(), vector_value(vector));
-    nodedb_types::value_to_msgpack(&value).map_err(|e| crate::Error::Codec {
+    zerompk::to_msgpack_vec(&value).map_err(|e| crate::Error::Codec {
         detail: format!("vector-primary row encode: {e}"),
     })
 }
@@ -195,7 +196,8 @@ mod tests {
         fields.insert("owner".to_string(), Value::String("alice".into()));
         let row = nodedb_types::value_to_msgpack(&Value::Object(fields)).expect("encode");
         let out = with_vector_column(&row, "vec", &[1.0, 0.5]).expect("attach");
-        let Value::Object(map) = nodedb_types::value_from_msgpack(&out).expect("decode") else {
+        let Value::Object(map) = nodedb_types::object_msgpack::decode_object(&out).expect("decode")
+        else {
             panic!("row is not a map");
         };
         assert_eq!(map.get("owner"), Some(&Value::String("alice".into())));

@@ -69,6 +69,15 @@ pub const DATETIME_FIELD_OVERFLOW: &str = "22008";
 /// raised at runtime instead of evaluating to `NULL`)
 pub const DIVISION_BY_ZERO: &str = "22012";
 
+/// `2201E` — `invalid_argument_for_logarithm` (`ln` or `log` of zero or a
+/// negative number)
+pub const INVALID_ARGUMENT_FOR_LOGARITHM: &str = "2201E";
+
+/// `2201F` — `invalid_argument_for_power_function` (zero to a negative
+/// power, a negative number to a non-integer power, the square root of a
+/// negative number)
+pub const INVALID_ARGUMENT_FOR_POWER_FUNCTION: &str = "2201F";
+
 /// `2201W` — `invalid_limit_value` (a LIMIT/OFFSET/FETCH bound that is
 /// negative, fractional, non-numeric, or wider than `usize`)
 pub const INVALID_LIMIT_VALUE: &str = "2201W";
@@ -431,6 +440,8 @@ mod tests {
             INVALID_DATETIME_FORMAT,
             DATETIME_FIELD_OVERFLOW,
             DIVISION_BY_ZERO,
+            INVALID_ARGUMENT_FOR_LOGARITHM,
+            INVALID_ARGUMENT_FOR_POWER_FUNCTION,
             INVALID_LIMIT_VALUE,
             INVALID_TEXT_REPRESENTATION,
             BAD_COPY_FILE_FORMAT,

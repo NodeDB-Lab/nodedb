@@ -258,7 +258,8 @@ fn decode_body(
         })?,
         None => body.to_vec(),
     };
-    let value = nodedb_types::value_from_msgpack(&msgpack).ok();
+    // A stored body is plain or native; either decodes typed.
+    let value = crate::data::executor::response_codec::decode_row_body(&msgpack).ok();
     Ok(Body { msgpack, value })
 }
 

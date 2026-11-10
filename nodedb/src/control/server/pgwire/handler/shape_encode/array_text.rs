@@ -15,7 +15,7 @@ use bytes::{BufMut, BytesMut};
 use nodedb_types::Value;
 use nodedb_types::columnar::FloatWidth;
 use nodedb_types::error::NodeDbError;
-use nodedb_types::value::non_finite_float_text;
+use nodedb_types::value::{float4_text, float8_text};
 use pgwire::api::Type;
 use pgwire::error::PgWireResult;
 use pgwire::types::ToSqlText;
@@ -135,17 +135,14 @@ fn check_rectangular(column: &str, items: &[Value]) -> PgWireResult<()> {
     ))))
 }
 
-/// The PostgreSQL text of one float element. A non-finite float is `NaN`,
-/// `Infinity` or `-Infinity`. A finite float is its shortest round-trip
-/// decimal at `width`. A finite value beyond `f32` range under `F32` is an
-/// out-of-range error.
+/// The PostgreSQL text of one float element, as `float8out` or
+/// `float4out` writes it at `width`. A finite value beyond `f32` range under
+/// `F32` is an out-of-range error.
 fn float_text(f: f64, width: FloatWidth) -> PgWireResult<String> {
-    if let Some(text) = non_finite_float_text(f) {
-        return Ok(text.to_owned());
-    }
     Ok(match width {
-        FloatWidth::F64 => f.to_string(),
-        FloatWidth::F32 => checked_narrow_f32(f)?.to_string(),
+        FloatWidth::F64 => float8_text(f),
+        FloatWidth::F32 if !f.is_finite() => float8_text(f),
+        FloatWidth::F32 => float4_text(checked_narrow_f32(f)?),
     })
 }
 
@@ -279,11 +276,13 @@ mod tests {
 
     #[test]
     fn float4_overflow_is_refused() {
-        assert!(float_array_text("c", &floats(&[1e39]), FloatWidth::F32).is_err());
-        assert_eq!(
-            text_of(&floats(&[1e39]), FloatWidth::F64),
-            format!("{{{}}}", 1e39f64)
-        );
+        let PgWireError::UserError(info) =
+            float_array_text("c", &floats(&[1e39]), FloatWidth::F32).expect_err("out of range")
+        else {
+            panic!("expected a UserError");
+        };
+        assert_eq!(info.code, "22003");
+        assert_eq!(text_of(&floats(&[1e39]), FloatWidth::F64), "{1e+39}");
     }
 
     #[test]

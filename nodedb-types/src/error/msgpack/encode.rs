@@ -184,6 +184,24 @@ impl ToMessagePack for ErrorDetails {
             ErrorDetails::ProgramLimitExceeded { detail } => {
                 write1(writer, TAG_PROGRAM_LIMIT_EXCEEDED, detail)
             }
+            ErrorDetails::InvalidArgumentForLogarithm { detail } => {
+                write1(writer, TAG_INVALID_ARGUMENT_FOR_LOGARITHM, detail)
+            }
+            ErrorDetails::InvalidArgumentForPowerFunction { detail } => {
+                write1(writer, TAG_INVALID_ARGUMENT_FOR_POWER_FUNCTION, detail)
+            }
+            ErrorDetails::InvalidTextRepresentation { detail } => {
+                write1(writer, TAG_INVALID_TEXT_REPRESENTATION, detail)
+            }
+            ErrorDetails::InvalidDatetimeFormat { detail } => {
+                write1(writer, TAG_INVALID_DATETIME_FORMAT, detail)
+            }
+            ErrorDetails::DatetimeFieldOverflow { detail } => {
+                write1(writer, TAG_DATETIME_FIELD_OVERFLOW, detail)
+            }
+            ErrorDetails::DatatypeMismatch { detail } => {
+                write1(writer, TAG_DATATYPE_MISMATCH, detail)
+            }
             ErrorDetails::InvalidLimitValue { clause, value } => {
                 write2(writer, TAG_INVALID_LIMIT_VALUE, clause, value)
             }

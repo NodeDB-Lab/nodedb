@@ -44,6 +44,10 @@ fn keyless_single_row_mutations_leave_the_engine_untouched() {
         engine.encode_pk_from_row(&values),
         Err(ColumnarError::MissingPrimaryKey)
     ));
+    assert!(matches!(
+        engine.delete_row(&values, 20),
+        Err(ColumnarError::MissingPrimaryKey)
+    ));
     assert_eq!(snapshot(&engine), before);
     assert_eq!(engine.memtable().row_count(), 0);
     assert!(engine.pk_index().is_empty());
@@ -113,4 +117,54 @@ fn raw_keyless_memtables_preserve_duplicate_rows() {
     assert_eq!(memtable.row_count(), 2);
     assert_eq!(memtable.get_row(0).expect("read"), Some(values.to_vec()));
     assert_eq!(memtable.get_row(1).expect("read"), Some(values.to_vec()));
+}
+
+#[test]
+fn full_row_delete_preserves_composite_boundaries_and_exact_numeric_cells() {
+    let schema = ColumnarSchema::new(vec![
+        ColumnDef::required("a", ColumnType::String).with_primary_key(),
+        ColumnDef::required("b", ColumnType::String).with_primary_key(),
+        ColumnDef::required("n", ColumnType::Int64).with_primary_key(),
+        ColumnDef::required("d", ColumnType::Decimal(None)).with_primary_key(),
+    ])
+    .expect("schema");
+    let row = |a: &str, b: &str, n: i64, decimal: &str| {
+        vec![
+            Value::String(a.into()),
+            Value::String(b.into()),
+            Value::Integer(n),
+            Value::Decimal(decimal.parse().expect("decimal")),
+        ]
+    };
+    let rows = [
+        row("ab", "c", i64::MAX - 1, "1.00001"),
+        row("a", "bc", i64::MAX - 1, "1.00001"),
+        row("ab", "c", i64::MAX, "1.00001"),
+        row("ab", "c", i64::MAX - 1, "1.00002"),
+    ];
+    let mut engine = MutationEngine::new("rows".into(), schema);
+    for row in &rows {
+        engine.insert(row, 10).expect("insert");
+    }
+    assert_eq!(engine.pk_index().iter().count(), 4);
+    engine
+        .delete_row(&rows[0], 20)
+        .expect("delete complete key");
+    assert_eq!(engine.pk_index().len(), 3);
+    assert!(
+        !engine
+            .pk_index()
+            .contains(&engine.encode_pk_from_row(&rows[0]).expect("key"))
+    );
+    for row in &rows[1..] {
+        let key = engine.encode_pk_from_row(row).expect("key");
+        assert_eq!(
+            engine.lookup_memtable_row_by_pk(&key).expect("lookup"),
+            Some(row.clone())
+        );
+    }
+    assert!(matches!(
+        engine.delete_row(&rows[0][..3], 30),
+        Err(ColumnarError::SchemaMismatch { .. })
+    ));
 }

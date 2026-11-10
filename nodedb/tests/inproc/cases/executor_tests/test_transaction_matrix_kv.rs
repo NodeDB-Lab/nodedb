@@ -13,7 +13,7 @@ use nodedb_physical::physical_plan::{
     TimeseriesOp,
 };
 
-use nodedb_test_support::tx_batch_helpers::commit_plans;
+use nodedb_test_support::tx_batch_helpers::{commit_plans, doc_body, doc_text};
 
 use super::helpers::*;
 
@@ -54,12 +54,13 @@ fn doc_put_conflict_seed(coll: &str) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointPut {
         collection: nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, coll),
         document_id: "conflict_doc".into(),
-        value: b"seed".to_vec(),
+        value: doc_body("seed"),
         surrogate: doc_surrogate("conflict_doc"),
         pk_bytes: Vec::new(),
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -67,13 +68,14 @@ fn doc_insert_conflict(coll: &str) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointInsert {
         collection: nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, coll),
         document_id: "conflict_doc".into(),
-        value: b"conflict".to_vec(),
+        value: doc_body("conflict"),
         surrogate: doc_surrogate("conflict_doc"),
         if_absent: false,
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -310,6 +312,7 @@ fn rollback_matrix_doc_then_doc_conflict_kv_intact() {
     // The seeded conflict doc must still be readable (it was not part of the transaction).
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs", "conflict_doc"));
     assert_eq!(r.status, Status::Ok, "conflict_doc must still exist");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("seed"));
 }
 
 // ---------------------------------------------------------------------------

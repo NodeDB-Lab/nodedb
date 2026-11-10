@@ -19,7 +19,7 @@ impl AggAccum {
             // zero identity in SQL. Integer inputs total exactly.
             AggAccum::SumAvg { sum } => {
                 if agg.function == "avg" {
-                    sum.avg()?
+                    sum.avg_value()?
                 } else {
                     sum.sum()?
                 }
@@ -32,7 +32,7 @@ impl AggAccum {
                     sum.add_value(v);
                 }
                 if agg.function == "avg_distinct" {
-                    sum.avg()?
+                    sum.avg_value()?
                 } else {
                     sum.sum()?
                 }

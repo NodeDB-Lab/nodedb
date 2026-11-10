@@ -10,8 +10,7 @@ use crate::bridge::expr_eval::ComputedColumn;
 
 /// Apply projection and computed columns on raw msgpack bytes.
 ///
-/// For projection-only (no computed columns), uses zero-decode binary field extraction.
-/// For computed columns, decodes fields on-demand from msgpack. A missing
+/// Native decoding preserves field types in projected and computed values. A missing
 /// projection key is written as NULL. A computed column whose alias is also
 /// projected keeps the projected value, so a window alias already on the
 /// row is not overwritten.
@@ -25,55 +24,29 @@ pub(in crate::data::executor) fn apply_projection_msgpack(
         return Ok(data.to_vec());
     }
 
-    // A computed column whose alias is projected writes no entry of its own,
-    // so the map header counts only the computed columns that do.
-    let written_computed = computed_cols
-        .iter()
-        .filter(|cc| !projection.iter().any(|p| p == &cc.alias))
-        .count();
-    let field_count = projection.len() + written_computed;
-
-    let mut buf = Vec::with_capacity(data.len());
-    nodedb_query::msgpack_scan::write_map_header(&mut buf, field_count);
-
-    if !projection.is_empty() {
-        for col in projection {
-            nodedb_query::msgpack_scan::write_str(&mut buf, col);
-            if let Some((start, end)) = nodedb_query::msgpack_scan::extract_field(data, 0, col) {
-                buf.extend_from_slice(&data[start..end]);
-            } else {
-                nodedb_query::msgpack_scan::write_null(&mut buf);
-            }
-        }
+    let doc = crate::data::executor::doc_format::decode_document_value(data)?;
+    let mut fields =
+        std::collections::HashMap::with_capacity(projection.len() + computed_cols.len());
+    for column in projection {
+        fields.insert(
+            column.clone(),
+            doc.get(column)
+                .cloned()
+                .unwrap_or(nodedb_types::Value::Null),
+        );
     }
-
-    if !computed_cols.is_empty() {
-        // A body that does not decode fails the query: evaluating the
-        // columns against `Null` would ship NULL for every one of them.
-        let doc_val =
-            nodedb_types::value_from_msgpack(data).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("computed columns: stored row does not decode: {e}"),
-            })?;
-        for cc in computed_cols {
-            let already_present = projection.iter().any(|p| p == &cc.alias);
-            if already_present {
-                continue;
-            }
-            nodedb_query::msgpack_scan::write_str(&mut buf, &cc.alias);
-            // A division/modulo-by-zero in a computed column fails the whole
-            // query instead of silently materializing NULL into the
-            // response.
-            let result = cc.expr.eval(&doc_val, crs)?;
-            let encoded = nodedb_types::value_to_msgpack(&result).map_err(|e| {
-                crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("computed column '{}' does not encode: {e}", cc.alias),
-                }
-            })?;
-            buf.extend_from_slice(&encoded);
+    for computed in computed_cols {
+        if projection.iter().any(|column| column == &computed.alias) {
+            continue;
         }
+        fields.insert(computed.alias.clone(), computed.expr.eval(&doc, crs)?);
     }
+    let buf = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(fields)).map_err(|error| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("projected document cannot encode: {error}"),
+        }
+    })?;
 
     Ok(buf)
 }
@@ -86,6 +59,33 @@ mod tests {
 
     fn row(doc: Value) -> Vec<u8> {
         nodedb_types::value_to_msgpack(&doc).expect("encode row")
+    }
+
+    #[test]
+    fn tagged_projection_preserves_native_values_and_computed_copies() {
+        let decimal = Value::Decimal("123456789.123456789".parse().unwrap());
+        let uuid = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let row = object(&[("decimal", decimal.clone()), ("uuid", uuid.clone())]);
+        let input = zerompk::to_msgpack_vec(&row).unwrap();
+        let computed = vec![ComputedColumn {
+            alias: "copy".into(),
+            expr: SqlExpr::Column("decimal".into()),
+        }];
+        let output = apply_projection_msgpack(
+            &input,
+            &computed,
+            &["decimal".into(), "uuid".into()],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::data::executor::doc_format::decode_document_value(&output).unwrap(),
+            object(&[
+                ("decimal", decimal.clone()),
+                ("uuid", uuid),
+                ("copy", decimal)
+            ])
+        );
     }
 
     fn object(pairs: &[(&str, Value)]) -> Value {
@@ -108,7 +108,10 @@ mod tests {
             projection,
             &nodedb_crs::CrsContext::builtin_only(),
         )?;
-        Ok(nodedb_types::value_from_msgpack(&bytes).expect("decode projected row"))
+        Ok(
+            crate::data::executor::doc_format::decode_document_value(&bytes)
+                .expect("decode projected row"),
+        )
     }
 
     #[test]

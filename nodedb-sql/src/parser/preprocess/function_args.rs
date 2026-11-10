@@ -52,9 +52,7 @@ pub(super) fn rewrite_object_literal_args(sql: &str) -> Option<String> {
                                 && let Some(end) = find_matching_brace(&chars, i)
                             {
                                 let json = value_map_to_json(&fields);
-                                seg_result.push('\'');
-                                seg_result.push_str(&json);
-                                seg_result.push('\'');
+                                seg_result.push_str(&nodedb_types::sql_quote::quote_literal(&json));
                                 i = end + 1;
                                 found = true;
                                 continue;
@@ -85,7 +83,7 @@ pub(super) fn value_map_to_json(
     let mut entries: Vec<_> = fields.iter().collect();
     entries.sort_by_key(|(k, _)| k.as_str());
     for (key, val) in entries {
-        parts.push(format!("\"{}\":{}", key, value_to_json(val)));
+        parts.push(format!("{}:{}", json_string(key), value_to_json(val)));
     }
     format!("{{{}}}", parts.join(","))
 }
@@ -93,9 +91,7 @@ pub(super) fn value_map_to_json(
 /// Convert a single `Value` to JSON text.
 fn value_to_json(value: &nodedb_types::Value) -> String {
     match value {
-        nodedb_types::Value::String(s) => {
-            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-        }
+        nodedb_types::Value::String(s) => json_string(s),
         nodedb_types::Value::Integer(n) => n.to_string(),
         nodedb_types::Value::Float(f) => {
             if f.is_finite() {
@@ -113,8 +109,37 @@ fn value_to_json(value: &nodedb_types::Value) -> String {
             format!("[{}]", inner.join(","))
         }
         nodedb_types::Value::Object(map) => value_map_to_json(map),
-        _ => format!("\"{}\"", format!("{value:?}").replace('"', "\\\"")),
+        // A typed scalar is its canonical text, a decimal its exact digits.
+        nodedb_types::Value::Uuid(u) | nodedb_types::Value::Ulid(u) => json_string(u),
+        nodedb_types::Value::Decimal(d) => json_string(&d.to_string()),
+        nodedb_types::Value::DateTime(at) | nodedb_types::Value::NaiveDateTime(at) => {
+            json_string(&at.to_iso8601())
+        }
+        nodedb_types::Value::Bytes(b) => {
+            json_string(&nodedb_types::bytea_text::format_bytea_hex(b))
+        }
+        _ => json_string(&format!("{value:?}")),
     }
+}
+
+/// `text` as a JSON string, with quotes, backslashes and control
+/// characters escaped.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Find the index of the matching `}` for a `{` at position `start` within

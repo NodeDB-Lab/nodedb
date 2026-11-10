@@ -16,6 +16,7 @@
 //! for a delete — never written durably here. COMMIT's buffered plan replay
 //! remains the sole durable apply.
 
+use nodedb_query::expr::EvalError;
 use nodedb_types::RowIdentity;
 
 use super::stage_kv::kv_row_identity;
@@ -240,7 +241,13 @@ impl CoreLoop {
                 return true;
             }
             held.check(|| {
-                ScanFilter::all_match_binary(&filters, &kv_row_to_doc(key, value).1, &crs)
+                let (_key, row) =
+                    kv_row_to_doc(key, value).map_err(|e| EvalError::ArgumentValue {
+                        function: "kv_row",
+                        position: 1,
+                        reason: format!("cannot present KV row: {e}"),
+                    })?;
+                ScanFilter::all_match_binary(&filters, &row, &crs)
             })
         };
         self.merge_kv_overlay_into_scan(txn_id, coll_key, &mut rows, &matches);

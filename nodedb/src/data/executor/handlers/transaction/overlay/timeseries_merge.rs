@@ -48,15 +48,16 @@ pub(in crate::data::executor) struct TimeseriesOverlayMergeParams<'a> {
     pub limit: usize,
 }
 
-/// Decode a staged timeseries row body (a `Value::Object` field map encoded by
-/// `stage_timeseries_insert` via `nodedb_types::value_to_msgpack`). Returns
-/// `None` for a body that fails to decode or is not an object — defensively
-/// treated as "does not match" rather than surfacing a panic.
-fn decode_staged_row(body: &[u8]) -> Option<Value> {
-    match nodedb_types::value_from_msgpack(body) {
-        Ok(v @ Value::Object(_)) => Some(v),
-        _ => None,
-    }
+/// Decode a staged timeseries row body: the native object
+/// `CoreLoop::staged_ts_body` encodes, whose DECIMAL, UUID and BOOLEAN cells
+/// carry their types. `Err` for a body that is not an object: the overlay
+/// holds only bodies this core staged, so it is corruption, never a row to
+/// skip.
+fn decode_staged_row(body: &[u8]) -> crate::Result<Value> {
+    nodedb_types::decode_object(body).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("staged timeseries row does not decode: {e}"),
+    })
 }
 
 /// Extract the time value (ms) from a staged row map.
@@ -163,9 +164,7 @@ impl CoreLoop {
             let Staged::Put(body) = staged else {
                 continue;
             };
-            let Some(row) = decode_staged_row(body) else {
-                continue;
-            };
+            let row = decode_staged_row(body)?;
 
             // Time-range prune, mirroring the base memtable scan's
             // `timestamp_range_filter` (inclusive bounds).
@@ -177,7 +176,7 @@ impl CoreLoop {
             // Re-apply the scan's WHERE predicate on the staged body (already
             // msgpack), exactly like the raw scan's `need_json_filter` path
             // does per base row.
-            if has_filters && !ScanFilter::all_match_binary(filter_predicates, body, &crs)? {
+            if has_filters && !value_matches_filters(&row, filter_predicates, &crs)? {
                 continue;
             }
             // The caller's read policy, on the decoded row, after the WHERE

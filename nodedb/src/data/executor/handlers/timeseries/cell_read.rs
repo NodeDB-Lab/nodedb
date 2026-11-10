@@ -4,8 +4,9 @@
 //!
 //! A column whose stored data does not match its declared type, a row past
 //! the end of its column, and a symbol id its dictionary does not hold are
-//! all errors. None of them reads as NULL. A NULL float is stored as NaN and
-//! a NULL symbol as [`NULL_SYMBOL_ID`].
+//! all errors. None of them reads as NULL. A NULL float is stored as NaN, a
+//! NULL symbol as [`NULL_SYMBOL_ID`], and a NULL decimal, UUID or boolean as
+//! its empty cell.
 
 use nodedb_types::timeseries::SymbolDictionary;
 
@@ -22,6 +23,10 @@ pub(in crate::data::executor) enum TsCell<'a> {
     Float(f64),
     Int(i64),
     Symbol(&'a str),
+    Decimal(rust_decimal::Decimal),
+    /// A UUID's 16 bytes.
+    Uuid([u8; 16]),
+    Bool(bool),
 }
 
 /// A timeseries cell that does not read as its declared type.
@@ -89,11 +94,37 @@ pub(in crate::data::executor) fn read_ts_cell<'a>(
                     id,
                 })
         }
+        (ColumnType::Decimal(_), ColumnData::Decimal(v)) => Ok(v
+            .get(row)
+            .ok_or_else(out_of_range)?
+            .map_or(TsCell::Null, TsCell::Decimal)),
+        (ColumnType::Uuid, ColumnData::Uuid(v)) => Ok(v
+            .get(row)
+            .ok_or_else(out_of_range)?
+            .map_or(TsCell::Null, TsCell::Uuid)),
+        (ColumnType::Bool, ColumnData::Bool(v)) => Ok(v
+            .get(row)
+            .ok_or_else(out_of_range)?
+            .map_or(TsCell::Null, TsCell::Bool)),
         (declared, stored) => Err(TsCellError::TypeMismatch {
             column: column.to_string(),
             stored: stored_kind(stored),
             declared,
         }),
+    }
+}
+
+/// The typed value of a decimal, UUID or boolean cell. `None` for any other
+/// cell, which its emitter writes in its own shape.
+pub(in crate::data::executor) fn exact_cell_value(cell: TsCell<'_>) -> Option<nodedb_types::Value> {
+    use crate::engine::timeseries::row_cells::{bool_value, decimal_value, uuid_value};
+    match cell {
+        TsCell::Decimal(d) => Some(decimal_value(Some(d))),
+        TsCell::Uuid(bytes) => Some(uuid_value(Some(bytes))),
+        TsCell::Bool(b) => Some(bool_value(Some(b))),
+        TsCell::Null | TsCell::Time(..) | TsCell::Float(_) | TsCell::Int(_) | TsCell::Symbol(_) => {
+            None
+        }
     }
 }
 
@@ -105,6 +136,9 @@ fn stored_kind(data: &ColumnData) -> &'static str {
         ColumnData::Int64(_) => "int64",
         ColumnData::Symbol(_) => "symbol",
         ColumnData::DictEncoded { .. } => "dictionary-encoded",
+        ColumnData::Decimal(_) => "decimal",
+        ColumnData::Uuid(_) => "uuid",
+        ColumnData::Bool(_) => "bool",
     }
 }
 

@@ -110,6 +110,18 @@ pub async fn resolve_read(
     }))
 }
 
+/// Whether `task` reads a collection through a clone that is not yet
+/// materialized. Such a read merges target and source rows, so it takes the
+/// clone read path and never streams.
+pub fn reads_live_clone(state: &SharedState, task: &PhysicalTask) -> crate::Result<bool> {
+    let Some(raw_coll) = extract_collection(&task.plan) else {
+        return Ok(false);
+    };
+    let db_id = task.database_id;
+    let coll_name = nodedb_types::CollectionKey::from_relation_name(db_id, raw_coll)?.name();
+    Ok(live_clone(state, db_id, task.tenant_id, coll_name, "get_collection")?.is_some())
+}
+
 /// A clone collection that is not yet materialized.
 struct LiveClone {
     origin: CloneOrigin,

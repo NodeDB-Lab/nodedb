@@ -177,7 +177,7 @@ impl CoreLoop {
         // applied the identical log prefix and therefore has the identical
         // installed `constraint_versions[collection]` — the gate decision is
         // deterministic across replicas, no divergence.
-        let (outcome, materialized, declared_row_present) = {
+        let (outcome, materialized, declared_row_present, staged) = {
             let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                 Ok(e) => e,
                 Err(e) => {
@@ -187,9 +187,13 @@ impl CoreLoop {
             };
             let installed = engine.installed_constraint_version(collection);
             if constraint_version_required > installed {
-                (GateOutcome::Pending { installed }, None, false)
+                (GateOutcome::Pending { installed }, Ok(None), false, None)
             } else {
-                let applied = engine.apply_committed_delta_authenticated(
+                // Staged: the state this apply displaces is kept until the
+                // merged row has landed in the sparse store, so a projection
+                // that fails can put it back and the CRDT state never runs
+                // ahead of its projection.
+                let (applied, staged) = engine.apply_committed_delta_staged(
                     collection,
                     delta,
                     crate::engine::crdt::tenant_state::ApplyTarget::Document {
@@ -226,14 +230,19 @@ impl CoreLoop {
                 let mat = if advanced {
                     Self::encode_crdt_row(engine, collection, document_id)
                 } else {
-                    None
+                    Ok(None)
                 };
                 // Whether the row this frame declared is readable at all. Only
                 // consulted for a delta that imported nothing, where it is the
                 // difference between a replay of a write that is present and a
                 // write that was discarded before it ever landed.
                 let declared_row_present = engine.row_exists(collection, document_id);
-                (GateOutcome::Applied(applied), mat, declared_row_present)
+                (
+                    GateOutcome::Applied(applied),
+                    mat,
+                    declared_row_present,
+                    staged,
+                )
             }
         };
         // engine borrow is dropped here; mark_dirty / sync_commit take
@@ -292,7 +301,6 @@ impl CoreLoop {
                     }
                     _ => {
                         imported_authoritative = true;
-                        self.checkpoint_coordinator.mark_dirty("crdt", 1);
                         GateDisposition::Applied
                     }
                 }
@@ -341,6 +349,25 @@ impl CoreLoop {
                      applied, high-water-mark held"
                 );
                 GateDisposition::NotApplied
+            }
+            // A row the delta writes holds a value no reader can decode. The
+            // candidate was discarded, so nothing applied. The same bytes fail
+            // the same way forever, so the refusal is terminal and the peer
+            // learns which value failed.
+            GateOutcome::Applied(ValidatedApplyOutcome::UndecodableValue { error }) => {
+                warn!(
+                    core = self.core_id,
+                    %collection,
+                    %document_id,
+                    %error,
+                    "crdt sync apply refused: a written value does not decode; nothing was applied"
+                );
+                GateDisposition::Terminal(ViolationType::MalformedDelta {
+                    detail: format!(
+                        "delta for {collection}/{document_id} writes a value that does not \
+                         decode: {error}; nothing was applied"
+                    ),
+                })
             }
             GateOutcome::Applied(ValidatedApplyOutcome::Malformed) => {
                 // The bytes did not decode, so nothing was imported. Acking
@@ -395,18 +422,59 @@ impl CoreLoop {
         // Materialize the merged document into the sparse store so
         // DocumentScan / ShapeSnapshot see the synced write. `materialized` is
         // Some only on a Clean apply with an assigned surrogate, and a refused
-        // delta must not surface a partial row.
-        if matches!(disposition, GateDisposition::Applied)
-            && let Some(bytes) = materialized
-        {
-            self.materialize_synced_document(
-                task,
-                tenant_id.as_u64(),
-                collection,
-                document_id,
-                surrogate,
-                &bytes,
+        // delta must not surface a partial row. A row that does not encode or
+        // a projection that does not land undoes the staged install: the CRDT
+        // state goes back to what it was, nothing is applied, and the sender
+        // keeps the delta for its re-push.
+        let projected = materialized.and_then(|materialized| {
+            match (
+                matches!(disposition, GateDisposition::Applied),
+                materialized,
+            ) {
+                (true, Some(bytes)) => self.materialize_synced_document(
+                    task,
+                    tenant_id.as_u64(),
+                    collection,
+                    document_id,
+                    surrogate,
+                    &bytes,
+                ),
+                _ => Ok(()),
+            }
+        });
+        if let Err(error) = projected {
+            warn!(
+                core = self.core_id,
+                %collection,
+                %document_id,
+                %error,
+                "crdt sync apply refused: its row did not project into the sparse store; \
+                 the apply is undone and the high-water-mark held"
             );
+            if let Some(staged) = staged {
+                match self.get_crdt_engine(task.request.database_id, tenant_id) {
+                    Ok(engine) => engine.rollback_install(staged),
+                    Err(e) => return self.response_error(task, ErrorCode::from(e)),
+                }
+            }
+            return self.response_error(
+                task,
+                ErrorCode::SyncNotApplied {
+                    hold: SyncHold::Gap { expected: prov.seq },
+                    applied_seq: current_hwm,
+                },
+            );
+        }
+        if let Some(staged) = staged {
+            match self.get_crdt_engine(task.request.database_id, tenant_id) {
+                Ok(engine) => engine.confirm_install(staged),
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
+        }
+        // Dirty only once the apply is kept: an undone apply changed nothing
+        // a checkpoint has to write.
+        if imported_authoritative {
+            self.checkpoint_coordinator.mark_dirty("crdt", 1);
         }
         if imported_authoritative && let Err(e) = self.note_collection_write(task, collection) {
             return self.response_error(task, e);

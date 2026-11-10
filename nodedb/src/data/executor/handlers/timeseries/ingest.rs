@@ -186,6 +186,13 @@ impl CoreLoop {
         ) {
             return self.response_error(task, error);
         }
+        // A value a declared DECIMAL, UUID or BOOLEAN column does not take
+        // refuses the batch here, before the first row is stored.
+        if let Err(error) =
+            self.admit_declared_ts_values(task.request.database_id, tid, collection, &lines)
+        {
+            return self.response_error(task, error);
+        }
 
         // A `RETURNING` ingest must take every row or none, because its
         // row set has no place to report a rejected row. The tag ceiling is

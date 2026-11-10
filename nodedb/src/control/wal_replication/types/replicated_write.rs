@@ -38,6 +38,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// Read filters gating what `returning` can show back.
         rls_filters: Vec<u8>,
+        /// Authenticated policy evaluated against the materialized row on apply.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     PointInsert {
         collection: String,
@@ -55,6 +57,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
+        /// See `PointPut::rls_write_check`.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     PointDelete {
         collection: String,
@@ -124,6 +128,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
+        /// See `PointPut::rls_write_check`.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     VectorInsert {
         collection: String,
@@ -562,7 +568,9 @@ pub enum ReplicatedWrite {
         document_id: String,
         list_path: String,
         index: u64,
-        fields_json: String,
+        /// The inserted block's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
         /// Surrogate of the parent document hosting this block list. See
         /// `ReplicatedWrite::CrdtApply::surrogate`.
         surrogate: u32,
@@ -588,7 +596,9 @@ pub enum ReplicatedWrite {
         collection: String,
         document_id: String,
         surrogate: u32,
-        fields_json: String,
+        /// The row's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
         partial: bool,
         /// The statement verb, so a decoded plan matches the proposed one.
         verb: CrdtWriteVerb,
@@ -1114,6 +1124,7 @@ mod tests {
                 }],
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
             ReplicatedWrite::PointDelete {
                 collection: "c".into(),

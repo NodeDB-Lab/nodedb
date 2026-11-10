@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `execute_merge_apply`: verify the resolve→apply prediction, run the
-//! UPDATE and INSERT arms inside one shared write transaction, commit, then
-//! run the DELETE arms and build the response.
+//! UPDATE, INSERT, and DELETE arms inside one shared write transaction.
 
 use std::collections::HashMap;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::enforcement::unique::SubmittedWrite;
 use crate::data::executor::handlers::merge::MergeParams;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
@@ -16,7 +14,7 @@ use crate::data::executor::response_codec::encode_json_as_msgpack;
 use crate::data::executor::task::ExecutionTask;
 
 use super::super::abort::MergeAbort;
-use super::super::apply_support::{MergePutEvent, gate_merge_arms};
+use super::super::apply_support::MergeEvent;
 use super::super::delete_arms::{MergeDeleteArms, MergeDeleteTally};
 use super::insert_rows::{InsertRowsCtx, InsertRowsTally};
 use super::update_rows::{UpdateRowsCtx, UpdateRowsTally};
@@ -62,92 +60,26 @@ impl CoreLoop {
         let surrogate_for: HashMap<&str, u32> =
             resolved.iter().map(|(k, s)| (k.as_str(), *s)).collect();
 
-        // Gate every arm on the target's write policy BEFORE the apply
-        // transaction opens, so a rejected row leaves nothing written and
-        // nothing to unwind.
-        let identity_column = self.identity_column(database_id, tid, params.target_collection);
-        if let Err(e) = gate_merge_arms(
-            &plan,
-            params.rls_write_check,
-            &identity_column,
-            tid,
-            params.target_collection,
-            &self.crs_context(),
-        ) {
-            return self.response_error(task, e);
-        }
-
-        // The rows land row by row and the DELETE arms after phase A, so
-        // UNIQUE is judged on the whole MERGE's post-state first. An insert
-        // missing its surrogate claims nothing here: phase A refuses it.
-        let collection = params.target_collection;
-        let unit: Vec<SubmittedWrite<'_>> = plan
-            .updates
-            .iter()
-            .map(|update| {
-                (
-                    update.key.surrogate().as_u32(),
-                    Some(update.body.as_slice()),
-                )
-            })
-            .chain(plan.inserts.iter().filter_map(|insert| {
-                surrogate_for
-                    .get(insert.join_key.as_str())
-                    .map(|surrogate| (*surrogate, Some(insert.body.as_slice())))
-            }))
-            .chain(
-                plan.deletes
-                    .iter()
-                    .map(|delete| (delete.key.surrogate().as_u32(), None)),
-            )
-            .map(|(surrogate, body)| SubmittedWrite {
-                collection,
-                surrogate,
-                body,
-                judged: true,
-            })
-            .collect();
-        if let Err(e) = self.check_submitted_unit_unique(database_id, tid, &unit) {
-            return self.response_error(task, e);
-        }
-
         // One post-apply redo entry per row the MERGE stores — a `Put` for
         // each UPDATE/INSERT post-image, a `Delete` for each removed row — in
         // the order the rows land. The plan carries no pre-dispatch record, so
         // these entries are the rows' only WAL record.
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
 
-        // The whole MERGE is ONE boundary, so its DELETE arms are accounted
-        // here, before any phase runs: those arms apply in their own
-        // transactions AFTER the phase-A commit, so entries collected as they
-        // ran could only report a violation phase A had already made durable.
-        // Their pre-images are the plan's captured bodies, which the classifier
-        // already holds — nothing is re-read.
-        let delete_bodies: Vec<&[u8]> = plan.deletes.iter().map(|d| d.body.as_slice()).collect();
-        let mut balanced_entries = self.balanced_entries_for_submitted_deletes(
-            database_id,
-            tid,
-            params.target_collection,
-            &delete_bodies,
-        );
-
-        // Phase A: matched UPDATE + NOT-MATCHED INSERT share ONE redb write
-        // transaction. Any per-row error aborts, dropping the txn and rolling
-        // the whole set back — the all-or-nothing guarantee the atomicity test
-        // pins.
+        let mut balanced_entries = Vec::new();
+        // Every source and derived row shares the statement transaction.
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => return self.response_error(task, e),
         };
-        // Captured for post-commit event emission. The clone into `write_set`
-        // below is the only owned body copy actually needed, since `plan`
-        // doesn't outlive the function but does outlive this loop.
-        let mut put_events: Vec<MergePutEvent<'_>> = Vec::new();
+        // Event images are prepared before commit and retained for publication.
+        let mut events: Vec<MergeEvent> = Vec::new();
         let mut affected = 0u64;
         // Every row key written into `txn`, pushed BEFORE the write so a row that
         // fails mid-apply (its cache entry is populated before the put's later
         // steps) is evicted on abort too — see `rollback_merge_cache`.
-        let mut applied_keys: Vec<String> = Vec::new();
+        let mut applied_keys: Vec<(String, crate::engine::document::store::StorageKey)> =
+            Vec::new();
         // In-memory (HNSW + R-tree) index deltas applied this pass, reversed on
         // any abort path — the redb txn drop only reverses store-backed state.
         let mut undo_log: Vec<UndoEntry> = Vec::new();
@@ -169,12 +101,13 @@ impl CoreLoop {
                 returning: params.returning.is_some(),
                 resolved_sum_targets: params.resolved_sum_targets,
                 declared_primary_key: params.declared_primary_key,
+                rls_write_check: params.rls_write_check,
             },
             UpdateRowsTally {
                 affected: &mut affected,
                 applied_keys: &mut applied_keys,
                 undo_log: &mut undo_log,
-                put_events: &mut put_events,
+                events: &mut events,
                 write_set: &mut write_set,
                 balanced_entries: &mut balanced_entries,
                 returned_docs: &mut returned_docs,
@@ -195,12 +128,13 @@ impl CoreLoop {
                 resolved_sum_targets: params.resolved_sum_targets,
                 surrogate_for: &surrogate_for,
                 declared_primary_key: params.declared_primary_key,
+                rls_write_check: params.rls_write_check,
             },
             InsertRowsTally {
                 affected: &mut affected,
                 applied_keys: &mut applied_keys,
                 undo_log: &mut undo_log,
-                put_events: &mut put_events,
+                events: &mut events,
                 write_set: &mut write_set,
                 balanced_entries: &mut balanced_entries,
                 returned_docs: &mut returned_docs,
@@ -209,57 +143,8 @@ impl CoreLoop {
             return response;
         }
 
-        // Every arm of the statement — the UPDATE and INSERT arms folded above
-        // and the DELETE arms accounted before phase A — is judged once here,
-        // before the phase-A commit, so a MERGE that leaves a journal group
-        // unbalanced writes nothing at all.
-        if let Err(e) = self.settle_balanced_entries(
-            database_id,
-            tid,
-            params.target_collection,
-            balanced_entries,
-        ) {
-            return self.abort_merge_apply(MergeAbort {
-                task,
-                database_id,
-                tid,
-                collection: params.target_collection,
-                applied_keys: &applied_keys,
-                undo_log,
-                err: e.into(),
-            });
-        }
-
-        if let Err(e) = txn.commit() {
-            return self.abort_merge_apply(MergeAbort {
-                task,
-                database_id,
-                tid,
-                collection: params.target_collection,
-                applied_keys: &applied_keys,
-                undo_log,
-                err: ErrorCode::Internal {
-                    detail: format!("merge apply commit: {e}"),
-                },
-            });
-        }
-        self.checkpoint_coordinator
-            .mark_dirty("sparse", put_events.len());
-
-        for (identity, body, prior) in put_events {
-            self.emit_put_event(
-                task,
-                tid,
-                params.target_collection,
-                identity,
-                body,
-                prior.as_deref(),
-            );
-        }
-
-        // Phase B: DELETE arms, applied after the put commit because their
-        // cascade opens its own transactions.
         if let Err(response) = self.apply_merge_delete_arms(
+            &txn,
             MergeDeleteArms {
                 task,
                 database_id,
@@ -269,39 +154,104 @@ impl CoreLoop {
                 returning: params.returning.is_some(),
                 resolved_targets: params.resolved_sum_targets,
                 declared_primary_key: params.declared_primary_key,
+                rls_write_check: params.rls_write_check,
             },
             MergeDeleteTally {
                 affected: &mut affected,
+                applied_keys: &mut applied_keys,
+                undo_log: &mut undo_log,
+                events: &mut events,
                 write_set: &mut write_set,
+                balanced_entries: &mut balanced_entries,
                 returned_docs: &mut returned_docs,
             },
         ) {
-            // Phase A and every earlier DELETE arm committed: the refusal
-            // carries their entries so they are journalled.
-            let mut response = response;
-            response.write_set = write_set;
             return response;
         }
 
-        // Every arm committed, so an encode error answers with the rows'
-        // entries as well.
-        let mut response = if let Some(spec) = params.returning {
-            match returning_rows::build_rows_payload(
-                spec,
-                params.rls_filters,
-                &returned_docs,
-                &self.crs_context(),
-            ) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::from(e)),
+        let prepared = (|| -> crate::Result<_> {
+            self.check_written_unit_unique(&txn, database_id, tid, &applied_keys)?;
+            self.settle_balanced_entries(
+                database_id,
+                tid,
+                params.target_collection,
+                balanced_entries,
+            )?;
+            let payload = match params.returning {
+                Some(spec) => returning_rows::build_rows_payload(
+                    spec,
+                    params.rls_filters,
+                    &returned_docs,
+                    &self.crs_context(),
+                )?,
+                None => encode_json_as_msgpack(&serde_json::json!({ "affected": affected }))?,
+            };
+            let mut notes = Vec::with_capacity(write_set.len());
+            for entry in &write_set {
+                let ordinal = match &entry.effect {
+                    crate::bridge::envelope::RowEffect::InstalledPut { image, .. } => {
+                        image.version.sys_from
+                    }
+                    crate::bridge::envelope::RowEffect::Delete { system_from } => *system_from,
+                    crate::bridge::envelope::RowEffect::CancelForward
+                    | crate::bridge::envelope::RowEffect::Edge(_) => {
+                        return Err(crate::Error::Storage {
+                            engine: "merge".into(),
+                            detail: "MERGE capture contains a non-document effect".into(),
+                        });
+                    }
+                };
+                let collection = entry
+                    .collection
+                    .as_deref()
+                    .unwrap_or(params.target_collection);
+                notes.push((
+                    self.prepare_surrogate_write(task, tid, collection, entry.surrogate)?,
+                    ordinal,
+                ));
             }
-        } else {
-            let result = serde_json::json!({ "affected": affected });
-            match encode_json_as_msgpack(&result) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::from(e)),
+            Ok((payload, notes))
+        })();
+        let (payload, notes) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self.abort_merge_apply(MergeAbort {
+                    task,
+                    database_id,
+                    tid,
+                    applied_keys: &applied_keys,
+                    undo_log,
+                    err: error.into(),
+                });
             }
         };
+
+        if let Err(e) = txn.commit() {
+            self.seal_journalled();
+            self.fail_stop_core(
+                crate::data::executor::core_loop::fail_stop::FailStopCause::WriteSetUnpersisted,
+                &format!("merge commit outcome is unknown: {e}"),
+            );
+            return self.abort_merge_apply(MergeAbort {
+                task,
+                database_id,
+                tid,
+                applied_keys: &applied_keys,
+                undo_log,
+                err: ErrorCode::Internal {
+                    detail: format!("merge apply commit: {e}"),
+                },
+            });
+        }
+        for (note, ordinal) in notes {
+            self.publish_surrogate_write(note, ordinal);
+        }
+        self.checkpoint_coordinator
+            .mark_dirty("sparse", write_set.len());
+        for event in events {
+            event.publish(self, task);
+        }
+        let mut response = self.response_with_payload(task, payload);
         response.write_set = write_set;
         response
     }

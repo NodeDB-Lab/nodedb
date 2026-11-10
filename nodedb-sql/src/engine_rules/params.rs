@@ -77,7 +77,7 @@ pub struct UpdateParams {
     pub assignments: Vec<(String, SqlExpr)>,
     pub filters: Vec<Filter>,
     pub target_keys: Vec<SqlValue>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
 }
 
 /// Parameters for planning an `UPDATE target SET ... FROM src WHERE ...` operation.
@@ -96,7 +96,7 @@ pub struct UpdateFromParams {
     pub assignments: Vec<(String, SqlExpr)>,
     /// Filters that apply only to the target.
     pub target_filters: Vec<Filter>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
 }
 
 /// Parameters for planning a DELETE operation.
@@ -134,7 +134,7 @@ pub struct MergeParams {
     pub source_join_col: String,
     pub source_alias: String,
     pub clauses: Vec<crate::types::MergePlanClause>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
 }
 
 /// Parameters for planning an UPSERT operation.

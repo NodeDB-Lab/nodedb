@@ -445,7 +445,10 @@ impl std::fmt::Display for EventSource {
 pub fn deserialize_event_payload(
     bytes: &[u8],
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
+    // A native body reads as the plain body of the same values.
+    if let Ok(serde_json::Value::Object(map)) =
+        crate::data::executor::response_codec::decode_body_plain_json(bytes)
+    {
         return Some(map);
     }
     if let Ok(serde_json::Value::Object(map)) = sonic_rs::from_slice::<serde_json::Value>(bytes) {

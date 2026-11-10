@@ -13,7 +13,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::sort;
 use crate::data::executor::handlers::provider_scan_compute::apply_windows_and_computed;
 use crate::data::executor::handlers::transaction::overlay::SidecarRowShape;
-use crate::data::executor::scan_normalize::sparse_row_to_doc;
+use crate::data::executor::row_shape::sparse_row_to_native_doc;
 use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
 
@@ -252,13 +252,15 @@ impl CoreLoop {
                         // A snapshot fetch normalizes its bodies to MessagePack
                         // and reports no schema, so the staged bodies merge in
                         // the same shape.
-                        self.merge_overlay_into_snapshot_scan(
+                        if let Err(e) = self.merge_overlay_into_snapshot_scan(
                             txn_id,
                             &coll_key,
                             strict_schema.as_ref(),
                             &mut filtered,
                             &matches,
-                        );
+                        ) {
+                            return self.response_error(task, e);
+                        }
                     }
                     if let Err(e) = held.finish::<_, ErrorCode>(()) {
                         return self.response_error(task, e);
@@ -292,27 +294,24 @@ impl CoreLoop {
                     filtered.retain(|(key, _)| pf.contains(key.surrogate()));
                 }
 
-                // Strict collections may store binary tuples. Sort and projection
-                // operate on msgpack, so normalize binary tuples here — through
-                // the shared converter, which leaves an already-msgpack body
-                // borrowed and so costs nothing on the schemaless path.
-                // Every stage past this point that reads fields (sort, window,
-                // projection, DISTINCT on a strict body) needs the normalized
-                // shape, so it is produced once here. A scan that reaches the
-                // client untouched keeps the stored bytes and renders only the
-                // envelope id.
+                // Decode source rows under their resolved storage format.
+                // Keep native fields through sorting, windows, and projection.
                 let normalizes = !sort_keys.is_empty()
                     || !projection.is_empty()
                     || !computed_cols.is_empty()
                     || !window_specs.is_empty()
                     || effective_schema.is_some();
                 let filtered: Vec<(String, Vec<u8>)> = if normalizes {
-                    filtered
+                    match filtered
                         .into_iter()
                         .map(|(key, bytes)| {
-                            sparse_row_to_doc(&key, &bytes, body_format, &identity_column)
+                            sparse_row_to_native_doc(&key, &bytes, body_format, &identity_column)
                         })
-                        .collect()
+                        .collect::<crate::Result<Vec<_>>>()
+                    {
+                        Ok(rows) => rows,
+                        Err(error) => return self.response_error(task, error),
+                    }
                 } else {
                     filtered
                         .into_iter()

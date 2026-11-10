@@ -6,7 +6,6 @@
 //! then applies the arithmetic conversion.
 
 use nodedb_sql::parser::query_function::ConvertCurrencyLookupArgs;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -16,7 +15,7 @@ use crate::types::{DatabaseId, TraceId};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
-use super::helpers::{err, json_to_decimal, single_result, unwrap_scan_docs};
+use super::helpers::{err, scan_rows, single_result, value_text, value_to_decimal};
 
 /// Convenience currency conversion with rate table lookup.
 ///
@@ -92,30 +91,32 @@ pub async fn convert_currency_lookup(
     .await
     .map_err(|e| DdlError::from_error_in_context("rate table scan failed", &e))?;
 
-    let payload_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&scan_resp.payload);
-    let docs: Vec<serde_json::Value> = sonic_rs::from_str(&payload_json)
-        .map_err(|e| err("22P02", &format!("invalid JSON in rate table scan: {e}")))?;
-    // Unwrap the `{"id", "data"}` scan envelope so matching reads the stored
-    // fields, not the wire wrapper.
-    let docs = unwrap_scan_docs(docs)?;
+    // `scan_rows` unwraps the `{"id", "data"}` scan envelope so matching
+    // reads the stored fields, typed, not the wire wrapper.
+    let docs = scan_rows(&scan_resp.payload)?;
 
     // Find latest row where key matches and time <= as_of.
     let mut best_rate: Option<rust_decimal::Decimal> = None;
     let mut best_time = String::new();
 
     for obj in &docs {
-        let key_val = obj.get(&key_column).and_then(|v| v.as_str()).unwrap_or("");
+        let key_val = obj
+            .get(&key_column)
+            .and_then(value_text)
+            .unwrap_or_default();
         if key_val != key_value {
             continue;
         }
-        let time_val = obj.get(&time_column).and_then(|v| v.as_str()).unwrap_or("");
-        if time_val.is_empty() || time_val > as_of.as_str() {
+        let time_val = obj
+            .get(&time_column)
+            .and_then(value_text)
+            .unwrap_or_default();
+        if time_val.is_empty() || time_val.as_str() > as_of.as_str() {
             continue;
         }
-        if time_val > best_time.as_str() {
-            best_time = time_val.to_string();
-            best_rate = obj.get(&rate_column).and_then(json_to_decimal);
+        if time_val > best_time {
+            best_time = time_val;
+            best_rate = obj.get(&rate_column).and_then(value_to_decimal);
         }
     }
 

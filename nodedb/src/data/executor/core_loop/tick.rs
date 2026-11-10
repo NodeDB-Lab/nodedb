@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn point_put_stores_schemaless_docs_as_canonical_msgpack_maps() {
+    fn point_put_stores_schemaless_docs_as_native_tagged_objects() {
         let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
 
         let mut obj = std::collections::HashMap::new();
@@ -452,6 +452,7 @@ mod tests {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 }),
             )))
             .unwrap();
@@ -471,9 +472,20 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(nodedb_query::msgpack_scan::map_header(&stored, 0).is_some());
-        assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "user_id").is_some());
-        assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "item").is_some());
+        let view = nodedb_types::object_msgpack::ObjectView::new(&stored).unwrap();
+        assert_eq!(
+            view.format(),
+            nodedb_types::object_msgpack::ObjectFormat::Native
+        );
+        assert_eq!(
+            view.get("user_id").unwrap(),
+            Some(nodedb_types::Value::String("u1".into()))
+        );
+        assert_eq!(
+            view.get("item").unwrap(),
+            Some(nodedb_types::Value::String("book".into()))
+        );
+        assert_eq!(view.fields().count(), 2);
     }
 
     #[test]
@@ -500,6 +512,7 @@ mod tests {
                         returning: None,
                         rls_filters: Vec::new(),
                         resolved_sum_targets: Vec::new(),
+                        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     }),
                 )))
                 .unwrap();

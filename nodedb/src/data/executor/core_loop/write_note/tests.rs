@@ -134,6 +134,7 @@ pub(crate) fn point_put(
             returning: None,
             rls_filters: &[],
             resolved_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         },
     )
 }

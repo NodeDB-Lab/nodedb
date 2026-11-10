@@ -6,19 +6,15 @@
 //! that needs document write + index + stats side-effects atomically.
 
 use redb::WriteTransaction;
-use tracing::warn;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::doc_format;
 
-use crate::data::executor::enforcement::unique::{
-    PostImage, UniqueJudge, UniqueScope, check_unique_post_state,
-};
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
-use crate::data::executor::handlers::transaction::undo::memory::abort_error;
 
-use super::enforce::PutEnforcement;
-use super::types::{PointPutOutcome, PointPutParams};
+use super::{
+    PreparedPointPut,
+    types::{PointPutOutcome, PointPutParams},
+};
 
 impl CoreLoop {
     /// Apply a PointPut within an externally-owned WriteTransaction. Stores
@@ -32,321 +28,20 @@ impl CoreLoop {
     /// `PointPutOutcome::memory_undo`: a caller that abandons the write after
     /// this returns reverses them with `undo_memory_effects`.
     ///
-    /// `value` always arrives WITH the write (never a row read back to
-    /// reconcile), so a `decode_document(value)` guard below that fails
-    /// quietly is an intentional "no fields to derive from", not a swallowed
-    /// error — except once `value` becomes STORED state (`old_value`,
-    /// enforcement pre-image), where a decode failure is corruption and
-    /// propagates instead.
+    /// Canonical document decoding and derived storage complete before the caller commits.
     pub(in crate::data::executor) fn apply_point_put(
         &mut self,
         txn: &WriteTransaction,
         params: PointPutParams<'_>,
     ) -> crate::Result<PointPutOutcome> {
-        let PointPutParams {
-            database_id,
-            tid,
-            collection,
-            storage_key,
-            surrogate,
-            value,
-            index_text,
-            user_roles,
-            enforce,
-            unique,
-            wal_lsn,
-            resolved_targets,
-            guards,
-        } = params;
-        let config_key = (
-            crate::types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tid),
-            collection.to_string(),
-        );
-
-        // Every write appends a version of the row. A stamp in
-        // `apply_scope.bitemporal_stamps` (WAL redo replay, a committed
-        // redo install) fixes the version at the EXACT stamp the live write
-        // used, independent of `doc_configs` (empty during replay). Absent a
-        // stamp the write takes its system-time ordinal, raised above the
-        // row's newest version. A `bitemporal=true` collection carries the
-        // stamp into its strict tuple's temporal columns. Any other
-        // collection's body carries no temporal column.
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
-        let carried = self
-            .apply_scope
-            .bitemporal_stamps
-            .get(&surrogate.as_u32())
-            .copied();
-        let (stamped, sys_from, valid_from_ms, valid_until_ms) = match carried {
-            Some(stamp) => (
-                true,
-                stamp.sys_from,
-                stamp.valid_from_ms,
-                stamp.valid_until_ms,
-            ),
-            None => (
-                bitemporal,
-                self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
-                i64::MIN,
-                i64::MAX,
-            ),
-        };
-
-        // Shared with the governed-write RESOLVE pass.
-        let body = self.build_stored_body(super::stored_body::StoredBodyInput {
-            config_key: &config_key,
-            surrogate,
-            value,
-            bitemporal: stamped,
-            sys_from,
-            valid_from_ms,
-            valid_until_ms,
-            guards,
-        })?;
-        let stored = body.stored;
-        let value: &[u8] = &body.value;
-
-        // A carried stamp below the row's newest version installs history
-        // only. A fresh ordinal is raised above the newest version, so only
-        // a carried one can land below it.
-        if carried.is_some()
-            && let Some(slot) =
-                self.history_slot_in_txn(txn, database_id, tid, collection, &storage_key, sys_from)?
-        {
-            self.check_stateless_put_enforcement(
-                enforce,
-                PutEnforcement {
-                    config_key: &config_key,
-                    database_id,
-                    tid,
-                    collection,
-                    value,
-                    old_value: &slot.predecessor,
-                    user_roles,
-                    resolved_targets,
-                },
-            )?;
-            return self.apply_history_put(
-                txn,
-                super::history::HistoryPut {
-                    database_id,
-                    tid,
-                    collection,
-                    storage_key: &storage_key,
-                    value,
-                    stored,
-                    sys_from,
-                    valid_from_ms,
-                    valid_until_ms,
-                    slot,
-                },
-            );
-        }
-
-        // The row's current body: the prior value the event reports, the
-        // enforcement pre-image, and the old index values the write moves
-        // off.
-        let old_value = self
-            .sparse
-            .get_in_txn(txn, database_id, tid, collection, &storage_key)?;
-        // Pre-write document for the secondary-index SET diff, routed
-        // through the storage-mode-aware helper so a strict row's Binary
-        // Tuple decodes too. `None` means "no prior row" or "no index
-        // paths". A prior row that exists but fails to decode fails the
-        // write instead, or its old index entries stay live forever.
-        let old_doc_for_index: Option<serde_json::Value> =
-            match (old_value.as_ref(), self.doc_configs.get(&config_key)) {
-                (Some(b), Some(config)) if !config.index_paths.is_empty() => {
-                    Some(self.decode_stored_document(config, b)?)
-                }
-                _ => None,
-            };
-
-        // Runs before any store or index is touched, so a refusal leaves
-        // nothing behind.
-        self.check_stateless_put_enforcement(
-            enforce,
-            PutEnforcement {
-                config_key: &config_key,
-                database_id,
-                tid,
-                collection,
-                value,
-                old_value: &old_value,
-                user_roles,
-                resolved_targets,
-            },
-        )?;
-
-        self.sparse.versioned_put_in_txn(
-            txn,
-            crate::engine::sparse::btree_versioned::VersionedPut {
-                database_id,
-                tenant: tid,
-                coll: collection,
-                doc_id: &storage_key,
-                sys_from,
-                valid_from_ms,
-                valid_until_ms,
-                body: &stored,
-            },
-        )?;
-        let prior = old_value;
-
-        // Pre-image capture for the column-stats read-modify-write, so a
-        // transactional caller can restore the exact prior stats on rollback.
-        let mut stats_prior: Vec<crate::engine::sparse::stats::StatsPreImage> = Vec::new();
-
-        // Text indexing and stats use the JSON input, not the stored bytes —
-        // Binary Tuple needs a schema to decode. A body with no readable
-        // fields contributes nothing here; once it IS readable, an
-        // inverted-index write failure is real and rejects the write.
-        if let Ok(doc) = doc_format::decode_document(value) {
-            // Shared with the DELETE-rollback re-index path.
-            let text_content = crate::data::executor::fts_text::extract_fts_fields(&doc);
-            // Empty text is NOT skipped — stripping every indexable word
-            // must still remove the document from the index.
-            if index_text {
-                // Lands in the caller's transaction, so propagating an error
-                // rolls row + index back together as one unit. Swallowing it
-                // would be permanent: no WAL record to replay, so the gap
-                // stays invisible to full-text search until a manual reindex.
-                if let Err(e) = self.inverted.index_document_in_txn(
-                    txn,
-                    crate::engine::sparse::inverted::IndexDocScope {
-                        database_id,
-                        tid: crate::types::TenantId::new(tid),
-                        collection,
-                        surrogate,
-                        ordinal: sys_from,
-                    },
-                    &text_content,
-                ) {
-                    // Recorded here, at the detection site — an fsync'd
-                    // report survives a restart, unlike a log line.
-                    crate::diag::fts_index_update_failed(&e, collection, surrogate.as_u32());
-                    warn!(core = self.core_id, %collection, %storage_key, error = %e, "inverted index update failed; rejecting the write");
-                    return Err(e);
-                }
-            }
-
-            match self
-                .stats_store
-                .observe_document_in_txn(txn, database_id, tid, collection, &doc)
-            {
-                Ok(pre) => stats_prior = pre,
-                Err(e) => {
-                    warn!(core = self.core_id, %collection, error = %e, "column stats update failed");
-                }
-            }
-
-            self.invalidate_aggregate_cache_for_collection(database_id, tid, collection);
-        }
-
-        self.doc_cache.put(
-            database_id,
-            tid,
-            collection,
-            &storage_key,
-            sys_from,
-            &stored,
-        );
-
-        // Secondary index extraction into the caller's write txn — the
-        // non-_in_txn variant would deadlock since `execute_point_put`
-        // already owns the only writer. A `Row` UNIQUE probe runs first,
-        // through a separate MVCC read txn that sees the committed index only.
-        let mut index_tuples: Vec<(String, String)> = Vec::new();
-        let config_key = (
-            crate::types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tid),
-            collection.to_string(),
-        );
-        // A collection with index paths indexes the body, and judges its
-        // UNIQUE claims. A body that does not decode fails the write: skipping
-        // it stores a row its indexes do not describe and whose claims
-        // no one judged.
-        let indexed = match self.doc_configs.get(&config_key) {
-            Some(config) if !config.index_paths.is_empty() => Some((
-                config.index_paths.clone(),
-                doc_format::decode_document(value)?,
-            )),
-            _ => None,
-        };
-        if let Some((paths, doc)) = indexed {
-            if unique == UniqueJudge::Row {
-                check_unique_post_state(
-                    &UniqueScope {
-                        sparse: &self.sparse,
-                        database_id,
-                        tid,
-                        collection,
-                        paths: &paths,
-                        base_visible: true,
-                        crs: &self.crs_context(),
-                    },
-                    &[PostImage {
-                        surrogate: storage_key.surrogate().as_u32(),
-                        doc: Some(&doc),
-                        judged: true,
-                    }],
-                )?;
-            }
-            // Keyed at the same `sys_from` as the row version, so one
-            // `version_sys_from` in the undo entry reverses both. Values the
-            // write drops are tombstoned, values it gains are added.
-            index_tuples = self.apply_secondary_indexes_in_txn(
-                txn,
-                crate::data::executor::core_loop::maintenance::SecondaryIndexInputs {
-                    database_id,
-                    tid,
-                    collection,
-                    old_doc: old_doc_for_index.as_ref(),
-                    new_doc: &doc,
-                    doc_id: &storage_key,
-                    index_paths: &paths,
-                    sys_from,
-                },
-            )?;
-        }
-
-        // Every write below is in memory, where the caller's transaction
-        // cannot reach it. A failure part-way reverses what already ran, so
-        // an `Err` from this function leaves no in-memory index entry behind.
-        let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        if let Err(e) = self.apply_point_put_memory_indexes(
-            MemoryIndexPut {
-                database_id,
-                tid,
-                collection,
-                storage_key,
-                value,
-                wal_lsn: wal_lsn.map(|l| l.as_u64()).unwrap_or(0),
-                sys_from,
-                replaces_row: prior.is_some(),
-            },
-            &mut memory_undo,
-        ) {
-            let undone = self.undo_memory_effects(database_id, tid, memory_undo);
-            return Err(abort_error(e, undone));
-        }
-
-        Ok(PointPutOutcome {
-            prior_value: prior,
-            stored_value: stored,
-            version_sys_from: sys_from,
-            index_tuples,
-            memory_undo,
-            stats_prior,
-            history: None,
-        })
+        let prepared: PreparedPointPut<'_> = self.prepare_point_put(txn, params)?;
+        self.apply_prepared_point_put(txn, prepared)
     }
 
     /// The in-memory index writes of one put: the R-tree, the vector
     /// indexes, and the sparse-vector indexes. Each step pushes an undo entry
     /// onto `undo` for every mutation it makes, also when it fails part-way.
-    fn apply_point_put_memory_indexes(
+    pub(super) fn apply_point_put_memory_indexes(
         &mut self,
         put: MemoryIndexPut<'_>,
         undo: &mut Vec<UndoEntry>,
@@ -418,19 +113,19 @@ impl CoreLoop {
 
 /// Inputs to `apply_point_put_memory_indexes`. `wal_lsn` is `0` when the
 /// write carries no LSN.
-struct MemoryIndexPut<'a> {
-    database_id: u64,
-    tid: u64,
-    collection: &'a str,
-    storage_key: crate::engine::document::store::StorageKey,
-    value: &'a [u8],
-    wal_lsn: u64,
+pub(super) struct MemoryIndexPut<'a> {
+    pub(super) database_id: u64,
+    pub(super) tid: u64,
+    pub(super) collection: &'a str,
+    pub(super) storage_key: crate::engine::document::store::StorageKey,
+    pub(super) value: &'a [u8],
+    pub(super) wal_lsn: u64,
     /// The row version's system-time ordinal: the index entries the write
     /// replaces end there, the ones it adds start there.
-    sys_from: i64,
+    pub(super) sys_from: i64,
     /// Whether the write replaces a stored row: the row's multi-vector
     /// documents end at `sys_from`, as an update ends them.
-    replaces_row: bool,
+    pub(super) replaces_row: bool,
 }
 
 #[cfg(test)]
@@ -493,6 +188,7 @@ mod tests {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -540,6 +236,7 @@ mod tests {
                 returning: None,
                 rls_filters: &[],
                 resolved_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
 
@@ -573,6 +270,7 @@ mod tests {
                 returning: None,
                 rls_filters: &[],
                 resolved_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
 
@@ -702,7 +400,7 @@ mod tests {
             )
             .unwrap();
         txn.commit().unwrap();
-        outcome.version_sys_from
+        outcome.installed.version.sys_from
     }
 
     /// A collection that is not bitemporal keeps every version: a read at

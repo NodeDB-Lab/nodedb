@@ -141,6 +141,9 @@ fn gather_column(column: &ColumnData, rows: &[usize]) -> crate::Result<ColumnDat
             reverse: reverse.clone(),
             valid: pick(valid, rows)?,
         },
+        ColumnData::Decimal(v) => ColumnData::Decimal(pick(v, rows)?),
+        ColumnData::Uuid(v) => ColumnData::Uuid(pick(v, rows)?),
+        ColumnData::Bool(v) => ColumnData::Bool(pick(v, rows)?),
     })
 }
 

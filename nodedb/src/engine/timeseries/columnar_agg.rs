@@ -286,6 +286,15 @@ impl AggAccum {
         self.feed_cell(Value::Integer(v), v as f64);
     }
 
+    /// Feed a single exact decimal into the accumulator. SUM, AVG, MIN and
+    /// MAX stay exact decimals. STDDEV reads it as its nearest `f64`.
+    pub fn feed_decimal(&mut self, v: rust_decimal::Decimal) {
+        self.feed_cell(
+            Value::Decimal(v),
+            nodedb_types::decimal_float::decimal_to_f64(v),
+        );
+    }
+
     /// Feed `cell`; `as_f64` is its reading for the `f64` STDDEV state.
     fn feed_cell(&mut self, cell: Value, as_f64: f64) {
         if self.count == 0 {
@@ -395,14 +404,22 @@ impl AggAccum {
         self.sum.sum()
     }
 
-    /// AVG from the exact total. `None` for no value.
+    /// SQL AVG, typed per [`ExactSum::avg_value`]: a `Float` over float
+    /// input, else a `Decimal` at PostgreSQL's division scale. NULL for no
+    /// value.
+    pub fn avg_value(&self) -> Result<Value, nodedb_query::EvalError> {
+        self.sum.avg_value()
+    }
+
+    /// AVG from the exact total as an `f64`, for float consumers. `None` for
+    /// no value.
     pub fn avg_f64(&self) -> Result<Option<f64>, nodedb_query::EvalError> {
         self.sum.avg_f64()
     }
 
     /// The `f64` running mean of the values fed (Welford), `0.0` for none.
     /// For float-valued consumers such as gap-fill interpolation; AVG
-    /// results use [`Self::avg_f64`].
+    /// results use [`Self::avg_value`].
     pub fn mean_f64(&self) -> f64 {
         self.mean
     }

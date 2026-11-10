@@ -28,11 +28,10 @@ fn index_to_wire(index: usize, field_name: &str) -> NodeDbResult<u64> {
 }
 
 /// Extract the field map from `fields`, rejecting anything that is not a
-/// JSON-object-shaped `Value::Object`.
+/// `Value::Object`.
 ///
-/// `CrdtOp::ListInsert` treats `fields_json` as a JSON object whose
-/// top-level keys become fields on the new list block; sending a scalar
-/// or array here would silently produce a malformed block server-side.
+/// Each top-level key of the object becomes a field of the new list block.
+/// A scalar or array has no keys, so it is refused here.
 fn require_object_fields(fields: &Value) -> NodeDbResult<&HashMap<String, Value>> {
     match fields {
         Value::Object(obj) => Ok(obj),
@@ -43,6 +42,9 @@ fn require_object_fields(fields: &Value) -> NodeDbResult<&HashMap<String, Value>
 }
 
 /// Build the `TextFields` payload for an `OpCode::CrdtListInsert` request.
+///
+/// The block fields travel as a tagged `Value::Object`, so a Decimal, a
+/// UUID, an instant or bytes reaches the block with its exact type.
 pub(super) fn build_list_insert_fields(
     collection: &str,
     document_id: &str,
@@ -50,9 +52,7 @@ pub(super) fn build_list_insert_fields(
     index: usize,
     fields: &Value,
 ) -> NodeDbResult<TextFields> {
-    let obj = require_object_fields(fields)?;
-    let fields_json = sonic_rs::to_string(obj)
-        .map_err(|e| NodeDbError::serialization("json", format!("list_insert fields: {e}")))?;
+    require_object_fields(fields)?;
     let list_index = index_to_wire(index, "list_index")?;
 
     Ok(TextFields {
@@ -60,7 +60,7 @@ pub(super) fn build_list_insert_fields(
         document_id: Some(document_id.to_string()),
         list_path: Some(list_path.to_string()),
         list_index: Some(list_index),
-        list_fields_json: Some(fields_json),
+        list_fields: Some(fields.clone()),
         ..Default::default()
     })
 }
@@ -157,6 +157,15 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("title".to_string(), Value::String("hello".to_string()));
         map.insert("done".to_string(), Value::Bool(false));
+        map.insert(
+            "price".to_string(),
+            Value::Decimal("12.50".parse().expect("decimal literal")),
+        );
+        map.insert(
+            "uid".to_string(),
+            Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+        );
+        map.insert("blob".to_string(), Value::Bytes(vec![0x01, 0xff]));
         Value::Object(map)
     }
 
@@ -169,10 +178,11 @@ mod tests {
         assert_eq!(req.document_id.as_deref(), Some("doc-1"));
         assert_eq!(req.list_path.as_deref(), Some("items"));
         assert_eq!(req.list_index, Some(3));
-        let json = req.list_fields_json.expect("fields_json must be set");
-        assert!(json.contains("\"title\""));
-        assert!(json.contains("hello"));
-        assert!(json.contains("\"done\""));
+        assert_eq!(
+            req.list_fields,
+            Some(fields),
+            "every block field travels with its exact type"
+        );
         // Move/delete-only fields must stay unset on an insert request.
         assert!(req.list_from_index.is_none());
         assert!(req.list_to_index.is_none());
@@ -186,14 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn list_delete_fields_carries_index_without_fields_json() {
+    fn list_delete_fields_carries_index_without_block_fields() {
         let req = build_list_delete_fields("docs", "doc-2", "notes", 7)
             .expect("delete request must build");
         assert_eq!(req.collection.as_deref(), Some("docs"));
         assert_eq!(req.document_id.as_deref(), Some("doc-2"));
         assert_eq!(req.list_path.as_deref(), Some("notes"));
         assert_eq!(req.list_index, Some(7));
-        assert!(req.list_fields_json.is_none());
+        assert!(req.list_fields.is_none());
     }
 
     #[test]

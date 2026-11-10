@@ -115,7 +115,7 @@ pub(super) async fn push_edge_put(
         dst,
     } = ctx;
     let properties = match weight {
-        Some(w) => weight_properties(w),
+        Some(w) => weight_properties(w)?,
         None => Vec::new(),
     };
 

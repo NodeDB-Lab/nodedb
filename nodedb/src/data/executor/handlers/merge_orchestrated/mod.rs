@@ -17,17 +17,17 @@
 //!    still equals the orchestrator's predicted set (returning
 //!    [`crate::bridge::envelope::ErrorCode::OllpRetryRequired`] WITHOUT
 //!    writing on drift, closing the resolve→apply TOCTOU), then apply every
-//!    arm's writes with the pre-assigned surrogates. The matched UPDATE and
-//!    NOT-MATCHED INSERT arms share ONE redb transaction so a UNIQUE
-//!    violation on any insert rolls back the whole set (all-or-nothing). Both
+//!    arm's writes with the pre-assigned surrogates. UPDATE, INSERT, and DELETE
+//!    arms share one redb transaction. Final UNIQUE and BALANCED checks judge
+//!    the actual post-state before commit. Both
 //!    insert and update land through
 //!    [`crate::data::executor::core_loop::CoreLoop::apply_point_put`], which
 //!    maintains the document store, FTS, HNSW vector, spatial, and secondary
 //!    indexes keyed by the row's surrogate — so a merge-inserted row is
 //!    immediately resolvable from any cross-engine search. DELETE arms hit
 //!    existing registered rows via
-//!    [`crate::data::executor::core_loop::CoreLoop::apply_point_delete`],
-//!    each in its own transaction, after the put commit.
+//!    [`crate::data::executor::core_loop::CoreLoop::apply_point_delete`]
+//!    inside that same transaction.
 
 mod abort;
 mod apply;

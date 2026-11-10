@@ -87,11 +87,10 @@ impl CoreLoop {
                 let Some(key) = keys.get_mut(slot) else {
                     continue;
                 };
-                let existing = nodedb_types::value_from_msgpack(&key.body).map_err(|_| {
-                    ErrorCode::Internal {
+                let existing = crate::data::executor::doc_format::decode_document_value(&key.body)
+                    .map_err(|_| ErrorCode::Internal {
                         detail: "failed to decode document for upsert".into(),
-                    }
-                })?;
+                    })?;
                 let merged =
                     merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())?;
                 key.body = merged.body;

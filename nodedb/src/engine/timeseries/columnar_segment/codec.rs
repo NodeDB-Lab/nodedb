@@ -6,6 +6,7 @@ use nodedb_codec::{ColumnCodec, ColumnStatistics, ColumnTypeHint, ResolvedColumn
 
 use super::super::columnar_memtable::{ColumnData, ColumnType, NULL_SYMBOL_ID};
 use super::error::SegmentError;
+use super::fixed_cells;
 
 /// Encode a single column using the appropriate codec pipeline.
 ///
@@ -85,7 +86,59 @@ pub(super) fn encode_column(
                 ColumnStatistics::from_symbols(values, cardinality, codec, encoded.len() as u64);
             Ok((encoded, codec, stats))
         }
+        ColumnType::Decimal(_) => {
+            let cells = col_data.as_decimals();
+            let present = cells.iter().filter(|c| c.is_some()).count();
+            encode_fixed_cells(
+                &fixed_cells::decimal_cells_to_bytes(cells),
+                present,
+                requested_codec,
+            )
+        }
+        ColumnType::Uuid => {
+            let cells = col_data.as_uuids();
+            let present = cells.iter().filter(|c| c.is_some()).count();
+            encode_fixed_cells(
+                &fixed_cells::wide_cells_to_bytes(cells),
+                present,
+                requested_codec,
+            )
+        }
+        ColumnType::Bool => {
+            let cells = col_data.as_bools();
+            let present = cells.iter().filter(|c| c.is_some()).count();
+            encode_fixed_cells(
+                &fixed_cells::bool_cells_to_bytes(cells),
+                present,
+                requested_codec,
+            )
+        }
     }
+}
+
+/// Encode the raw fixed-width cells of a decimal, UUID or boolean column
+/// ([`fixed_cells`]). `Auto` resolves to LZ4. The statistics carry the
+/// non-NULL count and no min or max: a float bound of an exact decimal is
+/// not exact, so no reader prunes on one.
+fn encode_fixed_cells(
+    raw: &[u8],
+    present: usize,
+    requested_codec: ColumnCodec,
+) -> Result<(Vec<u8>, ResolvedColumnCodec, ColumnStatistics), SegmentError> {
+    let codec = if requested_codec == ColumnCodec::Auto {
+        ColumnCodec::Lz4
+    } else {
+        requested_codec
+    }
+    .try_resolve()
+    .map_err(|e| SegmentError::Io(format!("codec resolve fixed cells: {e}")))?;
+    let encoded = nodedb_codec::encode_bytes_pipeline(raw, codec.into_column_codec())
+        .map_err(|e| SegmentError::Io(format!("encode fixed cells: {e}")))?;
+    let mut stats = ColumnStatistics::new(codec);
+    stats.count = present as u64;
+    stats.compressed_bytes = encoded.len() as u64;
+    stats.uncompressed_bytes = raw.len() as u64;
+    Ok((encoded, codec, stats))
 }
 
 /// Decode a column file using the codec pipeline.
@@ -122,6 +175,23 @@ pub(super) fn decode_column(
                 .map(|c| u32::from_le_bytes(*c))
                 .collect();
             Ok(ColumnData::Symbol(ids))
+        }
+        ColumnType::Decimal(_) => {
+            let raw = nodedb_codec::decode_bytes_pipeline(data, codec.into_column_codec())
+                .map_err(map_err)?;
+            Ok(ColumnData::Decimal(fixed_cells::decimal_cells_from_bytes(
+                &raw,
+            )?))
+        }
+        ColumnType::Uuid => {
+            let raw = nodedb_codec::decode_bytes_pipeline(data, codec.into_column_codec())
+                .map_err(map_err)?;
+            Ok(ColumnData::Uuid(fixed_cells::wide_cells_from_bytes(&raw)?))
+        }
+        ColumnType::Bool => {
+            let raw = nodedb_codec::decode_bytes_pipeline(data, codec.into_column_codec())
+                .map_err(map_err)?;
+            Ok(ColumnData::Bool(fixed_cells::bool_cells_from_bytes(&raw)?))
         }
     }
 }

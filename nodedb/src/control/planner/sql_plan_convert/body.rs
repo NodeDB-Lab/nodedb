@@ -10,6 +10,7 @@ use crate::types::TenantId;
 use nodedb_physical::physical_plan::{ExchangeMode, ExchangeOp, QueryOp, SetOpKind};
 
 use super::convert::{ConvertContext, convert_one};
+use super::output_schema::{NoCollectionCatalog, check_set_op_arity, set_op_branch_columns};
 
 /// Lower a derived-table body to ONE physical relation for a post-processor
 /// or an input-sourced aggregate.
@@ -35,11 +36,16 @@ pub(super) fn convert_body_to_single_plan(
             } else {
                 SetOpKind::UnionAll
             };
+            let columns = branch_columns(inputs.iter(), tenant_id, ctx)?;
             let inputs = inputs
                 .iter()
                 .map(|branch| convert_body_to_single_plan(branch, tenant_id, ctx))
                 .collect::<crate::Result<Vec<_>>>()?;
-            Ok(PhysicalPlan::Query(QueryOp::SetOp { inputs, op }))
+            Ok(PhysicalPlan::Query(QueryOp::SetOp {
+                inputs,
+                op,
+                columns,
+            }))
         }
         SqlPlan::Intersect { left, right, all } => {
             let op = if *all {
@@ -131,11 +137,51 @@ fn convert_binary_set_op(
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<PhysicalPlan> {
+    let columns = branch_columns([left, right], tenant_id, ctx)?;
     let inputs = vec![
         convert_body_to_single_plan(left, tenant_id, ctx)?,
         convert_body_to_single_plan(right, tenant_id, ctx)?,
     ];
-    Ok(PhysicalPlan::Query(QueryOp::SetOp { inputs, op }))
+    Ok(PhysicalPlan::Query(QueryOp::SetOp {
+        inputs,
+        op,
+        columns,
+    }))
+}
+
+/// Each branch's column positions, in branch order. Branches whose declared
+/// column counts differ are refused with SQL's arity error.
+///
+/// A `*` expands against the stored catalog, read through the converter's
+/// credentials, so a strict, columnar or timeseries `*` compares by its
+/// declared order. A converter with no credentials reads no catalog, and a
+/// `*` it sees is schemaless.
+fn branch_columns<'a>(
+    branches: impl IntoIterator<Item = &'a SqlPlan>,
+    tenant_id: TenantId,
+    ctx: &ConvertContext,
+) -> crate::Result<Vec<Vec<String>>> {
+    let map = |error| crate::control::planner::plan_error_map::map_plan_error(error, tenant_id);
+    let stored = ctx.credentials.as_ref().map(|credentials| {
+        crate::control::planner::catalog_adapter::OriginCatalog::new(
+            std::sync::Arc::clone(credentials),
+            ctx.array_catalog.clone().unwrap_or_default(),
+            ctx.tenant_id.as_u64(),
+            ctx.database_id,
+            ctx.retention_registry.clone(),
+        )
+        .describing()
+    });
+    let catalog: &dyn nodedb_sql::catalog::SqlCatalog = match &stored {
+        Some(catalog) => catalog,
+        None => &NoCollectionCatalog,
+    };
+    let columns = branches
+        .into_iter()
+        .map(|branch| set_op_branch_columns(branch, catalog, ctx.database_id).map_err(map))
+        .collect::<crate::Result<Vec<_>>>()?;
+    check_set_op_arity(&columns).map_err(map)?;
+    Ok(columns)
 }
 
 /// Wrap a sharded relation in `Exchange{Gather}` so its gather runs exactly
@@ -189,6 +235,7 @@ mod tests {
         SqlPlan::ConstantResult {
             columns: vec!["x".into()],
             values: vec![SqlValue::Int(x)],
+            cast_types: vec![None],
             volatile: false,
         }
     }
@@ -202,8 +249,13 @@ mod tests {
         let plan = convert_body_to_single_plan(&body, TenantId::new(1), &ctx())
             .expect("union body lowers");
         match plan {
-            PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) => {
+            PhysicalPlan::Query(QueryOp::SetOp {
+                inputs,
+                op,
+                columns,
+            }) => {
                 assert_eq!(op, SetOpKind::UnionAll);
+                assert_eq!(columns, vec![vec!["x".to_string()], vec!["x".to_string()]]);
                 assert_eq!(inputs.len(), 2);
                 for input in &inputs {
                     assert!(matches!(
@@ -228,7 +280,12 @@ mod tests {
         };
         let plan = convert_body_to_single_plan(&body, TenantId::new(1), &ctx())
             .expect("nested set-op body lowers");
-        let PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) = plan else {
+        let PhysicalPlan::Query(QueryOp::SetOp {
+            inputs,
+            op,
+            columns,
+        }) = plan
+        else {
             panic!("expected SetOp");
         };
         assert_eq!(op, SetOpKind::Intersect);
@@ -239,6 +296,13 @@ mod tests {
                 ..
             })
         ));
-        assert!(!PhysicalPlan::Query(QueryOp::SetOp { inputs, op }).is_sharded_source());
+        assert!(
+            !PhysicalPlan::Query(QueryOp::SetOp {
+                inputs,
+                op,
+                columns
+            })
+            .is_sharded_source()
+        );
     }
 }

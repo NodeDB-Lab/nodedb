@@ -188,6 +188,7 @@ fn a_staged_insert_claims_a_value_the_transaction_released() {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     ];
     let task = make_default_task();

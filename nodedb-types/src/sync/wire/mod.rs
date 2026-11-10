@@ -19,6 +19,7 @@
 //! - `0x21` ShapeSnapshot (server → client)
 //! - `0x22` ShapeDelta (server → client)
 //! - `0x23` ShapeUnsubscribe (client → server)
+//! - `0x24` ShapeSnapshotReject (server → client)
 //! - `0x30` VectorClockSync (bidirectional)
 //! - `0x40` TimeseriesPush (client → server)
 //! - `0x41` TimeseriesAck (server → client)
@@ -74,6 +75,7 @@ pub mod provenance;
 pub mod resync;
 pub mod session;
 pub mod shape;
+pub mod shape_snapshot_reject;
 pub mod spatial;
 pub mod stream_id;
 pub mod timeseries;
@@ -106,6 +108,7 @@ pub use session::{
 pub use shape::{
     ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, VectorClockSyncMsg,
 };
+pub use shape_snapshot_reject::{ShapeSnapshotRefusal, ShapeSnapshotRejectMsg};
 pub use spatial::{SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg, SpatialInsertMsg};
 pub use stream_id::{EngineKind, stream_id_for};
 pub use timeseries::{DefinitionSyncMsg, TimeseriesAckMsg, TimeseriesPushMsg};

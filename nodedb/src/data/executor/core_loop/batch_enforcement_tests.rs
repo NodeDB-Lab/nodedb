@@ -64,16 +64,47 @@ fn queued_sum_puts_run_the_canonical_fold_and_capture_each_target() {
     let stored = captures(&core);
     assert_eq!(stored.len(), 2);
     for (capture, expected) in stored.iter().zip(["125", "150"]) {
-        let entries = capture.write_set();
+        let entries = capture.write_set().expect("capture entries");
         let image = entries
             .iter()
             .find(|entry| entry.collection.as_deref() == Some(TARGET))
             .expect("captured target");
-        let crate::bridge::envelope::RowEffect::Put { value, .. } = &image.effect else {
+        let crate::bridge::envelope::RowEffect::InstalledPut {
+            image: installed,
+            event,
+        } = &image.effect
+        else {
             panic!("target capture must be a put");
         };
-        let target = doc_format::decode_document(value).expect("decode target");
+        let target = doc_format::decode_document(&installed.canonical).expect("decode target");
         assert_eq!(target["balance"].as_str(), Some(expected));
+        let actual = core
+            .sparse
+            .versioned_get_as_of(
+                0,
+                1,
+                TARGET,
+                &StorageKey::for_surrogate(Surrogate::new(image.surrogate)),
+                Some(installed.version.sys_from),
+                None,
+            )
+            .expect("read target version")
+            .expect("target version exists");
+        assert_eq!(actual, installed.stored);
+        let event_value =
+            doc_format::decode_document(&event.new_value).expect("decode target event");
+        assert_eq!(
+            event_value,
+            doc_format::decode_document(&actual).expect("decode stored target")
+        );
+        assert_eq!(event_value["balance"].as_str(), Some(expected));
+        let prior =
+            doc_format::decode_document(event.old_value.as_deref().expect("prior target image"))
+                .expect("decode prior target");
+        assert_eq!(
+            prior["balance"].as_str(),
+            Some(if expected == "125" { "100" } else { "125" })
+        );
     }
     assert!(events() > 0);
     drop(ends);

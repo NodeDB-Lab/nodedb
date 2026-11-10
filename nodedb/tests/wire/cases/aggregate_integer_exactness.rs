@@ -30,9 +30,9 @@ async fn insert_values(srv: &TestServer, collection: &str, values: &[i64]) {
     }
 }
 
-/// `SELECT MIN(v), MAX(v), SUM(v), AVG(v)` parsed: the three integer cells
-/// exactly, AVG as an `f64`.
-async fn min_max_sum_avg(srv: &TestServer, collection: &str) -> (i128, i128, i128, f64) {
+/// `SELECT MIN(v), MAX(v), SUM(v), AVG(v)`: the three integer cells parsed
+/// exactly, AVG as its text. AVG over integers is numeric, as in PostgreSQL.
+async fn min_max_sum_avg(srv: &TestServer, collection: &str) -> (i128, i128, i128, String) {
     let rows = srv
         .query_rows(&format!(
             "SELECT MIN(v), MAX(v), SUM(v), AVG(v) FROM {collection}"
@@ -48,10 +48,7 @@ async fn min_max_sum_avg(srv: &TestServer, collection: &str) -> (i128, i128, i12
             )
         })
     };
-    let avg = rows[0][3]
-        .parse::<f64>()
-        .unwrap_or_else(|_| panic!("{collection}: AVG must be numeric, got `{}`", rows[0][3]));
-    (int(0), int(1), int(2), avg)
+    (int(0), int(1), int(2), rows[0][3].clone())
 }
 
 /// Run every exactness check against three fresh collections made by
@@ -64,12 +61,13 @@ async fn check_engine(srv: &TestServer, create: impl Fn(&str) -> String) {
     assert_eq!(min, i128::from(AT), "MIN above 2^53");
     assert_eq!(max, i128::from(ABOVE), "MAX above 2^53");
     assert_eq!(sum, i128::from(ABOVE) + i128::from(AT), "SUM above 2^53");
-    assert_eq!(avg, AT as f64, "AVG above 2^53");
+    // PostgreSQL: the total's base-10000 weight leaves 4 fractional digits.
+    assert_eq!(avg, "9007199254740992.5000", "AVG above 2^53");
 
     // Nanosecond timestamps one tick apart.
     srv.exec(&create("nanos")).await.unwrap();
     insert_values(srv, "nanos", &NANOS).await;
-    let (min, max, sum, _) = min_max_sum_avg(srv, "nanos").await;
+    let (min, max, sum, avg) = min_max_sum_avg(srv, "nanos").await;
     assert_eq!(min, i128::from(NANOS[1]), "MIN of nanosecond timestamps");
     assert_eq!(max, i128::from(NANOS[2]), "MAX of nanosecond timestamps");
     assert_eq!(
@@ -77,11 +75,13 @@ async fn check_engine(srv: &TestServer, create: impl Fn(&str) -> String) {
         NANOS.iter().map(|&n| i128::from(n)).sum::<i128>(),
         "SUM of nanosecond timestamps"
     );
+    // PostgreSQL: 5100000000000000006 / 3 at weight 4 keeps no fraction.
+    assert_eq!(avg, "1700000000000000002", "AVG of nanosecond timestamps");
 
     // A total past i64::MAX is exact, never wrapped or rounded.
     srv.exec(&create("over")).await.unwrap();
     insert_values(srv, "over", &[i64::MAX, i64::MAX, 2]).await;
-    let (min, max, sum, _) = min_max_sum_avg(srv, "over").await;
+    let (min, max, sum, avg) = min_max_sum_avg(srv, "over").await;
     assert_eq!(min, 2, "MIN beside i64::MAX");
     assert_eq!(max, i128::from(i64::MAX), "MAX at i64::MAX");
     assert_eq!(
@@ -89,6 +89,8 @@ async fn check_engine(srv: &TestServer, create: impl Fn(&str) -> String) {
         2 * i128::from(i64::MAX) + 2,
         "SUM past i64::MAX must be the exact total"
     );
+    // PostgreSQL: 18446744073709551616 / 3 at weight 4 rounds to a whole.
+    assert_eq!(avg, "6148914691236517205", "AVG past i64::MAX");
 }
 
 #[tokio::test]

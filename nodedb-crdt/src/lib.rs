@@ -28,7 +28,7 @@ pub mod dead_letter;
 pub mod deferred;
 pub mod error;
 pub mod list_ops;
-mod loro_value;
+pub mod loro_value;
 pub mod policy;
 pub mod pre_validate;
 pub mod row_lookup;

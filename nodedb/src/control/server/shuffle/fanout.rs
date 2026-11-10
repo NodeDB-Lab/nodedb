@@ -42,7 +42,9 @@ use nodedb_cluster::{NexarTransport, ShufflePushRequest, ShufflePushStream, Type
 
 use super::frame_explode::explode_row_array;
 use super::inbox::ShuffleReceiverRegistry;
-use crate::data::executor::response_codec::{encode_binary_rows, flatten_to_relational_rows};
+use crate::data::executor::response_codec::{
+    RowContext, encode_binary_rows, flatten_rows_in_context,
+};
 
 /// Per-part row-buffer flush threshold (rows). Bounds peak RAM to
 /// `num_parts × FLUSH_ROWS` rows across the whole fan-out.
@@ -76,6 +78,8 @@ pub struct ShuffleFanoutSink {
     num_parts: u32,
     producer_count: u32,
     keys: Vec<String>,
+    /// The row shape of the produced scan's frames.
+    row_context: RowContext,
     /// `part -> PartState`, one entry per part in `0..num_parts`.
     parts: HashMap<u32, PartState>,
     /// The vShards every scanned frame fed to this sink read. The
@@ -93,6 +97,8 @@ pub struct ShuffleFanoutSinkParams<'a> {
     pub producer_count: u32,
     pub keys: Vec<String>,
     pub part_node_map: &'a [(u32, u64)],
+    /// The row shape of the produced scan's frames, from its plan.
+    pub row_context: RowContext,
 }
 
 impl ShuffleFanoutSink {
@@ -115,6 +121,7 @@ impl ShuffleFanoutSink {
             producer_count,
             keys,
             part_node_map,
+            row_context,
         } = params;
         let owner: HashMap<u32, u64> = part_node_map.iter().copied().collect();
         let mut parts = HashMap::with_capacity(num_parts as usize);
@@ -144,6 +151,7 @@ impl ShuffleFanoutSink {
             num_parts,
             producer_count,
             keys,
+            row_context,
             parts,
             read_vshards: crate::types::ReadShards::new(),
         }
@@ -175,17 +183,18 @@ impl ShuffleFanoutSink {
     async fn route_chunk(&mut self, payload: Vec<u8>) -> crate::Result<()> {
         // Normalize storage `{id, data:<value>}` scan wrappers → flat relational
         // rows BEFORE hashing/staging — the same canonical boundary the broadcast
-        // path applies (`flatten_to_relational_rows` is the ONE place storage rows
-        // become relational). Without it `partition_hash` and the consumer's grace
-        // join would look for the join-key fields at the wrapper's top level (which
-        // holds only `id`/`data`), find nothing, mishash to a single part, and
-        // produce an empty join. Already-flat rows (computed producers) pass
-        // through unchanged.
-        let flat = flatten_to_relational_rows(&payload);
+        // path applies (`flatten_rows_in_context` under the plan's row shape).
+        // Without it `partition_hash` and the consumer's grace join would look
+        // for the join-key fields at the wrapper's top level (which holds only
+        // `id`/`data`), find nothing, mishash to a single part, and produce an
+        // empty join. A computed producer's flat rows stay as they are, even a
+        // row with a `data` column.
+        let flat = flatten_rows_in_context(&payload, self.row_context)?;
         let rows = explode_row_array(&flat)?;
         for row in rows {
-            let part =
-                (nodedb_query::partition_hash(row, &self.keys) % self.num_parts as u64) as u32;
+            let part = (nodedb_query::partition_hash(row, &self.keys)
+                .map_err(crate::Error::from)?
+                % self.num_parts as u64) as u32;
             // Push into the part buffer, then drop the borrow before any flush so
             // the `&mut self` flush call below does not alias the `state` borrow.
             let needs_flush = {

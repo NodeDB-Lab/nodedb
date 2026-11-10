@@ -4233,6 +4233,8 @@ name = "nodedb-client"
 version = "0.7.0-dev"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
+ "bytes",
  "nodedb-types",
  "rust_decimal",
  "rustls-pemfile",
@@ -4251,6 +4253,7 @@ dependencies = [
 name = "nodedb-client-tests"
 version = "0.7.0-dev"
 dependencies = [
+ "bytes",
  "nodedb",
  "nodedb-client",
  "nodedb-test-support",
@@ -4442,7 +4445,6 @@ dependencies = [
  "nodedb-mem",
  "nodedb-types",
  "rkyv",
- "rmpv",
  "serde",
  "serde_json",
  "sonic-rs",
@@ -4575,6 +4577,7 @@ dependencies = [
  "sonic-rs",
  "sqlparser",
  "thiserror 2.0.21",
+ "zerompk",
 ]
 
 [[package]]

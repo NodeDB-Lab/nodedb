@@ -10,5 +10,6 @@
 pub(in crate::data::executor) mod exec;
 pub(in crate::data::executor) mod persist;
 pub(in crate::data::executor) mod post_image;
+pub(in crate::data::executor) mod prepared;
 
 pub(in crate::data::executor) use exec::PointUpdateParams;

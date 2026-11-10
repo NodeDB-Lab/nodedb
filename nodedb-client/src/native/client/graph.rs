@@ -61,18 +61,10 @@ impl NativeClient {
         edge_type: &str,
         properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
-        // Convert the document fields to a `serde_json::Value` via the
-        // type-level `From<nodedb_types::Value>` conversion — no runtime JSON
-        // serialization, and infallible, so properties are never silently
-        // dropped on a serializer error.
-        let props_json = properties.map(|d| {
-            serde_json::Value::Object(
-                d.fields
-                    .into_iter()
-                    .map(|(k, v)| (k, serde_json::Value::from(v)))
-                    .collect(),
-            )
-        });
+        // The property object travels as a typed `Value`, and the server
+        // stores it as a native tagged object, so every value keeps its exact
+        // type. The document id is not an edge property.
+        let properties = properties.map(|d| nodedb_types::Value::Object(d.fields));
         let mut conn = self.pool.acquire().await?;
         let resp = conn
             .send(
@@ -82,7 +74,7 @@ impl NativeClient {
                     from_node: Some(from.as_str().to_string()),
                     to_node: Some(to.as_str().to_string()),
                     edge_type: Some(edge_type.to_string()),
-                    properties: props_json,
+                    properties,
                     ..Default::default()
                 },
             )
@@ -126,6 +118,9 @@ impl NativeClient {
         if edges.is_empty() {
             return Ok(0);
         }
+        // Each edge's properties travel as typed `Value`s, and the server
+        // stores them as a native tagged object, so every value keeps its
+        // exact type.
         let payload = zerompk::to_msgpack_vec(&EdgePutBatch {
             edges: edges.to_vec(),
         })

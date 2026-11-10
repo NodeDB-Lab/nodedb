@@ -174,6 +174,7 @@ mod tests {
             group_cols: col_types.to_vec(),
             agg_cols: vec![AggColInfo::CountStar],
             ts_idx: 0,
+            group_reps: std::collections::HashMap::new(),
         }
     }
 

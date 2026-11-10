@@ -457,6 +457,7 @@ mod tests {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 }),
                 PhysicalPlan::Document(DocumentOp::PointDelete {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
@@ -721,6 +722,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(

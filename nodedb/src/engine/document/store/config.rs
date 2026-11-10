@@ -5,7 +5,7 @@
 use super::index_path::IndexPath;
 
 /// Collection configuration for the Document Engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CollectionConfig {
     pub name: String,
     /// Declared secondary index paths.

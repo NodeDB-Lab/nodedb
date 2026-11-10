@@ -51,6 +51,7 @@ fn returning_insert(document_id: &str, surrogate: u32) -> PhysicalPlan {
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 

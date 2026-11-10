@@ -20,6 +20,7 @@ pub mod array_route;
 pub mod ascii;
 pub mod backup_envelope;
 pub mod bbox;
+pub mod bytea_text;
 pub mod calvin;
 pub mod calvin_passive;
 pub mod clone;
@@ -29,6 +30,7 @@ pub mod columnar;
 pub mod conversion;
 pub mod crdt_preview;
 pub mod datetime;
+pub mod decimal_float;
 pub mod decode_bounds;
 pub mod diagnostic;
 pub mod document;
@@ -48,13 +50,16 @@ pub mod kv;
 pub mod kv_parsing;
 pub mod lsn;
 pub mod mirror;
+pub mod msgpack_span;
 pub mod multi_vector;
 pub mod namespace;
 pub mod numeric_cmp;
+pub mod object_msgpack;
 pub mod path_component;
 pub mod pg_compat;
 pub mod protocol;
 pub mod result;
+pub mod returning;
 pub mod rls_write_check;
 pub mod row_identity;
 pub mod sparse_vector;
@@ -113,7 +118,8 @@ pub use identity::KeyRepr;
 pub use json_msgpack::{
     InstantKind, JsonValue, MsgpackError, MsgpackResult, NativeCell, json_from_msgpack,
     json_to_msgpack, json_to_msgpack_or_empty, msgpack_to_json_string, ordered_map_to_msgpack,
-    read_instant, value_from_msgpack, value_to_msgpack, write_instant,
+    plain_msgpack_keeps_type, read_instant, value_from_msgpack, value_to_document_body,
+    value_to_msgpack, value_to_typed_msgpack, write_instant,
 };
 pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key_type};
 pub use lsn::Lsn;
@@ -124,11 +130,13 @@ pub use mirror::{
 };
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
+pub use object_msgpack::{ObjectFormat, ObjectView, decode_object};
 pub use path_component::is_plain_path_component;
 pub use quota::{
     PriorityClass, PriorityClassParseError, QuotaRecord, QuotaSpec, QuotaValidationError,
 };
 pub use result::{QueryResult, SearchResult, SubGraph};
+pub use returning::{ReturningColumns, ReturningItem, ReturningSpec};
 pub use rls_write_check::{RlsWriteCheck, WriteGateDecision};
 pub use row_identity::{
     DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, ROWID_COLUMN, RowIdentity, StorageKey,

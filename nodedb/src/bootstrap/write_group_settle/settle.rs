@@ -139,6 +139,7 @@ fn close_committed_group(
             home.vshard_id,
             home.database_id,
             &crate::wal::WriteGroupRecord {
+                schemas: Vec::new(),
                 group: crate::wal::WriteGroup::part_of(origin, 1, 1),
                 ops: Vec::new(),
                 redo: None,
@@ -157,7 +158,7 @@ fn complete_group(
 ) -> crate::Result<bool> {
     let appender = part_appender(wal, &capture.origin_append)?;
     let target = target(capture, Lsn::new(capture.origin));
-    let write_set = capture.write_set();
+    let write_set = capture.write_set()?;
     let parts = plan_group_parts(&target, &write_set, wal.max_payload())?;
     let cancels_origin = parts.cancels_origin;
     let present = scanned.parts_present(capture.origin);
@@ -215,7 +216,7 @@ fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Resu
         now_override: inputs.resolved_now_ms,
     })?
     .origin;
-    append_group_parts(appender, target(capture, origin.lsn), &capture.write_set())?;
+    append_group_parts(appender, target(capture, origin.lsn), &capture.write_set()?)?;
     Ok(true)
 }
 

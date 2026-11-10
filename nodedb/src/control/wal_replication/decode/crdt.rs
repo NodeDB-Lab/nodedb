@@ -122,7 +122,7 @@ pub(super) fn list_insert(
     document_id: &str,
     list_path: &str,
     index: u64,
-    fields_json: &str,
+    fields: &[u8],
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
@@ -131,7 +131,7 @@ pub(super) fn list_insert(
         document_id: document_id.to_owned(),
         list_path: list_path.to_owned(),
         index: list_index("index", index)?,
-        fields_json: fields_json.to_owned(),
+        fields: fields.to_vec(),
         surrogate,
     }))
 }
@@ -349,12 +349,24 @@ mod tests {
         let tenant = TenantId::new(1);
         let vshard = VShardId::new(0);
 
+        let block = std::collections::HashMap::from([
+            (
+                "type".to_string(),
+                nodedb_types::Value::String("text".into()),
+            ),
+            (
+                "price".to_string(),
+                nodedb_types::Value::Decimal("12.50".parse().expect("decimal literal")),
+            ),
+        ]);
+        let block_body =
+            nodedb_physical::physical_plan::encode_fields_body(&block).expect("block encodes");
         let plan = PhysicalPlan::Crdt(CrdtOp::ListInsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
             document_id: "doc-1".into(),
             list_path: "blocks".into(),
             index: 2,
-            fields_json: r#"{"type":"text"}"#.into(),
+            fields: block_body,
             surrogate: Surrogate::new(1),
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
@@ -370,14 +382,16 @@ mod tests {
                 document_id,
                 list_path,
                 index,
-                fields_json,
+                fields,
                 ..
             }) => {
                 assert_eq!(collection.as_str(), "notes");
                 assert_eq!(document_id, "doc-1");
                 assert_eq!(list_path, "blocks");
                 assert_eq!(index, 2, "index must round-trip");
-                assert_eq!(fields_json, r#"{"type":"text"}"#);
+                let decoded = nodedb_physical::physical_plan::decode_fields_body(&fields)
+                    .expect("block decodes");
+                assert_eq!(decoded, block, "every block field keeps its type");
             }
             other => panic!("expected CrdtOp::ListInsert, got {other:?}"),
         }
@@ -598,7 +612,8 @@ mod tests {
         let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             document_id: "d1".into(),
-            fields_json: "{}".into(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(&Default::default())
+                .expect("fields body encodes"),
             surrogate: Surrogate::new(4),
             partial: false,
             verb: CrdtWriteVerb::Insert,
@@ -792,7 +807,7 @@ mod tests {
             document_id: "doc-1".into(),
             list_path: "blocks".into(),
             index: 0,
-            fields_json: "{}".into(),
+            fields: Vec::new(),
             surrogate: leader_surrogate,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &insert_plan)

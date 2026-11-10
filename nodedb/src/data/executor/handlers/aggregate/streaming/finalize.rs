@@ -36,10 +36,10 @@ impl CoreLoop {
     /// Finalize consolidated per-group states into an encoded response payload.
     ///
     /// Mirrors the tail of `aggregate_over_docs`: each `GroupState` is finalized
-    /// into a row (the GROUP BY columns parsed back from the JSON-array group
-    /// key plus the aggregate outputs), HAVING is applied, user aliases are
+    /// into a row (the GROUP BY columns from the group's representative key
+    /// values plus the aggregate outputs), HAVING is applied, user aliases are
     /// renamed, the rows are sorted by `sort_keys`, truncated to `limit`, and
-    /// encoded as a MessagePack array.
+    /// encoded as a MessagePack array of native objects.
     ///
     /// `sub_groups` carries the optional sub-aggregation map (empty for plain
     /// GROUP BY, including the distributed-shuffle path).
@@ -85,12 +85,9 @@ impl CoreLoop {
             let mut row: HashMap<String, Value> = HashMap::new();
 
             if !group_by.is_empty() {
-                let parts =
-                    sonic_rs::from_str::<Vec<serde_json::Value>>(&group_key).map_err(|e| {
-                        crate::Error::Codec {
-                            detail: format!("aggregate group key decode: {e}"),
-                        }
-                    })?;
+                // The group's representative: the typed key values of the
+                // first row it admitted, never the canonical identity.
+                let parts = state.require_key_values("aggregate group")?;
                 // One positional slot per key that contributed to the key bytes
                 // (a bare `field` or a computed `expr`); emit each under its
                 // `output_name` — for a computed key this is the evaluated
@@ -100,10 +97,7 @@ impl CoreLoop {
                     if spec.field.is_none() && spec.expr.is_none() {
                         continue;
                     }
-                    let val = parts
-                        .get(part_idx)
-                        .cloned()
-                        .map_or(Value::Null, Value::from);
+                    let val = parts.get(part_idx).cloned().unwrap_or(Value::Null);
                     row.insert(spec.output_name.clone(), val);
                     part_idx += 1;
                 }
@@ -116,13 +110,12 @@ impl CoreLoop {
             if need_sub {
                 let sub_map = sub_groups.remove(&group_key).unwrap_or_default();
                 let mut sub_results: Vec<Value> = Vec::new();
-                for (sub_key, sub_state) in sub_map {
+                for (_sub_key, sub_state) in sub_map {
                     let mut sub_row: HashMap<String, Value> = HashMap::new();
-                    if let Ok(parts) = sonic_rs::from_str::<Vec<serde_json::Value>>(&sub_key) {
-                        for (i, field) in sub_group_by.iter().enumerate() {
-                            let val = parts.get(i).cloned().map_or(Value::Null, Value::from);
-                            sub_row.insert(field.clone(), val);
-                        }
+                    let parts = sub_state.require_key_values("aggregate sub-group")?;
+                    for (i, field) in sub_group_by.iter().enumerate() {
+                        let val = parts.get(i).cloned().unwrap_or(Value::Null);
+                        sub_row.insert(field.clone(), val);
                     }
                     for (alias, val) in sub_state.finalize(sub_aggregates)? {
                         sub_row.insert(alias, val);
@@ -151,6 +144,9 @@ impl CoreLoop {
         sort_aggregated_rows(&mut results, sort_keys, &crs)?;
         results.truncate(limit);
 
-        crate::data::executor::response_codec::encode_value_vec(&results)
+        // Group rows feed joins, set operations and post-processing: each
+        // key keeps its type, so a Decimal or UUID key still matches a native
+        // stored value. The public boundary renders them.
+        crate::data::executor::response_codec::encode_native_rows(&results)
     }
 }

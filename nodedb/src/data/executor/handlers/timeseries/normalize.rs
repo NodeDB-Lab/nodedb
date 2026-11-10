@@ -11,7 +11,27 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use super::msgpack_decode::MsgpackValue;
 use crate::data::executor::strict_format::float_to_i64;
+use crate::engine::timeseries::columnar_memtable::ColumnType;
 use crate::engine::timeseries::ilp::{self, IlpError};
+
+/// The declared DECIMAL, UUID and BOOLEAN columns of the collection being
+/// ingested, as `(column, type)`. Their values travel so the column reads
+/// them exactly: a DECIMAL float or text and a UUID text are string fields,
+/// never a number parsed from the text.
+pub(in crate::data::executor) type ExactColumns = [(String, ColumnType)];
+
+/// The declared type of `column` among `exact`, when it is one of them.
+fn exact_type(exact: &ExactColumns, column: &str) -> Option<ColumnType> {
+    exact
+        .iter()
+        .find(|(name, _)| name == column)
+        .map(|(_, ty)| *ty)
+}
+
+/// `text` as a quoted ILP string field value.
+fn ilp_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\"', "\\\""))
+}
 
 /// Nanoseconds per millisecond — line protocol timestamps are nanoseconds, the
 /// stored time column is milliseconds.
@@ -90,6 +110,7 @@ pub(in crate::data::executor) fn msgpack_rows_to_ilp(
     rows: &[Vec<(String, MsgpackValue)>],
     measurement: &str,
     time_key: Option<&str>,
+    exact: &ExactColumns,
 ) -> Result<String, IlpError> {
     let mut ilp_buf = String::new();
     for (line_number, row) in rows.iter().enumerate() {
@@ -102,7 +123,17 @@ pub(in crate::data::executor) fn msgpack_rows_to_ilp(
                 continue;
             }
 
+            let declared = exact_type(exact, key);
             match val {
+                // A DECIMAL float travels as its shortest decimal text, so
+                // the column reads the number the client sent.
+                MsgpackValue::Float(f) if matches!(declared, Some(ColumnType::Decimal(_))) => {
+                    fields.push(format!("{key}={}", ilp_string(&f.to_string())));
+                }
+                // Text bound for a DECIMAL or UUID column keeps every digit.
+                MsgpackValue::Str(s) if declared.is_some() => {
+                    fields.push(format!("{key}={}", ilp_string(s)));
+                }
                 MsgpackValue::Float(f) => fields.push(format!("{key}={f}")),
                 MsgpackValue::Int(n) => fields.push(format!("{key}={n}i")),
                 // An unsigned field keeps its exact number. A column whose
@@ -236,6 +267,7 @@ pub(in crate::data::executor) fn json_rows_to_ilp(
     rows: &sonic_rs::Array,
     measurement: &str,
     time_key: Option<&str>,
+    exact: &ExactColumns,
 ) -> Result<String, IlpError> {
     let mut ilp_buf = String::new();
     for (line_number, row_val) in rows.iter().enumerate() {
@@ -252,7 +284,19 @@ pub(in crate::data::executor) fn json_rows_to_ilp(
                 continue;
             }
 
-            if let Some(f) = val.as_f64() {
+            // A DECIMAL number travels as text: an integer exactly, a float
+            // as its shortest decimal text.
+            let decimal_text = if matches!(exact_type(exact, key), Some(ColumnType::Decimal(_))) {
+                val.as_i64()
+                    .map(|n| n.to_string())
+                    .or_else(|| val.as_u64().map(|u| u.to_string()))
+                    .or_else(|| val.as_f64().map(|f| f.to_string()))
+            } else {
+                None
+            };
+            if let Some(text) = decimal_text {
+                fields.push(format!("{key}={}", ilp_string(&text)));
+            } else if let Some(f) = val.as_f64() {
                 fields.push(format!("{key}={f}"));
             } else if let Some(n) = val.as_i64() {
                 fields.push(format!("{key}={n}i"));
@@ -313,7 +357,7 @@ mod tests {
             ("captured_at".to_string(), instant()),
             ("v".to_string(), MsgpackValue::Float(1.5)),
         ]];
-        let ilp = msgpack_rows_to_ilp(&rows, "m", Some("captured_at")).expect("ilp");
+        let ilp = msgpack_rows_to_ilp(&rows, "m", Some("captured_at"), &[]).expect("ilp");
         assert_eq!(ilp, "m v=1.5 1583402400000000000\n");
         let text = vec![vec![
             (
@@ -323,7 +367,7 @@ mod tests {
             ("v".to_string(), MsgpackValue::Float(1.5)),
         ]];
         assert_eq!(
-            msgpack_rows_to_ilp(&text, "m", Some("captured_at")).expect("ilp"),
+            msgpack_rows_to_ilp(&text, "m", Some("captured_at"), &[]).expect("ilp"),
             "m v=1.5 1583402400000000000\n"
         );
     }
@@ -347,7 +391,7 @@ mod tests {
             ("host".to_string(), MsgpackValue::Str("a".into())),
             ("v".to_string(), MsgpackValue::Float(1.5)),
         ]];
-        let sql = msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp");
+        let sql = msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect("ilp");
         let batch = format!("{sql}m,host=a v=2.5 2000000000\nm host=\"a\",v=3.5 3000000000\n");
         let lines = parse_batch(&batch).expect("valid ILP").into_lines();
         let cases = [
@@ -371,7 +415,7 @@ mod tests {
             let keys: Vec<_> = lines
                 .iter()
                 .map(|line| {
-                    let (_, values) = line_row(&schema, line, 0, None);
+                    let (_, values) = line_row(&schema, line, 0, None).expect("row");
                     row_series_key(
                         DatabaseId::DEFAULT,
                         line.measurement.as_ref(),
@@ -398,7 +442,7 @@ mod tests {
             ("seen".to_string(), instant()),
         ]];
         assert_eq!(
-            msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect("ilp"),
             "m seen=\"2020-03-05T10:00:00.000000Z\" 7000000\n"
         );
     }
@@ -417,7 +461,7 @@ mod tests {
                 ("ts".to_string(), bad),
                 ("v".to_string(), MsgpackValue::Int(1)),
             ]];
-            let err = msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect_err("refused");
+            let err = msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect_err("refused");
             assert_eq!(err.kind, ilp::IlpErrorKind::InvalidTimestamp);
             assert!(err.raw.starts_with("ts="), "{err:?}");
         }
@@ -433,7 +477,7 @@ mod tests {
             ("v".to_string(), MsgpackValue::Int(1)),
         ]];
         assert_eq!(
-            msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect("ilp"),
             "m v=1i 1500000\n"
         );
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300] {
@@ -441,7 +485,7 @@ mod tests {
                 ("ts".to_string(), MsgpackValue::Float(bad)),
                 ("v".to_string(), MsgpackValue::Int(1)),
             ]];
-            let err = msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect_err("refused");
+            let err = msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect_err("refused");
             assert_eq!(err.kind, ilp::IlpErrorKind::InvalidTimestamp);
         }
     }
@@ -454,7 +498,7 @@ mod tests {
         let rows: sonic_rs::Array =
             sonic_rs::from_str(r#"[{"ts": 2.25, "v": "x"}]"#).expect("json");
         assert_eq!(
-            json_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            json_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect("ilp"),
             "m v=\"x\" 2250000\n"
         );
         for bad in [
@@ -464,7 +508,7 @@ mod tests {
             r#"[{"ts": true, "v": "x"}]"#,
         ] {
             let rows: sonic_rs::Array = sonic_rs::from_str(bad).expect("json");
-            let err = json_rows_to_ilp(&rows, "m", Some("ts")).expect_err(bad);
+            let err = json_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect_err(bad);
             assert_eq!(err.kind, ilp::IlpErrorKind::InvalidTimestamp);
             assert!(err.raw.starts_with("ts="), "{err:?}");
         }
@@ -479,7 +523,7 @@ mod tests {
             ("v".to_string(), MsgpackValue::Int(1)),
         ]];
         assert_eq!(
-            msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            msgpack_rows_to_ilp(&rows, "m", Some("ts"), &[]).expect("ilp"),
             "m v=1i\n"
         );
     }

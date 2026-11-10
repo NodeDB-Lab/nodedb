@@ -175,14 +175,9 @@ impl NodeDbQueryParser {
         database_id: crate::types::DatabaseId,
         emitter: &ArcAuditEmitter,
     ) -> PgWireResult<Result<(), crate::Error>> {
-        // Execute strips a per-query `ON DENY` clause and then `RETURNING`
-        // before it plans, so Parse does too.
+        // Parse and Execute preserve RETURNING in the SQL AST.
         let (sql_without_on_deny, _) = crate::control::server::session_auth::extract_on_deny(sql);
-        let (sql_without_returning, _) = match returning::strip_returning(&sql_without_on_deny) {
-            Ok(parts) => parts,
-            Err(error) => return Ok(Err(error)),
-        };
-        let sql_for_planning = substitute_placeholders_with_null(&sql_without_returning);
+        let sql_for_planning = substitute_placeholders_with_null(&sql_without_on_deny);
         let query_ctx =
             crate::control::planner::context::QueryContext::for_state_with_lease(&self.state);
         // Parse plans against this selected database, including RLS
@@ -270,7 +265,7 @@ impl NodeDbQueryParser {
         client_types: &[Option<Type>],
         catalog: &crate::control::planner::catalog_adapter::OriginCatalog,
         database_id: crate::types::DatabaseId,
-        tenant_id: crate::types::TenantId,
+        _tenant_id: crate::types::TenantId,
     ) -> (Vec<Option<Type>>, Vec<ResultColumn>) {
         // Placeholder *counting* runs unconditionally so an unplannable SQL
         // string (e.g. `WHERE id = $1` where the planner needs bound params
@@ -280,15 +275,9 @@ impl NodeDbQueryParser {
         // pass below and survives that pass failing.
         let param_types = Self::param_types_with_inference(sql, client_types, catalog);
 
-        // Strip a per-query `ON DENY` clause, then RETURNING, before planning,
-        // as Execute does. The RETURNING item text is kept so the result
-        // fields for Describe are built from the resolved clause.
+        // Describe reads the same resolved response projection as Execute.
         let (sql_without_on_deny, _) = crate::control::server::session_auth::extract_on_deny(sql);
-        let (sql_stripped, returning_items) = match returning::strip_returning(&sql_without_on_deny)
-        {
-            Ok(pair) => pair,
-            Err(_) => return (param_types, Vec::new()),
-        };
+        let sql_stripped = sql_without_on_deny;
 
         // Parse and plan to get collection info for result schema.
         //
@@ -308,15 +297,7 @@ impl NodeDbQueryParser {
         // it does at execute time, so Describe announces the same columns —
         // an expression under its alias, a column under its name. A clause
         // that fails to resolve yields no fields; Execute reports the error.
-        let returning = match returning::resolve_returning_for_plans(
-            &plans,
-            returning_items.as_deref(),
-            catalog,
-            tenant_id,
-        ) {
-            Ok(clause) => clause,
-            Err(_) => return (param_types, Vec::new()),
-        };
+        let returning = returning::resolve_returning_for_plans(&plans);
 
         // Infer result fields from the planner's authoritative output
         // schema — the same derivation used to shape response rows, so

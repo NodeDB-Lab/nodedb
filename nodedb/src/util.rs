@@ -6,6 +6,7 @@ pub mod bounded_json;
 pub mod bounded_msgpack;
 pub mod rmpv_value;
 pub mod row_rename;
+pub mod value_identity;
 pub mod wire_json;
 
 /// FNV-1a 64-bit hash of a byte slice.

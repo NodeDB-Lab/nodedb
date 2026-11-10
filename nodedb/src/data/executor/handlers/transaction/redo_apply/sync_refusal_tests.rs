@@ -154,6 +154,7 @@ fn append_group(wal: &crate::wal::manager::WalManager, refused: RedoSubRecord, w
                 VShardId::new(0),
                 DatabaseId::DEFAULT,
                 &WriteGroupRecord {
+                    schemas: Vec::new(),
                     group: WriteGroup::OPENING,
                     ops: Vec::new(),
                     redo: None,
@@ -167,6 +168,7 @@ fn append_group(wal: &crate::wal::manager::WalManager, refused: RedoSubRecord, w
                     VShardId::new(0),
                     DatabaseId::DEFAULT,
                     &WriteGroupRecord {
+                        schemas: Vec::new(),
                         group: WriteGroup::part_of(opening.as_u64(), index as u32 + 1, 3),
                         ops: vec![op],
                         redo: None,

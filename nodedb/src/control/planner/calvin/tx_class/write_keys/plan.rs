@@ -154,7 +154,7 @@ mod tests {
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: qualified(CRDT),
             document_id: id.to_owned(),
-            fields_json: "{}".to_owned(),
+            fields: Vec::new(),
             surrogate: Surrogate::new(41),
             partial: false,
             verb: CrdtWriteVerb::Insert,
@@ -275,6 +275,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -330,6 +331,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert!(higher_waits(vec![batch], vec![doc_delete("x", None)]));
     }

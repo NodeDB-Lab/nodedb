@@ -2,8 +2,8 @@
 
 //! Multi-core broadcast join and inline hash join tests.
 
-use super::super::helpers::{make_ctx_with_id, send_ok};
-use nodedb::data::executor::response_codec;
+use super::super::helpers::{make_ctx_with_id, rows_json, send_ok};
+use nodedb::data::executor::response_codec::{self, RowContext};
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan, QueryOp};
 
 use super::basic_scans::build_msgpack_map;
@@ -37,6 +37,7 @@ fn multi_core_broadcast_inner_join() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -125,7 +126,8 @@ fn multi_core_broadcast_inner_join() {
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
-                rows: response_codec::flatten_to_relational_rows(&phase1_payload),
+                rows: response_codec::flatten_rows_in_context(&phase1_payload, RowContext::Flat)
+                    .expect("KV scan rows split"),
                 sources: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
@@ -146,7 +148,7 @@ fn multi_core_broadcast_inner_join() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&join_payload);
+    let json = rows_json(&join_payload);
     eprintln!("broadcast inner join result: {json}");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
@@ -199,6 +201,7 @@ fn multi_core_broadcast_left_join() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -273,7 +276,8 @@ fn multi_core_broadcast_left_join() {
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
-                rows: response_codec::flatten_to_relational_rows(&phase1_payload),
+                rows: response_codec::flatten_rows_in_context(&phase1_payload, RowContext::Flat)
+                    .expect("KV scan rows split"),
                 sources: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
@@ -294,7 +298,7 @@ fn multi_core_broadcast_left_join() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&join_payload);
+    let json = rows_json(&join_payload);
     eprintln!("broadcast left join result: {json}");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
@@ -334,6 +338,7 @@ fn multi_core_broadcast_merge_simulation() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -355,6 +360,7 @@ fn multi_core_broadcast_merge_simulation() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -462,7 +468,8 @@ fn multi_core_broadcast_merge_simulation() {
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
-                rows: response_codec::flatten_to_relational_rows(&data),
+                rows: response_codec::flatten_rows_in_context(&data, RowContext::Flat)
+                    .expect("KV scan rows split"),
                 sources: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
@@ -502,7 +509,7 @@ fn multi_core_broadcast_merge_simulation() {
         if payload.is_empty() {
             continue;
         }
-        let json_text = response_codec::decode_payload_to_json(payload);
+        let json_text = rows_json(payload);
         if json_text.starts_with('[') && json_text.ends_with(']') {
             let inner = &json_text[1..json_text.len() - 1];
             if !inner.trim().is_empty() {

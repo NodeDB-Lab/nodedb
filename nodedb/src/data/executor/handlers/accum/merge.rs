@@ -386,17 +386,16 @@ mod tests {
         a_avg.merge_from(b_avg);
 
         assert_eq!(combined_sum.finalize(&sum_spec), Ok(Value::Integer(15)));
-        assert_eq!(combined_avg.finalize(&avg_spec), Ok(Value::Float(3.0)));
+        // PostgreSQL: avg(DISTINCT v) over integers {1..5} is 3.0000000000000000.
+        let three =
+            Value::Decimal(rust_decimal::Decimal::from_str_exact("3.0000000000000000").unwrap());
+        assert_eq!(combined_avg.finalize(&avg_spec), Ok(three.clone()));
         assert_eq!(
             a_sum.finalize(&sum_spec),
             Ok(Value::Integer(15)),
             "sum_distinct merge"
         );
-        assert_eq!(
-            a_avg.finalize(&avg_spec),
-            Ok(Value::Float(3.0)),
-            "avg_distinct merge"
-        );
+        assert_eq!(a_avg.finalize(&avg_spec), Ok(three), "avg_distinct merge");
     }
 
     /// Feed `docs_a` and `docs_b` into one accumulator, and separately into
@@ -451,8 +450,12 @@ mod tests {
         for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
             assert_eq!(got, Value::Integer(ABOVE));
         }
+        // PostgreSQL: avg over these bigints is numeric 9007199254740992.5000.
         for got in single_and_merged(&make_spec("avg", "v"), &a, &b) {
-            assert_eq!(got, Value::Float(AT as f64));
+            let Value::Decimal(avg) = got else {
+                panic!("AVG over integers is numeric, got {got:?}");
+            };
+            assert_eq!(avg.to_string(), "9007199254740992.5000");
         }
     }
 

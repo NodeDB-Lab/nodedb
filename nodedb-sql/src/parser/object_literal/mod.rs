@@ -11,8 +11,12 @@
 
 pub mod api;
 pub mod scan;
+pub mod template;
+mod typed;
 
 pub use api::{
-    parse_object_literal, parse_object_literal_array, parse_object_literal_array_complete,
-    parse_object_literal_complete,
+    ObjectTemplate, object_literal_end, parse_object_literal, parse_object_literal_array,
+    parse_object_literal_array_complete, parse_object_literal_complete,
+    parse_object_template_array_complete, parse_object_template_complete,
 };
+pub use template::Literal;

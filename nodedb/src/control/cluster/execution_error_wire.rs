@@ -73,6 +73,12 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         crate::Error::DatetimeFieldOverflow { detail } => TypedClusterError::DataPlane {
             code: DataPlaneErrorCode::DatetimeFieldOverflow { detail },
         },
+        crate::Error::InvalidArgumentForLogarithm { detail } => TypedClusterError::DataPlane {
+            code: DataPlaneErrorCode::InvalidArgumentForLogarithm { detail },
+        },
+        crate::Error::InvalidArgumentForPowerFunction { detail } => TypedClusterError::DataPlane {
+            code: DataPlaneErrorCode::InvalidArgumentForPowerFunction { detail },
+        },
         // Every other error crosses as its public numeric code and message.
         // The coordinator renders the SQLSTATE that code maps to.
         other @ (crate::Error::TxnOverlayMemoryExceeded { .. }

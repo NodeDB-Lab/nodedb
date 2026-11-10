@@ -20,6 +20,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// One MATCH binding row: each variable's typed value. A node binds its
+/// name, an edge its text, a projected column its exact stored value.
+pub type MatchBindings = HashMap<String, nodedb_types::Value>;
+
 /// A partial MATCH result that needs continuation on another shard.
 ///
 /// Contains the current variable bindings and the index of the next
@@ -33,8 +37,8 @@ pub struct PatternContinuation {
     pub target_shard: u32,
     /// Source shard that generated this continuation.
     pub source_shard: u32,
-    /// Current variable bindings (node_name → value).
-    pub bindings: HashMap<String, String>,
+    /// Current variable bindings (variable → typed value).
+    pub bindings: MatchBindings,
     /// Index of the next triple to execute in the chain.
     pub next_triple_idx: usize,
     /// The ghost node name that the target shard should start from.
@@ -51,7 +55,7 @@ pub struct ShardMatchResult {
     /// Shard that produced these results.
     pub shard_id: u32,
     /// Completed binding rows (fully matched patterns).
-    pub completed_rows: Vec<HashMap<String, String>>,
+    pub completed_rows: Vec<MatchBindings>,
     /// Partial rows that need continuation on other shards.
     pub continuations: Vec<PatternContinuation>,
 }
@@ -63,7 +67,7 @@ pub struct ShardMatchResult {
 #[derive(Debug)]
 pub struct DistributedMatchCoordinator {
     /// Completed result rows from all shards.
-    pub completed: Vec<HashMap<String, String>>,
+    pub completed: Vec<MatchBindings>,
     /// Pending continuations grouped by target shard.
     pub pending: HashMap<u32, Vec<PatternContinuation>>,
     /// Round counter (for debugging / max-round termination).
@@ -76,7 +80,7 @@ pub struct DistributedMatchCoordinator {
 pub struct ResolvedContinuationArgs {
     pub target_shard: u32,
     pub source_shard: u32,
-    pub bindings: HashMap<String, String>,
+    pub bindings: MatchBindings,
     pub next_triple_idx: usize,
     pub start_node: String,
     pub start_binding: String,
@@ -177,7 +181,7 @@ mod tests {
         let decoded: PatternContinuation = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.target_shard, 2);
         assert_eq!(decoded.start_node, "bob");
-        assert_eq!(decoded.bindings["a"], "alice");
+        assert_eq!(decoded.bindings["a"], nodedb_types::Value::from("alice"));
     }
 
     #[test]

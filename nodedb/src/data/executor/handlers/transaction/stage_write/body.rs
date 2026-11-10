@@ -77,7 +77,24 @@ impl CoreLoop {
         let value: Vec<u8> = if let Some(config) = self.doc_configs.get(&config_key)
             && write_body::rewrites_body(config)
         {
-            if let Ok(mut doc) = doc_format::decode_document(value) {
+            // A native body keeps every field's type through the rewrite, as
+            // `freeze_document_body` keeps it on the durable path. A JSON
+            // round trip would turn a Decimal, a UUID or an instant into text.
+            if crate::data::executor::response_codec::is_native_row(value)
+                && let Ok(mut doc) = doc_format::decode_document_value(value)
+            {
+                crate::data::executor::handlers::point::apply_put::materialize_native_write_body(
+                    config,
+                    &mut doc,
+                    GuardScope::Document,
+                    &self.crs_context(),
+                )
+                .map_err(crate::Error::DataPlane)?;
+                zerompk::to_msgpack_vec(&doc).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("staged native body: {e}"),
+                })?
+            } else if let Ok(mut doc) = doc_format::decode_document(value) {
                 write_body::materialize_write_body(
                     config,
                     &mut doc,

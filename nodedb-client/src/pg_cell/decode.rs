@@ -24,6 +24,15 @@ pub(crate) fn decode_cell(column: &str, ty: &Type, raw: Option<&[u8]>) -> NodeDb
     decode_bytes(ty, raw).map_err(|reason| cell_error(column, ty, raw, &reason))
 }
 
+/// Decode `text`, the PostgreSQL text form of a scalar of PG type `ty`.
+///
+/// For a value whose type the client knows from elsewhere than a binary
+/// result cell, such as a declared column read back as JSON text. Text that
+/// does not decode is an error naming the column, the PG type and the text.
+pub(crate) fn decode_text_cell(column: &str, ty: &Type, text: &str) -> NodeDbResult<Value> {
+    text::scalar(ty, text).map_err(|reason| cell_error(column, ty, text.as_bytes(), &reason))
+}
+
 fn decode_bytes(ty: &Type, raw: &[u8]) -> Result<Value, DecodeReason> {
     match *ty {
         Type::BOOL => return binary::boolean(raw),

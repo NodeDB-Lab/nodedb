@@ -82,9 +82,11 @@ pub(in crate::data::executor) fn read_manifest(
     ts_dir: &Path,
 ) -> crate::Result<Option<FlushManifest>> {
     let path = ts_dir.join(MANIFEST_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => return Err(storage(&path, "read", &e)),
     };
     decode_manifest(&path, &bytes).map(Some)

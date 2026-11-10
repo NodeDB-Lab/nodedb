@@ -7,7 +7,7 @@
 use super::merge_body::{MergedUpsert, decode_stored_row, merge_upsert_body};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::submitted_row_image;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::chain_guard::{AbandonedWrite, abandon_write};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
@@ -82,27 +82,7 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
 
-        // Gate the persist on the collection's write policy, decided
-        // against the MERGED row — the row that will exist afterwards.
-        // The insert body alone would clear a write whose actual
-        // post-image the policy never saw, which is why this branch
-        // cannot be admitted at plan time. Decided on the MessagePack
-        // form, exactly as the insert arm below decides its own body.
         let identity_column = self.identity_column(database_id, tid, collection);
-        if let Err(e) = rls_write_gate::admit_stored_row(
-            rls_write_check,
-            rls_write_gate::GatedRow {
-                body: &merged_body,
-                identity: &document_identity,
-                strict_schema: None,
-                identity_column: &identity_column,
-            },
-            tid,
-            collection,
-            &self.crs_context(),
-        ) {
-            return self.response_error(task, e);
-        }
 
         // One transaction for the body, every index that describes it,
         // and every derived write the collection's constraints imply.
@@ -111,6 +91,12 @@ impl CoreLoop {
         // column statistics all kept asserting the values it used to
         // hold, and the write landed outside any transaction a
         // constraint could join.
+        let prepared_note =
+            match self.prepare_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+                Ok(note) => note,
+                Err(error) => return self.response_error(task, error),
+            };
+
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
@@ -122,26 +108,39 @@ impl CoreLoop {
         // version's ordinal and inserts the new ones there. Its in-memory
         // undo joins this list, so an abort puts the prior nodes back.
         let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        let mut outcome = match self.apply_point_put(
-            &txn,
-            PointPutParams {
-                database_id,
-                tid,
-                collection,
-                storage_key,
-                surrogate,
-                value: &merged_body,
-                index_text: true,
-                user_roles: &task.request.user_roles,
-                enforce: true,
-                unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
-                wal_lsn: task.wal_lsn(),
-                resolved_targets: hook_ctx.resolved_targets,
-                guards: crate::data::executor::enforcement::typeguard::GuardScope::Assigned(
-                    &assigned,
-                ),
-            },
-        ) {
+        let mut outcome = match self
+            .prepare_point_put(
+                &txn,
+                PointPutParams {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                    surrogate,
+                    value: &merged_body,
+                    index_text: true,
+                    user_roles: &task.request.user_roles,
+                    enforce: true,
+                    unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
+                    wal_lsn: task.wal_lsn(),
+                    resolved_targets: hook_ctx.resolved_targets,
+                    guards: crate::data::executor::enforcement::typeguard::GuardScope::Assigned(
+                        &assigned,
+                    ),
+                },
+            )
+            .and_then(|prepared| {
+                rls_write_gate::admit_installed_row(
+                    rls_write_check,
+                    prepared.installed(),
+                    &document_identity,
+                    &identity_column,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                )?;
+                self.apply_prepared_point_put(&txn, prepared)
+            }) {
             Ok(o) => o,
             Err(e) => {
                 // Some rejections land after the row was cached;
@@ -167,9 +166,14 @@ impl CoreLoop {
             self,
             &txn,
             hook_ctx,
-            WriteImages::Update {
-                old: ImageBody::Stored(&current_bytes),
-                new: ImageBody::Submitted(&merged_body),
+            match outcome.prior_value.as_deref() {
+                Some(old) => WriteImages::Update {
+                    old: ImageBody::Stored(old),
+                    new: ImageBody::Stored(&outcome.installed.stored),
+                },
+                None => WriteImages::Insert {
+                    new: ImageBody::Stored(&outcome.installed.stored),
+                },
             },
         ) {
             Ok(o) => o,
@@ -185,6 +189,23 @@ impl CoreLoop {
         };
         let target_write_set = write_hook::target_write_set(&enforcement.target_writes);
         let target_writes = enforcement.target_writes;
+
+        if let Err(error) = self.check_source_and_targets_unique(
+            &txn,
+            database_id,
+            tid,
+            (collection, storage_key),
+            &target_writes,
+        ) {
+            let error = abandon_write(
+                self,
+                AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                    .undo(memory_undo)
+                    .targets(target_writes),
+                error,
+            );
+            return self.response_error(task, error);
+        }
 
         // Settled before the commit: the merged row's old amount comes
         // off the group and its new one goes on, so an overwrite that
@@ -202,7 +223,77 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
+        let stored_bytes = &outcome.installed.stored;
+        let prepared_response = match returning {
+            // The MERGED body, not the caller's: on a conflict the
+            // submitted values are only part of what the row now holds,
+            // so echoing them would report a row that does not exist.
+            Some(spec) => self.prepare_stored_returning_response(
+                task,
+                spec,
+                rls_filters,
+                strict_schema,
+                &identity_column,
+                &[(&document_identity, stored_bytes.as_slice())],
+            ),
+            None => Ok(self.response_affected(task, 1)),
+        };
+        let mut response = match prepared_response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = abandon_write(
+                    self,
+                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                        .undo(memory_undo)
+                        .targets(target_writes),
+                    error,
+                );
+                return self.response_error(task, error);
+            }
+        };
+        // `wal_append_document_op` mints no pre-dispatch record for an
+        // upsert, so the merged row is journalled after apply, from the body
+        // `apply_point_put` took.
+        let event = match self.prepare_installed_put_event(
+            &WriteSetRow {
+                database_id,
+                tid,
+                collection,
+                identity: document_identity.clone(),
+            },
+            &outcome.installed,
+            outcome.prior_value.as_deref(),
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                let error = abandon_write(
+                    self,
+                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                        .undo(memory_undo)
+                        .targets(target_writes),
+                    error,
+                );
+                return self.response_error(task, error);
+            }
+        };
+        let image = crate::bridge::envelope::WriteSetEntry::installed_put(
+            surrogate.as_u32(),
+            document_identity.clone(),
+            outcome.installed.clone(),
+            event.clone(),
+        );
+        response.write_set = vec![image];
+        // Derived target rows live in a different collection, so each
+        // carries its own `Some(collection)` and homes to that
+        // collection's vShard.
+        response.write_set.extend(target_write_set);
+
         if let Err(e) = txn.commit() {
+            self.seal_journalled();
+            self.fail_stop_core(
+                crate::data::executor::core_loop::fail_stop::FailStopCause::WriteSetUnpersisted,
+                &format!("document commit outcome is unknown: {e}"),
+            );
             let e = abandon_write(
                 self,
                 AbandonedWrite::row(database_id, tid, collection, &storage_key)
@@ -217,51 +308,15 @@ impl CoreLoop {
         }
 
         // Record the committed row's version, as a point put does.
-        if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32()) {
-            return self.response_error(task, e);
-        }
+        self.publish_surrogate_write(prepared_note, outcome.installed.version.sys_from);
 
         // `current_bytes` is the pre-merge stored row, already read
         // above — thread it to the Event Plane as `old_value` so the
         // emitted WriteOp resolves to Update.
-        let stored_bytes = outcome.stored_value;
-        self.emit_put_event(
-            task,
-            tid,
-            collection,
-            document_identity.clone(),
-            &stored_bytes,
-            Some(&current_bytes),
-        );
+        self.emit_prepared_put_event(task, collection, document_identity.clone(), &event);
 
         // An upsert always writes the row: one row affected.
-        let mut response = match returning {
-            // The MERGED body, not the caller's: on a conflict the
-            // submitted values are only part of what the row now holds,
-            // so echoing them would report a row that does not exist.
-            Some(spec) => self.stored_returning_response(
-                task,
-                spec,
-                rls_filters,
-                strict_schema,
-                &identity_column,
-                &[(&document_identity, stored_bytes.as_slice())],
-            ),
-            None => self.response_affected(task, 1),
-        };
-        // `wal_append_document_op` mints no pre-dispatch record for an
-        // upsert, so the merged row is journalled after apply, from the body
-        // `apply_point_put` took.
-        response.write_set = vec![submitted_row_image(
-            surrogate.as_u32(),
-            document_identity,
-            merged_body,
-            outcome.version_sys_from,
-        )];
-        // Derived target rows live in a different collection, so each
-        // carries its own `Some(collection)` and homes to that
-        // collection's vShard.
-        response.write_set.extend(target_write_set);
+        response.watermark_lsn = self.watermark;
         response
     }
 }

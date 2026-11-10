@@ -42,23 +42,9 @@ row for an upsert's conflict branch. A row that fails the predicate fails the
 whole statement; it is never silently skipped, so an affected-row count never
 reports a write that did not happen.
 
-Document `UPDATE`, `DELETE`, `UPSERT`, `MERGE`, and `UPDATE ... FROM` build that
-image inside the storage engine — the row is read, the statement's changes are
-applied, and only then does the row the predicate decides exist. The compiled
-predicate travels with the query plan and is evaluated there, against the exact
-bytes about to be written, including any generated columns recomputed by the
-statement. A predicate may therefore reference a column the statement never
-mentions.
+Document `INSERT`, `UPDATE`, `DELETE`, `UPSERT`, `MERGE`, and `UPDATE ... FROM` build their policy image inside the storage engine. The compiled predicate travels with the query plan and evaluates the actual materialized row before persistence. Defaults, coercions, typeguards, and generated columns therefore participate in the decision. A denied row rolls back its statement, including every conforming row in the same batch.
 
-Columnar, timeseries, and spatial collections are decided the same way. A plain
-`INSERT` carries every row it will persist, so the policy decides those rows
-before the statement is dispatched and a rejected batch applies nothing — not
-even the conforming rows sharing it. An `UPDATE`, a `DELETE`, and an
-`ON CONFLICT DO UPDATE` build their image inside the engine, so the compiled
-predicate travels with the plan and is evaluated against the row about to be
-written or removed. Timeseries ingest is decided per parsed row, and that check
-covers every ingest path — SQL, JSON, MessagePack, and the line-protocol
-listener alike.
+Columnar, timeseries, and spatial collections evaluate their compiled write predicates against the rows about to be written or removed. Timeseries ingest checks each parsed row across SQL, JSON, MessagePack, and line-protocol ingest.
 
 ### When the decision happens inside a transaction
 

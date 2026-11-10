@@ -94,9 +94,11 @@ pub(in crate::data::executor) fn read_ts_schema(
     dir: &Path,
 ) -> crate::Result<Option<ColumnarSchema>> {
     let path = dir.join(TS_SCHEMA_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => return Err(schema_error(&path, "read", &e)),
     };
     let Some((&version, body)) = bytes.split_first() else {

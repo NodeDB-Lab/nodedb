@@ -91,18 +91,18 @@ pub(super) fn extract_number_after(upper: &str, keyword: &str) -> Result<Option<
     Ok(Some(v))
 }
 
-/// Convert a JSON value to Decimal for summation.
+/// Convert a typed cell to Decimal for summation. A Decimal reads exactly.
 ///
 /// Non-numeric values (null, objects, arrays, unparseable strings, NaN, Infinity)
 /// are treated as zero — TREE_SUM skips them silently.
-pub(super) fn json_to_decimal(v: &serde_json::Value) -> rust_decimal::Decimal {
-    if let Some(i) = v.as_i64() {
-        rust_decimal::Decimal::from(i)
-    } else if let Some(f) = v.as_f64() {
-        rust_decimal::Decimal::try_from(f).unwrap_or(rust_decimal::Decimal::ZERO)
-    } else if let Some(s) = v.as_str() {
-        s.parse().unwrap_or(rust_decimal::Decimal::ZERO)
-    } else {
-        rust_decimal::Decimal::ZERO
+pub(super) fn value_to_decimal(v: &nodedb_types::Value) -> rust_decimal::Decimal {
+    match v {
+        nodedb_types::Value::Decimal(d) => *d,
+        nodedb_types::Value::Integer(i) => rust_decimal::Decimal::from(*i),
+        nodedb_types::Value::Float(f) => {
+            rust_decimal::Decimal::try_from(*f).unwrap_or(rust_decimal::Decimal::ZERO)
+        }
+        nodedb_types::Value::String(s) => s.parse().unwrap_or(rust_decimal::Decimal::ZERO),
+        _ => rust_decimal::Decimal::ZERO,
     }
 }

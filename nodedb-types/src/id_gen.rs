@@ -31,6 +31,31 @@ pub fn is_uuid(s: &str) -> bool {
     uuid::Uuid::parse_str(s).is_ok()
 }
 
+/// The canonical text of a UUID: lowercase, hyphenated.
+///
+/// Accepts the spellings PostgreSQL's `uuid` input accepts: hyphenated,
+/// 32 plain hex digits, braced, upper or lower case. `None` when `s` is no
+/// UUID.
+pub fn canonical_uuid(s: &str) -> Option<String> {
+    uuid::Uuid::parse_str(s.trim())
+        .ok()
+        .map(|u| u.hyphenated().to_string())
+}
+
+/// The canonical text of the UUID in a 16-byte payload, the PostgreSQL
+/// binary `uuid` form. `None` when `bytes` is not 16 bytes long.
+pub fn uuid_from_bytes(bytes: &[u8]) -> Option<String> {
+    uuid::Uuid::from_slice(bytes)
+        .ok()
+        .map(|u| u.hyphenated().to_string())
+}
+
+/// The 16 bytes of a UUID's text, the PostgreSQL binary `uuid` form.
+/// `None` when `s` is no UUID.
+pub fn uuid_to_bytes(s: &str) -> Option<[u8; 16]> {
+    uuid::Uuid::parse_str(s.trim()).ok().map(|u| *u.as_bytes())
+}
+
 /// Extract the version from a UUID string (1-7, or 0 if invalid).
 pub fn uuid_version(s: &str) -> u8 {
     uuid::Uuid::parse_str(s)
@@ -198,6 +223,23 @@ pub fn generate_by_type(id_type: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uuid_text_and_bytes_are_canonical() {
+        let canonical = "550e8400-e29b-41d4-a716-446655440000";
+        for spelling in [
+            canonical,
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "{550e8400-e29b-41d4-a716-446655440000}",
+        ] {
+            assert_eq!(canonical_uuid(spelling).as_deref(), Some(canonical));
+        }
+        assert_eq!(canonical_uuid("not-a-uuid"), None);
+        let bytes = uuid_to_bytes(canonical).expect("valid uuid");
+        assert_eq!(uuid_from_bytes(&bytes).as_deref(), Some(canonical));
+        assert_eq!(uuid_from_bytes(&bytes[..15]), None);
+    }
 
     #[test]
     fn uuid_v4_valid() {

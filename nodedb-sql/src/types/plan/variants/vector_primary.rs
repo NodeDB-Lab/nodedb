@@ -10,6 +10,7 @@ use super::super::row_types::{VectorPrimaryInsertIntent, VectorPrimaryRow};
 /// Payload of [`SqlPlan::VectorPrimaryInsert`](crate::types::SqlPlan::VectorPrimaryInsert).
 #[derive(Debug, Clone)]
 pub struct VectorPrimaryInsertPlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     /// Vector column name (matches `VectorPrimaryConfig::vector_field`).
     /// Plumbed to the direct write op so the Data Plane keys its HNSW
@@ -44,6 +45,7 @@ pub struct VectorPrimaryInsertPlan {
 /// Payload of [`SqlPlan::VectorPrimaryDelete`](crate::types::SqlPlan::VectorPrimaryDelete).
 #[derive(Debug, Clone)]
 pub struct VectorPrimaryDeletePlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     /// Vector column name; keys the HNSW index the rows live in.
     pub field: String,
@@ -75,7 +77,7 @@ pub struct VectorPrimaryUpdatePlan {
     pub assignments: Vec<(String, SqlExpr)>,
     pub filters: Vec<Filter>,
     pub target_keys: Vec<SqlValue>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
     /// Resolved primary-key column name. See `Insert::primary_key`.
     pub primary_key: Option<String>,
 }

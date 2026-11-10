@@ -60,6 +60,7 @@ pub use self::connection::{
 pub use self::cross_shard_mode::{CrossShardTxnMode, parse_value as parse_cross_shard_value};
 pub use self::deadline::{
     StatementDeadline, statement_budget, statement_deadline, statement_deadline_ms,
+    statement_total_budget,
 };
 pub use self::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 pub use self::params::{parse_set_command, parse_show_command};

@@ -252,13 +252,14 @@ async fn native_one_slice_of_two_verbs_answers_mixed_with_the_sum() {
     assert_eq!(balance(&server, "acc").await, "1", "e1 is gone");
 }
 
-/// `RETURNING` attaches to every task of a request. One transaction answers one
-/// set of rows, so two such tasks are refused whole, over two slices or one.
+/// Each write of a request owns its own `RETURNING` clause. One transaction
+/// answers one set of rows, so two writes that each carry one are refused
+/// whole, over two slices or one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn returning_on_several_calvin_tasks_is_refused_whole() {
     let (server, other) = fixture().await;
     let sql = format!(
-        "{}; {} RETURNING v",
+        "{} RETURNING v; {} RETURNING v",
         update(ONE, "r1"),
         update(&other, "r1")
     );

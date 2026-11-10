@@ -27,7 +27,6 @@ use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::retry::retry_on_schema_change;
-use crate::control::server::shared::returning;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -112,12 +111,7 @@ async fn plan_authorize_and_admit_once(
     let query_ctx = request.query_ctx;
     let identity = request.scope.identity();
     let auth_ctx = request.scope.auth();
-    // The planner does not parse a DML `RETURNING` clause, so it is split off
-    // here. The item text resolves inside the planner against the planned
-    // target, which announces the projection and attaches the Data-Plane spec
-    // to every task. Planned with the clause still in the text, the statement
-    // drops it and answers a count with no rows.
-    let (sql, returning_items) = returning::strip_returning(request.sql)?;
+    let sql = request.sql;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;
@@ -138,13 +132,7 @@ async fn plan_authorize_and_admit_once(
             ),
         };
         let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
-            .plan_sql_with_rls_and_versions(
-                &sql,
-                tenant_id,
-                database_id,
-                &security,
-                returning_items.as_deref(),
-            )
+            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security)
             .await?;
         (tasks, output_schema, versions)
     };

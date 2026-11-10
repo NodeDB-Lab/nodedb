@@ -11,7 +11,7 @@ use nodedb_types::Surrogate;
 
 use super::super::array_read_rows::is_cluster_array_read;
 
-use crate::control::server::exchange::full_scan::{ScanSide, full_scan_plan_for_collection};
+use crate::control::server::exchange::full_scan::{ScanSide, read_set_scan_plan};
 use crate::control::server::exchange::gather::gather_all_vshards;
 use crate::control::server::exchange::gather_outcome::GatherOutcome;
 use crate::control::server::exchange::owning_core::gather_single_owning_core;
@@ -22,7 +22,7 @@ use crate::control::server::response_translate::vector::filter_vector_hits;
 use crate::control::server::shared::authorization::gathered_sources;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec::{
-    flatten_hybrid_hits_to_relational_rows, flatten_to_relational_rows,
+    flatten_hybrid_hits_to_relational_rows, flatten_rows_in_context,
     flatten_vector_hits_to_relational_rows, hybrid_hit_surrogates, vector_hit_surrogates,
 };
 
@@ -241,6 +241,8 @@ pub(in crate::control::server::exchange::resolve) async fn materialize_child_row
     // `collection` and `hit_kind` are captured before the gather
     // consumes `child`.
     let hit_kind = classify_hit_shape(&child);
+    // The row shape storage rows arrive in, from the child plan.
+    let row_context = crate::bridge::envelope::describe_row_context(&child);
     let hit_cut = vector_hit_cut(&child);
     // Extract the collection from the hit op directly: `collection()`
     // has no arm for sparse / multi-vector search, so it will yield
@@ -277,14 +279,14 @@ pub(in crate::control::server::exchange::resolve) async fn materialize_child_row
         gather_all_vshards(state, child, ctx).await?
     };
 
-    if let Some(coll) = probe_collection
-        && let Some(scan_plan) = full_scan_plan_for_collection(
+    // A collection the catalog no longer holds records an absence read.
+    if let Some(coll) = probe_collection {
+        let scan_plan = read_set_scan_plan(
             state,
             database_id,
             tenant_id,
             ScanSide::read_set_only(&coll),
-        )?
-    {
+        )?;
         captures.push(DistributedReadCapture {
             scan_plan,
             read_vshards: outcome.read_vshards.clone(),
@@ -328,7 +330,9 @@ pub(in crate::control::server::exchange::resolve) async fn materialize_child_row
             })
         }
         HitShape::ArrayRows => outcome.merged_array()?,
-        HitShape::None => flatten_to_relational_rows(&outcome.merged_rows(as_aggregate)?),
+        HitShape::None => {
+            flatten_rows_in_context(&outcome.merged_rows(as_aggregate)?, row_context)?
+        }
     };
     Ok(ChildRows::Rows { rows, sources })
 }

@@ -8,13 +8,13 @@ use super::clauses::{parse_order_by, parse_return, parse_where};
 use super::helpers::{bad, find_keyword_all, is_word_byte, split_top_level_commas, top_level_mask};
 
 /// The clauses after the patterns, in the order they must appear.
-const CLAUSES: [&str; 5] = ["IN", "WHERE", "RETURN", "ORDER BY", "LIMIT"];
+const CLAUSES: [&str; 6] = ["IN", "WHERE", "RETURN", "ORDER BY", "LIMIT", "OFFSET"];
 
 /// Parse a MATCH query string into a `MatchQuery` AST.
 ///
 /// Grammar: `[OPTIONAL] MATCH <patterns> ... [IN <collection>]
 /// [WHERE <predicates>] [RETURN <columns>] [ORDER BY <columns>]
-/// [LIMIT <n>]`, with an optional trailing `;`. Each clause appears at most
+/// [LIMIT <n>] [OFFSET <n>]`, with an optional trailing `;`. Each clause appears at most
 /// once and in this order. Clause keywords match only at the top level,
 /// never inside a literal, a quoted name, or brackets. Any text a clause
 /// cannot read is a `BadRequest` error.
@@ -60,6 +60,7 @@ pub fn parse(sql: &str) -> crate::Result<MatchQuery> {
         return_columns: Vec::new(),
         distinct: false,
         limit: None,
+        offset: None,
         order_by: Vec::new(),
         collection: None,
     };
@@ -76,16 +77,40 @@ pub fn parse(sql: &str) -> crate::Result<MatchQuery> {
                 query.distinct = distinct;
             }
             3 => query.order_by = parse_order_by(section)?,
-            _ => {
-                query.limit = Some(section.parse::<usize>().map_err(|_| {
-                    bad(format!(
-                        "MATCH: LIMIT needs a non-negative integer, found '{section}'"
-                    ))
-                })?);
-            }
+            4 => query.limit = Some(parse_count("LIMIT", section)?),
+            _ => query.offset = Some(parse_count("OFFSET", section)?),
         }
     }
+    check_edge_property_access(&query)?;
     Ok(query)
+}
+
+/// The non-negative row count after LIMIT or OFFSET.
+fn parse_count(keyword: &str, section: &str) -> crate::Result<usize> {
+    section.parse::<usize>().map_err(|_| {
+        bad(format!(
+            "MATCH: {keyword} needs a non-negative integer, found '{section}'"
+        ))
+    })
+}
+
+/// A relationship property `r.field` reads one edge's property object. It
+/// needs a fixed-length relationship, because a variable-length one binds a
+/// path of edges.
+fn check_edge_property_access(query: &MatchQuery) -> crate::Result<()> {
+    let vars = query.edge_property_vars();
+    for edge in query.edge_bindings() {
+        if let Some(name) = edge.name.as_deref()
+            && vars.contains(name)
+            && edge.is_variable_length()
+        {
+            return Err(bad(format!(
+                "MATCH: '{name}' is a variable-length relationship, which binds a path; \
+                 a property such as '{name}.<field>' needs a fixed-length relationship"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read the collection after `IN`: one quoted string or one bare word.
@@ -501,5 +526,34 @@ mod tests {
         let q = parse("MATCH (a)-[:KNOWS]->(b) WHERE a.name = 'Alice' AND b.age > 30 RETURN b")
             .unwrap();
         assert_eq!(q.where_predicates.len(), 2);
+    }
+
+    /// A relationship property reads a fixed-length relationship:
+    /// `r.price` in RETURN, WHERE or ORDER BY.
+    #[test]
+    fn relationship_properties_need_a_fixed_length_edge() {
+        let q = parse("MATCH (a)-[r:KNOWS]->(b) IN 'col' WHERE r.price > 12 RETURN r.price")
+            .expect("a fixed-length relationship property parses");
+        assert_eq!(
+            q.edge_property_vars(),
+            std::collections::HashSet::from(["r".to_string()])
+        );
+        let varlen = parse("MATCH (a)-[r:KNOWS*1..3]->(b) IN 'col' RETURN r.price")
+            .expect_err("a path has no single property object");
+        assert!(varlen.to_string().contains("variable-length"), "{varlen}");
+        // The crossed edge names its own collection, so no IN is needed.
+        parse("MATCH (a)-[r:KNOWS]->(b) WHERE r.price > 1 RETURN b")
+            .expect("a relationship property without IN");
+        // A node property and a bare path variable need no fixed length.
+        parse("MATCH (a)-[r:KNOWS*1..3]->(b) RETURN a.name, r").expect("no relationship property");
+    }
+
+    #[test]
+    fn limit_and_offset_parse_in_order() {
+        let q = parse("MATCH (a)-[:K]->(b) RETURN b ORDER BY b DESC LIMIT 5 OFFSET 2").unwrap();
+        assert_eq!((q.limit, q.offset), (Some(5), Some(2)));
+        assert!(!q.order_by[0].ascending);
+        err("MATCH (a)-[:K]->(b) RETURN b OFFSET 2 LIMIT 5");
+        err("MATCH (a)-[:K]->(b) RETURN b OFFSET x");
     }
 }

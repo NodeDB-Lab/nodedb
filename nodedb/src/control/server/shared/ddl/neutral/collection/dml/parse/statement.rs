@@ -82,6 +82,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
                         &coll_name,
                         coll_type,
                         &crs,
+                        tenant_id,
                     ),
                     returning_clause,
                 );
@@ -97,7 +98,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     }
 
     with_returning(
-        parse_values_form(sql, keyword, &coll_name, coll_type, &crs),
+        parse_values_form(sql, keyword, &coll_name, coll_type, &crs, tenant_id),
         returning_clause,
     )
 }
@@ -141,6 +142,7 @@ fn parse_values_form(
     coll_name: &str,
     coll_type: Option<nodedb_types::CollectionType>,
     crs: &nodedb_crs::CrsContext<'_>,
+    tenant_id: crate::types::TenantId,
 ) -> Option<Result<ParsedInsert, DdlError>> {
     let first_open = match sql.find('(') {
         Some(p) => p,
@@ -170,7 +172,7 @@ fn parse_values_form(
     };
     let mut rows = Vec::with_capacity(tuples.len());
     for tuple in tuples {
-        match parse_row(&columns, tuple, crs) {
+        match parse_row(&columns, tuple, crs, tenant_id) {
             Ok(row) => rows.push(row),
             Err(error) => return Some(Err(error)),
         }
@@ -190,8 +192,9 @@ fn parse_row(
     columns: &[&str],
     tuple: &str,
     crs: &nodedb_crs::CrsContext<'_>,
+    tenant_id: crate::types::TenantId,
 ) -> Result<ParsedRow, DdlError> {
-    let values: Vec<&str> = split_values(tuple);
+    let values: Vec<&str> = split_values(tuple).map_err(|detail| ddl_err("42601", detail))?;
     if columns.len() != values.len() {
         return Err(ddl_err(
             "42601",
@@ -213,7 +216,9 @@ fn parse_row(
         {
             doc_id = val.trim_matches('\'').to_string();
         }
-        fields.insert(col.to_string(), parse_sql_value(val, crs));
+        let value = parse_sql_value(val, crs)
+            .map_err(|error| DdlError::from_sql_error(error, tenant_id))?;
+        fields.insert(col.to_string(), value);
     }
     if doc_id.is_empty() {
         doc_id = nodedb_types::id_gen::uuid_v7();
@@ -234,6 +239,7 @@ mod tests {
             "tﬀﬀ",
             None,
             &nodedb_crs::CrsContext::builtin_only(),
+            crate::types::TenantId::new(1),
         )
         .expect("statement should be recognized")
         .expect("statement should parse");
@@ -252,6 +258,7 @@ mod tests {
             "c",
             None,
             &nodedb_crs::CrsContext::builtin_only(),
+            crate::types::TenantId::new(1),
         )
         .expect("statement should be recognized")
         .expect("statement should parse");

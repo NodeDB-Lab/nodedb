@@ -102,7 +102,7 @@ fn apply_v_running_aggregate(
             let result = match spec.func_name.as_str() {
                 "sum" => running_sum.sum()?,
                 "count" => Value::Integer(running_count as i64),
-                "avg" => running_sum.avg()?,
+                "avg" => running_sum.avg_value()?,
                 "min" | "max" => running_extreme.clone().unwrap_or(Value::Null),
                 "first_value" => first_val,
                 "last_value" => last_val,
@@ -203,7 +203,7 @@ fn aggregate_v_slice(
             };
             Value::Integer(counted as i64)
         }
-        "avg" => frame_sum().avg()?,
+        "avg" => frame_sum().avg_value()?,
         "min" | "max" => {
             let want_max = spec.func_name == "max";
             let mut best: Option<&Value> = None;
@@ -509,8 +509,23 @@ mod tests {
         let mut rows = rows_v(&[4, 8, 12]);
         let avg = agg_spec("avg", f, vec![(col("v"), true)]);
         run_agg(&mut rows, &cols, &avg);
-        let avgs: Vec<f64> = rows.iter().map(|r| r[1].as_f64().unwrap()).collect();
-        assert_eq!(avgs, vec![4.0, 6.0, 8.0]);
+        // PostgreSQL: a running avg over integers is numeric at the division
+        // scale, 16 fractional digits here.
+        let avgs: Vec<String> = rows
+            .iter()
+            .map(|r| match &r[1] {
+                Value::Decimal(d) => d.to_string(),
+                other => panic!("avg over integers is numeric, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            avgs,
+            vec![
+                "4.0000000000000000",
+                "6.0000000000000000",
+                "8.0000000000000000"
+            ]
+        );
     }
 
     #[test]
@@ -588,7 +603,11 @@ mod tests {
             &cols,
             &agg_spec("avg", whole_partition(), vec![]),
         );
-        assert_eq!(rows[0][1], Value::Float(9_007_199_254_740_992.0));
+        // PostgreSQL: avg over these bigints is 9007199254740992.5000.
+        assert_eq!(
+            rows[0][1],
+            Value::Decimal(rust_decimal::Decimal::from_str_exact("9007199254740992.5000").unwrap())
+        );
     }
 
     #[test]

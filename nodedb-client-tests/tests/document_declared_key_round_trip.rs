@@ -134,10 +134,13 @@ async fn documents_round_trip_under_a_declared_key() {
     let [row] = documents.rows.as_slice() else {
         panic!("one row matches: {:?}", documents.rows);
     };
-    let Some(Value::String(json)) = row.first() else {
-        panic!("the document cell is JSON text: {row:?}");
+    // A parameterless SELECT decodes by its column type: a `json` column is
+    // the decoded object, a text column its JSON text.
+    let fields: serde_json::Value = match row.first() {
+        Some(Value::String(json)) => sonic_rs::from_str(json).expect("the cell is JSON"),
+        Some(object @ Value::Object(_)) => serde_json::Value::from(object.clone()),
+        other => panic!("the document cell is a JSON object: {other:?}"),
     };
-    let fields: serde_json::Value = sonic_rs::from_str(json).expect("the cell is JSON");
     assert_eq!(
         fields,
         serde_json::json!({"sku": "p2", "name": "ink", "qty": 7}),

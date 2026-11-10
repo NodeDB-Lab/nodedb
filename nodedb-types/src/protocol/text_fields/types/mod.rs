@@ -99,7 +99,7 @@
 //! 86  list_index
 //! 87  list_from_index
 //! 88  list_to_index
-//! 89  list_fields_json
+//! 89  list_fields
 //! 90  vector_dim
 //! 91  text_mode
 //! 92  allowed_ids

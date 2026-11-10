@@ -19,6 +19,7 @@ use crate::control::security::audit::AuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::permission::PermissionStore;
 use crate::control::security::role::RoleStore;
+use crate::control::server::exchange::DistributedReadCapture;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -29,8 +30,25 @@ use super::temporal::extract_system_as_of_ordinal;
 pub(in crate::control::server) enum CloneReadOutcome {
     /// No interception needed — caller must dispatch normally.
     Passthrough,
-    /// The read was fully handled by the clone path. Caller uses this response.
-    Handled(Response),
+    /// The read was fully handled by the clone path. Caller uses this answer.
+    Handled(CloneReadAnswer),
+}
+
+/// A clone read's response and the distributed reads it gathered. A
+/// transaction records the captures so commit validates every collection
+/// the read touched.
+pub(in crate::control::server) struct CloneReadAnswer {
+    pub response: Response,
+    pub distributed_reads: Vec<DistributedReadCapture>,
+}
+
+impl CloneReadAnswer {
+    fn answered(response: Response) -> Self {
+        Self {
+            response,
+            distributed_reads: Vec::new(),
+        }
+    }
 }
 
 /// Inputs for [`maybe_intercept_clone_read`] — one struct because the gate
@@ -44,12 +62,20 @@ pub(in crate::control::server) struct CloneReadInterceptParams<'a> {
     pub permissions: &'a PermissionStore,
     pub roles: &'a RoleStore,
     pub emitter: &'a dyn AuditEmitter,
+    /// Whether every gathered leg confirms its group where it is served.
+    pub linearizable: bool,
 }
 
 /// Intercept a single `Read` task for a cloned collection.
 pub(in crate::control::server) async fn maybe_intercept_clone_read(
     params: CloneReadInterceptParams<'_>,
 ) -> crate::Result<CloneReadOutcome> {
+    // A set operation reads each branch's collection through its own clone.
+    // Boxed: the branch reads resolve and dispatch whole plans, and inlining
+    // that future into every caller nests past the layout limit.
+    if let Some(answer) = Box::pin(super::set_op::read_set_op_through_clone(&params)).await? {
+        return Ok(CloneReadOutcome::Handled(answer));
+    }
     let CloneReadInterceptParams {
         state,
         task,
@@ -58,6 +84,7 @@ pub(in crate::control::server) async fn maybe_intercept_clone_read(
         permissions,
         roles,
         emitter,
+        linearizable: _,
     } = params;
     // The resolver maps the `AS OF` cut to an LSN only for a live clone.
     let resolve_params = CloneReadParams {
@@ -76,7 +103,9 @@ pub(in crate::control::server) async fn maybe_intercept_clone_read(
                 clone_created_at = %note.clone_created_at,
                 "clone read predates clone creation — returning empty result"
             );
-            Ok(CloneReadOutcome::Handled(empty_response(state)))
+            Ok(CloneReadOutcome::Handled(CloneReadAnswer::answered(
+                empty_response(state),
+            )))
         }
         ResolveOutcome::Augmented {
             target_task,
@@ -101,7 +130,9 @@ pub(in crate::control::server) async fn maybe_intercept_clone_read(
                 target_collection_key: &target_collection_key,
             })
             .await?;
-            Ok(CloneReadOutcome::Handled(response))
+            Ok(CloneReadOutcome::Handled(CloneReadAnswer::answered(
+                response,
+            )))
         }
     }
 }

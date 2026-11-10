@@ -131,6 +131,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert!(
             to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
@@ -255,6 +256,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert!(
             to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &point_put)

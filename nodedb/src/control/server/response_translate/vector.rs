@@ -226,8 +226,9 @@ fn flatten_hits(hits: &[Hit]) -> crate::Result<FlattenedHits> {
     // payload columns. The base hit fields stay top-level; payload fields are
     // serialized as JSON-style siblings.
     //
-    // `body` is BARE (standard) msgpack: the Data Plane normalizes every
-    // attached body through the shared sparse-body normalizer, which resolves a
+    // `body` is a document body: a BARE (standard) msgpack map, or a native
+    // object `[7, {...}]`. The Data Plane normalizes every attached body
+    // through the shared sparse-body normalizer, which resolves a
     // vector-primary collection's `zerompk` TAGGED sidecar to the same shape a
     // classic document body already has. That is the one contract — the gather
     // path's `flatten_vector_hits_to_relational_rows` reads it identically.
@@ -242,15 +243,21 @@ fn flatten_hits(hits: &[Hit]) -> crate::Result<FlattenedHits> {
         // Body fields go first, so the document's own `id` field wins over
         // the surrogate. Only a slow-path fetch attaches a body. A stored
         // body that does not decode is corruption and fails the response.
+        // A native body renders through the typed-value renderer.
         if let Some(ref body) = h.body {
-            let decoded =
-                nodedb_types::json_from_msgpack(body).map_err(|e| crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!(
-                        "vector hit {} carries a stored body that does not decode: {e}",
-                        h.id
-                    ),
-                })?;
+            let native = crate::data::executor::response_codec::render_native_body_json(body)?;
+            let decoded = match native {
+                Some(json) => json,
+                None => nodedb_types::json_from_msgpack(body).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!(
+                            "vector hit {} carries a stored body that does not decode: {e}",
+                            h.id
+                        ),
+                    }
+                })?,
+            };
             if let serde_json::Value::Object(map) = decoded {
                 for (k, v) in map {
                     obj.insert(k, v);
@@ -285,4 +292,96 @@ fn flatten_hits(hits: &[Hit]) -> crate::Result<FlattenedHits> {
         rows.push(obj);
     }
     Ok(FlattenedHits { rows, unnamed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::Value;
+
+    fn typed_body() -> Value {
+        Value::Object(
+            [
+                ("id".to_owned(), Value::String("r1".into())),
+                (
+                    "price".to_owned(),
+                    Value::Decimal("123.45".parse().unwrap()),
+                ),
+                (
+                    "uid".to_owned(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                (
+                    "seen".to_owned(),
+                    Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                        1_700_000_000_000_000,
+                    )),
+                ),
+                (
+                    "meta".to_owned(),
+                    Value::Object([("k".to_owned(), Value::Integer(1))].into()),
+                ),
+                (
+                    "tags".to_owned(),
+                    Value::Array(vec![Value::Integer(7), Value::String("x".into())]),
+                ),
+            ]
+            .into(),
+        )
+    }
+
+    fn hit(body: Vec<u8>) -> Hit {
+        Hit {
+            id: nodedb_types::StorageKey::for_surrogate(Surrogate::new(5)).to_string(),
+            distance: 0.5,
+            doc_id: None,
+            body: Some(body),
+        }
+    }
+
+    /// A native body renders as `value_to_wire_json` renders its typed
+    /// value; a plain body renders unchanged; a malformed native body fails
+    /// the response.
+    #[test]
+    fn a_native_body_renders_as_its_typed_value() {
+        let native = zerompk::to_msgpack_vec(&typed_body()).unwrap();
+        let plain = nodedb_types::value_to_msgpack(&typed_body()).unwrap();
+        let native_rows = flatten_hits(&[hit(native)]).unwrap();
+        let plain_rows = flatten_hits(&[hit(plain.clone())]).unwrap();
+        assert!(native_rows.unnamed.is_empty());
+        let row = &native_rows.rows[0];
+        let serde_json::Value::Object(typed) =
+            crate::util::wire_json::value_to_wire_json(&typed_body())
+        else {
+            panic!("typed body is an object");
+        };
+        for (column, value) in &typed {
+            assert_eq!(row.get(column), Some(value), "column {column}");
+        }
+        assert_eq!(row["id"], "r1");
+        assert_eq!(row["price"], "123.45");
+        assert_eq!(row["seen"], "2023-11-14T22:13:20.000000Z");
+        assert_eq!(plain_rows.rows[0]["price"], "123.45");
+        let serde_json::Value::Object(plain_json) =
+            nodedb_types::json_from_msgpack(&plain).unwrap()
+        else {
+            panic!("plain body is an object");
+        };
+        for (column, value) in &plain_json {
+            assert_eq!(
+                plain_rows.rows[0].get(column),
+                Some(value),
+                "column {column}"
+            );
+        }
+        assert_eq!(row["uid"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(row["meta"], serde_json::json!({"k": 1}));
+        assert_eq!(row["tags"], serde_json::json!([7, "x"]));
+
+        let malformed = vec![0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
+        assert!(matches!(
+            flatten_hits(&[hit(malformed)]),
+            Err(crate::Error::Serialization { .. })
+        ));
+    }
 }

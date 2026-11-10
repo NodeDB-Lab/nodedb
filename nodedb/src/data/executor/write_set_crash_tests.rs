@@ -222,6 +222,7 @@ fn put(note: &str) -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -268,8 +269,12 @@ fn notes_after_replay(dir: &Path, records: &[WalRecord]) -> Vec<String> {
                 .expect("rows")
         })
         .filter_map(|(_, bytes)| {
-            let (start, _) = nodedb_query::msgpack_scan::extract_field(&bytes, 0, "note")?;
-            nodedb_query::msgpack_scan::read_str(&bytes, start).map(str::to_string)
+            let row = nodedb_types::object_msgpack::ObjectView::new(&bytes)
+                .expect("a stored document row is an object");
+            match row.get("note").expect("decode note") {
+                Some(Value::String(note)) => Some(note),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -391,17 +396,28 @@ fn put_row(id: &str, surrogate: u32, note: &str) -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
 /// The target row `t` of another collection, as a sum fold stores it: at
 /// the version ordinal `sys_from` its write stamped.
 fn target_row(note: &str, sys_from: i64) -> WriteSetEntry {
-    WriteSetEntry::put(
+    let value = note_doc(note);
+    WriteSetEntry::installed_put(
         100,
         RowIdentity::from_user_key("t"),
-        note_doc(note),
-        crate::bridge::envelope::RowVersion::open(sys_from),
+        crate::types::installed_document::InstalledDocument {
+            canonical: value.clone(),
+            stored: value.clone(),
+            version: crate::bridge::envelope::RowVersion::open(sys_from),
+            schema: std::sync::Arc::new(nodedb_physical::physical_plan::StorageMode::Schemaless),
+            chain_head: None,
+        },
+        crate::types::document_event::DocumentPutEvent {
+            new_value: value,
+            old_value: None,
+        },
     )
     .in_collection(TOTALS.to_string())
 }

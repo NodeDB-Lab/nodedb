@@ -185,6 +185,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: vec![target],
             deferred_sum_targets: vec![deferred.to_string()],
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 

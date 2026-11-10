@@ -99,7 +99,9 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                     out.edge_type = Some(reader.read_string()?.into_owned());
                 }
                 FID_PROPERTIES => {
-                    out.properties = Some(JsonValue::read(reader)?.0);
+                    out.properties = Some(<crate::value::Value as zerompk::FromMessagePack>::read(
+                        reader,
+                    )?);
                 }
                 FID_QUERY_TEXT => {
                     out.query_text = Some(reader.read_string()?.into_owned());
@@ -288,8 +290,10 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                 FID_LIST_TO_INDEX => {
                     out.list_to_index = Some(reader.read_u64()?);
                 }
-                FID_LIST_FIELDS_JSON => {
-                    out.list_fields_json = Some(reader.read_string()?.into_owned());
+                FID_LIST_FIELDS => {
+                    out.list_fields = Some(
+                        <crate::value::Value as zerompk::FromMessagePack>::read(reader)?,
+                    );
                 }
                 FID_TEXT_MODE => {
                     out.text_mode = Some(crate::text_search::QueryMode::read(reader)?);
@@ -398,7 +402,7 @@ mod tests {
             list_index: Some(3),
             list_from_index: Some(1),
             list_to_index: Some(5),
-            list_fields_json: Some(r#"{"title":"hello"}"#.into()),
+            list_fields: Some(typed_block()),
             ..Default::default()
         };
         let decoded = roundtrip(&tf);
@@ -408,10 +412,31 @@ mod tests {
         assert_eq!(decoded.list_to_index, Some(5));
         // from_index and to_index must stay distinct through the wire.
         assert_ne!(decoded.list_from_index, decoded.list_to_index);
-        assert_eq!(
-            decoded.list_fields_json.as_deref(),
-            Some(r#"{"title":"hello"}"#)
-        );
+        assert_eq!(decoded.list_fields, Some(typed_block()));
+    }
+
+    /// A block holding every kind JSON text cannot carry exactly.
+    fn typed_block() -> crate::value::Value {
+        use crate::value::Value;
+        Value::Object(
+            [
+                ("title".to_string(), Value::String("hello".into())),
+                (
+                    "price".to_string(),
+                    Value::Decimal("12.50".parse().expect("decimal literal")),
+                ),
+                (
+                    "uid".to_string(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                (
+                    "at".to_string(),
+                    Value::DateTime(crate::datetime::NdbDateTime::from_micros(1_700_000_000)),
+                ),
+                ("blob".to_string(), Value::Bytes(vec![0x00, 0xff])),
+            ]
+            .into(),
+        )
     }
 
     #[test]

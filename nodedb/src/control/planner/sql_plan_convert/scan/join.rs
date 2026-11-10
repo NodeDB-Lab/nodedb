@@ -221,6 +221,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     //      neither is cheap to broadcast). Un-analyzed collections fall back to
     //      broadcast — see `join_cost::cost_model_picks_shuffle`.
     let structurally_shufflable = !on_keys.is_empty()
+        // `NOT IN` needs whole-build-side facts (any NULL key, any row at
+        // all) that no shuffle partition holds.
+        && join_type != &nodedb_sql::types::JoinType::AntiNullAware
         && left_input.is_none()
         && right_input.is_none()
         // Shuffle consumers currently execute only the bare equi-join. Keep
@@ -417,6 +420,51 @@ mod tests {
             matches!(refused, Err(crate::Error::FeatureNotSupported { .. })),
             "{refused:?}"
         );
+    }
+
+    /// An equi-join of two plain scans, as `IN` / `NOT IN` subqueries lower.
+    fn equi_join(join_type: JoinType) -> SqlPlan {
+        let SqlPlan::Join {
+            left, right, on, ..
+        } = lateral_join(ValidTime::Any)
+        else {
+            unreachable!("lateral_join builds a join")
+        };
+        SqlPlan::Join {
+            left,
+            right,
+            on,
+            join_type,
+            condition: None,
+            limit: None,
+            projection: Vec::new(),
+            filters: Vec::new(),
+        }
+    }
+
+    /// Even with shuffle forced, `NOT IN` lowers to a plain hash join: the
+    /// resolver then gathers the whole build side onto the probe task, so
+    /// its NULL facts are global. `NOT EXISTS` still shuffles.
+    #[test]
+    fn not_in_never_shuffles() {
+        let mut ctx = context();
+        ctx.force_shuffle_join = true;
+        let tasks = convert_one(&equi_join(JoinType::AntiNullAware), TenantId::new(1), &ctx)
+            .expect("NOT IN converts");
+        let PhysicalPlan::Query(QueryOp::HashJoin { join_type, .. }) = &tasks[0].plan else {
+            panic!("expected a plain hash join, got {:?}", tasks[0].plan);
+        };
+        assert_eq!(join_type, "anti_null_aware");
+
+        let tasks = convert_one(&equi_join(JoinType::Anti), TenantId::new(1), &ctx)
+            .expect("NOT EXISTS converts");
+        assert!(matches!(
+            &tasks[0].plan,
+            PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
+                mode: ExchangeMode::Shuffle { .. },
+                ..
+            }))
+        ));
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! Server-built document-row mutations for `CrdtOp::DocUpsert` / `DocDelete`.
 
 use loro::LoroValue;
-use nodedb_crdt::state::RowImage;
 
 use super::TenantCrdtEngine;
 use super::core::loro_root;
@@ -39,36 +38,6 @@ impl TenantCrdtEngine {
     pub fn doc_delete(&mut self, collection: &str, row_id: &str) -> crate::Result<()> {
         self.state_mut(collection)?
             .delete(loro_root(collection), row_id)
-            .map_err(crate::Error::Crdt)
-    }
-
-    /// Capture the state of a document row that `doc_upsert` and
-    /// `doc_set_fields` can change. `None`: the collection has no local
-    /// state.
-    pub fn doc_row_image(&self, collection: &str, row_id: &str) -> crate::Result<Option<RowImage>> {
-        match self.collections.get(collection) {
-            Some(state) => state
-                .row_image(loro_root(collection), row_id)
-                .map(Some)
-                .map_err(crate::Error::Crdt),
-            None => Ok(None),
-        }
-    }
-
-    /// Put a document row back to the image `doc_row_image` captured. `None`
-    /// removes the collection's local state: it had none before the write.
-    pub fn restore_doc_row(
-        &mut self,
-        collection: &str,
-        row_id: &str,
-        image: Option<&RowImage>,
-    ) -> crate::Result<()> {
-        let Some(image) = image else {
-            self.collections.remove(collection);
-            return Ok(());
-        };
-        self.state_mut(collection)?
-            .restore_row_image(loro_root(collection), row_id, image)
             .map_err(crate::Error::Crdt)
     }
 }

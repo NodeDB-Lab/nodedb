@@ -164,7 +164,10 @@ impl CoreLoop {
             // what a KV row looks like. A private copy of that logic in this
             // loop risks diverging from the others on the raw-bytes case.
             let (_key_str, mut entry_mp) =
-                crate::data::executor::scan_normalize::kv_row_to_doc(k, v);
+                match crate::data::executor::scan_normalize::kv_row_to_doc(k, v) {
+                    Ok(doc) => doc,
+                    Err(e) => return self.response_error(task, e),
+                };
             // An all-versions row carries the millisecond of the write that
             // set it.
             if let Some(&sys_from) = row_sys_from.get(row) {

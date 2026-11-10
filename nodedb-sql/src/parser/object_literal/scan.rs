@@ -9,6 +9,9 @@ use nodedb_types::Value;
 
 use crate::error::SqlError;
 
+use super::template::Literal;
+use super::typed::{LiteralType, parse_cast};
+
 pub(super) fn skip_ws(chars: &[char], pos: &mut usize) {
     while *pos < chars.len() && chars[*pos].is_ascii_whitespace() {
         *pos += 1;
@@ -110,11 +113,26 @@ fn parse_number(chars: &[char], pos: &mut usize) -> Result<Value, SqlError> {
     while *pos < chars.len() && chars[*pos].is_ascii_digit() {
         *pos += 1;
     }
-    let is_float = *pos < chars.len() && chars[*pos] == '.';
+    let mut is_float = *pos < chars.len() && chars[*pos] == '.';
     if is_float {
         *pos += 1; // consume '.'
         while *pos < chars.len() && chars[*pos].is_ascii_digit() {
             *pos += 1;
+        }
+    }
+    // An exponent (`1.5e0`, `2E-3`) makes a float: the spelling a bound
+    // float parameter takes.
+    if matches!(chars.get(*pos), Some(&('e' | 'E'))) {
+        let mut at = *pos + 1;
+        if matches!(chars.get(at), Some(&('+' | '-'))) {
+            at += 1;
+        }
+        if chars.get(at).is_some_and(char::is_ascii_digit) {
+            while chars.get(at).is_some_and(char::is_ascii_digit) {
+                at += 1;
+            }
+            *pos = at;
+            is_float = true;
         }
     }
     let raw: String = chars[start..*pos].iter().collect();
@@ -133,7 +151,7 @@ fn parse_number(chars: &[char], pos: &mut usize) -> Result<Value, SqlError> {
     }
 }
 
-fn parse_array(chars: &[char], pos: &mut usize) -> Result<Vec<Value>, SqlError> {
+fn parse_array(chars: &[char], pos: &mut usize) -> Result<Vec<Literal>, SqlError> {
     // Expect '['
     if *pos >= chars.len() || chars[*pos] != '[' {
         return Err(SqlError::Parse {
@@ -174,7 +192,7 @@ fn parse_array(chars: &[char], pos: &mut usize) -> Result<Vec<Value>, SqlError> 
 pub(super) fn parse_object(
     chars: &[char],
     pos: &mut usize,
-) -> Result<HashMap<String, Value>, SqlError> {
+) -> Result<HashMap<String, Literal>, SqlError> {
     // Expect '{'
     if *pos >= chars.len() || chars[*pos] != '{' {
         return Err(SqlError::Parse {
@@ -263,21 +281,80 @@ pub(super) fn parse_object(
     Ok(map)
 }
 
-fn parse_value(chars: &[char], pos: &mut usize) -> Result<Value, SqlError> {
+fn parse_value(chars: &[char], pos: &mut usize) -> Result<Literal, SqlError> {
     skip_ws(chars, pos);
+    match chars.get(*pos) {
+        // `$N`: a parameter reference, bound by the statement.
+        Some(&'$') => return parse_param(chars, pos).map(Literal::Param),
+        Some(&'{') => return parse_object(chars, pos).map(Literal::Object),
+        Some(&'[') => return parse_array(chars, pos).map(Literal::Array),
+        _ => {}
+    }
+    parse_scalar(chars, pos).map(Literal::Value)
+}
+
+/// A `$N` parameter reference at `pos`: its 1-based index.
+fn parse_param(chars: &[char], pos: &mut usize) -> Result<usize, SqlError> {
+    let start = *pos;
+    *pos += 1; // consume '$'
+    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    let digits: String = chars
+        .get(start + 1..*pos)
+        .unwrap_or_default()
+        .iter()
+        .collect();
+    match digits.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(SqlError::Parse {
+            detail: format!("invalid parameter reference '${digits}' in object literal"),
+        }),
+    }
+}
+
+fn parse_scalar(chars: &[char], pos: &mut usize) -> Result<Value, SqlError> {
     if *pos >= chars.len() {
         return Err(SqlError::Parse {
             detail: "unexpected end of input while parsing value".to_string(),
         });
     }
     match chars[*pos] {
-        '\'' => parse_string(chars, pos).map(Value::String),
-        '{' => parse_object(chars, pos).map(Value::Object),
-        '[' => parse_array(chars, pos).map(Value::Array),
-        '-' | '0'..='9' => parse_number(chars, pos),
+        // `'...'` is a string; `'...'::uuid` is the typed value it spells.
+        '\'' => {
+            let text = parse_string(chars, pos)?;
+            match parse_cast(chars, pos)? {
+                Some(ty) => ty.value(&text),
+                None => Ok(Value::String(text)),
+            }
+        }
+        // A number; `12.50::decimal` is the exact decimal of its digits,
+        // `2::float8` the float.
+        '-' | '0'..='9' => {
+            let start = *pos;
+            let number = parse_number(chars, pos)?;
+            let end = *pos;
+            match parse_cast(chars, pos)? {
+                Some(ty @ (LiteralType::Decimal | LiteralType::Float8)) => {
+                    let digits: String = chars.get(start..end).unwrap_or_default().iter().collect();
+                    ty.value(&digits)
+                }
+                Some(other) => Err(SqlError::Parse {
+                    detail: format!("a number cannot be cast to {other:?} in an object literal"),
+                }),
+                None => Ok(number),
+            }
+        }
         _ => {
-            // bare word: true / false / null / identifier
+            // bare word: true / false / null / a typed string (`UUID '...'`)
             let word = parse_ident(chars, pos);
+            if let Some(ty) = LiteralType::named(&word) {
+                skip_ws(chars, pos);
+                if chars.get(*pos) == Some(&'\'') {
+                    let text = parse_string(chars, pos)?;
+                    return ty.value(&text);
+                }
+            }
             match word.to_lowercase().as_str() {
                 "true" => Ok(Value::Bool(true)),
                 "false" => Ok(Value::Bool(false)),
@@ -468,6 +545,59 @@ mod tests {
     fn dotted_key() {
         let m = parse("{ metadata.source: 'web' }");
         assert_eq!(m["metadata.source"], Value::String("web".to_string()));
+    }
+
+    /// A cast or a typed string reads as the typed value it spells.
+    #[test]
+    fn typed_values_read_typed() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let m = parse(&format!(
+            "{{ a: '{uuid}'::uuid, b: UUID '{uuid}', c: '2024-01-02T03:04:05Z'::timestamptz, \
+             d: TIMESTAMP '2024-01-02 03:04:05', e: '\\x01ff'::bytea, f: 12.50::decimal, \
+             g: DECIMAL '0.10', h: ['{uuid}'::uuid] }}"
+        ));
+        let at = nodedb_types::NdbDateTime::parse("2024-01-02T03:04:05Z").unwrap();
+        assert_eq!(m["a"], Value::Uuid(uuid.into()));
+        assert_eq!(m["b"], Value::Uuid(uuid.into()));
+        assert_eq!(m["c"], Value::DateTime(at));
+        assert_eq!(m["d"], Value::NaiveDateTime(at));
+        assert_eq!(m["e"], Value::Bytes(vec![1, 0xff]));
+        assert_eq!(m["f"], Value::Decimal("12.50".parse().unwrap()));
+        assert_eq!(m["g"], Value::Decimal("0.10".parse().unwrap()));
+        assert_eq!(m["h"], Value::Array(vec![Value::Uuid(uuid.into())]));
+    }
+
+    /// The `FLOAT8` cast form reads as the float, the form a bound
+    /// non-finite float takes.
+    #[test]
+    fn a_float8_cast_reads_as_the_float() {
+        let m = parse(
+            "{ a: 'NaN'::FLOAT8, b: 'Infinity'::float8, c: ['-Infinity'::FLOAT8], d: 2::float8 }",
+        );
+        assert!(matches!(m["a"], Value::Float(f) if f.is_nan()));
+        assert_eq!(m["b"], Value::Float(f64::INFINITY));
+        assert_eq!(m["c"], Value::Array(vec![Value::Float(f64::NEG_INFINITY)]));
+        assert_eq!(m["d"], Value::Float(2.0));
+    }
+
+    #[test]
+    fn an_exponent_reads_as_a_float() {
+        let m = parse("{ a: 1.5e0, b: 2e0, c: -3E-1 }");
+        assert_eq!(m["a"], Value::Float(1.5));
+        assert_eq!(m["b"], Value::Float(2.0));
+        assert_eq!(m["c"], Value::Float(-0.3));
+    }
+
+    #[test]
+    fn invalid_typed_text_and_unknown_casts_are_refused() {
+        assert!(matches!(
+            parse_object_literal("{ a: 'x'::uuid }"),
+            Some(Err(SqlError::InvalidTextRepresentation { .. }))
+        ));
+        assert!(matches!(
+            parse_object_literal("{ a: 'x'::text }"),
+            Some(Err(_))
+        ));
     }
 
     #[test]

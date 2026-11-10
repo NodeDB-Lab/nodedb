@@ -9,6 +9,7 @@
 use super::super::error::MsgpackResult;
 use super::super::geometry_ext::geometry_from_ext;
 use super::super::instant_ext::instant_from_ext;
+use super::super::scalar_ext::scalar_ext_json_text;
 use super::cursor::Cursor;
 use crate::datetime::NdbDateTime;
 use crate::geometry::geojson_tree;
@@ -173,10 +174,13 @@ fn read_json_value(c: &mut Cursor<'_>) -> zerompk::Result<serde_json::Value> {
 }
 
 /// An ext value of `len` payload bytes: a geometry becomes its GeoJSON
-/// object, any other type `null`.
+/// object, a UUID or decimal its text as a string, any other type `null`.
 fn read_json_ext(c: &mut Cursor<'_>, len: usize) -> zerompk::Result<serde_json::Value> {
     let ext_type = c.take()? as i8;
     let payload = c.take_n(len)?;
+    if let Some(text) = scalar_ext_json_text(ext_type, payload) {
+        return Ok(serde_json::Value::String(text));
+    }
     Ok(geometry_from_ext(ext_type, payload).map_or(serde_json::Value::Null, |g| geojson_tree(&g)))
 }
 

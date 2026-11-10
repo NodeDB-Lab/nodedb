@@ -32,6 +32,9 @@ pub struct TextFields {
     pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_id: Option<String>,
+    /// A document body: a native object `[7, {field: tagged value}]`, a plain
+    /// MessagePack map or JSON text. A `VectorInsert` carries the row's
+    /// non-vector fields here as a native object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<u8>>,
 
@@ -86,8 +89,9 @@ pub struct TextFields {
     pub to_node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_type: Option<String>,
+    /// An `EdgePut`'s property object, every value typed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<serde_json::Value>,
+    pub properties: Option<crate::value::Value>,
 
     // ── Text/Hybrid search ───────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -347,8 +351,8 @@ pub struct TextFields {
     /// `list_from_index` — the two must never be conflated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_to_index: Option<u64>,
-    /// JSON object of block fields to insert as a new list element (for
-    /// `CrdtListInsert`).
+    /// The fields of the block a `CrdtListInsert` inserts: a
+    /// `Value::Object`, each value tagged with its exact type.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub list_fields_json: Option<String>,
+    pub list_fields: Option<crate::value::Value>,
 }

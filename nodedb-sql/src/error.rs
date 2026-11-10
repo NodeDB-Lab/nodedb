@@ -127,6 +127,32 @@ pub enum SqlError {
     #[error("{detail}")]
     DataException { detail: String },
 
+    /// A constant `sqrt`, logarithm or `power` call received an argument
+    /// outside its domain. Same distinction as [`SqlError::DivisionByZero`].
+    /// Rendered as SQLSTATE `2201E` for a logarithm and `2201F` for the
+    /// others; see [`nodedb_query::expr::MathDomain::class`].
+    #[error("{0}")]
+    MathDomain(nodedb_query::expr::MathDomain),
+
+    /// A typed literal's text spells no value of its type: `'x'::uuid`,
+    /// `BYTEA '\x0'`. Rendered as SQLSTATE `22P02`
+    /// (`invalid_text_representation`), PostgreSQL's code for the same input.
+    #[error("invalid input syntax for type {type_name}: \"{text}\"")]
+    InvalidTextRepresentation {
+        type_name: &'static str,
+        text: String,
+    },
+
+    /// A typed timestamp literal's text spells no instant:
+    /// `TIMESTAMP 'x'`, `'x'::timestamptz`. Rendered as SQLSTATE `22007`
+    /// (`invalid_datetime_format`), the code parameter decoding gives the
+    /// same text.
+    #[error("invalid input syntax for type {type_name}: \"{text}\"")]
+    InvalidDatetimeFormat {
+        type_name: &'static str,
+        text: String,
+    },
+
     /// A LIMIT, OFFSET, or FETCH FIRST clause resolved to a value outside
     /// `[0, usize::MAX]`, or to an expression the planner cannot read as a
     /// literal. PostgreSQL rejects the same input with SQLSTATE `2201W`.
@@ -135,7 +161,7 @@ pub enum SqlError {
 
     /// A constant expression overflowed at plan time. Same distinction as
     /// [`SqlError::DivisionByZero`].
-    #[error("arithmetic overflow evaluating a constant expression: {detail}")]
+    #[error("{detail}")]
     ConstantOverflow { detail: String },
 
     /// An integer literal past the exact numeric range (the 96-bit

@@ -15,7 +15,16 @@ categories = ["database", "api-bindings"]
 
 [features]
 default = []
-remote = ["tokio-postgres", "tokio", "serde_json", "rust_decimal"]
+remote = [
+    "tokio-postgres",
+    "tokio",
+    "serde_json",
+    "rust_decimal",
+    "rust_decimal/db-postgres",
+    "base64",
+    "bytes",
+    "zerompk",
+]
 native = ["tokio", "zerompk", "serde_json", "tokio-rustls", "rustls-pemfile"]
 
 [dependencies]
@@ -30,6 +39,8 @@ tokio-postgres = { workspace = true, optional = true, features = ["with-serde_js
 tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 serde_json = { workspace = true, optional = true }
 rust_decimal = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 sonic-rs = { workspace = true }
 
 # Native protocol client dependencies (feature-gated)

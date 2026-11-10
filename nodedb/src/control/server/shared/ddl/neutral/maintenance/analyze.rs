@@ -12,6 +12,7 @@ use nodedb_types::DatabaseId;
 use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::security::catalog::column_stats::StoredColumnStats;
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::response_shape::types::ShapedRow;
 use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
@@ -72,8 +73,9 @@ pub async fn handle_analyze(
             database_id,
         )
         .await?;
-    let mut rows = Vec::new();
+    let mut rows: Vec<ShapedRow> = Vec::new();
     for task in tasks {
+        let row_context = crate::bridge::envelope::describe_row_context(&task.plan);
         let emitter =
             crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
         let resp = crate::control::server::shared::clone_write::intercept_authorize_and_dispatch(
@@ -91,8 +93,7 @@ pub async fn handle_analyze(
         .await
         .map_err(|error| DdlError::from_error_in_context("ANALYZE scan failed", &error))?;
         if !resp.payload.is_empty() {
-            let json = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-            push_scan_rows(&json, &mut rows);
+            push_scan_rows(&resp.payload, row_context, &mut rows)?;
         }
     }
 
@@ -102,7 +103,7 @@ pub async fn handle_analyze(
     // none of it.
     let stats_rows: Vec<StoredColumnStats> = if !columns_to_analyze.is_empty() && !rows.is_empty() {
         // Use stats_collector to compute real statistics via SIMD kernels.
-        super::stats_collector::collect_stats_from_json_rows(
+        super::stats_collector::collect_stats_from_rows(
             database_id.as_u64(),
             tenant_id,
             &collection,
@@ -155,27 +156,18 @@ pub async fn handle_analyze(
     }])
 }
 
-/// Split one task's scan payload into per-row JSON objects.
-///
-/// A task answers a scan with a JSON array of rows. The statistics
-/// collector counts one entry per row. It reads each column out of a row
-/// object, so an array must arrive flattened. A payload that is not an
-/// array carries a single row and passes through whole.
-fn push_scan_rows(payload: &str, rows: &mut Vec<String>) {
-    match sonic_rs::from_str::<serde_json::Value>(payload) {
-        Ok(serde_json::Value::Array(items)) => {
-            for item in items {
-                match sonic_rs::to_string(&item) {
-                    Ok(row) => rows.push(row),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "skipping an ANALYZE scan row that will not re-encode"
-                    ),
-                }
-            }
-        }
-        _ => rows.push(payload.to_string()),
-    }
+/// Decode one task's scan payload into typed rows, unwrapping scan
+/// envelopes under the row shape `context` its plan produces. A payload that
+/// does not decode fails the ANALYZE.
+fn push_scan_rows(
+    payload: &[u8],
+    context: crate::data::executor::response_codec::RowContext,
+    rows: &mut Vec<ShapedRow>,
+) -> Result<(), DdlError> {
+    let decoded = crate::data::executor::response_codec::decode_row_payload_value(payload, context)
+        .map_err(|e| DdlError::from_error_in_context("ANALYZE scan rows do not decode", &e))?;
+    crate::control::server::response_shape::project::push_row_bodies(decoded, context, rows);
+    Ok(())
 }
 
 /// Parse optional `(col1, col2)` column list from ANALYZE statement.

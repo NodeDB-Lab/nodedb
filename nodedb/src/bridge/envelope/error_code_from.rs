@@ -23,9 +23,36 @@ impl From<nodedb_query::EvalError> for ErrorCode {
             | nodedb_query::EvalError::ArgumentValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
-            e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
-                detail: e.to_string(),
+            nodedb_query::EvalError::MathDomain(fault) => match fault.class() {
+                nodedb_query::expr::MathDomainClass::Logarithm => {
+                    Self::InvalidArgumentForLogarithm {
+                        detail: fault.to_string(),
+                    }
+                }
+                nodedb_query::expr::MathDomainClass::PowerFunction => {
+                    Self::InvalidArgumentForPowerFunction {
+                        detail: fault.to_string(),
+                    }
+                }
             },
+            e @ (nodedb_query::EvalError::NumericOverflow { .. }
+            | nodedb_query::EvalError::NumericFieldOverflow { .. }
+            | nodedb_query::EvalError::OutOfRange(_)
+            | nodedb_query::EvalError::NumericSpecialValue { .. }) => {
+                Self::NumericValueOutOfRange {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidTextRepresentation { .. } => {
+                Self::InvalidTextRepresentation {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidDatetimeFormat { .. } => {
+                Self::InvalidDatetimeFormat {
+                    detail: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -136,6 +163,12 @@ impl From<crate::Error> for ErrorCode {
             crate::Error::DivisionByZero => Self::DivisionByZero,
             crate::Error::UndefinedFunction { name } => Self::UndefinedFunction { name },
             crate::Error::DataException { detail } => Self::DataException { detail },
+            crate::Error::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            crate::Error::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
+            }
             // `42601` (syntax_error), as the Control Plane gives both.
             crate::Error::BadRequest { detail } | crate::Error::PlanError { detail } => {
                 Self::BadRequest { detail }

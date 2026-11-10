@@ -96,6 +96,19 @@ impl ColumnPartial {
         );
     }
 
+    /// Add one exact decimal cell at timestamp `ts`. SUM, AVG, MIN, MAX,
+    /// FIRST and LAST keep it exact. Equal decimals of different scales hash
+    /// as one value in the sketches.
+    pub fn add_decimal(&mut self, ts: i64, v: rust_decimal::Decimal) {
+        self.sum.add_decimal(v);
+        self.add_cell(
+            ts,
+            Value::Decimal(v),
+            fnv1a_hash(&v.normalize().serialize()),
+            nodedb_types::decimal_float::decimal_to_f64(v),
+        );
+    }
+
     /// Feed the sketches and the extremes with a cell already added to the
     /// sum. `hash` is its sketch identity, `reading` its `f64` reading.
     fn add_cell(&mut self, ts: i64, cell: Value, hash: u64, reading: f64) {

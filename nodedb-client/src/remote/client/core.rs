@@ -38,6 +38,40 @@ pub(super) fn pg_error_detail(e: &tokio_postgres::Error) -> String {
     }
 }
 
+/// Whether `sql` is a statement the server plans and describes at Parse: a
+/// `SELECT`, `WITH`, `VALUES` or `TABLE` query, or an `INSERT`, `UPDATE` or
+/// `DELETE` with a `RETURNING` clause. Leading parentheses and whitespace are
+/// skipped. Any other statement may be one Parse does not plan, so it stays
+/// on the simple-query protocol.
+pub(super) fn is_row_query(sql: &str) -> bool {
+    let body = sql.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+    let first = body
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    match first.as_str() {
+        "SELECT" | "WITH" | "VALUES" | "TABLE" => true,
+        "INSERT" | "UPDATE" | "DELETE" => body
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|word| word.eq_ignore_ascii_case("RETURNING")),
+        _ => false,
+    }
+}
+
+/// Each row's cells, decoded by their column types.
+fn typed_rows(rows: &[tokio_postgres::Row]) -> NodeDbResult<Vec<Vec<Value>>> {
+    rows.iter()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| pg_value_to_value(row, idx, column))
+                .collect()
+        })
+        .collect()
+}
+
 impl NodeDbRemote {
     /// Connect to a NodeDB Origin instance.
     ///
@@ -81,16 +115,77 @@ impl NodeDbRemote {
             .map(|c| c.name().to_string())
             .collect();
 
-        let mut result_rows = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let mut vals = Vec::with_capacity(columns.len());
-            for (idx, column) in row.columns().iter().enumerate() {
-                vals.push(pg_value_to_value(row, idx, column)?);
-            }
-            result_rows.push(vals);
-        }
+        Ok((columns, typed_rows(&rows)?))
+    }
 
-        Ok((columns, result_rows))
+    /// Prepare `sql` with the declared parameter `types`, run it with
+    /// `params`, and return its rows typed by column.
+    pub(super) async fn query_typed_params(
+        &self,
+        sql: &str,
+        types: &[tokio_postgres::types::Type],
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> NodeDbResult<(Vec<String>, Vec<Vec<Value>>)> {
+        let client = self.client.lock().await;
+        let statement = client.prepare_typed(sql, types).await.map_err(|e| {
+            NodeDbError::storage(format!("pgwire prepare failed: {}", pg_error_detail(&e)))
+        })?;
+        let rows = client.query(&statement, params).await.map_err(|e| {
+            NodeDbError::storage(format!("pgwire query failed: {}", pg_error_detail(&e)))
+        })?;
+        if rows.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let columns: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        Ok((columns, typed_rows(&rows)?))
+    }
+
+    /// Run a parameterless statement, with each cell typed by its column
+    /// type when the statement's result shape is known at Parse.
+    ///
+    /// The simple-query protocol carries no column types to the client:
+    /// `tokio_postgres` keeps only the column names of its RowDescription, so
+    /// every cell would arrive as text. A statement whose result columns the
+    /// server describes at Parse (a planned `SELECT`, a `RETURNING` write)
+    /// runs through the extended protocol instead, and each cell decodes by
+    /// its RowDescription type: a `numeric` column is a `Decimal`, a `uuid`
+    /// a `Uuid`, a `timestamp` an instant.
+    ///
+    /// Only a row query ([`is_row_query`]) is prepared. Every other
+    /// statement (DDL, a DSL statement, SET, transaction control) runs
+    /// through the simple-query protocol, as does a row query the server
+    /// describes no columns for. Parse executes nothing, so no statement
+    /// runs twice. A row query Parse refuses fails with the server's error:
+    /// it plans at Parse exactly as the simple query would plan it, so the
+    /// error is the one the simple query reports.
+    pub(super) async fn query_typed_or_simple(
+        &self,
+        sql: &str,
+    ) -> NodeDbResult<(Vec<String>, Vec<Vec<Value>>)> {
+        if !is_row_query(sql) {
+            return self.simple_query_raw(sql).await;
+        }
+        let client = self.client.lock().await;
+        let statement = client.prepare(sql).await.map_err(|e| {
+            NodeDbError::storage(format!("pgwire prepare failed: {}", pg_error_detail(&e)))
+        })?;
+        if statement.columns().is_empty() {
+            drop(client);
+            return self.simple_query_raw(sql).await;
+        }
+        let rows = client.query(&statement, &[]).await.map_err(|e| {
+            NodeDbError::storage(format!("pgwire query failed: {}", pg_error_detail(&e)))
+        })?;
+        let columns = statement
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        Ok((columns, typed_rows(&rows)?))
     }
 
     /// Execute a statement that doesn't return rows (INSERT/UPDATE/DELETE).
@@ -182,8 +277,37 @@ impl NodeDbRemote {
 
 #[cfg(test)]
 mod tests {
-    use super::NodeDbRemote;
+    use super::{NodeDbRemote, is_row_query};
     use crate::traits::NodeDb;
+
+    /// A row query is prepared for typed cells. Any statement Parse might not
+    /// plan stays on the simple-query protocol, as does a write without
+    /// `RETURNING`.
+    #[test]
+    fn row_queries_are_prepared_and_other_statements_are_not() {
+        for sql in [
+            "SELECT 1.50::numeric",
+            "  (select * from t)",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "VALUES (1)",
+            "INSERT INTO t (a) VALUES (1) RETURNING a",
+            "delete from t where a = 1 returning *",
+        ] {
+            assert!(is_row_query(sql), "{sql}");
+        }
+        for sql in [
+            "CREATE COLLECTION t",
+            "SET nodedb.x = 1",
+            "BEGIN",
+            "INSERT INTO t (a) VALUES (1)",
+            "UPDATE t SET returning_flag = 1",
+            "SHOW COLLECTIONS",
+            "DESCRIBE t",
+            "",
+        ] {
+            assert!(!is_row_query(sql), "{sql}");
+        }
+    }
 
     /// Compile-time check: `NodeDbRemote` implements `NodeDb`.
     #[test]

@@ -1,30 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Sort key evaluation and row comparators.
-//!
-//! Two comparison strategies, chosen per query by the shape of the ORDER BY:
-//!
-//! - **Every key is a stored column** — compare the raw msgpack bytes field by
-//!   field, with no decode at all. This is the common `ORDER BY col` case and
-//!   the reason the binary comparator exists.
-//! - **Any key is computed** (`ORDER BY 100 / weight`, `ORDER BY UPPER(name)`)
-//!   — the value being sorted on exists in no field, so each row's keys are
-//!   evaluated once up front and the rows are ordered by those values.
-//!
-//! Both produce the same ordering for the same query; the second simply
-//! handles keys the first cannot name. Evaluating is fallible — a zero divisor
-//! in a sort key fails the statement with SQLSTATE `22012` rather than
-//! returning the rows in storage order under a sort the client asked for.
+//! Native sort-key evaluation and comparison.
 
 use std::str::FromStr;
 
 use nodedb_physical::physical_plan::SortKeySpec;
-use nodedb_query::{compare_json, eval_expr_on_json, msgpack_scan};
+use nodedb_types::Value;
 use nodedb_types::columnar::{ColumnType, StrictSchema};
 use rust_decimal::Decimal;
 
 /// One row's evaluated sort keys, positionally aligned with the ORDER BY list.
-pub(in crate::data::executor) type SortValues = Vec<serde_json::Value>;
+pub(in crate::data::executor) type SortValues = Vec<Value>;
 
 /// Per ORDER BY key, whether it is a bare column `schema` declares `DECIMAL`.
 ///
@@ -57,53 +43,74 @@ pub(in crate::data::executor) fn is_decimal_key(decimal_keys: &[bool], idx: usiz
 
 /// The decimal an evaluated sort value stands for: a decimal string or a
 /// number. `None` for any other value.
-fn json_decimal(value: &serde_json::Value) -> Option<Decimal> {
+pub(in crate::data::executor) fn native_decimal(value: &Value) -> Option<Decimal> {
     match value {
-        serde_json::Value::String(text) => Decimal::from_str(text.trim())
+        Value::Decimal(value) => Some(*value),
+        Value::Integer(value) => Some(Decimal::from(*value)),
+        Value::Float(value) => Decimal::try_from(*value).ok(),
+        Value::String(text) => Decimal::from_str(text.trim())
             .or_else(|_| Decimal::from_scientific(text.trim()))
             .ok(),
-        serde_json::Value::Number(number) => {
-            if let Some(i) = number.as_i64() {
-                Some(Decimal::from(i))
-            } else if let Some(u) = number.as_u64() {
-                Some(Decimal::from(u))
-            } else {
-                number.as_f64().and_then(|f| Decimal::try_from(f).ok())
-            }
-        }
         _ => None,
     }
 }
 
-/// Order two evaluated sort values, by value when the key is `DECIMAL`.
-fn compare_key_values(
-    a: &serde_json::Value,
-    b: &serde_json::Value,
-    decimal: bool,
-) -> std::cmp::Ordering {
-    if decimal && let (Some(da), Some(db)) = (json_decimal(a), json_decimal(b)) {
-        return da.cmp(&db);
-    }
-    compare_json(a, b)
-}
-
-/// Order two stored cells, by value when the key is `DECIMAL`.
-pub(in crate::data::executor) fn compare_cells(
-    a_bytes: &[u8],
-    a_range: (usize, usize),
-    b_bytes: &[u8],
-    b_range: (usize, usize),
-    decimal: bool,
-) -> std::cmp::Ordering {
-    if decimal {
-        msgpack_scan::compare_decimal_field_bytes(a_bytes, a_range, b_bytes, b_range)
-    } else {
-        msgpack_scan::compare_field_bytes(a_bytes, a_range, b_bytes, b_range)
+fn type_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Integer(_) | Value::Float(_) | Value::Decimal(_) => 2,
+        Value::DateTime(_) => 3,
+        Value::NaiveDateTime(_) => 4,
+        Value::String(_) | Value::Uuid(_) | Value::Ulid(_) | Value::Regex(_) => 5,
+        Value::Bytes(_) => 6,
+        Value::Array(_) | Value::Set(_) => 7,
+        Value::Object(_) => 8,
+        _ => 9,
     }
 }
 
-/// True when every key is a bare stored column, so the zero-decode binary
-/// comparator can be used.
+/// Preserve JSON expression ordering for mixed primitive and composite values.
+fn expression_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::String(_) => 1,
+        Value::Integer(_) | Value::Float(_) | Value::Decimal(_) => 2,
+        Value::Array(_) => 3,
+        Value::Bool(false) => 4,
+        Value::Bool(true) => 5,
+        Value::Object(_) => 6,
+        _ => 7,
+    }
+}
+
+/// Preserve stored-field type ranks and compare numeric values exactly.
+fn compare_key_values(a: &Value, b: &Value, decimal: bool, computed: bool) -> std::cmp::Ordering {
+    if decimal && let (Some(a), Some(b)) = (native_decimal(a), native_decimal(b)) {
+        return a.cmp(&b);
+    }
+    let rank = if computed { expression_rank } else { type_rank };
+    rank(a)
+        .cmp(&rank(b))
+        .then_with(|| nodedb_query::value_ops::compare_sort_values(a, b))
+}
+
+/// Order two stored column values: by type rank, then numbers by their exact
+/// reading across integer, float and decimal. Join keys order by this, as
+/// `ORDER BY` over a stored column does.
+pub(in crate::data::executor) fn compare_column_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    compare_key_values(a, b, false, false)
+}
+
+/// Compare provider expressions with the existing expression sort order.
+pub(in crate::data::executor) fn compare_expression_values(
+    a: &Value,
+    b: &Value,
+) -> std::cmp::Ordering {
+    compare_key_values(a, b, false, true)
+}
+
+/// Whether every key names a stored column.
 pub(in crate::data::executor) fn all_column_keys(sort_keys: &[SortKeySpec]) -> bool {
     sort_keys.iter().all(|k| k.as_column().is_some())
 }
@@ -118,21 +125,23 @@ pub(in crate::data::executor) fn eval_sort_values(
     sort_keys: &[SortKeySpec],
     crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<SortValues> {
-    let doc = nodedb_types::json_from_msgpack(doc_bytes).map_err(|e| crate::Error::Codec {
-        detail: format!("ORDER BY document decode: {e}"),
+    let doc = crate::data::executor::doc_format::decode_document_value(doc_bytes).map_err(|e| {
+        crate::Error::Codec {
+            detail: format!("ORDER BY document decode: {e}"),
+        }
     })?;
 
     sort_keys
         .iter()
-        .map(|k| eval_expr_on_json(&k.expr, &doc, crs).map_err(crate::Error::from))
+        .map(|k| k.expr.eval(&doc, crs).map_err(crate::Error::from))
         .collect()
 }
 
 /// Compare two rows by their pre-evaluated sort values. `decimal_keys` flags
 /// the keys [`decimal_sort_keys`] found `DECIMAL`.
 pub(in crate::data::executor) fn compare_sort_values(
-    a: &[serde_json::Value],
-    b: &[serde_json::Value],
+    a: &[Value],
+    b: &[Value],
     sort_keys: &[SortKeySpec],
     decimal_keys: &[bool],
 ) -> std::cmp::Ordering {
@@ -148,6 +157,7 @@ pub(in crate::data::executor) fn compare_sort_values(
                 va,
                 vb,
                 is_decimal_key(decimal_keys, idx),
+                !all_column_keys(sort_keys),
             )),
         };
         if ord != std::cmp::Ordering::Equal {
@@ -157,86 +167,53 @@ pub(in crate::data::executor) fn compare_sort_values(
     std::cmp::Ordering::Equal
 }
 
-/// Compare two raw msgpack documents by column-only sort keys.
-///
-/// Uses binary field extraction — no decode. Shared by the in-memory sort and
-/// the external merge so both order rows identically. `decimal_keys` flags
-/// the keys [`decimal_sort_keys`] found `DECIMAL`.
-pub(in crate::data::executor) fn compare_docs_by_keys_binary(
-    a_bytes: &[u8],
-    b_bytes: &[u8],
-    sort_keys: &[SortKeySpec],
-    decimal_keys: &[bool],
-) -> std::cmp::Ordering {
-    for (idx, key) in sort_keys.iter().enumerate() {
-        // Column-only callers guarantee `as_column`; a computed key has no
-        // field to extract and compares equal here, which is why the caller
-        // routes those rows through `compare_sort_values` instead.
-        let Some(field) = key.as_column() else {
-            continue;
-        };
-        let a_range = msgpack_scan::extract_field(a_bytes, 0, field);
-        let b_range = msgpack_scan::extract_field(b_bytes, 0, field);
-
-        // An absent field and a stored NULL are both NULL for ordering, and
-        // their placement follows the key's NULLS FIRST/LAST setting.
-        let ordered = match key.order_nulls(
-            is_null_range(a_bytes, a_range),
-            is_null_range(b_bytes, b_range),
-        ) {
-            Some(ord) => ord,
-            None => match (a_range, b_range) {
-                (Some(ar), Some(br)) => key.direct(compare_cells(
-                    a_bytes,
-                    ar,
-                    b_bytes,
-                    br,
-                    is_decimal_key(decimal_keys, idx),
-                )),
-                _ => std::cmp::Ordering::Equal,
-            },
-        };
-        if ordered != std::cmp::Ordering::Equal {
-            return ordered;
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
 /// Encode evaluated sort values for a spill run record.
 pub(in crate::data::executor) fn encode_sort_values(values: &SortValues) -> crate::Result<Vec<u8>> {
-    nodedb_types::json_to_msgpack(&serde_json::Value::Array(values.clone())).map_err(|e| {
-        crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("sort key values: {e}"),
-        }
+    zerompk::to_msgpack_vec(values).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("sort key values: {e}"),
     })
 }
 
 /// Decode evaluated sort values read back from a spill run record.
 pub(in crate::data::executor) fn decode_sort_values(bytes: &[u8]) -> crate::Result<SortValues> {
-    if bytes.is_empty() {
-        return Ok(Vec::new());
-    }
-    match nodedb_types::json_from_msgpack(bytes) {
-        Ok(serde_json::Value::Array(values)) => Ok(values),
-        Ok(other) => Err(crate::Error::Storage {
-            engine: "sort".into(),
-            detail: format!("sort run corrupt: key values are not an array ({other})"),
-        }),
-        Err(e) => Err(crate::Error::Storage {
-            engine: "sort".into(),
-            detail: format!("sort run corrupt: key values undecodable: {e}"),
-        }),
-    }
+    zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Storage {
+        engine: "sort".into(),
+        detail: format!("sort run corrupt: key values undecodable: {e}"),
+    })
 }
 
-/// Whether an extracted field range is SQL NULL: the field is absent, or the
-/// bytes it points at are a msgpack nil.
-pub(in crate::data::executor) fn is_null_range(doc: &[u8], range: Option<(usize, usize)>) -> bool {
-    const MSGPACK_NIL: u8 = 0xc0;
-    match range {
-        None => true,
-        Some((start, _)) => doc.get(start) == Some(&MSGPACK_NIL),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluated_and_spilled_keys_retain_native_values() {
+        let values = vec![
+            Value::Decimal("123456789.123456789".parse().expect("decimal")),
+            Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            Value::Bytes(vec![0, 255]),
+            Value::Array(vec![Value::Decimal(Decimal::MAX)]),
+        ];
+        let fields = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (format!("key{index}"), value.clone()))
+            .collect();
+        let doc = zerompk::to_msgpack_vec(&Value::Object(fields)).expect("native document");
+        let keys = (0..values.len())
+            .map(|index| SortKeySpec::column(format!("key{index}"), true))
+            .collect::<Vec<_>>();
+        let evaluated = eval_sort_values(&doc, &keys, &nodedb_crs::CrsContext::builtin_only())
+            .expect("native keys");
+        assert_eq!(evaluated, values);
+        let encoded = encode_sort_values(&evaluated).expect("encode keys");
+        assert_eq!(decode_sort_values(&encoded).expect("decode keys"), values);
+    }
+
+    #[test]
+    fn malformed_spill_keys_return_storage_error() {
+        assert!(decode_sort_values(&[]).is_err());
+        assert!(decode_sort_values(&[0x91]).is_err());
     }
 }

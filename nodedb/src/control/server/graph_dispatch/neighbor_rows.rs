@@ -36,7 +36,8 @@ impl NeighborRow {
 /// `src` and `node`, fails with a `Codec` error naming the row. Dropping it
 /// returns a partial neighbor set as a complete one. `label` is "" when
 /// absent: a label-less edge is a valid graph shape. `properties` is absent
-/// or nil when the hop returns none, else a map.
+/// or nil when the hop returns none, else the edge's stored property image as
+/// `bin`, decoded to its typed fields.
 pub(crate) fn decode_neighbor_rows(payload: &[u8]) -> crate::Result<Vec<NeighborRow>> {
     if payload.is_empty() {
         return Ok(Vec::new());
@@ -75,11 +76,18 @@ fn decode_row(index: usize, item: Value) -> crate::Result<NeighborRow> {
     };
     let properties = match fields.remove("properties") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(properties)) => Some(properties),
+        Some(Value::Bytes(image)) => {
+            Some(nodedb_graph::decode_edge_properties(&image).map_err(|e| {
+                row_err(
+                    index,
+                    format!("edge ({src})-[{label}]->({node}) properties do not decode: {e}"),
+                )
+            })?)
+        }
         Some(other) => {
             return Err(row_err(
                 index,
-                format!("has `properties` that are not a map: {other:?}"),
+                format!("has `properties` that are not a stored property image: {other:?}"),
             ));
         }
     };
@@ -131,20 +139,62 @@ mod tests {
         assert_eq!(rows, vec![row("a", "K", "b"), row("b", "", "c")]);
     }
 
+    /// A row as a hop writes it, its properties the stored image as `bin`.
+    fn row_with_image(node: &str, image: Option<Vec<u8>>) -> Value {
+        let mut fields = HashMap::from([
+            ("src".to_string(), Value::String("a".into())),
+            ("label".to_string(), Value::String("K".into())),
+            ("node".to_string(), Value::String(node.into())),
+        ]);
+        if let Some(image) = image {
+            fields.insert("properties".to_string(), Value::Bytes(image));
+        }
+        Value::Object(fields)
+    }
+
     #[test]
     fn properties_decode_as_a_typed_map() {
-        let rows = decode_neighbor_rows(&encode(serde_json::json!([
-            {"src": "a", "label": "K", "node": "b", "properties": {"score": 9, "kind": "road"}},
-            {"src": "a", "label": "K", "node": "c", "properties": null},
-        ])))
-        .unwrap();
+        let price = Value::Decimal("12.50".parse().expect("decimal"));
+        let image = nodedb_graph::encode_edge_properties(HashMap::from([
+            ("score".to_string(), Value::Integer(9)),
+            ("price".to_string(), price.clone()),
+        ]))
+        .expect("encode properties");
+        let payload = nodedb_types::json_msgpack::value_to_msgpack(&Value::Array(vec![
+            row_with_image("b", Some(image)),
+            row_with_image("c", None),
+            row_with_image("d", Some(Vec::new())),
+        ]))
+        .expect("encode rows");
+        let rows = decode_neighbor_rows(&payload).unwrap();
         let properties = rows[0]
             .properties
             .as_ref()
             .expect("first row has properties");
         assert_eq!(properties.get("score"), Some(&Value::Integer(9)));
-        assert_eq!(properties.get("kind"), Some(&Value::String("road".into())));
+        assert_eq!(properties.get("price"), Some(&price));
         assert_eq!(rows[1].properties, None);
+        assert_eq!(
+            rows[2].properties,
+            Some(HashMap::new()),
+            "an empty image is {{}}"
+        );
+    }
+
+    #[test]
+    fn an_undecodable_property_image_names_the_edge() {
+        let payload =
+            nodedb_types::json_msgpack::value_to_msgpack(&Value::Array(vec![row_with_image(
+                "b",
+                Some(vec![0x92, 0x01]),
+            )]))
+            .expect("encode rows");
+        match decode_neighbor_rows(&payload) {
+            Err(crate::Error::Codec { detail }) => {
+                assert!(detail.contains("(a)-[K]->(b)"), "{detail}");
+            }
+            other => panic!("expected a codec error, got {other:?}"),
+        }
     }
 
     #[test]

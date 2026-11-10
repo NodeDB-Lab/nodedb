@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Universal document scan: routes to the correct engine and normalizes
-//! all results to standard msgpack maps.
+//! Universal document scan: routes to the correct engine and returns every
+//! row as an object row, plain or native tagged, that `ObjectView` reads.
 //!
 //! Every query handler (aggregate, join, sort, filter, subquery) should
 //! use `scan_collection` instead of calling engine-specific scan methods.
@@ -74,24 +74,38 @@ impl CoreLoop {
     /// empty means no policy applies and every row passes. Used by point and
     /// batch reads, which have no pushdown filter slot in storage and so
     /// evaluate the policy on the fetched bytes.
+    ///
+    /// A raw scalar KV body (the single-`value` SQL form, RESP `SET`) is
+    /// decided against the `{value}` row reads present for it, so a policy
+    /// naming another column excludes it as it excludes any row lacking that
+    /// column.
     pub(in crate::data::executor) fn row_passes_rls(
         &self,
         row: &[u8],
         rls_filters: &[u8],
     ) -> crate::Result<bool> {
+        use crate::bridge::scan_filter::ScanFilter;
+        use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape, kv_body_to_row};
+
         if rls_filters.is_empty() {
             return Ok(true);
         }
         let filters = crate::bridge::scan_filter::decode_scan_filters(rls_filters, "RLS filter")?;
-        Ok(crate::bridge::scan_filter::ScanFilter::all_match_binary(
-            &filters,
-            row,
-            &self.crs_context(),
-        )?)
+        let crs = self.crs_context();
+        let raw_scalar = kv_body_shape(row) == KvBodyShape::Raw
+            && !crate::data::executor::response_codec::is_native_row(row);
+        if raw_scalar {
+            let (presented, _) = kv_body_to_row(row).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("KV raw body for an RLS check: {e}"),
+            })?;
+            return Ok(ScanFilter::all_match_value(&filters, &presented, &crs)?);
+        }
+        Ok(ScanFilter::all_match_binary(&filters, row, &crs)?)
     }
 
     /// Universal scan: reads from the correct engine for `collection` and
-    /// returns `(doc_id, msgpack_bytes)` pairs in standard msgpack map format.
+    /// returns `(doc_id, msgpack_bytes)` pairs, each an object row.
     ///
     /// Routing order:
     /// 1. Timeseries (by identity): memtable rows, then flushed partitions
@@ -99,7 +113,7 @@ impl CoreLoop {
     /// 3. Columnar storage (plain/spatial engine)
     /// 4. Sparse/document engine (default)
     ///
-    /// All results are normalized to standard msgpack maps so callers
+    /// Every row is an object row that keeps its typed cells, so callers
     /// (aggregate, join, sort, filter) never need engine-specific code.
     pub fn scan_collection(
         &self,
@@ -114,7 +128,7 @@ impl CoreLoop {
         }
 
         // 2. KV engine
-        let kv_docs = self.scan_kv(did, tid, collection, limit);
+        let kv_docs = self.scan_kv(did, tid, collection, limit)?;
         if !kv_docs.is_empty() {
             return Ok(kv_docs);
         }
@@ -139,8 +153,8 @@ impl CoreLoop {
     /// in `collection` without an upper-row cap.
     ///
     /// Routing follows the same priority order as [`scan_collection`]:
-    /// Timeseries → KV → Columnar → Sparse/document. All rows are normalized
-    /// to standard msgpack maps before being passed to `f`.
+    /// Timeseries → KV → Columnar → Sparse/document. Each row is an object row
+    /// when it is passed to `f`.
     ///
     /// The callback receives shared references to the data; it must copy any
     /// bytes it wants to retain beyond the call. If `f` returns `Err`, iteration
@@ -189,7 +203,7 @@ impl CoreLoop {
             },
             |key, value| {
                 found = true;
-                let (key_str, mp) = kv_row_to_doc(key, value);
+                let (key_str, mp) = kv_row_to_doc(key, value)?;
                 f(&key_str, &mp)
             },
         )?;
@@ -226,20 +240,21 @@ impl CoreLoop {
         let identity_column = self.identity_column(did, tid, collection);
         // Each row at its current version, so a bitemporal collection scans.
         self.for_each_current_row(did, tid, collection, |id, raw| {
-            let (id_s, mp) = sparse_row_to_doc(id, raw, format.as_format_ref(), &identity_column);
+            let (id_s, mp) =
+                sparse_row_to_relational_doc(id, raw, format.as_format_ref(), &identity_column)?;
             f(&id_s, &mp).map(|()| std::ops::ControlFlow::Continue(()))
         })
     }
 
-    /// Scan KV engine entries → standard msgpack.
-    /// Injects the `key` field directly into the msgpack map — no JSON roundtrip.
+    /// Scan KV engine entries as object rows, each carrying its `key`
+    /// ([`kv_row_to_doc`]).
     fn scan_kv(
         &self,
         did: u64,
         tid: u64,
         collection: &str,
         limit: usize,
-    ) -> Vec<(String, Vec<u8>)> {
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let now_ms = crate::engine::kv::current_ms();
         let (entries, _next_cursor) = self.kv_engine.scan(KvScanParams {
             database_id: did,
@@ -253,11 +268,10 @@ impl CoreLoop {
             filter_value: None,
             surrogate_ceiling: None,
         });
-        let mut results = Vec::with_capacity(entries.len());
-        for (key, value) in entries {
-            results.push(kv_row_to_doc(&key, &value));
-        }
-        results
+        entries
+            .iter()
+            .map(|(key, value)| kv_row_to_doc(key, value))
+            .collect()
     }
 
     /// Scan plain/spatial columnar rows → standard msgpack: flushed
@@ -359,19 +373,21 @@ impl CoreLoop {
 
         let mut normalized = Vec::with_capacity(docs.len());
         for (id, raw) in docs {
-            normalized.push(sparse_row_to_doc(
+            normalized.push(sparse_row_to_relational_doc(
                 &id,
                 &raw,
                 format.as_format_ref(),
                 &identity_column,
-            ));
+            )?);
         }
         Ok(normalized)
     }
 }
 
-/// A positional columnar row as `(id, msgpack object)`: the `id` column's
-/// text, or empty when the row has none, and the row keyed by column name.
+/// A positional columnar row as `(id, native tagged object)`: the `id`
+/// column's text, or empty when the row has none, and the row keyed by
+/// column name. The native encoding keeps `DECIMAL`, `UUID` and other typed
+/// cells typed for the relational paths that read these rows.
 fn columnar_row_to_doc(
     schema: &nodedb_types::columnar::ColumnarSchema,
     row: Vec<nodedb_types::value::Value>,
@@ -386,13 +402,12 @@ fn columnar_row_to_doc(
         }
         map.insert(col_def.name.clone(), val);
     }
-    let mp =
-        nodedb_types::value_to_msgpack(&nodedb_types::value::Value::Object(map)).map_err(|e| {
-            crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("encode normalized columnar row: {e}"),
-            }
-        })?;
+    let mp = zerompk::to_msgpack_vec(&nodedb_types::value::Value::Object(map)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("encode normalized columnar row: {e}"),
+        }
+    })?;
     Ok((id, mp))
 }
 
@@ -402,10 +417,69 @@ fn columnar_row_to_doc(
 // split must not be visible to them.
 pub(in crate::data::executor) use super::row_shape::{
     decoded_col_to_value, kv_row_to_doc, sparse_body_to_msgpack, sparse_row_to_doc,
+    sparse_row_to_native_doc, sparse_row_to_relational_doc,
 };
 
 #[cfg(test)]
 mod tests {
+    /// A columnar `DECIMAL` / `UUID` row keeps its types, so it joins, groups
+    /// and routes with a schemaless native row holding the same values, and
+    /// a genuine text value stays apart.
+    #[test]
+    fn columnar_typed_cells_match_native_schemaless_rows() {
+        use nodedb_query::msgpack_scan::{build_group_key, join_key_identity};
+        use nodedb_types::Value;
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::nullable("amount", ColumnType::Decimal(None)),
+            ColumnDef::nullable("ref", ColumnType::Uuid),
+        ])
+        .expect("schema");
+        let amount = Value::Decimal("5.25".parse().expect("decimal"));
+        let reference = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let (_, columnar) =
+            super::columnar_row_to_doc(&schema, vec![amount.clone(), reference.clone()])
+                .expect("columnar row");
+        let schemaless = zerompk::to_msgpack_vec(&Value::Object(
+            [
+                ("amount".to_owned(), amount),
+                ("ref".to_owned(), reference.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+        .expect("native row");
+        for keys in [["amount"], ["ref"]] {
+            assert_eq!(
+                join_key_identity(&columnar, &keys).expect("columnar key"),
+                join_key_identity(&schemaless, &keys).expect("native key"),
+                "{keys:?}"
+            );
+            assert_eq!(
+                nodedb_query::partition_hash(&columnar, &keys).expect("columnar route"),
+                nodedb_query::partition_hash(&schemaless, &keys).expect("native route"),
+            );
+        }
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let group = [nodedb_query::expr::GroupKeySpec::column("amount")];
+        assert_eq!(
+            build_group_key(&columnar, &group, &crs).expect("columnar group"),
+            build_group_key(&schemaless, &group, &crs).expect("native group"),
+        );
+        // A user string "5.25" is text, not the decimal.
+        let text = zerompk::to_msgpack_vec(&Value::Object(
+            [("amount".to_owned(), Value::String("5.25".into()))]
+                .into_iter()
+                .collect(),
+        ))
+        .expect("text row");
+        assert_ne!(
+            join_key_identity(&columnar, &["amount"]).expect("columnar key"),
+            join_key_identity(&text, &["amount"]).expect("text key"),
+        );
+    }
+
     /// Storage key for a small test surrogate, keyed by a mnemonic letter so
     /// call sites below read the same as the doc-id literals they replace.
     fn key(surrogate: u32) -> nodedb_types::StorageKey {

@@ -84,7 +84,7 @@ impl NodeDbPgHandler {
                     ),
                 };
                 let (tasks, _output_schema, versions, _) = query_ctx
-                    .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec, None)
+                    .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec)
                     .await
                     .map_err(StatementSetupError::from)?;
 
@@ -108,6 +108,7 @@ impl NodeDbPgHandler {
         let mut rows = Vec::new();
         for task in tasks {
             let tenant_id = task.tenant_id;
+            let row_context = crate::bridge::envelope::describe_row_context(&task.plan);
             let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
                 &self.state.audit,
             ));
@@ -128,8 +129,11 @@ impl NodeDbPgHandler {
                 .map_err(|e| super::super::types::error_to_pg(&e))?;
 
             if !resp.payload.is_empty() {
-                let json =
-                    crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
+                let json = crate::data::executor::response_codec::decode_row_payload_to_json(
+                    &resp.payload,
+                    row_context,
+                )
+                .map_err(|e| super::super::types::error_to_pg(&e))?;
                 rows.push(json);
             }
         }

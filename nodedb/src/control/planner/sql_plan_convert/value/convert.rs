@@ -4,8 +4,6 @@
 
 use nodedb_sql::types::SqlValue;
 
-use super::msgpack_write::write_msgpack_value;
-
 pub(crate) fn sql_value_to_nodedb_value(v: &SqlValue) -> nodedb_types::Value {
     match v {
         SqlValue::Int(i) => nodedb_types::Value::Integer(*i),
@@ -18,15 +16,23 @@ pub(crate) fn sql_value_to_nodedb_value(v: &SqlValue) -> nodedb_types::Value {
             nodedb_types::Value::Array(arr.iter().map(sql_value_to_nodedb_value).collect())
         }
         SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b.clone()),
+        SqlValue::Uuid(u) => nodedb_types::Value::Uuid(u.clone()),
+        SqlValue::Object(fields) => nodedb_types::Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), sql_value_to_nodedb_value(value)))
+                .collect(),
+        ),
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(*dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(*dt),
         SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g.clone()),
+        SqlValue::Duration(d) => nodedb_types::Value::Duration(*d),
     }
 }
 
 pub(crate) fn sql_value_to_string(v: &SqlValue) -> String {
     match v {
-        SqlValue::String(s) => s.clone(),
+        SqlValue::String(s) | SqlValue::Uuid(s) => s.clone(),
         SqlValue::Int(i) => i.to_string(),
         SqlValue::Float(f) => f.to_string(),
         SqlValue::Decimal(d) => d.to_string(),
@@ -34,10 +40,33 @@ pub(crate) fn sql_value_to_string(v: &SqlValue) -> String {
         SqlValue::Timestamp(dt) | SqlValue::Timestamptz(dt) => dt.to_iso8601(),
         SqlValue::Bytes(b) => format!("\\x{}", hex::encode(b)),
         SqlValue::Array(arr) => format_pg_array(arr),
+        // The JSON text of the object, as a client reads it.
+        SqlValue::Object(_) => {
+            crate::util::wire_json::value_to_wire_json(&sql_value_to_nodedb_value(v)).to_string()
+        }
         SqlValue::Null => String::new(),
         // GeoJSON text, `crs` member included for a non-WGS 84 SRID.
         SqlValue::Geometry(g) => nodedb_types::geometry::geojson_tree(g).to_string(),
+        SqlValue::Duration(d) => d.to_string(),
     }
+}
+
+/// The text a document secondary index files `v` under, for an index
+/// probe.
+///
+/// The index files a field by the JSON text of the stored value. Bytes are
+/// the JSON text of the bytes value, its base64, so a probe on a bytea
+/// literal finds the row that stores those bytes. Every other value is
+/// [`sql_value_to_string`], which already matches the stored JSON text.
+pub(crate) fn sql_value_to_index_text(v: &SqlValue) -> String {
+    if let SqlValue::Bytes(bytes) = v
+        && let Ok(encoded) =
+            nodedb_types::value_to_msgpack(&nodedb_types::Value::Bytes(bytes.clone()))
+        && let Ok(serde_json::Value::String(text)) = nodedb_types::json_from_msgpack(&encoded)
+    {
+        return text;
+    }
+    sql_value_to_string(v)
 }
 
 fn format_pg_array(values: &[SqlValue]) -> String {
@@ -70,7 +99,7 @@ fn pg_array_string_needs_quotes(value: &str) -> bool {
 /// PostgreSQL array text.
 pub(crate) fn sql_value_to_bytes(v: &SqlValue) -> crate::Result<Vec<u8>> {
     match v {
-        SqlValue::Array(_) => Ok(sql_value_to_string(v).into_bytes()),
+        SqlValue::Array(_) | SqlValue::Object(_) => Ok(sql_value_to_string(v).into_bytes()),
         SqlValue::Int(_)
         | SqlValue::Float(_)
         | SqlValue::Decimal(_)
@@ -78,19 +107,29 @@ pub(crate) fn sql_value_to_bytes(v: &SqlValue) -> crate::Result<Vec<u8>> {
         | SqlValue::Bool(_)
         | SqlValue::Null
         | SqlValue::Bytes(_)
+        | SqlValue::Uuid(_)
         | SqlValue::Timestamp(_)
         | SqlValue::Timestamptz(_)
-        | SqlValue::Geometry(_) => Ok(nodedb_types::scalar_to_raw_bytes(
+        | SqlValue::Geometry(_)
+        | SqlValue::Duration(_) => Ok(nodedb_types::scalar_to_raw_bytes(
             &sql_value_to_nodedb_value(v),
         )?),
     }
 }
 
-/// Encode a SQL value as standard msgpack for field-level updates.
+/// Encode a SQL value as plain msgpack for a field-level update literal.
+///
+/// Every typed scalar keeps its type: an instant is the instant ext, a UUID
+/// the UUID ext, a decimal the decimal ext (a `u64` past `i64::MAX` stays a
+/// `uint64`). The literal applies to the field as is, so text in their place
+/// would store text in a schemaless field.
 pub(crate) fn sql_value_to_msgpack(v: &SqlValue) -> crate::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(16);
-    write_msgpack_value(&mut buf, v)?;
-    Ok(buf)
+    nodedb_types::value_to_typed_msgpack(&sql_value_to_nodedb_value(v)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("update literal: {e}"),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -115,6 +154,21 @@ mod tests {
             ])),
             "{public,\"two words\",\"NULL\",NULL}"
         );
+    }
+
+    /// A bytes probe reads the index text the stored bytes are filed under.
+    #[test]
+    fn a_bytes_probe_matches_the_index_text_of_stored_bytes() {
+        let stored = nodedb_types::json_from_msgpack(
+            &nodedb_types::value_to_msgpack(&nodedb_types::Value::Bytes(vec![1, 2]))
+                .expect("encode"),
+        )
+        .expect("json");
+        assert_eq!(
+            json_scalar_to_string(&stored),
+            Some(sql_value_to_index_text(&SqlValue::Bytes(vec![1, 2])))
+        );
+        assert_eq!(sql_value_to_index_text(&SqlValue::Int(7)), "7");
     }
 
     #[test]

@@ -10,9 +10,9 @@
 //! apply. CRDT constraint checks stay at COMMIT and replication.
 //!
 //! The staged body is built the way the live handler materializes one: the
-//! row's fields normalized through Loro's value model and encoded as
-//! MessagePack (`crdt_row_body`), then through the put-body encoder a
-//! document point write uses. A partial write merges the incoming fields
+//! row's typed fields normalized through `nodedb_crdt::loro_value` and
+//! encoded as a native object (`crdt_row_body`), then through the put-body
+//! encoder a document point write uses. A partial write merges the incoming fields
 //! over the row's current body under BASE ∪ OVERLAY. A partial write on a
 //! missing row creates it from the incoming fields alone and counts one row,
 //! as the live `set_fields` does.
@@ -22,17 +22,17 @@
 //! Write-policy admission for a CRDT collection is decided at planning.
 
 use nodedb_physical::physical_plan::CrdtOp;
-use nodedb_types::{RowIdentity, Surrogate};
+use nodedb_types::{RowIdentity, Surrogate, Value};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
-use crate::data::executor::handlers::control::convert::{crdt_row_body, json_to_loro_value};
+use crate::data::executor::handlers::control::convert::crdt_row_body;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TxnId;
 
-type JsonMap = serde_json::Map<String, serde_json::Value>;
+type ValueMap = std::collections::HashMap<String, Value>;
 
 impl CoreLoop {
     /// Route a `MetaOp::StageWrite` wrapping a `CrdtOp` to its staging path.
@@ -47,7 +47,7 @@ impl CoreLoop {
             CrdtOp::DocUpsert {
                 collection,
                 document_id,
-                fields_json,
+                fields,
                 surrogate,
                 partial,
                 // The verb decides the command tag on the Control Plane.
@@ -65,7 +65,7 @@ impl CoreLoop {
                     RowIdentity::from_user_key(document_id),
                     *surrogate,
                 );
-                self.stage_crdt_doc_upsert(&ctx, fields_json, *partial)
+                self.stage_crdt_doc_upsert(&ctx, fields, *partial)
             }
             CrdtOp::DocDelete {
                 collection,
@@ -114,7 +114,7 @@ impl CoreLoop {
     fn stage_crdt_doc_upsert(
         &mut self,
         ctx: &StageCtx<'_>,
-        fields_json: &str,
+        fields: &[u8],
         partial: bool,
     ) -> Response {
         if ctx.surrogate == Surrogate::ZERO {
@@ -128,16 +128,16 @@ impl CoreLoop {
                 },
             );
         }
-        let Ok(incoming) = sonic_rs::from_str::<JsonMap>(fields_json) else {
-            return self.response_error(
-                ctx.task,
-                ErrorCode::Internal {
-                    detail: format!(
-                        "crdt doc upsert: invalid fields_json for {}",
-                        ctx.document_id
-                    ),
-                },
-            );
+        let incoming = match nodedb_physical::physical_plan::decode_fields_body(fields) {
+            Ok(incoming) => incoming,
+            Err(detail) => {
+                return self.response_error(
+                    ctx.task,
+                    ErrorCode::DataException {
+                        detail: format!("crdt doc upsert for '{}': {detail}", ctx.document_id),
+                    },
+                );
+            }
         };
 
         let row = if partial {
@@ -179,38 +179,46 @@ impl CoreLoop {
         self.stage_count_response(ctx.task, 1)
     }
 
-    /// The row's current fields under BASE ∪ OVERLAY, decoded through the
-    /// collection's storage mode. `Ok(None)` when the row is absent.
-    fn stage_crdt_current_fields(&self, ctx: &StageCtx<'_>) -> crate::Result<Option<JsonMap>> {
+    /// The row's current fields under BASE ∪ OVERLAY, decoded typed through
+    /// the collection's storage mode. `Ok(None)` when the row is absent.
+    fn stage_crdt_current_fields(&self, ctx: &StageCtx<'_>) -> crate::Result<Option<ValueMap>> {
         let Some(bytes) = self.stage_current_body(ctx)? else {
             return Ok(None);
         };
         let schema = self.resolve_strict_schema(ctx.database_id, ctx.tid, ctx.collection);
-        let doc = doc_format::decode_document_or_binary_tuple(
-            &bytes,
-            schema.as_ref(),
-            "staged crdt row",
-        )?;
+        let doc = match schema.as_ref() {
+            Some(schema) => {
+                crate::data::executor::strict_format::binary_tuple_to_value(&bytes, schema)
+                    .ok_or_else(|| crate::Error::Serialization {
+                        format: "binary_tuple".into(),
+                        detail: format!(
+                            "staged crdt row '{}' ({} bytes) is not a Binary Tuple readable under \
+                     the collection's strict schema",
+                            ctx.document_id,
+                            bytes.len()
+                        ),
+                    })?
+            }
+            None => doc_format::decode_document_value(&bytes)?,
+        };
         match doc {
-            serde_json::Value::Object(fields) => Ok(Some(fields)),
+            Value::Object(fields) => Ok(Some(fields)),
             other => Err(crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!(
-                    "staged crdt row '{}' is not an object: {other}",
-                    ctx.document_id
+                    "staged crdt row '{}' is {}, expected an object",
+                    ctx.document_id,
+                    other.type_name()
                 ),
             }),
         }
     }
 
     /// Encode `row` into the stored form the live materialization writes:
-    /// Loro-normalized MessagePack, then the document put-body pipeline.
-    fn stage_crdt_encode_row(&self, ctx: &StageCtx<'_>, row: JsonMap) -> crate::Result<Vec<u8>> {
-        let loro = json_to_loro_value(&serde_json::Value::Object(row));
-        let raw = crdt_row_body(&loro).ok_or_else(|| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("staged crdt row '{}' does not encode", ctx.document_id),
-        })?;
+    /// Loro-normalized native object, then the document put-body pipeline.
+    fn stage_crdt_encode_row(&self, ctx: &StageCtx<'_>, row: ValueMap) -> crate::Result<Vec<u8>> {
+        let loro = nodedb_crdt::loro_value::value_to_loro(&Value::Object(row))?;
+        let raw = crdt_row_body(&loro)?;
         self.stage_encode_put_body(
             ctx.database_id,
             ctx.tid,

@@ -57,6 +57,22 @@ pub(crate) fn map_plan_error(
         // row-scope evaluator raises, so it carries the same code.
         nodedb_sql::SqlError::DivisionByZero => crate::Error::DivisionByZero,
         nodedb_sql::SqlError::DataException { detail } => crate::Error::DataException { detail },
+        // A constant `sqrt`, logarithm or `power` outside its domain: `2201E`
+        // or `2201F`, the codes the row-scope evaluator gives it.
+        nodedb_sql::SqlError::MathDomain(fault) => {
+            crate::Error::from(nodedb_query::EvalError::MathDomain(fault))
+        }
+        // A typed literal whose text spells no value of its type: `22P02`,
+        // the code the parameter decoder gives the same text.
+        nodedb_sql::SqlError::InvalidTextRepresentation { .. } => {
+            crate::Error::InvalidTextRepresentation {
+                detail: error.to_string(),
+            }
+        }
+        // A typed timestamp literal that spells no instant: `22007`.
+        nodedb_sql::SqlError::InvalidDatetimeFormat { .. } => crate::Error::InvalidDatetimeFormat {
+            detail: error.to_string(),
+        },
         // A vector element that is not a number is the wrong kind for the
         // column: `42804`, the code the strict encoder gives the same element.
         nodedb_sql::SqlError::VectorElementNotNumeric { .. } => crate::Error::DatatypeMismatch {

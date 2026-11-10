@@ -436,6 +436,36 @@ pub(super) fn collect_neighbors(
     direction: Direction,
     collection_filter: CollectionFilter,
 ) -> Vec<(u32, u32)> {
+    collect_oriented_neighbors(csr, node, label_filter, direction, collection_filter)
+        .into_iter()
+        .map(|n| (n.label, n.other))
+        .collect()
+}
+
+/// One crossed edge from the node a hop expands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OrientedNeighbor {
+    pub label: u32,
+    /// The node at the edge's other end.
+    pub other: u32,
+    /// `true` when the expanded node is the edge's source, `false` when it
+    /// is the destination.
+    pub outgoing: bool,
+    /// The collection the edge is stored under (`CsrIndex::collection_name`).
+    pub collection: u32,
+}
+
+/// [`collect_neighbors`] with each edge's orientation and collection. A
+/// relationship property is read from the physical edge under its own
+/// collection, so a `Both` read must know which way each row crossed, and an
+/// unscoped read which collection holds the edge.
+pub(super) fn collect_oriented_neighbors(
+    csr: &CsrIndex,
+    node: u32,
+    label_filter: Option<&str>,
+    direction: Direction,
+    collection_filter: CollectionFilter,
+) -> Vec<OrientedNeighbor> {
     let mut neighbors = Vec::new();
     // A collection clause naming an unknown collection matches nothing —
     // never fall through to the unscoped iterators.
@@ -443,39 +473,41 @@ pub(super) fn collect_neighbors(
         return neighbors;
     }
     let keep = |lid: u32| label_filter.is_none() || csr_label_matches(csr, lid, label_filter);
+    let edges = |outgoing: bool| -> Vec<(u32, u32, u32)> {
+        match (collection_filter, outgoing) {
+            (CollectionFilter::Only(cid), true) => csr
+                .iter_out_edges_raw_in(node, cid)
+                .map(|(lid, other)| (lid, other, cid))
+                .collect(),
+            (CollectionFilter::Only(cid), false) => csr
+                .iter_in_edges_raw_in(node, cid)
+                .map(|(lid, other)| (lid, other, cid))
+                .collect(),
+            (_, true) => csr.iter_out_edges_raw_with_collection(node),
+            (_, false) => csr.iter_in_edges_raw_with_collection(node),
+        }
+    };
     if matches!(direction, Direction::Out | Direction::Both) {
-        match collection_filter {
-            CollectionFilter::Only(cid) => {
-                for (lid, dst) in csr.iter_out_edges_raw_in(node, cid) {
-                    if keep(lid) {
-                        neighbors.push((lid, dst));
-                    }
-                }
-            }
-            _ => {
-                for (lid, dst) in csr.iter_out_edges_raw(node) {
-                    if keep(lid) {
-                        neighbors.push((lid, dst));
-                    }
-                }
+        for (label, other, collection) in edges(true) {
+            if keep(label) {
+                neighbors.push(OrientedNeighbor {
+                    label,
+                    other,
+                    outgoing: true,
+                    collection,
+                });
             }
         }
     }
     if matches!(direction, Direction::In | Direction::Both) {
-        match collection_filter {
-            CollectionFilter::Only(cid) => {
-                for (lid, src) in csr.iter_in_edges_raw_in(node, cid) {
-                    if keep(lid) && direction.in_pass_keeps(&src, &node) {
-                        neighbors.push((lid, src));
-                    }
-                }
-            }
-            _ => {
-                for (lid, src) in csr.iter_in_edges_raw(node) {
-                    if keep(lid) && direction.in_pass_keeps(&src, &node) {
-                        neighbors.push((lid, src));
-                    }
-                }
+        for (label, other, collection) in edges(false) {
+            if keep(label) && direction.in_pass_keeps(&other, &node) {
+                neighbors.push(OrientedNeighbor {
+                    label,
+                    other,
+                    outgoing: false,
+                    collection,
+                });
             }
         }
     }

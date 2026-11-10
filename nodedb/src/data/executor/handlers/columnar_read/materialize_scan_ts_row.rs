@@ -91,6 +91,9 @@ fn cell_to_value(cell: TsCell<'_>, column: &str) -> crate::Result<Value> {
         TsCell::Float(f) => Value::Float(f),
         TsCell::Int(n) => Value::Integer(n),
         TsCell::Symbol(s) => Value::String(s.to_string()),
+        TsCell::Decimal(d) => Value::Decimal(d),
+        TsCell::Uuid(bytes) => crate::engine::timeseries::row_cells::uuid_value(Some(bytes)),
+        TsCell::Bool(b) => Value::Bool(b),
     })
 }
 
@@ -99,7 +102,12 @@ fn cell_to_value(cell: TsCell<'_>, column: &str) -> crate::Result<Value> {
 pub(super) fn system_time(cell: TsCell<'_>) -> Option<i64> {
     match cell {
         TsCell::Time(_, millis) | TsCell::Int(millis) => Some(millis),
-        TsCell::Null | TsCell::Float(_) | TsCell::Symbol(_) => None,
+        TsCell::Null
+        | TsCell::Float(_)
+        | TsCell::Symbol(_)
+        | TsCell::Decimal(_)
+        | TsCell::Uuid(_)
+        | TsCell::Bool(_) => None,
     }
 }
 

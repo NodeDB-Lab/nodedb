@@ -1107,6 +1107,12 @@ mod tests {
         )
         .expect("redo replay must succeed");
 
+        let expected_native = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(
+            [("name".into(), nodedb_types::Value::String("bob".into()))]
+                .into_iter()
+                .collect(),
+        ))
+        .expect("native body");
         for s in [1u32, 2u32] {
             let row_key = storage_key(s);
             let stored = dst
@@ -1115,8 +1121,7 @@ mod tests {
                 .expect("get")
                 .expect("updated row must replay from resolve output");
             assert_eq!(
-                stored,
-                schemaless_body("bob"),
+                stored, expected_native,
                 "the resolved post-image round-trips through redo replay"
             );
         }
@@ -1214,6 +1219,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -1686,6 +1692,15 @@ mod tests {
         nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(obj)).expect("encode msgpack")
     }
 
+    /// The native tagged object a schemaless row stores for `schemaless_body(name)`.
+    fn stored_schemaless_body(name: &str) -> Vec<u8> {
+        let obj = std::collections::HashMap::from([(
+            "name".to_string(),
+            nodedb_types::Value::String(name.to_string()),
+        )]);
+        zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).expect("encode native object")
+    }
+
     /// A resolve plan naming `collection` as a schemaless document write.
     fn doc_put_plan(collection: &str) -> PhysicalPlan {
         PhysicalPlan::Document(DocumentOp::PointPut {
@@ -1697,6 +1712,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -1781,7 +1797,7 @@ mod tests {
             coll_key("notes"),
             surrogate,
             &RowIdentity::from_user_key("userpk"),
-            body.clone(),
+            body,
         );
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
@@ -1802,7 +1818,11 @@ mod tests {
             .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get")
             .expect("schemaless document row must replay");
-        assert_eq!(stored, body, "schemaless body round-trips verbatim");
+        assert_eq!(
+            stored,
+            stored_schemaless_body("alice"),
+            "schemaless body round-trips verbatim"
+        );
     }
 
     #[test]
@@ -1979,7 +1999,10 @@ mod tests {
             .sparse
             .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get");
-        assert_eq!(before.as_deref(), Some(schemaless_body("base").as_slice()));
+        assert_eq!(
+            before.as_deref(),
+            Some(stored_schemaless_body("base").as_slice())
+        );
 
         core.txn_overlay_mut(txn).insert_put(
             coll_key("notes"),
@@ -1998,7 +2021,7 @@ mod tests {
             .expect("get");
         assert_eq!(
             after.as_deref(),
-            Some(schemaless_body("base").as_slice()),
+            Some(stored_schemaless_body("base").as_slice()),
             "resolve must not mutate the base document engine"
         );
     }
@@ -3215,19 +3238,26 @@ mod tests {
         assert_eq!(redo.ops.len(), 1, "one timeseries ingest -> one sub-record");
         assert_eq!(redo.ops[0].record_type, RecordType::TimeseriesBatch as u32);
 
-        // The payload is the six-element tuple tagged "timeseries" (a msgpack
+        // The payload is the seven-element tuple tagged "timeseries" (a msgpack
         // array), distinct from the columnar map form. It carries the resolved
-        // rows and the statement instant.
-        let (kind, collection, payload, _prov, format, _instant) = zerompk::from_msgpack::<(
-            String,
-            String,
-            Vec<u8>,
-            Option<SyncProvenance>,
-            String,
-            i64,
-        )>(&redo.ops[0].payload)
-        .expect("decode timeseries six-element tuple");
+        // rows, the statement instant, and the policy check the commit already
+        // decided.
+        let (kind, collection, payload, _prov, format, _instant, rls_write_check) =
+            zerompk::from_msgpack::<(
+                String,
+                String,
+                Vec<u8>,
+                Option<SyncProvenance>,
+                String,
+                i64,
+                nodedb_types::RlsWriteCheck,
+            )>(&redo.ops[0].payload)
+            .expect("decode timeseries seven-element tuple");
         assert_eq!(kind, "timeseries");
+        assert_eq!(
+            rls_write_check,
+            nodedb_types::RlsWriteCheck::already_decided_elsewhere()
+        );
         assert_eq!(collection, "metrics");
         assert_eq!(
             format,
@@ -3286,7 +3316,7 @@ mod tests {
 
         let redo = decode_redo(&src.execute_resolve_txn(&task, TID, txn, &[plan]));
         assert_eq!(redo.ops.len(), 1);
-        let (kind, collection, replay_payload, _provenance, format, _instant) =
+        let (kind, collection, replay_payload, _provenance, format, _instant, _rls) =
             zerompk::from_msgpack::<(
                 String,
                 String,
@@ -3294,6 +3324,7 @@ mod tests {
                 Option<SyncProvenance>,
                 String,
                 i64,
+                nodedb_types::RlsWriteCheck,
             )>(&redo.ops[0].payload)
             .expect("decode timeseries redo");
         assert_eq!(kind, "timeseries");
@@ -4019,15 +4050,17 @@ mod tests {
         core.epoch_system_ms = Some(1_700_000_999_000);
         let redo = decode_redo(&core.execute_resolve_txn(&make_task(), TID, txn, &[ingest]));
         assert_eq!(redo.ops.len(), 1);
-        let (_kind, _collection, payload, _prov, format, instant) = zerompk::from_msgpack::<(
-            String,
-            String,
-            Vec<u8>,
-            Option<SyncProvenance>,
-            String,
-            i64,
-        )>(&redo.ops[0].payload)
-        .expect("decode timeseries redo");
+        let (_kind, _collection, payload, _prov, format, instant, _rls) =
+            zerompk::from_msgpack::<(
+                String,
+                String,
+                Vec<u8>,
+                Option<SyncProvenance>,
+                String,
+                i64,
+                nodedb_types::RlsWriteCheck,
+            )>(&redo.ops[0].payload)
+            .expect("decode timeseries redo");
         assert_eq!(
             format,
             crate::engine::timeseries::resolved_ingest::RESOLVED_INGEST_FORMAT
@@ -4314,7 +4347,13 @@ mod tests {
         let upsert = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "boards"),
             document_id: "c1".to_owned(),
-            fields_json: r#"{"name":"card"}"#.to_owned(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "name".to_string(),
+                    nodedb_types::Value::String("card".into()),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: Surrogate::new(7),
             partial: false,
             verb: CrdtWriteVerb::Insert,
@@ -4326,7 +4365,13 @@ mod tests {
             document_id: "c2".to_owned(),
             list_path: "blocks".to_owned(),
             index: 0,
-            fields_json: r#"{"text":"a"}"#.to_owned(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "text".to_string(),
+                    nodedb_types::Value::String("a".into()),
+                )]),
+            )
+            .expect("block fields encode"),
             surrogate: Surrogate::new(8),
         });
 

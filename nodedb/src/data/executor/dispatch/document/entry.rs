@@ -83,6 +83,7 @@ impl CoreLoop {
                 surrogates,
                 returning,
                 rls_filters,
+                rls_write_check,
                 resolved_sum_targets,
                 deferred_sum_targets,
             } => self.execute_document_batch_insert(
@@ -95,6 +96,7 @@ impl CoreLoop {
                     if_absent: *if_absent,
                     returning: returning.as_ref(),
                     rls_filters,
+                    rls_write_check,
                     resolved_sum_targets,
                     deferred_sum_targets,
                 },

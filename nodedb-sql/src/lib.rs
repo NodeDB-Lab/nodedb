@@ -21,9 +21,13 @@ pub mod fts_types;
 pub mod functions;
 pub mod optimizer;
 pub mod params;
+pub mod params_composite;
+pub mod params_typed;
+pub mod params_value;
 pub mod parser;
 pub mod placeholder_types;
 pub mod planner;
+pub mod query_expr;
 pub mod reserved;
 pub mod resolver;
 pub mod temporal;
@@ -53,15 +57,24 @@ pub fn parse_expr_string(expr_text: &str) -> Result<SqlExpr> {
     use sqlparser::parser::Parser;
 
     let dialect = GenericDialect {};
-    let ast_expr = Parser::new(&dialect)
-        .try_with_sql(expr_text)
-        .map_err(|e| SqlError::Parse {
-            detail: e.to_string(),
-        })?
-        .parse_expr()
-        .map_err(|e| SqlError::Parse {
-            detail: e.to_string(),
-        })?;
+    let mut parser =
+        Parser::new(&dialect)
+            .try_with_sql(expr_text)
+            .map_err(|e| SqlError::Parse {
+                detail: e.to_string(),
+            })?;
+    let ast_expr = parser.parse_expr().map_err(|e| SqlError::Parse {
+        detail: e.to_string(),
+    })?;
+    let trailing = parser.peek_token();
+    if trailing.token != sqlparser::tokenizer::Token::EOF {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "expression '{expr_text}' has trailing token '{}'. Remove trailing tokens",
+                trailing.token
+            ),
+        });
+    }
 
     resolver::expr::convert_expr(&ast_expr, &resolver::ColumnScope::Unchecked)
 }
@@ -198,3 +211,6 @@ fn plan_array_statement(stmt: ArrayStatement, catalog: &dyn SqlCatalog) -> Resul
         ArrayStatement::Alter(a) => Ok(vec![planner::array_ddl::plan_alter_array(&a, catalog)?]),
     }
 }
+
+#[cfg(test)]
+mod expression_parse_tests;

@@ -54,7 +54,7 @@ pub(crate) fn prepare_submit(
     } else {
         "calvin unique claims"
     };
-    let plans = decode_plans(&tx_class.plans, stage)?;
+    let plans = bind_volatile_defaults(state, tx_class, decode_plans(&tx_class.plans, stage)?)?;
     super::local::stamp_incarnations(state, tx_class, &plans)?;
     super::unique_claims::stamp_unique_claims(state, tx_class, &plans)?;
     // A batch edge op spans the homes of all its edges. Split into one batch
@@ -63,6 +63,40 @@ pub(crate) fn prepare_submit(
     let stream = super::parts::split_into_parts(state, tx_class, &sliced)?;
     let fold = ReplyFold::of_prepared(tx_class, &sliced.plans);
     Ok(Prepared { stream, fold })
+}
+
+/// `plans` with every volatile DEFAULT their bodies leave unset bound once,
+/// here on the submitter. Every participant replica executes the sequenced
+/// plans on its own, so a DEFAULT left for the apply would draw a different
+/// value on each. The class's plan bytes re-encode only when a body changed.
+/// A class an earlier submit already bound binds nothing again.
+fn bind_volatile_defaults(
+    state: &SharedState,
+    tx_class: &mut TxClass,
+    mut plans: Vec<PhysicalPlan>,
+) -> crate::Result<Vec<PhysicalPlan>> {
+    let mut changed = false;
+    for plan in &mut plans {
+        if let Some(bound) = crate::control::write_resolve::bind_volatile_defaults(
+            state,
+            tx_class.tenant_id,
+            tx_class.database_id,
+            plan,
+        )? {
+            *plan = bound;
+            changed = true;
+        }
+    }
+    if changed {
+        tx_class.plans =
+            nodedb_physical::physical_plan::wire::encode_batch(&plans).map_err(|e| {
+                Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("calvin default binding: plan encode: {e}"),
+                }
+            })?;
+    }
+    Ok(plans)
 }
 
 /// Decode the plan batch `bytes`. `stage` names the reader in a decode

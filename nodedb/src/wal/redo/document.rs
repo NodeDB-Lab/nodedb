@@ -11,8 +11,9 @@
 //!   tuple plus `sys_from`.
 //!
 //! The stamped form carries the version key the live write decided. Replay
-//! installs the row at that exact key. Every write-set image, every
-//! transaction redo and every RESTORE row is stamped.
+//! installs the row at that exact key. Submitted transaction redo and RESTORE
+//! rows are stamped. Installed write-set images use `installed_document`
+//! payloads with exact storage bytes and independent public event pairs.
 //!
 //! The unstamped form is the pre-dispatch record of a point put, insert or
 //! delete, and the opening forward record of its write group

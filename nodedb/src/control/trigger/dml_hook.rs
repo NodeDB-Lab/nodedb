@@ -198,7 +198,10 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
 /// Deserialize a MessagePack/JSON value blob into a HashMap for trigger bindings.
 fn deserialize_value_to_fields(value: &[u8]) -> HashMap<String, nodedb_types::Value> {
     // Try MessagePack first (primary format), fall back to JSON.
-    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(value) {
+    // A native body reads as the plain body of the same values.
+    if let Ok(serde_json::Value::Object(map)) =
+        crate::data::executor::response_codec::decode_body_plain_json(value)
+    {
         return map
             .into_iter()
             .map(|(k, v)| (k, nodedb_types::Value::from(v)))
@@ -427,7 +430,9 @@ pub async fn fetch_old_row(
 
     // A non-object payload is a transport failure, not evidence the row is absent.
     let bytes = resp.payload.as_ref();
-    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
+    if let Ok(serde_json::Value::Object(map)) =
+        crate::data::executor::response_codec::decode_body_plain_json(bytes)
+    {
         return Ok(map
             .into_iter()
             .map(|(k, v)| (k, nodedb_types::Value::from(v)))

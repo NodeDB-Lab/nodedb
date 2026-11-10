@@ -239,13 +239,14 @@ pub(crate) async fn build_edge_put(
     }))
 }
 
-/// The plain-MessagePack property map an `EdgePut` stores. Absent or null
-/// properties store nothing. Any other non-object value is refused.
-fn edge_properties_msgpack(properties: Option<&serde_json::Value>) -> crate::Result<Vec<u8>> {
+/// The native tagged property object an `EdgePut` stores. Absent or null
+/// properties, and an empty object, store nothing. Any other non-object
+/// value is refused.
+fn edge_properties_msgpack(properties: Option<&nodedb_types::Value>) -> crate::Result<Vec<u8>> {
     match properties {
-        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
-        Some(object @ serde_json::Value::Object(_)) => {
-            nodedb_types::json_msgpack::json_to_msgpack(object).map_err(|e| {
+        None | Some(nodedb_types::Value::Null) => Ok(Vec::new()),
+        Some(nodedb_types::Value::Object(fields)) => {
+            nodedb_graph::encode_edge_properties(fields.clone()).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
                     detail: format!("edge properties: {e}"),
@@ -253,7 +254,10 @@ fn edge_properties_msgpack(properties: Option<&serde_json::Value>) -> crate::Res
             })
         }
         Some(other) => Err(crate::Error::BadRequest {
-            detail: format!("edge properties must be a JSON object, got {other}"),
+            detail: format!(
+                "edge properties must be an object, got a {} value",
+                other.type_name()
+            ),
         }),
     }
 }
@@ -552,20 +556,36 @@ mod tests {
     }
 
     #[test]
-    fn edge_properties_store_plain_msgpack() {
-        let bytes = edge_properties_msgpack(Some(&json!({"weight": 3, "kind": "road"})))
+    fn edge_properties_store_a_native_object() {
+        use nodedb_types::Value;
+        let price = Value::Decimal("12.50".parse().expect("decimal"));
+        let fields = std::collections::HashMap::from([
+            ("weight".to_string(), Value::Integer(3)),
+            ("price".to_string(), price.clone()),
+        ]);
+        let bytes = edge_properties_msgpack(Some(&Value::Object(fields.clone())))
             .expect("object properties encode");
+        assert_eq!(
+            nodedb_types::ObjectView::new(&bytes)
+                .expect("object")
+                .format(),
+            nodedb_types::ObjectFormat::Native
+        );
+        assert_eq!(
+            nodedb_graph::decode_edge_properties(&bytes).expect("decode"),
+            fields
+        );
         assert_eq!(
             nodedb_graph::csr::weights::extract_weight_from_properties(&bytes),
             3.0
         );
         assert!(edge_properties_msgpack(None).expect("absent").is_empty());
         assert!(
-            edge_properties_msgpack(Some(&serde_json::Value::Null))
+            edge_properties_msgpack(Some(&Value::Null))
                 .expect("null")
                 .is_empty()
         );
-        assert!(edge_properties_msgpack(Some(&json!([1, 2]))).is_err());
+        assert!(edge_properties_msgpack(Some(&Value::Array(vec![Value::Integer(1)]))).is_err());
     }
 
     #[tokio::test]

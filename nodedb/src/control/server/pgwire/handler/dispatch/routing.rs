@@ -116,11 +116,12 @@ impl NodeDbPgHandler {
 
         // Clone-read must run first: resolving derived Exchange plans below
         // dispatches straight to the Data Plane, bypassing the clone check.
-        if let Some(resp) = self
-            .maybe_intercept_clone_read_early(&task, identity, perm)
+        if let Some(answer) = self
+            .maybe_intercept_clone_read_early(&task, identity, perm, linearizable)
             .await?
         {
-            return Ok(resp);
+            *distributed_reads = answer.distributed_reads;
+            return Ok(answer.response);
         }
 
         // Resolve derived Exchange plans before authorizing the dispatched task.

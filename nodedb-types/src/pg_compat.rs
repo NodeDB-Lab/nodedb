@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! PostgreSQL wire-compatibility version constants. NodeDB advertises
+//! PostgreSQL wire-compatibility constants. NodeDB advertises
 //! compatibility with a fixed PostgreSQL major so libpq-based clients gate
 //! features correctly. These are the single source of truth for `version()`,
 //! the `server_version_num` runtime parameter, and startup ParameterStatus.
+
+/// The parameter type OID of a tagged NodeDB value: PostgreSQL's `any`
+/// pseudo-type, which no PostgreSQL client binds a value under.
+///
+/// A parameter of this type is an object or array whose leaves JSON cannot
+/// hold exactly (a whole decimal, a UUID, an instant, bytes, a duration, a
+/// non-finite float). Its binary form is the NodeDB tagged MessagePack of
+/// the value, so every leaf keeps its type. Any other object or array binds
+/// as `jsonb`.
+pub const TAGGED_VALUE_PARAM_OID: u32 = 2276;
 
 /// PostgreSQL version NodeDB advertises compatibility with (`server_version` numeric form source).
 pub const PG_COMPAT_VERSION: &str = "15.0";

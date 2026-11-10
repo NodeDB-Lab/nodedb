@@ -18,7 +18,7 @@ use nodedb_physical::physical_task::PostSetOp;
 use nodedb_types::protocol::NativeResponse;
 
 use crate::control::gateway::core::QueryContext;
-use crate::control::server::exchange::streamable::streamable_gather_child;
+use crate::control::server::exchange::streamable::{StreamableScan, open_streamable_scan};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::result_stream::ResultStream;
@@ -77,6 +77,8 @@ pub(crate) struct SqlStream {
     /// stream, so retaining the scope here holds leases until final emission
     /// or connection teardown drops the stream.
     pub(crate) lease_scope: Option<crate::control::lease::QueryLeaseScope>,
+    /// The row shape of the streamed plan's batches.
+    pub row_context: crate::data::executor::response_codec::RowContext,
 }
 
 impl SqlStream {
@@ -104,8 +106,9 @@ impl SqlStream {
 ///     needs per-row session sequence access, which the per-batch shaper
 ///     does not carry),
 ///   - autocommit (not inside a `BEGIN..COMMIT` block), and
-///   - the plan is `Query(Exchange(Gather{as_aggregate:false}))` over a
-///     streamable unordered scan (via [`streamable_gather_child`]).
+///   - [`open_streamable_scan`] clears the plan: a
+///     `Query(Exchange(Gather{as_aggregate:false}))` over a streamable
+///     unordered scan that reads through no unmaterialized clone.
 ///
 /// Returns `Ok(Some(stream))` when eligible, `Ok(None)` to fall back to the
 /// materialized path, or `Err` if the stream cannot be opened.
@@ -125,40 +128,13 @@ pub(crate) async fn try_open_sql_stream(
     {
         return Ok(None);
     }
-    let Some((child_plan, limit)) = streamable_gather_child(&task.plan) else {
+    let Some(StreamableScan {
+        checked: checked_child,
+        child_plan,
+        limit,
+    }) = open_streamable_scan(ctx.state, ctx.identity, task).await?
+    else {
         return Ok(None);
-    };
-
-    let mut child_task = task.clone();
-    child_task.plan = child_plan.clone();
-    let tenant_id = child_task.tenant_id;
-    let emitter =
-        crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&ctx.state.audit));
-    let checked_child = match crate::control::server::shared::clone_write::intercept_and_authorize(
-        crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
-            state: ctx.state,
-            task: child_task,
-            identity: ctx.identity,
-            tenant_id,
-            permissions: &ctx.state.permissions,
-            roles: &ctx.state.roles,
-            emitter: &emitter,
-        },
-    )
-    .await?
-    {
-        // A streamable child is always a plain unordered scan (see
-        // `streamable_gather_child`), never a clone-write plan shape, so this
-        // is unreachable in practice — surfaced as a typed error rather than
-        // silently accommodated as either a stream or a materialized response.
-        crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(_) => {
-            return Err(crate::Error::Internal {
-                detail: "clone-write hook unexpectedly intercepted a streamable scan".into(),
-            });
-        }
-        crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(checked) => {
-            checked
-        }
     };
 
     let gateway = ctx.state.installed_gateway()?;
@@ -183,5 +159,6 @@ pub(crate) async fn try_open_sql_stream(
             &child_plan,
         )),
         lease_scope: None,
+        row_context: crate::bridge::envelope::describe_row_context(&child_plan),
     }))
 }

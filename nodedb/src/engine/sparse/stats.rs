@@ -327,14 +327,19 @@ impl StatsStore {
             // deserialize the same bytes for the merge — one read, not two.
             let prior_bytes: Option<Vec<u8>> = table
                 .get(key.as_str())
-                .ok()
-                .flatten()
+                .map_err(|e| crate::Error::Storage {
+                    engine: "stats".into(),
+                    detail: format!("get '{key}': {e}"),
+                })?
                 .map(|guard| guard.value().to_vec());
 
-            let mut stats: ColumnStats = prior_bytes
-                .as_deref()
-                .and_then(|b| zerompk::from_msgpack(b).ok())
-                .unwrap_or_default();
+            let mut stats: ColumnStats = match prior_bytes.as_deref() {
+                Some(bytes) => zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Storage {
+                    engine: "stats".into(),
+                    detail: format!("deserialize '{key}': {e}"),
+                })?,
+                None => ColumnStats::default(),
+            };
 
             stats.observe(Some(value));
 
@@ -455,6 +460,39 @@ mod tests {
         }
         let sel = stats.eq_selectivity();
         assert!(sel > 0.005 && sel < 0.02, "selectivity: {sel}");
+    }
+
+    #[test]
+    fn transactional_observe_rejects_corrupt_stats_and_abort_retains_prior_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(GatedDatabase::create(dir.path().join("stats.redb")).unwrap());
+        let store = StatsStore::open(Arc::clone(&db)).unwrap();
+        let key = "0:1:users:name";
+        let corrupt = [0xc1];
+        store.restore(key, Some(&corrupt)).unwrap();
+
+        let txn = db.begin_write().unwrap();
+        let result = store.observe_document_in_txn(
+            &txn,
+            0,
+            1,
+            "users",
+            &serde_json::json!({"name": "Alice"}),
+        );
+        match result {
+            Err(crate::Error::Storage { engine, detail }) => {
+                assert_eq!(engine, "stats");
+                assert!(detail.contains("deserialize"), "{detail}");
+                assert!(detail.contains(key), "{detail}");
+            }
+            other => panic!("expected a stats storage error, got {other:?}"),
+        }
+        txn.abort().unwrap();
+
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(COLUMN_STATS).unwrap();
+        let retained = table.get(key).unwrap().unwrap();
+        assert_eq!(retained.value(), corrupt.as_slice());
     }
 
     #[test]

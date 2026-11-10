@@ -42,8 +42,9 @@ pub(crate) enum CrdtDocOpWalRecord {
         collection: String,
         document_id: String,
         surrogate: u32,
-        /// JSON-encoded field map for the row.
-        fields_json: String,
+        /// The row's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
         /// `false` = INSERT / full replace (prune absent keys); `true` =
         /// UPDATE SET partial-merge.
         partial: bool,
@@ -65,7 +66,16 @@ mod tests {
             collection: "users".to_string(),
             document_id: "u1".to_string(),
             surrogate: 42,
-            fields_json: r#"{"a":1,"b":2}"#.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([
+                    ("a".to_string(), nodedb_types::Value::Integer(1)),
+                    (
+                        "b".to_string(),
+                        nodedb_types::Value::Decimal("12.50".parse().expect("decimal literal")),
+                    ),
+                ]),
+            )
+            .expect("fields body encodes"),
             partial: false,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");

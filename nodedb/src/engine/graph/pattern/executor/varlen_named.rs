@@ -254,6 +254,45 @@ pub(super) fn merge_neighbors_named(
     collection_filter: CollectionFilter,
     overlay: &GraphOverlayDelta,
 ) -> Vec<(String, String)> {
+    merge_neighbors_oriented(
+        csr,
+        src_name,
+        src_id,
+        label_filter,
+        direction,
+        collection_filter,
+        overlay,
+    )
+    .into_iter()
+    .map(|n| (n.label, n.other))
+    .collect()
+}
+
+/// One crossed edge of a name-keyed hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NamedNeighbor {
+    pub label: String,
+    /// The node at the edge's other end.
+    pub other: String,
+    /// `true` when the expanded node is the edge's source, `false` when it
+    /// is the destination.
+    pub outgoing: bool,
+    /// The collection the durable edge is stored under. `None` for an edge
+    /// only the transaction's staged overlay holds.
+    pub collection: Option<String>,
+}
+
+/// [`merge_neighbors_named`] with each edge's orientation and, for a durable
+/// edge, its collection.
+pub(super) fn merge_neighbors_oriented(
+    csr: &CsrIndex,
+    src_name: &str,
+    src_id: Option<u32>,
+    label_filter: Option<&str>,
+    direction: Direction,
+    collection_filter: CollectionFilter,
+    overlay: &GraphOverlayDelta,
+) -> Vec<NamedNeighbor> {
     let want_out = matches!(direction, Direction::Out | Direction::Both);
     let want_in = matches!(direction, Direction::In | Direction::Both);
     let durable_of = |pass: Direction| match src_id {
@@ -279,24 +318,30 @@ pub(super) fn merge_neighbors_named(
     } else {
         Vec::new()
     };
-    durable_in.retain(|(_, other)| direction.in_pass_keeps(other.as_str(), src_name));
+    durable_in.retain(|n| direction.in_pass_keeps(n.other.as_str(), src_name));
 
-    let has = |rows: &[(String, String)], label: &str, other: &str| {
+    let has = |rows: &[NamedNeighbor], label: &str, other: &str| {
         rows.iter()
-            .any(|(l, n)| l.as_str() == label && n.as_str() == other)
+            .any(|n| n.label.as_str() == label && n.other.as_str() == other)
     };
-    let mut staged: Vec<(String, String)> = Vec::new();
+    let staged_edge = |label: &str, other: &str, outgoing: bool| NamedNeighbor {
+        label: label.to_string(),
+        other: other.to_string(),
+        outgoing,
+        collection: None,
+    };
+    let mut staged: Vec<NamedNeighbor> = Vec::new();
     if want_out {
         for (label, dst) in overlay.out_neighbors(src_name, label_filter.as_slice()) {
             if !has(&durable_out, label, dst) {
-                staged.push((label.to_string(), dst.to_string()));
+                staged.push(staged_edge(label, dst, true));
             }
         }
     }
     if want_in {
         for (label, src) in overlay.in_neighbors(src_name, label_filter.as_slice()) {
             if direction.in_pass_keeps(src, src_name) && !has(&durable_in, label, src) {
-                staged.push((label.to_string(), src.to_string()));
+                staged.push(staged_edge(label, src, false));
             }
         }
     }
@@ -307,11 +352,11 @@ pub(super) fn merge_neighbors_named(
     out
 }
 
-/// Durable CSR neighbours of `id` in one direction, as `(label, neighbour)`
-/// names, with any staged-tombstoned edge removed. Split out from
-/// [`merge_neighbors_named`] so out- and in-edges are each collected under a
-/// single known direction, keeping the tombstone lookup's `(src, label, dst)`
-/// orientation unambiguous.
+/// Durable CSR neighbours of `id` in one direction, with any
+/// staged-tombstoned edge removed. Split out from [`merge_neighbors_named`]
+/// so out- and in-edges are each collected under a single known direction,
+/// keeping the tombstone lookup's `(src, label, dst)` orientation
+/// unambiguous.
 fn durable_named(
     csr: &CsrIndex,
     id: u32,
@@ -320,20 +365,25 @@ fn durable_named(
     collection_filter: CollectionFilter,
     src_name: &str,
     overlay: &GraphOverlayDelta,
-) -> Vec<(String, String)> {
+) -> Vec<NamedNeighbor> {
     let mut v = Vec::new();
-    for (lid, other_id) in
-        expansion::collect_neighbors(csr, id, label_filter, dir, collection_filter)
+    for neighbor in
+        expansion::collect_oriented_neighbors(csr, id, label_filter, dir, collection_filter)
     {
-        let label = csr.label_name(lid).to_string();
-        let other = csr.node_name_raw(other_id).to_string();
-        let tombstoned = if matches!(dir, Direction::In) {
-            overlay.is_tombstoned(&other, &label, src_name)
-        } else {
+        let label = csr.label_name(neighbor.label).to_string();
+        let other = csr.node_name_raw(neighbor.other).to_string();
+        let tombstoned = if neighbor.outgoing {
             overlay.is_tombstoned(src_name, &label, &other)
+        } else {
+            overlay.is_tombstoned(&other, &label, src_name)
         };
         if !tombstoned {
-            v.push((label, other));
+            v.push(NamedNeighbor {
+                label,
+                other,
+                outgoing: neighbor.outgoing,
+                collection: csr.collection_name(neighbor.collection).map(str::to_string),
+            });
         }
     }
     v
@@ -525,7 +575,7 @@ mod tests {
         let pred = |n: &str| n == "b";
         let mut state = ExecutionState::new(Some(&pred), VarLenCaps::default());
         let mut source_row = BindingRow::new();
-        source_row.insert("a".to_string(), "a".to_string());
+        source_row.insert("a".to_string(), nodedb_types::Value::String("a".into()));
         record_boundary_resumes(&mut state, 0, &source_row, &exp.boundary);
         assert!(
             state.truncated(),

@@ -19,11 +19,18 @@ impl Value {
     /// Two strings are equal by their text or by the instant they denote.
     /// Any other pair where both sides read as numbers is equal when
     /// [`cmp_numeric`] orders it `Equal`: exact for integers and decimals,
-    /// and NaN equals NaN.
+    /// and NaN equals NaN. Two UUIDs are equal by the UUID they denote. A
+    /// UUID equals a string that is its canonical text, so a typed UUID
+    /// matches the text literal that names it.
     pub fn eq_coerced(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a.eq_ignore_ascii_case(b),
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                *s == canonical_uuid_text(u)
+            }
             (Value::String(a), Value::String(b)) => {
                 a == b
                     || matches!(
@@ -74,6 +81,10 @@ impl Value {
                 }
                 match other {
                     Value::String(s) => Some(EqCoercedBucket::Text(s.clone())),
+                    // A UUID shares the bucket of its canonical text, the
+                    // one string it equals.
+                    Value::Uuid(u) => Some(EqCoercedBucket::Text(canonical_uuid_text(u))),
+                    Value::Bytes(b) => Some(EqCoercedBucket::Bytes(b.clone())),
                     _ => None,
                 }
             }
@@ -119,6 +130,14 @@ impl Value {
         }
         match (self, other) {
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            // A UUID orders by its canonical text, as against the text that
+            // names it.
+            (Value::Uuid(a), Value::Uuid(b)) => {
+                Some(canonical_uuid_text(a).cmp(&canonical_uuid_text(b)))
+            }
+            (Value::Uuid(u), Value::String(s)) => Some(canonical_uuid_text(u).as_str().cmp(s)),
+            (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
+            (Value::String(s), Value::Uuid(u)) => Some(s.as_str().cmp(&canonical_uuid_text(u))),
             _ => None,
         }
     }
@@ -148,6 +167,8 @@ pub enum EqCoercedBucket {
     Text(String),
     /// Every ND cell: cells compare structurally, so they share one bucket.
     Cell,
+    /// Bytes: equal to the same bytes only.
+    Bytes(Vec<u8>),
 }
 
 /// The number a value denotes for coerced comparison: an integer, a float,
@@ -174,9 +195,51 @@ fn datetime_micros(v: &Value) -> Option<i64> {
     }
 }
 
+/// The canonical text of a stored UUID. A UUID that does not parse keeps
+/// its text.
+fn canonical_uuid_text(u: &str) -> String {
+    crate::id_gen::canonical_uuid(u).unwrap_or_else(|| u.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_equal_the_same_bytes_and_share_their_bucket() {
+        let a = Value::Bytes(vec![1, 2]);
+        assert!(a.eq_coerced(&Value::Bytes(vec![1, 2])));
+        assert!(!a.eq_coerced(&Value::Bytes(vec![1, 3])));
+        assert!(!a.eq_coerced(&Value::String("\\x0102".into())));
+        assert_eq!(
+            a.eq_coerced_bucket(),
+            Value::Bytes(vec![1, 2]).eq_coerced_bucket()
+        );
+        assert_eq!(
+            a.partial_cmp_coerced(&Value::Bytes(vec![1, 3])),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn a_uuid_equals_its_canonical_text_and_shares_its_bucket() {
+        let text = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = Value::Uuid(text.into());
+        let upper = Value::Uuid(text.to_ascii_uppercase());
+        assert!(uuid.eq_coerced(&upper));
+        assert!(uuid.eq_coerced(&Value::String(text.into())));
+        assert!(Value::String(text.into()).eq_coerced(&upper));
+        assert!(!uuid.eq_coerced(&Value::String("other".into())));
+        assert_eq!(
+            uuid.eq_coerced_bucket(),
+            Value::String(text.into()).eq_coerced_bucket()
+        );
+        assert_eq!(uuid.eq_coerced_bucket(), upper.eq_coerced_bucket());
+        assert_eq!(
+            uuid.partial_cmp_coerced(&Value::String(text.into())),
+            Some(Ordering::Equal)
+        );
+    }
 
     #[test]
     fn a_decimal_literal_equals_the_float_it_denotes() {

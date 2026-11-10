@@ -1049,7 +1049,13 @@ mod tests {
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
             document_id: "a".into(),
-            fields_json: r#"{"title":"t"}"#.into(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "title".to_string(),
+                    nodedb_types::Value::String("t".into()),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: nodedb_types::Surrogate(7),
             partial: verb == CrdtWriteVerb::Update,
             verb,

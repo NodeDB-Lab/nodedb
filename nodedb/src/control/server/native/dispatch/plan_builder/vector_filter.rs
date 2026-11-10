@@ -26,7 +26,7 @@ use crate::control::planner::sql_plan_convert::filter::serialize_filters;
 /// `MetadataFilter`.
 ///
 /// Bytes that do not decode to a `MetadataFilter`, and a filter value no SQL
-/// literal can carry, are a `BadRequest`. A column the collection does not
+/// literal can carry, are a `BadRequest`. Every typed value keeps its type. A column the collection does not
 /// have fails the same way the SQL `WHERE` fails.
 pub(crate) fn residual_filters(
     ctx: &DispatchCtx<'_>,
@@ -124,19 +124,50 @@ fn column(field: &str) -> SqlExpr {
     }
 }
 
-/// The SQL literal a pgwire client renders for `value`. Only `NULL`,
-/// booleans, integers, floats and strings have a literal form.
+/// The SQL literal a pgwire client renders for `value`, typed as the value
+/// is: a decimal keeps its digits and scale, a UUID, an instant, bytes, a
+/// geometry, a duration, an array and an object stay typed. A ULID is its
+/// text. A value with no literal form (a range, a record, a set, a regex,
+/// an array cell) is a `BadRequest`.
 fn literal(value: &Value) -> crate::Result<SqlValue> {
-    match value {
-        Value::Null => Ok(SqlValue::Null),
-        Value::Bool(b) => Ok(SqlValue::Bool(*b)),
-        Value::Integer(i) => Ok(SqlValue::Int(*i)),
-        Value::Float(f) => Ok(SqlValue::Float(*f)),
-        Value::String(s) => Ok(SqlValue::String(s.clone())),
-        other => Err(crate::Error::BadRequest {
-            detail: format!("vector_search filter value has no SQL literal form: {other:?}"),
-        }),
-    }
+    Ok(match value {
+        Value::Null => SqlValue::Null,
+        Value::Bool(b) => SqlValue::Bool(*b),
+        Value::Integer(i) => SqlValue::Int(*i),
+        Value::Float(f) => SqlValue::Float(*f),
+        Value::String(s) | Value::Ulid(s) => SqlValue::String(s.clone()),
+        Value::Decimal(d) => SqlValue::Decimal(*d),
+        Value::Uuid(u) => SqlValue::Uuid(u.clone()),
+        Value::DateTime(at) => SqlValue::Timestamptz(*at),
+        Value::NaiveDateTime(at) => SqlValue::Timestamp(*at),
+        Value::Bytes(b) => SqlValue::Bytes(b.clone()),
+        Value::Geometry(g) => SqlValue::Geometry(g.clone()),
+        Value::Duration(d) => SqlValue::Duration(*d),
+        Value::Array(items) => {
+            SqlValue::Array(items.iter().map(literal).collect::<crate::Result<_>>()?)
+        }
+        Value::Vector(v) => {
+            SqlValue::Array(v.iter().map(|f| SqlValue::Float(f64::from(*f))).collect())
+        }
+        Value::Object(fields) => {
+            let mut fields: Vec<_> = fields.iter().collect();
+            fields.sort_by(|a, b| a.0.cmp(b.0));
+            SqlValue::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| Ok((key.clone(), literal(value)?)))
+                    .collect::<crate::Result<_>>()?,
+            )
+        }
+        other => {
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "vector_search filter value of type {} has no SQL literal form",
+                    other.type_name()
+                ),
+            });
+        }
+    })
 }
 
 #[cfg(test)]
@@ -210,9 +241,27 @@ mod tests {
     }
 
     #[test]
+    fn typed_values_lower_to_typed_literals() {
+        let price: rust_decimal::Decimal = "12.50".parse().expect("decimal");
+        let uid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            literal(&Value::Decimal(price)).expect("decimal"),
+            SqlValue::Decimal(price)
+        );
+        assert_eq!(
+            literal(&Value::Uuid(uid.into())).expect("uuid"),
+            SqlValue::Uuid(uid.into())
+        );
+        assert_eq!(
+            literal(&Value::Array(vec![Value::Integer(1)])).expect("array"),
+            SqlValue::Array(vec![SqlValue::Int(1)])
+        );
+    }
+
+    #[test]
     fn value_without_literal_form_is_bad_request() {
-        let filter = MetadataFilter::eq("tags", Value::Array(vec![Value::Integer(1)]));
-        let err = metadata_filter_predicate(&filter).expect_err("array has no literal");
+        let filter = MetadataFilter::eq("pattern", Value::Regex("a.*".into()));
+        let err = metadata_filter_predicate(&filter).expect_err("a regex has no literal");
         assert!(matches!(err, crate::Error::BadRequest { .. }), "{err:?}");
     }
 }

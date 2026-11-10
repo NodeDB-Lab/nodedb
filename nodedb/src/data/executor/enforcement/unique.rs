@@ -16,7 +16,7 @@
 //! one value, so every multi-row unit judges here before its first write.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
@@ -60,16 +60,6 @@ pub(in crate::data::executor) struct UniqueScope<'a> {
     pub base_visible: bool,
     /// Resolves SRIDs in partial-index predicates.
     pub crs: &'a nodedb_crs::CrsContext<'a>,
-}
-
-/// One submitted row write of a unit, as its caller holds it.
-pub(in crate::data::executor) struct SubmittedWrite<'a> {
-    pub collection: &'a str,
-    pub surrogate: u32,
-    /// The submitted MessagePack body. `None`: the unit removes the row.
-    pub body: Option<&'a [u8]>,
-    /// See [`PostImage::judged`].
-    pub judged: bool,
 }
 
 /// Refuse the unit when its post-state gives one unique value two owners.
@@ -212,47 +202,6 @@ impl CoreLoop {
             },
             rows,
         )
-    }
-
-    /// Judge UNIQUE on the post-state of a unit of submitted row writes,
-    /// collection by collection. A collection with no UNIQUE index decodes
-    /// nothing.
-    pub(in crate::data::executor) fn check_submitted_unit_unique(
-        &self,
-        database_id: u64,
-        tid: u64,
-        writes: &[SubmittedWrite<'_>],
-    ) -> crate::Result<()> {
-        let mut by_collection: BTreeMap<&str, Vec<&SubmittedWrite<'_>>> = BTreeMap::new();
-        for write in writes {
-            by_collection
-                .entry(write.collection)
-                .or_default()
-                .push(write);
-        }
-        for (collection, writes) in by_collection {
-            let Some(config) = self.unique_config(database_id, tid, collection) else {
-                continue;
-            };
-            let docs = writes
-                .iter()
-                .map(|write| match write.body {
-                    Some(body) => self.unique_image(config, body).map(Some),
-                    None => Ok(None),
-                })
-                .collect::<crate::Result<Vec<_>>>()?;
-            let rows: Vec<PostImage<'_>> = writes
-                .iter()
-                .zip(&docs)
-                .map(|(write, doc)| PostImage {
-                    surrogate: write.surrogate,
-                    doc: doc.as_ref(),
-                    judged: write.judged,
-                })
-                .collect();
-            self.check_unit_unique(database_id, tid, collection, &rows)?;
-        }
-        Ok(())
     }
 
     /// The document a submitted body is indexed as: typeguards injected and

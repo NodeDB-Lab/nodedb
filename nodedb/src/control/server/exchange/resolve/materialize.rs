@@ -297,14 +297,22 @@ pub(super) async fn materialize_providers(
 
         // SetOp: recurse into every branch so nested catalog providers are
         // filled before the set-op resolver materializes the branches.
-        PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) => {
+        PhysicalPlan::Query(QueryOp::SetOp {
+            inputs,
+            op,
+            columns,
+        }) => {
             let mut filled = Vec::with_capacity(inputs.len());
             for input in inputs {
                 filled.push(
                     Box::pin(materialize_providers(state, identity, database_id, input)).await?,
                 );
             }
-            Ok(PhysicalPlan::Query(QueryOp::SetOp { inputs: filled, op }))
+            Ok(PhysicalPlan::Query(QueryOp::SetOp {
+                inputs: filled,
+                op,
+                columns,
+            }))
         }
 
         // All other variants: no catalog providers can be nested here —

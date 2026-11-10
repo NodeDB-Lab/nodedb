@@ -3,7 +3,7 @@
 //! The counter value an `INCR_FLOAT` stores once a declared column rule has
 //! fitted the image it computed.
 
-use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape};
+use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape, kv_body_to_row};
 use nodedb_types::Value;
 
 /// The counter value the image `fitted` stores.
@@ -21,10 +21,10 @@ pub fn fitted_counter_f64(value: f64, computed: &[u8], fitted: &[u8]) -> f64 {
             .and_then(|text| text.trim().parse::<f64>().ok())
             .unwrap_or(value);
     }
-    let (Ok(Value::Object(before)), Ok(Value::Object(after))) = (
-        nodedb_types::value_from_msgpack(computed),
-        nodedb_types::value_from_msgpack(fitted),
-    ) else {
+    // Both images decode in their own shape: a plain map or a native row.
+    let (Ok((Value::Object(before), _)), Ok((Value::Object(after), _))) =
+        (kv_body_to_row(computed), kv_body_to_row(fitted))
+    else {
         return value;
     };
     let mut moved: Vec<&String> = before

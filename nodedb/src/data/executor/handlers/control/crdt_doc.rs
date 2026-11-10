@@ -11,6 +11,7 @@
 //! tombstones the Loro row only after its storage delete commits.
 
 use loro::LoroValue;
+use nodedb_crdt::state::RowWrite;
 use tracing::debug;
 
 use nodedb_types::Surrogate;
@@ -21,7 +22,6 @@ use crate::data::executor::enforcement::chain_guard::{AbandonedWrite, abandon_wr
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
-use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::handlers::transaction::undo::document_outcome::{
     DocumentRow, push_delete_undo,
 };
@@ -35,7 +35,9 @@ use nodedb_physical::physical_plan::ReturningSpec;
 pub(in crate::data::executor) struct CrdtDocUpsert<'a> {
     pub collection: &'a str,
     pub document_id: &'a str,
-    pub fields_json: &'a str,
+    /// The row's fields: a native object body, see
+    /// `nodedb_physical::physical_plan::crdt::fields_body`.
+    pub fields: &'a [u8],
     pub surrogate: Surrogate,
     pub partial: bool,
     pub returning: Option<&'a ReturningSpec>,
@@ -60,7 +62,8 @@ pub(in crate::data::executor) struct CrdtDocDelete<'a> {
 
 impl CoreLoop {
     /// Insert-or-replace (`partial = false`) or partial-merge (`partial = true`)
-    /// a document row's scalar fields, server-built from `fields_json`.
+    /// a document row's scalar fields, server-built from the typed `fields`
+    /// body. Each field enters Loro through `nodedb_crdt::loro_value`.
     pub(in crate::data::executor) fn execute_crdt_doc_upsert(
         &mut self,
         task: &ExecutionTask,
@@ -69,7 +72,7 @@ impl CoreLoop {
         let CrdtDocUpsert {
             collection,
             document_id,
-            fields_json,
+            fields,
             surrogate,
             partial,
             returning,
@@ -83,19 +86,26 @@ impl CoreLoop {
             return self.response_error(task, refusal);
         }
         let tenant_id = task.request.tenant_id;
-        let Ok(json_map) =
-            sonic_rs::from_str::<serde_json::Map<String, serde_json::Value>>(fields_json)
-        else {
-            return self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: format!("crdt doc upsert: invalid fields_json for {document_id}"),
-                },
-            );
+        let field_map = match nodedb_physical::physical_plan::decode_fields_body(fields) {
+            Ok(field_map) => field_map,
+            Err(detail) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::DataException {
+                        detail: format!(
+                            "crdt doc upsert into '{collection}'/'{document_id}': {detail}"
+                        ),
+                    },
+                );
+            }
         };
-        let fields: Vec<(&str, LoroValue)> = json_map
+        let loro_fields = match nodedb_crdt::loro_value::fields_to_loro_map(&field_map) {
+            Ok(loro_fields) => loro_fields,
+            Err(error) => return self.response_error(task, ErrorCode::from(&error)),
+        };
+        let fields: Vec<(&str, LoroValue)> = loro_fields
             .iter()
-            .map(|(k, v)| (k.as_str(), super::convert::json_to_loro_value(v)))
+            .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
 
         // The row as stored before this write, for the collection's
@@ -109,55 +119,37 @@ impl CoreLoop {
             None
         };
 
-        // The sparse row is built from the merged Loro row, so Loro changes
-        // first. The row's prior scalar state is captured before that, and an
-        // abort writes it back.
-        let row_undo = match self.capture_crdt_row_undo(
-            task.request.database_id,
-            tenant_id,
+        // The write is predicted first: the merged row it leaves, computed
+        // from the row alone with no change to the Loro document. The row is
+        // judged and projected into the sparse store, and only then does the
+        // write run on the document. A write refused or failed at any step
+        // before that leaves the document unchanged.
+        let write = if partial {
+            RowWrite::SetFields(&fields)
+        } else {
+            RowWrite::Upsert(&fields)
+        };
+        let row = super::crdt_materialize::ProjectedRow {
             collection,
             document_id,
-        ) {
-            Ok(entry) => entry,
-            Err(e) => return self.response_error(task, e),
+            surrogate,
+            index_text: true,
         };
-        let mutated = self
-            .get_crdt_engine(task.request.database_id, tenant_id)
-            .and_then(|engine| {
-                if partial {
-                    engine.doc_set_fields(collection, document_id, &fields)?;
-                } else {
-                    engine.doc_upsert(collection, document_id, &fields)?;
-                }
-                Ok(Self::encode_crdt_row(engine, collection, document_id))
-            });
-        // A Loro write that fails part-way commits the fields it wrote before
-        // the error. Loro cannot roll them back, so the undo writes the
-        // captured row image over them.
-        let bytes = match mutated {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                let error = crate::Error::Internal {
-                    detail: format!(
-                        "crdt doc upsert: row {document_id} of '{collection}' has no \
-                         document body after its write"
-                    ),
-                };
-                return self.abandon_crdt_row(task, row_undo, error);
-            }
-            Err(e) => return self.abandon_crdt_row(task, row_undo, e),
+        let (predicted, bytes) = match self.predict_row_body(task, &row, &write) {
+            Ok(predicted) => predicted,
+            Err(e) => return self.response_error(task, e),
         };
 
         // The merged row is the post-image this write produces, so the
         // collection's typeguards judge it here. A partial UPDATE judges the
-        // fields it assigns. A full replace judges the whole row. A refused
-        // write puts the Loro row back.
+        // fields it assigns. A full replace judges the whole row.
         if judge_guards {
-            let assigned: Option<Vec<String>> = partial.then(|| json_map.keys().cloned().collect());
+            let assigned: Option<Vec<String>> =
+                partial.then(|| field_map.keys().cloned().collect());
             if let Err(error) =
                 self.check_crdt_row_guards(task, collection, &bytes, assigned.as_deref())
             {
-                return self.abandon_crdt_row(task, row_undo, error);
+                return self.response_error(task, error);
             }
         }
         // The state and transition rules judge the stored row → merged row
@@ -165,24 +157,14 @@ impl CoreLoop {
         if let Some(prior) = prior_body.as_deref()
             && let Err(error) = self.check_crdt_row_transitions(task, collection, prior, &bytes)
         {
-            return self.abandon_crdt_row(task, row_undo, error);
+            return self.response_error(task, error);
         }
 
         // The Loro row and its sparse projection answer the same reads, so a
-        // projection that did not land fails the write and puts the Loro row
-        // back.
-        if let Err(error) = self.materialize_document_write(
-            task,
-            super::crdt_materialize::CrdtMaterializeWrite {
-                tid: tenant_id.as_u64(),
-                collection,
-                document_id,
-                surrogate,
-                value: &bytes,
-                index_text: true,
-            },
-        ) {
-            return self.abandon_crdt_row(task, row_undo, error);
+        // projection that did not land fails the write before the document
+        // changes.
+        if let Err(error) = self.land_row_write(task, &row, &write, &predicted, &bytes) {
+            return self.response_error(task, error);
         }
         self.checkpoint_coordinator.mark_dirty("crdt", 1);
         if let Some(spec) = returning {
@@ -235,11 +217,11 @@ impl CoreLoop {
         if config.type_guards.is_empty() {
             return Ok(());
         }
-        let row =
-            nodedb_types::value_from_msgpack(merged).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("merged CRDT row of '{collection}' does not decode: {e}"),
-            })?;
+        // The merged row is a native object body.
+        let row = nodedb_types::decode_object(merged).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("merged CRDT row of '{collection}' does not decode: {e}"),
+        })?;
         crate::data::executor::enforcement::typeguard::check_type_guards(
             &config.type_guards,
             &row,
@@ -301,23 +283,6 @@ impl CoreLoop {
             &task.request.user_roles,
         )
         .map_err(crate::Error::DataPlane)
-    }
-
-    /// Write the CRDT row's captured pre-image back after its write is
-    /// abandoned. Answers with the error the abort reports: `error`, or
-    /// `RollbackFailed` when the row did not go back.
-    fn abandon_crdt_row(
-        &mut self,
-        task: &ExecutionTask,
-        row_undo: UndoEntry,
-        error: crate::Error,
-    ) -> Response {
-        let undo = self.undo_memory_effects(
-            task.request.database_id.as_u64(),
-            task.request.tenant_id.as_u64(),
-            vec![row_undo],
-        );
-        self.response_error(task, abort_error(error, undo))
     }
 
     /// Delete a document row: remove it from the sparse store with the full
@@ -447,12 +412,15 @@ impl CoreLoop {
         // identity column exactly like PointDelete.
         if let Some(spec) = returning {
             if let Some(prior_bytes) = prior_value.as_deref() {
-                // No strict schema — see the upsert path: a CRDT row is
-                // materialized as MessagePack in either storage mode.
+                // The prior bytes are the stored row: the materialization
+                // put Binary-Tuple-encodes it on a strict collection, so it
+                // decodes under the collection's strict schema.
+                let strict_schema =
+                    self.resolve_strict_schema(task.request.database_id.as_u64(), tid, collection);
                 let doc = match returning_doc::from_stored(
                     prior_bytes,
                     &RowIdentity::from_user_key(document_id),
-                    None,
+                    strict_schema.as_ref(),
                     &self.identity_column(
                         task.request.database_id.as_u64(),
                         tenant_id.as_u64(),
@@ -504,13 +472,24 @@ mod tests {
     const DOC: &str = "n1";
     const SURROGATE: Surrogate = Surrogate(7);
 
+    /// The typed fields body of the JSON object `fields_json`.
+    fn fields_body(fields_json: &str) -> Vec<u8> {
+        let json: serde_json::Value = sonic_rs::from_str(fields_json).expect("fields JSON");
+        let nodedb_types::Value::Object(fields) = nodedb_types::conversion::json_to_value(json)
+        else {
+            panic!("fields JSON is an object");
+        };
+        nodedb_physical::physical_plan::encode_fields_body(&fields).expect("fields body encodes")
+    }
+
     fn upsert(core: &mut CoreLoop, task: &ExecutionTask, fields_json: &str) -> Response {
+        let fields = fields_body(fields_json);
         core.execute_crdt_doc_upsert(
             task,
             CrdtDocUpsert {
                 collection: COLL,
                 document_id: DOC,
-                fields_json,
+                fields: &fields,
                 surrogate: SURROGATE,
                 partial: false,
                 returning: None,
@@ -537,6 +516,13 @@ mod tests {
         core.get_crdt_engine(DatabaseId::DEFAULT, TenantId::new(TID))
             .expect("engine")
             .read_row(COLL, DOC)
+    }
+
+    fn crdt_version(core: &mut CoreLoop) -> String {
+        core.get_crdt_engine(DatabaseId::DEFAULT, TenantId::new(TID))
+            .expect("engine")
+            .version_vector_json(COLL)
+            .expect("version")
     }
 
     fn i64_field(row: &loro::LoroValue, key: &str) -> Option<i64> {
@@ -620,8 +606,9 @@ mod tests {
         );
     }
 
-    /// A CRDT upsert whose sparse projection fails puts the Loro row back to
-    /// its fields before the write.
+    /// A CRDT upsert whose sparse projection fails leaves the Loro document
+    /// as it was: the write ran on a fork the refusal dropped, so no
+    /// operation reached the document.
     #[test]
     fn a_refused_crdt_upsert_puts_the_crdt_row_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -632,6 +619,7 @@ mod tests {
             Status::Ok
         );
         let before = crdt_row(&mut core);
+        let version_before = crdt_version(&mut core);
         break_stored_row(&mut core);
 
         let resp = upsert(&mut core, &task, r#"{"a":5,"c":3}"#);
@@ -649,6 +637,54 @@ mod tests {
             before,
             "the refused upsert leaves the CRDT row as it was"
         );
+        assert_eq!(
+            crdt_version(&mut core),
+            version_before,
+            "no operation of the refused upsert reached the document"
+        );
+    }
+
+    /// The materialized row is a native object body: a typed field written
+    /// through the CRDT reads back from the sparse store with its type.
+    #[test]
+    fn the_materialized_row_is_a_typed_native_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let fields = std::collections::HashMap::from([(
+            "price".to_string(),
+            nodedb_types::Value::Decimal("12.50".parse().expect("decimal literal")),
+        )]);
+        let body =
+            nodedb_physical::physical_plan::encode_fields_body(&fields).expect("fields body");
+        let resp = core.execute_crdt_doc_upsert(
+            &task,
+            CrdtDocUpsert {
+                collection: COLL,
+                document_id: DOC,
+                fields: &body,
+                surrogate: SURROGATE,
+                partial: false,
+                returning: None,
+                rls_filters: &[],
+                judge_guards: true,
+            },
+        );
+        assert_eq!(resp.status, Status::Ok, "got {:?}", resp.error_code);
+        let stored = core
+            .sparse
+            .get(DB, TID, COLL, &StorageKey::for_surrogate(SURROGATE))
+            .expect("read back")
+            .expect("the row is materialized");
+        let decoded = crate::data::executor::doc_format::decode_document_value(&stored)
+            .expect("the stored body decodes");
+        let nodedb_types::Value::Object(row) = decoded else {
+            panic!("the stored body is an object");
+        };
+        match row.get("price") {
+            Some(nodedb_types::Value::Decimal(d)) => assert_eq!(d.to_string(), "12.50"),
+            other => panic!("price is stored as a Decimal, got {other:?}"),
+        }
     }
 
     /// Register `notes` as a CRDT collection whose `a` must be a present INT.
@@ -674,12 +710,13 @@ mod tests {
     }
 
     fn partial_set(core: &mut CoreLoop, task: &ExecutionTask, fields_json: &str) -> Response {
+        let fields = fields_body(fields_json);
         core.execute_crdt_doc_upsert(
             task,
             CrdtDocUpsert {
                 collection: COLL,
                 document_id: DOC,
-                fields_json,
+                fields: &fields,
                 surrogate: SURROGATE,
                 partial: true,
                 returning: None,

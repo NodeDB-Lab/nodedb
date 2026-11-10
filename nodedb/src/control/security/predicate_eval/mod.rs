@@ -10,10 +10,12 @@
 //! - [`substitute`] — `substitute_to_scan_filters` and `combine_policies`.
 //! - [`sets`] — `CONTAINS` / `INTERSECTS` lowering.
 //! - [`filters`] — the `match_all` and deny filter constructors.
+//! - [`verdict`] — plan-time verdicts for comparisons naming no field.
 
 pub mod filters;
 pub mod sets;
 pub mod substitute;
+pub mod verdict;
 
 pub use filters::{deny_filter, match_all_filter};
 pub use substitute::{combine_policies, substitute_to_scan_filters};

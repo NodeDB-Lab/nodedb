@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn a_shaped_kv_row_binds_its_key_and_value() {
-        let row = nodedb_query::msgpack_scan::kv_row_msgpack("a", b"x");
+        let row = nodedb_query::msgpack_scan::kv_row_msgpack("a", b"x").expect("row");
         let fields = super::row_fields(Some(&row), "a")
             .expect("a KV row decodes")
             .expect("an image is present");

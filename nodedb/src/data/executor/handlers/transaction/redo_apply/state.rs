@@ -23,6 +23,7 @@ use crate::data::executor::core_loop::write_note::{KeyRepr, WriteStamp};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
+use crate::types::document_event::DocumentPutEvent;
 
 /// Committed-redo apply state owned by one core.
 pub(in crate::data::executor) struct RedoApplyState {
@@ -50,10 +51,10 @@ pub(in crate::data::executor) struct AppliedDocWrite {
     /// The row's client identity.
     pub identity: RowIdentity,
     pub op: WriteOp,
-    /// The row as stored before this write, when the write read it.
+    /// The deleted row's stored preimage. Puts carry their public preimage in `event`.
     pub old_value: Option<Vec<u8>>,
-    /// The MessagePack body this write installed. `None` for a delete.
-    pub new_body: Option<Vec<u8>>,
+    /// The prepared public put event pair. `None` for a delete.
+    pub event: Option<DocumentPutEvent>,
     /// Whether the write emits a change event. A clone copy emits none.
     pub emits_event: bool,
 }
@@ -247,8 +248,8 @@ pub(in crate::data::executor) fn target_doc_write(target: &TargetWrite) -> Appli
         } else {
             WriteOp::Insert
         },
-        old_value: outcome.prior_value.clone(),
-        new_body: Some(target.body.clone()),
+        old_value: None,
+        event: Some(target.event.clone()),
         emits_event: true,
     }
 }

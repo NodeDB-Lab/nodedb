@@ -108,6 +108,7 @@ fn put(ctx: &mut TestCtx, collection: &str, doc_id: &str, value: Vec<u8>, surrog
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
     assert_eq!(resp.status, Status::Ok, "PointPut {doc_id}");
@@ -160,7 +161,12 @@ fn range_scan_scores(
         }),
     );
     assert_eq!(resp.status, Status::Ok, "RangeScan status");
-    let json = nodedb::data::executor::response_codec::decode_payload_to_json(&resp.payload);
+    // A range scan answers `{id, data}` envelopes, plain or native.
+    let json = nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        &resp.payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("range scan rows decode");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_else(|_| Vec::new());
     rows.iter()
         .filter_map(|row| {

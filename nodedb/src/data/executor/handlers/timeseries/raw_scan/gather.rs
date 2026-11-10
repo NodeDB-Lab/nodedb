@@ -14,7 +14,7 @@ use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::types::{DatabaseId, TenantId};
 
 use super::partition_scan::{PartitionScan, ScanDeadline, scan_partitions};
-use super::row_emit::{emit_memtable_row, render_system_time, row_admitted_by_policy};
+use super::row_form::TsRowForm;
 
 /// Inputs to [`CoreLoop::gather_ts_rows`].
 pub(in crate::data::executor) struct TsGatherParams<'a> {
@@ -43,14 +43,17 @@ impl CoreLoop {
     /// admitted by the
     /// WHERE predicates and then the read policy, up to `limit`. Predicates
     /// read the stored `_ts_system` ordinal. Each admitted row then renders
-    /// its system time ([`render_system_time`]).
+    /// its system time ([`TsRowForm::render_system_time`]).
+    ///
+    /// `R` is the form each row takes: an `rmpv::Value` map for a client's
+    /// raw scan, a [`super::row_form::TypedTsRow`] for the collection scan.
     ///
     /// A registered partition whose directory is missing is an error: the
     /// rows it holds are part of the answer.
-    pub(in crate::data::executor) fn gather_ts_rows(
+    pub(in crate::data::executor) fn gather_ts_rows<R: TsRowForm>(
         &self,
         p: TsGatherParams<'_>,
-    ) -> crate::Result<Vec<rmpv::Value>> {
+    ) -> crate::Result<Vec<R>> {
         let crs = self.crs_context();
         let TsGatherParams {
             database_id,
@@ -72,7 +75,7 @@ impl CoreLoop {
             });
         let has_filters = !filter_predicates.is_empty();
         let key = (database_id, tid, collection.to_string());
-        let mut results: Vec<rmpv::Value> = Vec::new();
+        let mut results: Vec<R> = Vec::new();
 
         // 1. Live memtable.
         if let Some(mt) = self.columnar_memtables.get(&key)
@@ -131,23 +134,18 @@ impl CoreLoop {
                 {
                     return Err(deadline.exceeded());
                 }
-                let row = emit_memtable_row(mt, &columns, idx as usize)?;
-                if need_row_filter {
-                    let mut buf = Vec::new();
-                    rmpv::encode::write_value(&mut buf, &row).map_err(|e| crate::Error::Codec {
-                        detail: format!("timeseries row encode: {e}"),
-                    })?;
-                    if !ScanFilter::all_match_binary(filter_predicates, &buf, &crs)? {
-                        continue;
-                    }
-                }
-                // The read policy, after the WHERE predicates and before the
-                // row takes a limit slot.
-                if !row_admitted_by_policy(&row, rls_predicates, &crs)? {
+                let mut row = R::from_memtable(mt, &columns, idx as usize)?;
+                // The WHERE predicates the typed columns could not decide,
+                // then the read policy, before the row takes a limit slot.
+                let where_predicates: &[ScanFilter] = if need_row_filter {
+                    filter_predicates
+                } else {
+                    &[]
+                };
+                if !row.admitted(where_predicates, rls_predicates, &crs)? {
                     continue;
                 }
-                let mut row = row;
-                render_system_time(&mut row);
+                row.render_system_time();
                 results.push(row);
             }
         }
@@ -198,8 +196,8 @@ impl CoreLoop {
                     },
                     &crs,
                 )?;
-                results.extend(partition_rows.into_iter().map(|mut row| {
-                    render_system_time(&mut row);
+                results.extend(partition_rows.into_iter().map(|mut row: R| {
+                    row.render_system_time();
                     row
                 }));
                 results.truncate(limit);

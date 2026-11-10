@@ -204,10 +204,14 @@ impl CoreLoop {
         // A raw body goes out as stored, with no `id` added: the clone
         // materializer copies the exact stored contents.
         for (key, value, _) in &mut entries {
-            *value = if raw_bodies {
-                sparse_body_to_msgpack(value, format_ref).into_owned()
+            let shaped = if raw_bodies {
+                sparse_body_to_msgpack(value, format_ref).map(std::borrow::Cow::into_owned)
             } else {
-                sparse_row_to_doc(key, value, format_ref, &identity_column).1
+                sparse_row_to_doc(key, value, format_ref, &identity_column).map(|(_, body)| body)
+            };
+            *value = match shaped {
+                Ok(body) => body,
+                Err(error) => return self.response_error(task, error),
             };
         }
         // A read of a vector-primary row carries its vector under the vector

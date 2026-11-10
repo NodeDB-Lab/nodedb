@@ -158,7 +158,7 @@ fn chain_seq(
             break;
         }
     }
-    body.and_then(|body| nodedb_types::json_from_msgpack(&body).ok())
+    body.and_then(|body| crate::data::executor::response_codec::decode_body_plain_json(&body).ok())
         .and_then(|doc| {
             doc.get(crate::types::hash_chain::CHAIN_SEQ_FIELD)
                 .and_then(|seq| seq.as_u64())

@@ -114,6 +114,34 @@ pub(in crate::data::executor) struct GatedRow<'a> {
     pub identity_column: &'a str,
 }
 
+/// Judge the exact prepared row using its captured storage schema.
+pub(in crate::data::executor) fn admit_installed_row(
+    rls_write_check: &RlsWriteCheck,
+    image: &crate::types::SharedInstalledDocument,
+    identity: &crate::engine::document::store::RowIdentity,
+    identity_column: &str,
+    tid: u64,
+    collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<()> {
+    let strict_schema = match image.schema.as_ref() {
+        nodedb_physical::physical_plan::StorageMode::Schemaless => None,
+        nodedb_physical::physical_plan::StorageMode::Strict { schema } => Some(schema),
+    };
+    admit_stored_row(
+        rls_write_check,
+        GatedRow {
+            body: &image.stored,
+            identity,
+            strict_schema,
+            identity_column,
+        },
+        tid,
+        collection,
+        crs,
+    )
+}
+
 /// Decide one STORED row body — the bytes about to be written, or the bytes
 /// about to be removed — against the compiled write policy.
 ///
@@ -171,10 +199,11 @@ pub(in crate::data::executor) fn admit_stored_row(
 /// Decide one graph edge's STORED property object — the image of the edge
 /// about to be tombstoned — against the compiled write policy.
 ///
-/// An edge stores its properties as a plain-MessagePack map. The edge put
-/// decides its image in the Control Plane with `ScanFilter::all_match_binary`
-/// on those msgpack bytes. The delete decides the stored bytes with the same
-/// binary evaluator through [`rls_eval::rls_check_msgpack_bytes`], so one
+/// An edge stores its properties as a native tagged object
+/// (`nodedb_graph::encode_edge_properties`). The edge put decides its image
+/// in the Control Plane with `ScanFilter::all_match_binary` on those bytes.
+/// The delete decides the stored bytes through
+/// [`rls_eval::rls_check_msgpack_bytes`], which reads the same object, so one
 /// policy gives put and delete one verdict on one property map.
 ///
 /// `properties` is `None` when no live edge version exists. A body that is not
@@ -197,12 +226,8 @@ pub(in crate::data::executor) fn admit_edge_properties(
             ),
         }),
         WriteGateDecision::Evaluate(_) => {
-            let map = properties.filter(|bytes| {
-                matches!(
-                    nodedb_types::json_msgpack::value_from_msgpack(bytes),
-                    Ok(nodedb_types::Value::Object(_))
-                )
-            });
+            let map = properties
+                .filter(|bytes| !bytes.is_empty() && nodedb_types::ObjectView::new(bytes).is_ok());
             match map {
                 Some(bytes) => decide(rls_write_check, tid, collection, |filters| {
                     rls_eval::rls_check_msgpack_bytes(filters, bytes, crs)
@@ -368,9 +393,16 @@ mod tests {
         );
     }
 
-    /// Edge properties as stored: a plain-MessagePack map.
+    /// Edge properties as stored: a native tagged object. A JSON value that
+    /// is not an object stores as its own native value, which no gate
+    /// accepts as a property object.
     fn edge_properties(value: serde_json::Value) -> Vec<u8> {
-        nodedb_types::json_msgpack::json_to_msgpack(&value).expect("encode properties")
+        match nodedb_types::Value::from(value) {
+            nodedb_types::Value::Object(fields) => {
+                nodedb_graph::encode_edge_properties(fields).expect("encode properties")
+            }
+            other => zerompk::to_msgpack_vec(&other).expect("encode value"),
+        }
     }
 
     #[test]
@@ -401,21 +433,44 @@ mod tests {
         );
     }
 
-    /// The binary evaluator resolves `owner` to a qualified `e.owner` key.
-    /// A typed-value evaluator does not. Put and delete both use the binary
-    /// one, so they agree on every property map.
+    /// Put and delete decide one image with one verdict. On a plain map the
+    /// binary evaluator also resolves `owner` to a qualified `e.owner` key. A
+    /// native tagged object, the form an edge write stores, is decided on its
+    /// typed values, so a Decimal beside `owner` changes nothing.
     #[test]
     fn edge_put_and_delete_share_one_verdict() {
         let policy = owner_policy("alice");
         let check = RlsWriteCheck::Predicate(policy.clone());
-        for (properties, admitted) in [
-            (json!({"e.owner": "alice"}), true),
-            (json!({"owner": "alice"}), true),
-            (json!({"owner": "bob"}), false),
-            (json!({"e.owner": "bob"}), false),
-            (json!({"note": "x"}), false),
+        let plain = |json: serde_json::Value| {
+            nodedb_types::json_msgpack::json_to_msgpack(&json).expect("encode plain properties")
+        };
+        let native = |owner: &str| {
+            nodedb_graph::encode_edge_properties(std::collections::HashMap::from([
+                (
+                    "owner".to_string(),
+                    nodedb_types::Value::String(owner.into()),
+                ),
+                (
+                    "price".to_string(),
+                    nodedb_types::Value::Decimal("12.50".parse().expect("decimal")),
+                ),
+            ]))
+            .expect("encode native properties")
+        };
+        for (what, bytes, admitted) in [
+            (
+                "plain e.owner alice",
+                plain(json!({"e.owner": "alice"})),
+                true,
+            ),
+            ("plain owner alice", plain(json!({"owner": "alice"})), true),
+            ("plain owner bob", plain(json!({"owner": "bob"})), false),
+            ("plain e.owner bob", plain(json!({"e.owner": "bob"})), false),
+            ("plain note", plain(json!({"note": "x"})), false),
+            ("native owner alice", native("alice"), true),
+            ("native owner bob", native("bob"), false),
+            ("native note", edge_properties(json!({"note": "x"})), false),
         ] {
-            let bytes = edge_properties(properties.clone());
             let put = crate::control::security::rls::admit_compiled_write_image(
                 &policy,
                 &bytes,
@@ -430,8 +485,8 @@ mod tests {
                 "knows",
                 &nodedb_crs::CrsContext::builtin_only(),
             );
-            assert_eq!(put.is_ok(), admitted, "put {properties}");
-            assert_eq!(delete.is_ok(), admitted, "delete {properties}");
+            assert_eq!(put.is_ok(), admitted, "put {what}");
+            assert_eq!(delete.is_ok(), admitted, "delete {what}");
         }
     }
 

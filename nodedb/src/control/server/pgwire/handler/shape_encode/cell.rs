@@ -22,7 +22,7 @@ use postgres_types::{IsNull, ToSql, accepts, to_sql_checked};
 
 use nodedb_types::columnar::{FloatWidth, IntWidth};
 use nodedb_types::error::NodeDbError;
-use nodedb_types::value::non_finite_float_text;
+use nodedb_types::value::{float4_text, float8_text};
 use nodedb_types::{NdbDateTime, Value};
 
 use crate::control::server::pgwire::numeric_narrow::{checked_narrow, checked_narrow_f32};
@@ -137,26 +137,19 @@ pub(in crate::control::server::pgwire) fn encode_cell(
     }
 
     match ct {
+        // PostgreSQL's `float8out` text: `7`, not `7.0`.
         DdlColType::Float8 => match v {
-            Value::Float(f) => match non_finite_float_text(*f) {
-                Some(text) => encoder.encode_field(&text),
-                None => encoder.encode_field(f),
-            },
-            Value::Integer(i) => encoder.encode_field(&(*i as f64)),
+            Value::Float(f) => encoder.encode_field(&float8_text(*f)),
+            Value::Integer(i) => encoder.encode_field(&float8_text(*i as f64)),
             other => encoder.encode_field(&cell_text(other)),
         },
         // Same overflow guard as the binary arm: the text rendering of a
         // `real` column must not silently read `Infinity` for a finite stored
         // value either.
+        // PostgreSQL's `float4out` text: shortest `f32` digits.
         DdlColType::Float4 => match v {
-            Value::Float(f) => {
-                let narrowed = checked_narrow_f32(*f)?;
-                match non_finite_float_text(f64::from(narrowed)) {
-                    Some(text) => encoder.encode_field(&text),
-                    None => encoder.encode_field(&narrowed),
-                }
-            }
-            Value::Integer(i) => encoder.encode_field(&checked_narrow_f32(*i as f64)?),
+            Value::Float(f) => encoder.encode_field(&float4_text(checked_narrow_f32(*f)?)),
+            Value::Integer(i) => encoder.encode_field(&float4_text(checked_narrow_f32(*i as f64)?)),
             other => encoder.encode_field(&cell_text(other)),
         },
         DdlColType::Bytea => encoder.encode_field(&bytea_text(v)),
@@ -443,20 +436,19 @@ mod tests {
                 .as_deref(),
             Some("42")
         );
-        // Float columns go through pgwire's float encoder: shortest form.
-        assert_eq!(
-            encode_text(DdlColType::Float8, &Value::Float(0.0))
-                .expect("encodes")
-                .as_deref(),
-            Some("0")
-        );
-        // A text column keeps the JSON text of a float.
-        assert_eq!(
-            encode_text(DdlColType::Text, &Value::Float(0.0))
-                .expect("encodes")
-                .as_deref(),
-            Some("0.0")
-        );
+        // A float renders as `float8out` text under a float8 or a text
+        // column: shortest digits, no trailing `.0`.
+        for ct in [DdlColType::Float8, DdlColType::Text] {
+            for (f, want) in [(0.0, "0"), (7.0, "7"), (1e20, "1e+20"), (0.25, "0.25")] {
+                assert_eq!(
+                    encode_text(ct, &Value::Float(f))
+                        .expect("encodes")
+                        .as_deref(),
+                    Some(want),
+                    "{ct:?}"
+                );
+            }
+        }
         assert_eq!(
             encode_text(DdlColType::Text, &Value::Bytes(vec![0, 255, 7]))
                 .expect("encodes")

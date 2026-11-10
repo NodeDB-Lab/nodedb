@@ -222,14 +222,9 @@ impl CoreLoop {
             }
         }
 
-        // Gate vector maintenance once so a non-vector target pays nothing;
-        // a rewritten embedding must re-index or KNN scores stale vectors.
         let database_id = task.request.database_id.as_u64();
-        let has_vectors = self.collection_has_vectors(database_id, tid, target_collection);
 
-        // Checked over the whole resolved set before the first row is written —
-        // each row commits in its own transaction, so a check after the loop
-        // could only report a violation already made durable.
+        // Judge the complete resolved set before its atomic publication.
         let balanced_entries = {
             let images: Vec<(&[u8], &[u8])> = rows
                 .iter()
@@ -254,10 +249,10 @@ impl CoreLoop {
                 tid,
                 target_collection,
                 resolved_sum_targets,
-                has_vectors,
                 strict_schema: strict_schema.as_ref(),
                 declared_primary_key,
-                want_returning: returning.is_some(),
+                returning,
+                rls_filters,
                 sys_from,
             },
             rows,
@@ -266,26 +261,9 @@ impl CoreLoop {
             Err(resp) => return resp,
         };
 
-        let mut response = if let Some(spec) = returning {
-            match super::returning_rows::build_rows_payload(
-                spec,
-                rls_filters,
-                &outcome.returned_docs,
-                &self.crs_context(),
-            ) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::from(e)),
-            }
-        } else {
-            let result = serde_json::json!({ "affected": outcome.affected });
-            match encode_json_as_msgpack(&result) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::from(e)),
-            }
-        };
-        if !outcome.write_set.is_empty() {
-            response.write_set = outcome.write_set;
-        }
+        debug!(affected = outcome.affected, "update from join committed");
+        let mut response = self.response_with_payload(task, outcome.payload);
+        response.write_set = outcome.write_set;
         response
     }
 
@@ -300,21 +278,24 @@ impl CoreLoop {
     ) -> Response {
         let mut wire: Vec<crate::query::ResolvedUpdateRowWire> = Vec::with_capacity(rows.len());
         for r in rows {
-            // The pre-image is stored bytes read straight off the scan; the
-            // post-image is already decoded on the row.
-            let old_doc = match doc_format::decode_document_or_binary_tuple(
-                &r.old_body,
-                strict_schema,
-                "UPDATE ... FROM pre-image",
+            // Both images are decoded typed from their encoded bytes, so a
+            // UUID, an instant, a decimal or bytes keeps its type on the wire.
+            let typed_body = |bytes: &[u8], context: &str| {
+                doc_format::decode_typed_document_or_binary_tuple(bytes, strict_schema, context)
+                    .and_then(|doc| doc_format::encode_typed_resolved_body(&doc))
+            };
+            let (body, old_body) = match (
+                typed_body(&r.body, "UPDATE ... FROM post-image"),
+                typed_body(&r.old_body, "UPDATE ... FROM pre-image"),
             ) {
-                Ok(d) => d,
-                Err(e) => return self.response_error(task, e),
+                (Ok(body), Ok(old_body)) => (body, old_body),
+                (Err(e), _) | (_, Err(e)) => return self.response_error(task, e),
             };
             wire.push((
                 r.key.to_string(),
                 r.key.surrogate().as_u32(),
-                doc_format::encode_resolved_wire_body(&r.doc),
-                doc_format::encode_resolved_wire_body(&old_doc),
+                body,
+                old_body,
             ));
         }
         match zerompk::to_msgpack_vec(&wire) {

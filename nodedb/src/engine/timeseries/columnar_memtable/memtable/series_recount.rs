@@ -96,7 +96,12 @@ impl ColumnarMemtable {
                 let id = usize::try_from(*ids.get(row)?).ok()?;
                 dictionary.get(id).cloned()
             }
-            ColumnData::Timestamp(_) | ColumnData::Float64(_) | ColumnData::Int64(_) => None,
+            ColumnData::Timestamp(_)
+            | ColumnData::Float64(_)
+            | ColumnData::Int64(_)
+            | ColumnData::Decimal(_)
+            | ColumnData::Uuid(_)
+            | ColumnData::Bool(_) => None,
         }
     }
 }

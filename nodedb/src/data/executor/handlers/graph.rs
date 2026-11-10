@@ -83,7 +83,9 @@ pub(in crate::data::executor) struct GraphNeighborsArgs<'a> {
 }
 
 /// One `NeighborsMulti` row: `(frontier node, label, neighbour, properties)`.
-type NeighborRow = (String, String, String, Option<nodedb_types::NativeCell>);
+/// `properties` is the crossed edge's stored property image when the hop
+/// returns properties.
+type NeighborRow = (String, String, String, Option<Vec<u8>>);
 
 /// The error for a `NeighborsMulti` hop whose rows outgrow its `max_results`.
 ///
@@ -296,7 +298,7 @@ impl CoreLoop {
                     src: src.as_str(),
                     label: label.as_str(),
                     node: node.as_str(),
-                    properties: properties.as_ref(),
+                    properties: properties.as_deref(),
                 }
             })
             .collect();
@@ -421,7 +423,7 @@ impl CoreLoop {
                             match hop.cross(src, &label, dst, staged)? {
                                 graph_edge_predicate::EdgeCrossing::Rejected => continue,
                                 graph_edge_predicate::EdgeCrossing::Admitted(properties) => {
-                                    properties.map(nodedb_types::NativeCell)
+                                    properties
                                 }
                             }
                         }
@@ -516,8 +518,11 @@ mod tests {
     /// the property map `{"w": 1}`.
     fn two_edges() -> Harness {
         let mut h = harness();
-        let properties = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"w": 1}))
-            .expect("encode properties");
+        let properties = nodedb_graph::encode_edge_properties(std::collections::HashMap::from([(
+            "w".to_string(),
+            nodedb_types::Value::Integer(1),
+        )]))
+        .expect("encode properties");
         for (lsn, dst, surrogate) in [(10, "b", 2), (11, "c", 3)] {
             let put = h.core.execute_edge_put(
                 &task(lsn),

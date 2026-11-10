@@ -6,8 +6,6 @@
 //! the document, looks up the period status in the reference collection, and
 //! rejects the write if the status is not in the allowed set.
 
-use sonic_rs;
-
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use nodedb_physical::physical_plan::{PeriodLockConfig, ResolvedSumTarget, resolved_sum_surrogate};
@@ -131,23 +129,16 @@ fn extract_period_value(doc_bytes: &[u8], field_name: &str) -> Option<String> {
     extract_field_string(doc_bytes, field_name)
 }
 
-/// Extract a string field from a MessagePack or JSON document.
-///
-/// Uses first-byte detection: MessagePack maps start with 0x80-0x8F (fixmap),
-/// 0xDE (map16), 0xDF (map32). Everything else is tried as JSON.
+/// Extract a string field through the central native document decoder.
 fn extract_field_string(bytes: &[u8], field_name: &str) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
+    let doc = crate::data::executor::doc_format::decode_document_value(bytes).ok()?;
+    match doc.get(field_name)? {
+        nodedb_types::Value::String(value)
+        | nodedb_types::Value::Uuid(value)
+        | nodedb_types::Value::Ulid(value)
+        | nodedb_types::Value::Regex(value) => Some(value.clone()),
+        _ => None,
     }
-    let first = bytes[0];
-    let is_msgpack = (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF;
-    if is_msgpack && let Ok(val) = nodedb_types::json_from_msgpack(bytes) {
-        return val.get(field_name)?.as_str().map(String::from);
-    }
-    if let Ok(val) = sonic_rs::from_slice::<serde_json::Value>(bytes) {
-        return val.get(field_name)?.as_str().map(String::from);
-    }
-    None
 }
 
 #[cfg(test)]
@@ -155,6 +146,19 @@ mod tests {
     use super::*;
     use crate::engine::sparse::btree::SparseEngine;
     use nodedb_types::Surrogate;
+
+    #[test]
+    fn tagged_period_fields_use_the_same_string_values() {
+        let fields = std::collections::HashMap::from([(
+            "period".into(),
+            nodedb_types::Value::String("2026-03".into()),
+        )]);
+        let bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(fields)).unwrap();
+        assert_eq!(
+            extract_field_string(&bytes, "period"),
+            Some("2026-03".into())
+        );
+    }
 
     /// Reads a reference row's current version from `sparse`.
     fn reader(

@@ -95,6 +95,25 @@ impl SparseEngine {
         }
     }
 
+    /// Read one collection's chain head, including changes in the caller's transaction.
+    pub fn get_chain_head_in_txn(
+        &self,
+        txn: &WriteTransaction,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Option<ChainHead>> {
+        let key = chain_head_key(database_id, tenant_id, collection);
+        let table = txn
+            .open_table(CHAIN_HEADS)
+            .map_err(|e| redb_err("open chain heads", e))?;
+        match table.get(key.as_str()) {
+            Ok(Some(v)) => decode_head(&key, v.value()).map(Some),
+            Ok(None) => Ok(None),
+            Err(e) => Err(redb_err("get chain head", e)),
+        }
+    }
+
     /// Write one collection's chain head inside an externally-owned write
     /// transaction.
     ///
@@ -256,6 +275,54 @@ mod tests {
                 "ledger".to_string()
             )),
             Some(&head(7, "abc123"))
+        );
+    }
+
+    #[test]
+    fn chain_head_transaction_reads_include_pending_changes() {
+        let (engine, _dir) = open_temp();
+        let original = head(1, "h1");
+        engine.put_chain_head(0, 1, "ledger", &original).unwrap();
+
+        let txn = engine.begin_write().unwrap();
+        assert_eq!(
+            engine.get_chain_head_in_txn(&txn, 0, 1, "ledger").unwrap(),
+            Some(original.clone())
+        );
+        assert_eq!(
+            engine.get_chain_head_in_txn(&txn, 0, 1, "audit").unwrap(),
+            None
+        );
+
+        let pending = head(2, "h2");
+        engine
+            .put_chain_head_in_txn(&txn, 0, 1, "ledger", &pending)
+            .unwrap();
+        assert_eq!(
+            engine.get_chain_head_in_txn(&txn, 0, 1, "ledger").unwrap(),
+            Some(pending)
+        );
+        assert_eq!(
+            engine.get_chain_head(0, 1, "ledger").unwrap(),
+            Some(original.clone())
+        );
+
+        engine
+            .delete_chain_head_in_txn(&txn, 0, 1, "ledger")
+            .unwrap();
+        assert_eq!(
+            engine.get_chain_head_in_txn(&txn, 0, 1, "ledger").unwrap(),
+            None
+        );
+        assert_eq!(
+            engine.get_chain_head(0, 1, "ledger").unwrap(),
+            Some(original.clone())
+        );
+
+        txn.abort().unwrap();
+        assert_eq!(
+            engine.get_chain_head(0, 1, "ledger").unwrap(),
+            Some(original)
         );
     }
 

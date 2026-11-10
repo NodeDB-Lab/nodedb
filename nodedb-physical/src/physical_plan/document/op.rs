@@ -71,6 +71,8 @@ pub enum DocumentOp {
         /// principal would show. See `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against the materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// `(target collection, join-key value)` → target row surrogate,
         /// resolved by the Control Plane at plan time (Data Plane has no
         /// PK→surrogate map). Keyed on the pair: one source can drive two
@@ -102,6 +104,8 @@ pub enum DocumentOp {
         /// `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against the materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// See `PointPut::resolved_sum_targets`.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
@@ -228,6 +232,8 @@ pub enum DocumentOp {
         /// `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against every materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// See `PointPut::resolved_sum_targets`. One entry per distinct pair
         /// across `documents`.
         #[serde(default)]

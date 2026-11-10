@@ -29,6 +29,7 @@ use crate::sql_escape::quote_identifier;
 
 use super::core::{NodeDbRemote, pg_error_detail};
 use super::document_bind::{DocumentInsert, check_identity_field, document_insert};
+use super::identity::identity_column_of;
 
 /// The savepoint a put opens inside the caller's transaction block.
 const PUT_SAVEPOINT: &str = "nodedb_document_put";
@@ -81,7 +82,8 @@ impl NodeDbRemote {
         collection: &str,
         doc: Document,
     ) -> NodeDbResult<()> {
-        let key = self.identity_column(collection).await?;
+        let (describe_columns, describe_rows) = self.describe(collection).await?;
+        let key = identity_column_of(collection, &describe_columns, &describe_rows)?;
         check_identity_field(collection, &doc, &key)?;
         let insert = document_insert(collection, &key, &doc)?;
         let target = PutTarget {

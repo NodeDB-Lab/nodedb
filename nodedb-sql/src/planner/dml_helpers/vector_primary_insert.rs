@@ -102,6 +102,7 @@ pub(crate) fn build_vector_primary_insert_plan(
 
     Ok(vec![SqlPlan::VectorPrimaryInsert(
         VectorPrimaryInsertPlan {
+            returning: None,
             collection: collection.to_string(),
             field: vpc.vector_field.clone(),
             quantization: vpc.quantization,

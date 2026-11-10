@@ -68,23 +68,11 @@ impl SqlCatalog for OriginCatalog {
         if !stored.is_active {
             // Soft-deleted: surface a distinct error so the pgwire
             // handler renders the UNDROP hint instead of "unknown
-            // table". Retention window uses the default config —
-            // per-tenant override resolution is tracked as its own
-            // checklist item.
-            let retention = crate::config::server::RetentionSettings::default()
-                .retention_window()
-                .as_nanos() as u64;
-            // `deactivated_at_ns == 0` means the drop time is unknown (a
-            // pre-upgrade row the GC sweeper has not yet adopted a time
-            // for — see `event::collection_gc::policy::PurgeDecision`,
-            // which never purges such a row). Report `u64::MAX` rather
-            // than `0 + retention`, which will falsely tell the caller
-            // the row is already past its window.
-            let retention_expires_at_ns = if stored.deactivated_at_ns == 0 {
-                u64::MAX
-            } else {
-                stored.deactivated_at_ns.saturating_add(retention)
-            };
+            // table". The window uses the default retention.
+            let retention_expires_at_ns =
+                crate::control::server::exchange::full_scan::deactivated_retention_expires_at_ns(
+                    &stored,
+                );
             return Err(SqlCatalogError::CollectionDeactivated {
                 name: name.to_string(),
                 retention_expires_at_ns,

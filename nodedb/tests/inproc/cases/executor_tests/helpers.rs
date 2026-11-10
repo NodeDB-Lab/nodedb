@@ -141,13 +141,56 @@ pub fn send_raw(
     resp_rx.try_pop().unwrap().inner
 }
 
+/// Render a Data-Plane payload as JSON text the way a client JSON path
+/// does. Executor fixtures read scan payloads, so rows decode as
+/// `{id, data}` scan envelopes; a native row renders as its typed values.
 pub fn payload_json(payload: &[u8]) -> String {
-    nodedb::data::executor::response_codec::decode_payload_to_json(payload)
+    nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("payload rows decode")
+}
+
+/// Render a query or join payload as JSON text. Each row is a flat body,
+/// a plain map or a native object, and renders as its typed values.
+pub fn rows_json(payload: &[u8]) -> String {
+    nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::Flat,
+    )
+    .expect("payload rows decode")
 }
 
 pub fn payload_value(payload: &[u8]) -> serde_json::Value {
     let json = payload_json(payload);
     serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)
+}
+
+/// The rows of a `NeighborsMulti` payload as JSON. A row's `properties`
+/// travel as the edge's stored property image (`bin`). Each renders here as
+/// its decoded property object.
+pub fn neighbor_rows_value(payload: &[u8]) -> Vec<serde_json::Value> {
+    use nodedb_types::Value;
+    if payload.is_empty() {
+        return Vec::new();
+    }
+    let Value::Array(rows) = nodedb_types::value_from_msgpack(payload).expect("rows decode") else {
+        panic!("neighbor rows are an array");
+    };
+    rows.into_iter()
+        .map(|row| {
+            let Value::Object(mut fields) = row else {
+                panic!("a neighbor row is a map: {row:?}");
+            };
+            if let Some(Value::Bytes(image)) = fields.remove("properties") {
+                let properties =
+                    nodedb_graph::decode_edge_properties(&image).expect("properties decode");
+                fields.insert("properties".to_string(), Value::Object(properties));
+            }
+            serde_json::Value::from(Value::Object(fields))
+        })
+        .collect()
 }
 
 /// A deterministic bound surrogate for a document id, never

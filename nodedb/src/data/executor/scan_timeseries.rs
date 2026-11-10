@@ -7,11 +7,13 @@
 //! partition. A flushed collection with no resident memtable still answers
 //! with all of its rows.
 
+use nodedb_types::Value;
 use nodedb_types::columnar::schema::TS_SYSTEM;
 
 use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::raw_scan::TsGatherParams;
+use crate::data::executor::handlers::timeseries::raw_scan::row_form::TypedTsRow;
 use crate::types::{DatabaseId, TenantId};
 
 /// The full time range: a collection scan has no time bounds.
@@ -55,8 +57,13 @@ impl CoreLoop {
         self.columnar_memtables.contains_key(&key) || self.ts_registries.contains_key(&key)
     }
 
-    /// Committed rows of a timeseries collection as `(id, msgpack map)`, up
+    /// Committed rows of a timeseries collection as `(id, native row)`, up
     /// to `limit`. The id is the row's `id` text column, or empty.
+    ///
+    /// Each row is a native tagged object (`[7, {...}]`) whose cells carry
+    /// their stored types: a DECIMAL is `Value::Decimal`, a UUID
+    /// `Value::Uuid`, a BOOLEAN `Value::Bool`, an instant a typed instant.
+    /// Joins, GROUP BY, partition routing and aggregates read these rows.
     pub(in crate::data::executor) fn scan_timeseries_docs(
         &self,
         did: u64,
@@ -81,7 +88,7 @@ impl CoreLoop {
         at: Option<i64>,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let cut_predicates: Vec<ScanFilter> = at.map(system_cut_predicate).into_iter().collect();
-        let rows = self.gather_ts_rows(TsGatherParams {
+        let rows = self.gather_ts_rows::<TypedTsRow>(TsGatherParams {
             database_id: DatabaseId::new(did),
             tid: TenantId::new(tid),
             collection,
@@ -95,7 +102,9 @@ impl CoreLoop {
             ),
             task: None,
         })?;
-        rows.into_iter().map(ts_row_to_doc).collect()
+        rows.into_iter()
+            .map(|row| ts_row_to_doc(row.into_value()))
+            .collect()
     }
 }
 
@@ -110,19 +119,17 @@ fn system_cut_predicate(ordinal: i64) -> ScanFilter {
     }
 }
 
-/// One timeseries row as `(id, msgpack map)`.
-fn ts_row_to_doc(row: rmpv::Value) -> crate::Result<(String, Vec<u8>)> {
+/// One typed timeseries row as `(id, native row)`.
+fn ts_row_to_doc(row: Value) -> crate::Result<(String, Vec<u8>)> {
     let id = match &row {
-        rmpv::Value::Map(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("id"))
-            .and_then(|(_, v)| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        Value::Object(fields) => match fields.get("id") {
+            Some(Value::String(id)) => id.clone(),
+            _ => String::new(),
+        },
         _ => String::new(),
     };
-    let mut mp = Vec::new();
-    rmpv::encode::write_value(&mut mp, &row).map_err(|e| crate::Error::Codec {
+    let mp = zerompk::to_msgpack_vec(&row).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
         detail: format!("encode timeseries row: {e}"),
     })?;
     Ok((id, mp))
@@ -130,17 +137,43 @@ fn ts_row_to_doc(row: rmpv::Value) -> crate::Result<(String, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use nodedb_query::msgpack_scan::{build_group_key, join_key_identity, join_match_identity};
+    use nodedb_types::InstantKind;
+
     use super::*;
+    use crate::data::executor::handlers::timeseries::raw_scan::row_form::TsRowForm;
+    use crate::engine::timeseries::columnar_memtable::{
+        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
+    };
+
+    const DEVICE: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const AT_MS: i64 = 1_700_000_000_000;
+    const PRICE: &str = "12345678901234567.89";
+
+    fn object(fields: Vec<(&str, Value)>) -> Value {
+        Value::Object(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    fn native(row: &Value) -> Vec<u8> {
+        zerompk::to_msgpack_vec(row).expect("native row")
+    }
 
     #[test]
     fn row_id_comes_from_the_id_column() {
-        let row = rmpv::Value::Map(vec![
-            (rmpv::Value::from("id"), rmpv::Value::from("r1")),
-            (rmpv::Value::from("v"), rmpv::Value::from(2.5)),
+        let row = object(vec![
+            ("id", Value::String("r1".into())),
+            ("v", Value::Float(2.5)),
         ]);
         let (id, mp) = ts_row_to_doc(row).expect("row encodes");
         assert_eq!(id, "r1");
-        assert!(!mp.is_empty());
+        assert!(nodedb_types::ObjectView::new(&mp).is_ok());
     }
 
     #[test]
@@ -153,8 +186,110 @@ mod tests {
 
     #[test]
     fn row_without_id_has_empty_id() {
-        let row = rmpv::Value::Map(vec![(rmpv::Value::from("v"), rmpv::Value::from(1))]);
+        let row = object(vec![("v", Value::Integer(1))]);
         let (id, _) = ts_row_to_doc(row).expect("row encodes");
         assert!(id.is_empty());
+    }
+
+    /// A memtable holding one row of a TIMESTAMPTZ key, a DECIMAL, a UUID
+    /// and a BOOLEAN, read back as the collection scan reads it.
+    fn stored_row() -> Vec<u8> {
+        let schema = ColumnarSchema {
+            columns: vec![
+                (
+                    "ts".into(),
+                    ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)),
+                ),
+                ("price".into(), ColumnType::Decimal(None)),
+                ("device".into(), ColumnType::Uuid),
+                ("ok".into(), ColumnType::Bool),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 4],
+        };
+        let mut mt = ColumnarMemtable::new(schema, ColumnarMemtableConfig::default());
+        mt.ingest_row(
+            1,
+            &[
+                ColumnValue::Timestamp(AT_MS),
+                ColumnValue::decimal(PRICE.parse().expect("decimal")),
+                ColumnValue::Uuid(*uuid::Uuid::parse_str(DEVICE).expect("uuid").as_bytes()),
+                ColumnValue::Bool(true),
+            ],
+        )
+        .expect("ingest");
+        let schema = mt.schema().clone();
+        let columns: Vec<_> = schema
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, (name, ty))| (i, name, ty, mt.column(i)))
+            .collect();
+        let row = TypedTsRow::from_memtable(&mt, &columns, 0).expect("row");
+        ts_row_to_doc(row.into_value()).expect("doc").1
+    }
+
+    /// The collection scan emits a native row whose DECIMAL, UUID and
+    /// BOOLEAN cells keep their types. The row joins, groups and routes with
+    /// a schemaless native row holding the same values. Text with the same
+    /// characters, and a float near the decimal, stay apart.
+    #[test]
+    fn timeseries_typed_cells_match_native_schemaless_rows() {
+        let ts_row = stored_row();
+        let view = nodedb_types::ObjectView::new(&ts_row).expect("object");
+        assert_eq!(view.format(), nodedb_types::ObjectFormat::Native);
+        let price = Value::Decimal(PRICE.parse().expect("decimal"));
+        assert_eq!(view.get("price").expect("price"), Some(price.clone()));
+        assert_eq!(
+            view.get("device").expect("device"),
+            Some(Value::Uuid(DEVICE.into()))
+        );
+        assert_eq!(view.get("ok").expect("ok"), Some(Value::Bool(true)));
+
+        let schemaless = native(&object(vec![
+            ("ts", InstantKind::Utc.from_millis(AT_MS).expect("instant")),
+            ("price", price),
+            ("device", Value::Uuid(DEVICE.into())),
+            ("ok", Value::Bool(true)),
+        ]));
+        for keys in [["price"], ["device"], ["ts"], ["ok"]] {
+            let ts_key = join_match_identity(&ts_row, &keys).expect("ts key");
+            assert!(ts_key.is_some(), "{keys:?}");
+            assert_eq!(
+                ts_key,
+                join_match_identity(&schemaless, &keys).expect("native key"),
+                "{keys:?}"
+            );
+            assert_eq!(
+                nodedb_query::partition_hash(&ts_row, &keys).expect("ts route"),
+                nodedb_query::partition_hash(&schemaless, &keys).expect("native route"),
+                "{keys:?}"
+            );
+        }
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        for column in ["price", "device"] {
+            let group = [nodedb_query::expr::GroupKeySpec::column(column)];
+            assert_eq!(
+                build_group_key(&ts_row, &group, &crs).expect("ts group"),
+                build_group_key(&schemaless, &group, &crs).expect("native group"),
+                "{column}"
+            );
+        }
+
+        let text = native(&object(vec![
+            ("price", Value::String(PRICE.into())),
+            ("device", Value::String(DEVICE.into())),
+        ]));
+        let float = native(&object(vec![(
+            "price",
+            Value::Float(PRICE.parse::<f64>().expect("float")),
+        )]));
+        for (other, keys) in [(&text, ["price"]), (&text, ["device"]), (&float, ["price"])] {
+            assert_ne!(
+                join_key_identity(&ts_row, &keys).expect("ts key"),
+                join_key_identity(other, &keys).expect("other key"),
+                "{keys:?}"
+            );
+        }
     }
 }

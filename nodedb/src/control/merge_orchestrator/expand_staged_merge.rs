@@ -213,6 +213,12 @@ async fn emit_arms(
     arms: ResolvedMergeArms,
     out: &mut Vec<PhysicalTask>,
 ) -> crate::Result<()> {
+    let rls_write_check =
+        task.plan
+            .sole_rls_write_check()
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: "MERGE expansion carries no write policy".into(),
+            })?;
     // Every inserted row's surrogate in one batch at the target's home.
     let insert_bodies: Vec<&[u8]> = arms
         .inserts
@@ -245,6 +251,7 @@ async fn emit_arms(
                 // expands into are internal writes that answer no client.
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: rls_write_check.clone(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
             }),
@@ -272,6 +279,7 @@ async fn emit_arms(
                 // See the insert arm above.
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: rls_write_check.clone(),
                 resolved_sum_targets: Vec::new(),
             }),
         ));

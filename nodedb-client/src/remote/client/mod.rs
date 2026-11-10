@@ -9,8 +9,12 @@ mod document_put;
 mod graph;
 mod graph_batch;
 mod identity;
+mod pg_param;
+mod props_bind;
 mod sql_lifecycle;
+mod sql_params;
 mod text_search;
 mod vector;
+mod vector_bind;
 
 pub use core::NodeDbRemote;

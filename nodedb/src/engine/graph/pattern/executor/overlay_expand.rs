@@ -28,8 +28,10 @@
 //! locally resolvable.
 
 use super::super::ast::{NodeBinding, PatternTriple};
+use super::edge_props::CrossedEdge;
+use super::row::{Bound, bind_text, lookup};
 use super::types::{BindingRow, ExecutionState, UnresolvedExpansion};
-use super::varlen_named::merge_neighbors_named;
+use super::varlen_named::{merge_neighbors_named, merge_neighbors_oriented};
 use crate::engine::graph::csr::{CsrIndex, GraphOverlayDelta};
 
 /// Expand one fixed-hop (non variable-length) triple against a name-keyed merge
@@ -52,7 +54,7 @@ pub(super) fn expand_triple_overlay(
     state: &mut ExecutionState,
     frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
     overlay: &GraphOverlayDelta,
-) -> Vec<BindingRow> {
+) -> crate::Result<Vec<BindingRow>> {
     let direction = triple.edge.direction.to_csr_direction();
     let label_filter = triple.edge.edge_type.as_deref();
     let collection_filter = state.collection_filter;
@@ -70,7 +72,7 @@ pub(super) fn expand_triple_overlay(
 
     let mut results = Vec::new();
     for (src_name, src_id) in &sources {
-        let neighbors = merge_neighbors_named(
+        let neighbors = merge_neighbors_oriented(
             csr,
             src_name,
             *src_id,
@@ -115,20 +117,37 @@ pub(super) fn expand_triple_overlay(
             }
             continue;
         }
-        for (label, dst_name) in neighbors {
-            if !dst_compatible(&triple.dst, csr, input_row, &dst_name) {
+        for neighbor in neighbors {
+            let (label, dst_name) = (&neighbor.label, &neighbor.other);
+            if !dst_compatible(&triple.dst, csr, input_row, dst_name) {
                 continue;
             }
             let mut row = input_row.clone();
             bind_name(&mut row, &triple.src, src_name);
-            bind_name(&mut row, &triple.dst, &dst_name);
+            bind_name(&mut row, &triple.dst, dst_name);
             if let Some(ref edge_name) = triple.edge.name {
-                row.insert(edge_name.clone(), format!("{src_name}|{label}|{dst_name}"));
+                row.insert(
+                    edge_name.clone(),
+                    nodedb_types::Value::String(format!("{src_name}|{label}|{dst_name}")),
+                );
+                // The physical edge runs from the source of the crossing.
+                let (src, dst) = if neighbor.outgoing {
+                    (src_name.as_str(), dst_name.as_str())
+                } else {
+                    (dst_name.as_str(), src_name.as_str())
+                };
+                let crossed = CrossedEdge {
+                    collection: neighbor.collection.as_deref(),
+                    src,
+                    label,
+                    dst,
+                };
+                state.capture_edge(&mut row, edge_name, crossed)?;
             }
             results.push(row);
         }
     }
-    results
+    Ok(results)
 }
 
 /// Resolve a triple's source binding to `(node_name, csr_id)` candidates.
@@ -147,7 +166,15 @@ fn resolve_sources(
     frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
     overlay: &GraphOverlayDelta,
 ) -> Vec<(String, Option<u32>)> {
-    if let Some(name) = binding.name.as_ref().and_then(|n| row.get(n)) {
+    let bound = binding
+        .name
+        .as_ref()
+        .map_or(Bound::Unbound, |n| lookup(row, n));
+    if bound == Bound::Null {
+        // A variable bound to NULL matched nothing: no node continues it.
+        return Vec::new();
+    }
+    if let Bound::Text(name) = bound {
         let id = csr.node_id_raw(name);
         if let Some(ref label) = binding.label {
             match id {
@@ -155,7 +182,7 @@ fn resolve_sources(
                 _ => return Vec::new(),
             }
         }
-        return vec![(name.clone(), id)];
+        return vec![(name.to_string(), id)];
     }
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -202,10 +229,12 @@ pub(super) fn dst_compatible(
             _ => return false,
         }
     }
-    if let Some(ref var) = binding.name
-        && let Some(existing) = row.get(var)
-    {
-        return existing == name;
+    if let Some(ref var) = binding.name {
+        return match lookup(row, var) {
+            Bound::Unbound => true,
+            Bound::Null => false,
+            Bound::Text(existing) => existing == name,
+        };
     }
     true
 }
@@ -214,7 +243,7 @@ pub(super) fn dst_compatible(
 /// binding's variable if it has one and is not already bound.
 pub(super) fn bind_name(row: &mut BindingRow, binding: &NodeBinding, name: &str) {
     if let Some(ref var) = binding.name {
-        row.entry(var.clone()).or_insert_with(|| name.to_string());
+        bind_text(row, var, name);
     }
 }
 
@@ -223,6 +252,7 @@ mod tests {
     use super::*;
     use crate::engine::graph::pattern::ast::{EdgeBinding, EdgeDirection};
     use crate::engine::graph::test_support::test_scoped_memory;
+    use nodedb_types::Value;
 
     fn triple(src: Option<&str>, label: &str, dst: Option<&str>) -> PatternTriple {
         PatternTriple {
@@ -258,7 +288,7 @@ mod tests {
         ov.stage_edge("a", "KNOWS", "c");
 
         let mut row = BindingRow::new();
-        row.insert("a".to_string(), "a".to_string());
+        row.insert("a".to_string(), Value::String("a".into()));
         // `(a)-[:KNOWS]->(y)` with `y` a free variable: both the durable `b` and
         // the staged `c` bind to `y`.
         let mut st = state();
@@ -270,8 +300,10 @@ mod tests {
             &mut st,
             None,
             &ov,
-        );
-        let dsts: std::collections::HashSet<&str> = rows.iter().map(|r| r["y"].as_str()).collect();
+        )
+        .expect("expand");
+        let dsts: std::collections::HashSet<&str> =
+            rows.iter().filter_map(|r| r["y"].as_str()).collect();
         assert_eq!(
             dsts,
             ["b", "c"]
@@ -289,7 +321,7 @@ mod tests {
         ov.stage_tombstone("a", "KNOWS", "b");
 
         let mut row = BindingRow::new();
-        row.insert("a".to_string(), "a".to_string());
+        row.insert("a".to_string(), Value::String("a".into()));
         let mut st = state();
         let rows = expand_triple_overlay(
             &triple(Some("a"), "KNOWS", Some("x")),
@@ -299,7 +331,8 @@ mod tests {
             &mut st,
             None,
             &ov,
-        );
+        )
+        .expect("expand");
         assert!(rows.is_empty(), "tombstoned edge must not expand");
     }
 
@@ -312,7 +345,7 @@ mod tests {
         ov.stage_edge("x", "KNOWS", "y");
 
         let mut row = BindingRow::new();
-        row.insert("m".to_string(), "x".to_string());
+        row.insert("m".to_string(), Value::String("x".into()));
         let mut st = state();
         let rows = expand_triple_overlay(
             &triple(Some("m"), "KNOWS", Some("n")),
@@ -322,8 +355,9 @@ mod tests {
             &mut st,
             None,
             &ov,
-        );
+        )
+        .expect("expand");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["n"], "y");
+        assert_eq!(rows[0]["n"], Value::String("y".into()));
     }
 }

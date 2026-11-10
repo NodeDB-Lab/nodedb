@@ -355,7 +355,8 @@ fn images_of(
 /// contributes no delta — the same conclusion the Data-Plane hook reaches for a
 /// submitted body it cannot decode.
 fn decode_body(body: &[u8]) -> Option<serde_json::Value> {
-    nodedb_types::json_from_msgpack(body).ok()
+    // A native body reads as the plain body of the same values.
+    crate::data::executor::response_codec::decode_body_plain_json(body).ok()
 }
 
 #[cfg(test)]
@@ -414,6 +415,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }
     }
 
@@ -442,6 +444,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }
     }
 
@@ -646,6 +649,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         };
         let scope = stored_row_scope(&op, None).expect("a put names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});

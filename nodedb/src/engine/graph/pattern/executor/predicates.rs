@@ -2,9 +2,14 @@
 
 //! WHERE predicate application and RETURN column projection.
 
+use nodedb_types::Value;
+
 use super::super::ast::*;
 use super::core::execute_clause;
 use super::expansion::VarLenCaps;
+pub(super) use super::properties::QueryTail;
+use super::properties::compare;
+use super::row::{Bound, lookup};
 use super::types::{BindingRow, ExecutionState};
 use crate::engine::graph::csr::{CsrIndex, GraphOverlayDelta};
 use crate::engine::graph::edge_store::EdgeStore;
@@ -36,6 +41,12 @@ pub struct PropertyLookup<'a> {
     /// Where the node collection keeps its documents, and the cut a
     /// versioned read takes.
     pub document_cut: DocumentCut,
+    /// The cut a relationship property is read at: the MATCH's own graph
+    /// read scope.
+    pub edge_cut: nodedb_physical::physical_plan::GraphReadScope,
+    /// The reading transaction's staged edge puts in the collection. A
+    /// staged put's property object replaces the stored one.
+    pub staged_edges: Option<&'a super::edge_props::StagedEdgeProperties>,
 }
 
 /// How a node's document is read.
@@ -60,16 +71,19 @@ pub enum DocumentCut {
 /// variable-length sub-pattern (e.g. inside `NOT EXISTS`) truncates at the
 /// configured ceiling rather than a hardcoded one.
 ///
-/// `props` carries the sparse-engine handle and `(database_id, tenant_id,
-/// collection)` needed to resolve property predicates (`WHERE a.field = 'v'`)
-/// against each bound node's stored document.
+/// `tail` resolves property predicates: `WHERE a.field = 'v'` against each
+/// bound node's stored document, and `WHERE r.field > 5` against the property
+/// object a relationship row captured where the edge was bound. Both compare
+/// the exact stored value against the literal through the shared typed
+/// comparison. A row whose variable is unbound or NULL, or whose node or edge
+/// lacks the field, fails a property predicate.
 pub(super) fn apply_predicate(
     rows: &[BindingRow],
     predicate: &WherePredicate,
     csr: &CsrIndex,
     _edge_store: &EdgeStore,
     varlen_caps: VarLenCaps,
-    props: &PropertyLookup<'_>,
+    tail: &QueryTail<'_>,
     overlay: Option<&GraphOverlayDelta>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     match predicate {
@@ -77,97 +91,13 @@ pub(super) fn apply_predicate(
             binding,
             field,
             value,
-        } => {
-            if field.is_empty() {
-                Ok(rows
-                    .iter()
-                    .filter(|row| row.get(binding).is_some_and(|v| v == value))
-                    .cloned()
-                    .collect())
-            } else {
-                let expected_value = coerce_literal(value);
-                let mut kept = Vec::new();
-                for row in rows {
-                    let keep = match row.get(binding) {
-                        Some(node_id) => check_property(
-                            props,
-                            node_id,
-                            field,
-                            &ComparisonOp::Eq,
-                            &expected_value,
-                        )?,
-                        None => false,
-                    };
-                    if keep {
-                        kept.push(row.clone());
-                    }
-                }
-                Ok(kept)
-            }
-        }
-
+        } => filter_by(rows, tail, binding, field, ComparisonOp::Eq, value),
         WherePredicate::Comparison {
             binding,
             field,
             op,
             value,
-        } => {
-            if field.is_empty() {
-                // Node-identity comparison: `WHERE a <> b` or `WHERE a <> 'literal'`.
-                //
-                // The parser stores `value` as the raw RHS string — either a binding
-                // name (no quotes, e.g. `p3` from `WHERE p1 <> p3`) or a stripped
-                // literal (e.g. `alice` from `WHERE p1 <> 'alice'`). We distinguish by
-                // attempting to resolve `value` as a binding in the current row. If it
-                // resolves, we compare two bound node identities (binding-vs-binding).
-                // If it does not resolve, we compare the bound node identity against
-                // the literal string (binding-vs-literal).
-                //
-                // This covers the LSQB `WHERE p1 <> p3` anti-self-join filter as well
-                // as identity equality/inequality against a fixed value.
-                Ok(rows
-                    .iter()
-                    .filter(|row| {
-                        let lhs = match row.get(binding.as_str()) {
-                            Some(v) => v.as_str(),
-                            // Binding not yet resolved in this row → keep row
-                            // (predicate is unevaluable; don't silently drop).
-                            None => return true,
-                        };
-                        // Resolve RHS: prefer binding lookup, fall back to literal.
-                        let rhs: &str = match row.get(value.as_str()) {
-                            Some(v) => v.as_str(),
-                            None => value.as_str(),
-                        };
-                        apply_op(op, lhs, rhs)
-                    })
-                    .cloned()
-                    .collect())
-            } else {
-                // Property comparison: `WHERE a.age > 25`.
-                //
-                // Each bound node's properties are fetched from the sparse
-                // engine (its document, keyed by node-id within the query's
-                // `IN '<collection>'`), decoded, and the field compared against
-                // the coerced literal using `op`. Coercion happens once here
-                // rather than inside `check_property` (which runs per row).
-                let expected_value = coerce_literal(value);
-                let mut kept = Vec::new();
-                for row in rows {
-                    let keep = match row.get(binding.as_str()) {
-                        Some(node_id) => {
-                            check_property(props, node_id, field, op, &expected_value)?
-                        }
-                        None => false,
-                    };
-                    if keep {
-                        kept.push(row.clone());
-                    }
-                }
-                Ok(kept)
-            }
-        }
-
+        } => filter_by(rows, tail, binding, field, *op, value),
         WherePredicate::NotExists { sub_pattern } => {
             let mut result = Vec::new();
             // NOT EXISTS sub-patterns run in their own local state: any
@@ -183,7 +113,7 @@ pub(super) fn apply_predicate(
                 // as the outer query (`IN '<collection>'`) so NOT EXISTS never
                 // consults another collection's edges.
                 sub_state.collection_filter =
-                    super::expansion::resolve_collection_filter(props.collection, csr);
+                    super::expansion::resolve_collection_filter(tail.props.collection, csr);
                 // NOT EXISTS sub-patterns check structural connectivity
                 // against already-bound variables — no anchor enumeration
                 // occurs, so the frontier bitmap does not apply here.
@@ -212,6 +142,64 @@ pub(super) fn apply_predicate(
             Ok(result)
         }
     }
+}
+
+/// Keep the rows where `binding[.field] <op> value` holds.
+///
+/// An empty `field` compares node identities: `WHERE a = 'alice'`,
+/// `WHERE a <> b` or `WHERE a <> 'alice'`. The parser stores `value` as the
+/// raw RHS string, either a binding name (`p3` from `WHERE p1 <> p3`) or a
+/// stripped literal. `=` compares against the literal. Another operator
+/// compares a `value` the row binds as that binding (binding-vs-binding, the
+/// LSQB anti-self-join filter), else the literal. An unbound left side fails
+/// `=` and keeps the row for every other operator, which is unevaluable
+/// there. A side bound to NULL drops the row: NULL compares as unknown.
+///
+/// A non-empty `field` reads the property through `tail` and compares it
+/// against the coerced literal. The literal is coerced once per predicate.
+fn filter_by(
+    rows: &[BindingRow],
+    tail: &QueryTail<'_>,
+    binding: &str,
+    field: &str,
+    op: ComparisonOp,
+    value: &str,
+) -> Result<Vec<BindingRow>, crate::Error> {
+    if field.is_empty() {
+        return Ok(rows
+            .iter()
+            .filter(|row| {
+                let lhs = match lookup(row, binding) {
+                    Bound::Text(text) => text,
+                    Bound::Null => return false,
+                    // An Eq on an unbound identity is false, an ordering or
+                    // Neq is unevaluable and keeps the row.
+                    Bound::Unbound => return op != ComparisonOp::Eq,
+                };
+                // `=` compares against the literal. Every other operator
+                // reads a `value` the row binds as that binding.
+                let rhs = match (op, lookup(row, value)) {
+                    (ComparisonOp::Eq, _) | (_, Bound::Unbound) => value,
+                    (_, Bound::Text(text)) => text,
+                    (_, Bound::Null) => return false,
+                };
+                apply_op(&op, lhs, rhs)
+            })
+            .cloned()
+            .collect());
+    }
+    let expected = coerce_literal(value);
+    let mut kept = Vec::new();
+    for row in rows {
+        let keep = match tail.property(row, binding, field)? {
+            Some(stored) => compare(op, &stored, &expected),
+            None => false,
+        };
+        if keep {
+            kept.push(row.clone());
+        }
+    }
+    Ok(kept)
 }
 
 /// Apply a `ComparisonOp` to two string-typed node identities.
@@ -249,143 +237,10 @@ fn coerce_literal(expected: &str) -> nodedb_types::Value {
     }
 }
 
-/// Fetch and decode the stored document for `node_id` within `collection`.
-///
-/// Returns `Ok(Some(doc))` when the document is present and successfully
-/// decoded, `Ok(None)` when the node has no stored document, and `Err` for
-/// storage or decode failures.
-///
-/// The document is keyed by the node's GLOBAL SURROGATE, not by the node-id
-/// string. We resolve `node_id → Surrogate` through the CSR (a graph node and
-/// its same-pk document share one surrogate), derive the redb storage key via
-/// `StorageKey::for_surrogate`, then fetch. A node that is unknown to the partition
-/// or has no surrogate set (the ZERO sentinel) is treated as having no
-/// document → `Ok(None)`.
-///
-/// The `collection` argument is already resolved by the caller (both
-/// `check_property` and `project_property` guard `props.collection` first
-/// because their `BadRequest` messages reference context the caller owns).
-fn fetch_node_doc(
-    props: &PropertyLookup<'_>,
-    collection: &str,
-    node_id: &str,
-) -> Result<Option<nodedb_types::Value>, crate::Error> {
-    let Some(surrogate) = props.csr.node_surrogate(node_id) else {
-        return Ok(None);
-    };
-    let doc_id = crate::engine::document::store::key::StorageKey::for_surrogate(surrogate);
-    let stored = match props.document_cut {
-        DocumentCut::Plain => {
-            props
-                .sparse
-                .get(props.database_id, props.tenant_id, collection, &doc_id)?
-        }
-        DocumentCut::Versioned {
-            system_as_of,
-            valid_at_ms,
-        } => props.sparse.versioned_get_as_of(
-            props.database_id,
-            props.tenant_id,
-            collection,
-            &doc_id,
-            system_as_of,
-            valid_at_ms,
-        )?,
-    };
-    let Some(bytes) = stored else {
-        return Ok(None);
-    };
-
-    let doc =
-        nodedb_types::value_from_msgpack(&bytes).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("decode graph node `{node_id}` document: {e}"),
-        })?;
-
-    Ok(Some(doc))
-}
-
-/// Evaluate a property predicate (`<node_id>.<field> <op> <expected>`) against
-/// the node's stored document.
-///
-/// A graph node's properties live as a document in the sparse engine, keyed by
-/// the node-id string within the query's `IN '<collection>'`. This:
-///
-/// - returns a typed `BadRequest` when no collection is available — a property
-///   predicate is unresolvable without one, so we must NOT silently pass or drop;
-/// - returns `Ok(false)` when the node has no document (a node with no
-///   properties cannot satisfy a property predicate);
-/// - returns `Ok(false)` when the document lacks `field`;
-/// - otherwise compares the stored field value against `expected_value`
-///   using `op` (type-aware, via `nodedb_query::value_ops`).
-///
-/// `expected_value` is pre-coerced by the caller so that `coerce_literal` is
-/// called once per predicate rather than once per matching row.
-fn check_property(
-    props: &PropertyLookup<'_>,
-    node_id: &str,
-    field: &str,
-    op: &ComparisonOp,
-    expected_value: &nodedb_types::Value,
-) -> Result<bool, crate::Error> {
-    use nodedb_query::value_ops::{coerced_eq, partial_compare_values};
-    use std::cmp::Ordering;
-
-    let collection = props.collection.ok_or_else(|| crate::Error::BadRequest {
-        detail: format!(
-            "MATCH property predicate `{node_id}.{field}` requires an \
-             `IN '<collection>'` clause to resolve node properties"
-        ),
-    })?;
-
-    // Fetch and decode the node's document. Absent document → cannot satisfy a
-    // property predicate.
-    let doc = match fetch_node_doc(props, collection, node_id)? {
-        Some(d) => d,
-        None => return Ok(false),
-    };
-
-    // Look up the field. Missing field → predicate not satisfiable.
-    let field_value = match &doc {
-        nodedb_types::Value::Object(map) => map.get(field),
-        _ => None,
-    };
-    let field_value = match field_value {
-        Some(v) => v,
-        None => return Ok(false),
-    };
-
-    let result = match op {
-        ComparisonOp::Eq => coerced_eq(field_value, expected_value),
-        ComparisonOp::Neq => !coerced_eq(field_value, expected_value),
-        ComparisonOp::Lt => {
-            partial_compare_values(field_value, expected_value) == Some(Ordering::Less)
-        }
-        ComparisonOp::Lte => {
-            matches!(
-                partial_compare_values(field_value, expected_value),
-                Some(Ordering::Less | Ordering::Equal)
-            )
-        }
-        ComparisonOp::Gt => {
-            partial_compare_values(field_value, expected_value) == Some(Ordering::Greater)
-        }
-        ComparisonOp::Gte => {
-            matches!(
-                partial_compare_values(field_value, expected_value),
-                Some(Ordering::Greater | Ordering::Equal)
-            )
-        }
-    };
-    Ok(result)
-}
-
-/// Test-only re-export of [`check_property`] so sibling-module tests can
-/// exercise the property-predicate evaluation path directly against a real
-/// `SparseEngine` without standing up a full executor run.
-///
-/// Coerces `expected` via [`coerce_literal`] (matching `apply_predicate`'s
-/// per-predicate coerce-once pattern) before forwarding to `check_property`.
+/// Test-only entry to the node-property predicate: `node_id.field <op>
+/// expected` against the node's stored document, `expected` coerced as a
+/// WHERE literal is. A node without a document, or a document without the
+/// field, fails.
 #[cfg(test)]
 pub(super) fn check_property_for_test(
     props: &PropertyLookup<'_>,
@@ -395,96 +250,38 @@ pub(super) fn check_property_for_test(
     expected: &str,
 ) -> Result<bool, crate::Error> {
     let expected_value = coerce_literal(expected);
-    check_property(props, node_id, field, op, &expected_value)
+    Ok(super::properties::node_property(props, node_id, field)?
+        .is_some_and(|stored| compare(*op, &stored, &expected_value)))
 }
 
-/// Project RETURN columns from rows.
+/// Project RETURN columns from rows, each cell the exact typed value.
 ///
-/// Non-dotted exprs (`a`, or an aliased binding) project the node identity bound
-/// in the row, `"NULL"` if absent — the mirror of node-identity resolution.
-///
-/// Dotted exprs (`a.field`) project the node's stored PROPERTY: the binding is
-/// resolved to a node-id, the node's document is fetched from the sparse engine
-/// (keyed by node-id within the query's `IN '<collection>'`), decoded, and the
-/// `field` extracted and stringified via the canonical `value_ops` display
-/// convention so projected scalars match how binding values are otherwise
-/// stringified. The same resolution rules as the predicate path apply:
-///
-/// - binding not in the row → `"NULL"` (unevaluable for that row);
-/// - no `IN '<collection>'` clause → typed `BadRequest` (a property is
-///   unresolvable without one; never silently `"NULL"`);
-/// - node has no document → `"NULL"` (SQL projection: missing row → NULL);
-/// - document lacks `field` → `"NULL"`.
+/// A non-dotted expr (`a`, or an aliased binding) projects what the row
+/// binds: a node name, edge text, or NULL. A dotted expr projects a
+/// property: `a.field` from node `a`'s stored document, `r.field` from the
+/// property object relationship `r` captured. A variable that is unbound or
+/// NULL, a node with no document, and a missing field project NULL. A node
+/// property with no `IN '<collection>'` clause is a typed `BadRequest`,
+/// never a silent NULL.
 pub(super) fn project_columns(
     rows: &[BindingRow],
     columns: &[ReturnColumn],
-    props: &PropertyLookup<'_>,
+    tail: &QueryTail<'_>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut projected = BindingRow::new();
         for col in columns {
             let key = col.alias.as_deref().unwrap_or(&col.expr);
-
-            let value = if let Some(dot) = col.expr.find('.') {
-                let binding = &col.expr[..dot];
-                let field = &col.expr[dot + 1..];
-                match row.get(binding) {
-                    // Binding not yet resolved in this row → NULL (unchanged).
-                    None => "NULL".to_string(),
-                    Some(node_id) => project_property(props, node_id, field)?,
-                }
-            } else {
-                row.get(&col.expr)
-                    .cloned()
-                    .unwrap_or_else(|| "NULL".to_string())
+            let value = match col.expr.split_once('.') {
+                Some((binding, field)) => tail.property(row, binding, field)?,
+                None => row.get(&col.expr).cloned(),
             };
-
-            projected.insert(key.to_string(), value);
+            projected.insert(key.to_string(), value.unwrap_or(Value::Null));
         }
         out.push(projected);
     }
     Ok(out)
-}
-
-/// Resolve `<node_id>.<field>` to its projected string value against the node's
-/// stored document. Mirrors [`check_property`]'s fetch+decode contract:
-///
-/// - returns a typed `BadRequest` when no collection is available (a property is
-///   unresolvable without one);
-/// - returns `"NULL"` when the node has no document (missing row → NULL);
-/// - returns `"NULL"` when the document lacks `field`;
-/// - otherwise stringifies the stored value via the canonical `value_ops`
-///   display convention so it matches how binding values are stringified.
-fn project_property(
-    props: &PropertyLookup<'_>,
-    node_id: &str,
-    field: &str,
-) -> Result<String, crate::Error> {
-    use nodedb_query::value_ops::value_to_display_string;
-
-    let collection = props.collection.ok_or_else(|| crate::Error::BadRequest {
-        detail: format!(
-            "MATCH property projection `{node_id}.{field}` requires an \
-             `IN '<collection>'` clause to resolve node properties"
-        ),
-    })?;
-
-    // Absent document → NULL (SQL projection semantics: missing row → NULL).
-    let doc = match fetch_node_doc(props, collection, node_id)? {
-        Some(d) => d,
-        None => return Ok("NULL".to_string()),
-    };
-
-    // Missing field → NULL.
-    let field_value = match &doc {
-        nodedb_types::Value::Object(map) => map.get(field),
-        _ => None,
-    };
-    match field_value {
-        Some(v) => Ok(value_to_display_string(v)),
-        None => Ok("NULL".to_string()),
-    }
 }
 
 #[cfg(test)]

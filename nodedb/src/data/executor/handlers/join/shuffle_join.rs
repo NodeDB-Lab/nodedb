@@ -91,7 +91,13 @@ impl CoreLoop {
         // the local path). The caller routes only equi-joins through this entry;
         // a keyless `on` is a routing bug, so surface it loudly rather than
         // hash-partitioning a cartesian product (which would be wrong).
-        if join.join_type == "cross" || build_keys.is_empty() || probe_keys.is_empty() {
+        // `NOT IN` needs whole-build-side facts no partition holds, so the
+        // planner never shuffles it: reaching here is a routing bug too.
+        if join.join_type == "cross"
+            || join.join_type == super::hash::NULL_AWARE_ANTI
+            || build_keys.is_empty()
+            || probe_keys.is_empty()
+        {
             return self.response_error(
                 join.task,
                 crate::bridge::envelope::ErrorCode::Internal {

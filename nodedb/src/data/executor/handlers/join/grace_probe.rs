@@ -42,7 +42,7 @@ impl CoreLoop {
         spec: &GraceSpec<'_>,
         budget: usize,
     ) -> crate::Result<Vec<Vec<u8>>> {
-        let index = HashIndex::build(build_docs, spec.build_keys);
+        let index = HashIndex::build(build_docs, spec.build_keys)?;
 
         let is_right = spec.join_type == "right" || spec.join_type == "full";
         let mut index_matched: Vec<bool> = if is_right {
@@ -136,7 +136,7 @@ impl CoreLoop {
                 },
                 &mut results,
                 &index_matched,
-            );
+            )?;
         }
 
         Ok(results)

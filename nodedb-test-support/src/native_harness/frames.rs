@@ -156,13 +156,62 @@ pub async fn send_request_within(
     fields: TextFields,
     bound: Option<Duration>,
 ) -> NativeResponse {
+    send_request_encoded(stream, seq, op, fields, bound, FrameEncoding::Json).await
+}
+
+/// How a session's frames are encoded. The first frame a session sends
+/// selects it for the rest of the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameEncoding {
+    /// JSON text. A typed value such as a UUID, a decimal or bytes reaches
+    /// the server as plain JSON and loses its type.
+    Json,
+    /// MessagePack, the encoding the native client uses. Every value keeps
+    /// its exact type.
+    MessagePack,
+}
+
+/// [`send_request`] over a MessagePack-encoding session: every value of
+/// `fields` reaches the server with its exact type. The session's first
+/// frame must be MessagePack too, so authenticate with this as well.
+///
+/// Waits at most [`RESPONSE_BOUND`] for the response.
+pub async fn send_request_msgpack(
+    stream: &mut TcpStream,
+    seq: u64,
+    op: OpCode,
+    fields: TextFields,
+) -> NativeResponse {
+    send_request_encoded(
+        stream,
+        seq,
+        op,
+        fields,
+        Some(RESPONSE_BOUND),
+        FrameEncoding::MessagePack,
+    )
+    .await
+}
+
+/// [`send_request_within`] with frames in `encoding`.
+pub async fn send_request_encoded(
+    stream: &mut TcpStream,
+    seq: u64,
+    op: OpCode,
+    fields: TextFields,
+    bound: Option<Duration>,
+    encoding: FrameEncoding,
+) -> NativeResponse {
     let req = NativeRequest {
         op,
         seq,
         fields: RequestFields::Text(fields),
     };
-    let json_bytes = sonic_rs::to_vec(&req).expect("json encode");
-    write_frame(stream, &json_bytes).await;
+    let request_bytes = match encoding {
+        FrameEncoding::Json => sonic_rs::to_vec(&req).expect("json encode"),
+        FrameEncoding::MessagePack => zerompk::to_msgpack_vec(&req).expect("msgpack encode"),
+    };
+    write_frame(stream, &request_bytes).await;
 
     let deadline = bound.map(|bound| tokio::time::Instant::now() + bound);
     let mut accumulated: Option<NativeResponse> = None;
@@ -176,8 +225,14 @@ pub async fn send_request_within(
             None => read_frame(stream).await,
         }
         .expect("response frame");
-        let response: NativeResponse =
-            sonic_rs::from_slice(&response_payload).expect("json decode NativeResponse");
+        let response: NativeResponse = match encoding {
+            FrameEncoding::Json => {
+                sonic_rs::from_slice(&response_payload).expect("json decode NativeResponse")
+            }
+            FrameEncoding::MessagePack => {
+                zerompk::from_msgpack(&response_payload).expect("msgpack decode NativeResponse")
+            }
+        };
         if response.seq == seq {
             if response.status == nodedb_types::protocol::ResponseStatus::Partial {
                 if let Some(aggregate) = accumulated.as_mut() {

@@ -135,11 +135,27 @@ pub(super) fn aggregate_schema<C: SqlCatalog + ?Sized>(
     // is parallel to `group_by` when populated, but may be empty when the
     // plan was built without a projection in scope — treat a
     // missing/`None` entry as "no alias".
+    // Each key's row key is decided by the rule the aggregate's rename
+    // applies, so an alias another cell already holds reads its row name.
+    let row_names: Vec<String> = group_by
+        .iter()
+        .enumerate()
+        .map(|(index, key)| nodedb_sql::planner::agg_naming::group_key_row_name(key, index))
+        .collect();
+    let aggregate_names: Vec<&str> = aggregates.iter().map(|agg| agg.alias.as_str()).collect();
+    let final_names = nodedb_sql::planner::agg_naming::group_key_final_names(
+        &row_names,
+        group_by_aliases,
+        &aggregate_names,
+    );
     let key_column = |index: usize| {
-        group_by.get(index).map(|key| {
-            let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
-            group_by_key_column(key, index, alias, &types)
-        })
+        group_by
+            .get(index)
+            .zip(final_names.get(index))
+            .map(|(key, final_name)| {
+                let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
+                group_by_key_column(key, index, alias, final_name, &types)
+            })
     };
     // Derives the `OutputColumn` for one aggregate. `AggregateExpr::alias`
     // is always populated by the planner: either the user's explicit
@@ -148,7 +164,8 @@ pub(super) fn aggregate_schema<C: SqlCatalog + ?Sized>(
     // lowercasing of non-column expressions. So the alias is already the
     // canonical name; no separate derivation needed. The result type is
     // inferred conservatively (COUNT -> Int8, MIN/MAX preserve the input
-    // column type, SUM/AVG of a float -> Float8, else Text).
+    // column type, SUM of a float -> Float8, AVG of a float -> Float8 and of
+    // anything else -> Numeric, else Text).
     let agg_column = |index: usize| {
         aggregates.get(index).map(|agg| OutputColumn {
             display_name: agg.alias.clone(),

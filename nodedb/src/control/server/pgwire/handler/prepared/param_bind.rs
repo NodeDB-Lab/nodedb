@@ -5,8 +5,17 @@
 
 use bytes::Bytes;
 use pgwire::api::Type;
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::error::{PgWireError, PgWireResult};
 use postgres_types::FromSql;
+
+use super::param_array::binary_array;
+use super::param_composite::{
+    array_member, binary_interval, binary_json, binary_tagged, is_tagged_type, text_interval,
+    text_json, text_tagged,
+};
+use super::param_typed::{
+    binary_timestamp, binary_uuid, pg_error, text_bytea, text_timestamp, text_uuid,
+};
 
 /// Convert pgwire portal parameters to typed `ParamValue` for AST-level binding.
 ///
@@ -28,11 +37,21 @@ use postgres_types::FromSql;
 /// 8-byte big-endian microsecond offset from 2000-01-01T00:00:00Z, converted
 /// to `NdbDateTime` (which stores microseconds since the Unix epoch).
 ///
-/// Every other binary-format type (UUID, BYTEA, DATE, TIME, JSON/JSONB, array
-/// types, INTERVAL, user-defined types, ...) is also rejected with SQLSTATE
-/// 0A000 rather than silently mis-decoded as UTF-8 text — its bytes may
-/// happen to be valid UTF-8 without being a valid text representation of
-/// the type.
+/// Binary-format `UUID` is its 16 bytes, decoded to `ParamValue::Uuid`.
+/// Binary-format `BYTEA` is the raw bytes, decoded to `ParamValue::Bytes`.
+///
+/// Binary-format `JSON` / `JSONB` binds as the typed object, array or
+/// scalar its text spells, `INTERVAL` as an exact duration, and an array
+/// type as its elements, each by the rule for the element type (see
+/// `param_composite` and `param_array`). A parameter of type `any` (OID
+/// 2276) is a tagged NodeDB value: its binary form is the tagged
+/// MessagePack of an object or array, every leaf typed (see
+/// `nodedb_sql::params_value`).
+///
+/// Every other binary-format type (DATE, TIME, user-defined types, ...) is
+/// rejected with SQLSTATE 0A000 rather than silently mis-decoded as UTF-8
+/// text — its bytes may happen to be valid UTF-8 without being a valid text
+/// representation of the type.
 pub(super) fn convert_portal_params(
     params: &[Option<Bytes>],
     param_types: &[Option<Type>],
@@ -67,6 +86,12 @@ fn convert_binary_param(
     pg_type: &Type,
     index: usize,
 ) -> PgWireResult<nodedb_sql::ParamValue> {
+    if let Some(member) = array_member(pg_type) {
+        return binary_array(bytes, member, index, &convert_binary_param);
+    }
+    if is_tagged_type(pg_type) {
+        return binary_tagged(bytes, index);
+    }
     match *pg_type {
         Type::BOOL => {
             decode_binary::<bool>(bytes, pg_type, index).map(nodedb_sql::ParamValue::Bool)
@@ -91,29 +116,20 @@ fn convert_binary_param(
         }
         Type::NUMERIC => decode_binary::<rust_decimal::Decimal>(bytes, pg_type, index)
             .map(nodedb_sql::ParamValue::Decimal),
-        Type::TIMESTAMP => {
-            decode_binary_timestamp(bytes, index).map(nodedb_sql::ParamValue::Timestamp)
-        }
+        Type::TIMESTAMP => binary_timestamp(bytes, index).map(nodedb_sql::ParamValue::Timestamp),
         Type::TIMESTAMPTZ => {
-            decode_binary_timestamp(bytes, index).map(nodedb_sql::ParamValue::Timestamptz)
+            binary_timestamp(bytes, index).map(nodedb_sql::ParamValue::Timestamptz)
         }
+        Type::UUID => binary_uuid(bytes, index).map(nodedb_sql::ParamValue::Uuid),
+        Type::BYTEA => Ok(nodedb_sql::ParamValue::Bytes(bytes.to_vec())),
+        Type::JSON => binary_json(bytes, false, index),
+        Type::JSONB => binary_json(bytes, true, index),
+        Type::INTERVAL => binary_interval(bytes, index).map(nodedb_sql::ParamValue::Duration),
         // Every other binary type: refuse rather than silently mis-decode
         // as UTF-8 text (its bytes may happen to be valid UTF-8 without
         // being a valid text representation of the type).
         _ => Err(binary_unsupported_error(pg_type.name(), index)),
     }
-}
-
-/// Build a typed pgwire `ErrorInfo::new("ERROR", sqlstate, message)` error.
-/// Shared boilerplate for every SQLSTATE-tagged error this module raises;
-/// callers own the SQLSTATE and message, which intentionally differ per
-/// call site.
-fn pg_error(sqlstate: &str, message: String) -> PgWireError {
-    PgWireError::UserError(Box::new(ErrorInfo::new(
-        "ERROR".to_owned(),
-        sqlstate.to_owned(),
-        message,
-    )))
 }
 
 /// Decode a parameter's raw bytes as UTF-8 text, mapping a decode failure to
@@ -174,80 +190,28 @@ fn decode_binary<'a, T: FromSql<'a>>(
     })
 }
 
-/// Microseconds between the Unix epoch and the PostgreSQL binary timestamp
-/// epoch (2000-01-01T00:00:00Z): 10_957 days x 86_400 s x 1e6. PostgreSQL
-/// transmits binary TIMESTAMP/TIMESTAMPTZ as microseconds from that epoch.
-const POSTGRES_EPOCH_OFFSET_MICROS: i64 = 946_684_800_000_000;
-
-/// Decode a binary TIMESTAMP/TIMESTAMPTZ payload: an 8-byte big-endian
-/// microsecond offset from the PostgreSQL epoch (2000-01-01T00:00:00Z),
-/// converted to `NdbDateTime` (microseconds since the Unix epoch).
-///
-/// Rejects payloads that are not exactly 8 bytes (SQLSTATE 22P02).
-///
-/// Also rejects PostgreSQL's +/-infinity sentinels, which are transmitted
-/// as the raw `i64::MAX` / `i64::MIN` values. `i64::MIN` rebases to a valid
-/// (if absurdly distant) Unix-epoch offset under plain addition — it does
-/// not overflow `checked_add` — so it is checked explicitly rather than
-/// relying on overflow detection alone. `i64::MAX` does overflow once
-/// rebased and is caught by `checked_add`. `NdbDateTime` has no infinity
-/// concept, so both sentinels must error rather than decode to a finite
-/// (and wrong) timestamp.
-fn decode_binary_timestamp(
-    bytes: &[u8],
-    index: usize,
-) -> PgWireResult<nodedb_types::datetime::NdbDateTime> {
-    let raw: [u8; 8] = bytes.try_into().map_err(|_| {
-        pg_error(
-            "22P02",
-            format!(
-                "invalid binary representation for parameter ${}: expected 8 bytes, got {}",
-                index + 1,
-                bytes.len()
-            ),
-        )
-    })?;
-    let pg_micros = i64::from_be_bytes(raw);
-    let out_of_range = || {
-        pg_error(
-            "22P02",
-            format!(
-                "invalid binary representation for parameter ${}: timestamp out of range",
-                index + 1
-            ),
-        )
-    };
-    if pg_micros == i64::MAX || pg_micros == i64::MIN {
-        return Err(out_of_range());
-    }
-    let unix_micros = pg_micros
-        .checked_add(POSTGRES_EPOCH_OFFSET_MICROS)
-        .ok_or_else(out_of_range)?;
-    Ok(nodedb_types::datetime::NdbDateTime::from_micros(
-        unix_micros,
-    ))
-}
-
 /// Convert a pgwire text parameter + declared type to a typed
 /// `ParamValue` for AST/DSL binding.
 ///
 /// # Type coverage
 ///
 /// Natively decoded: `BOOL`, `INT2`/`INT4`/`INT8`, `FLOAT4`/`FLOAT8`/
-/// `NUMERIC`, `TIMESTAMP`, `TIMESTAMPTZ`, `TEXT`/`VARCHAR` (implicit via
-/// fall-through), and `UNKNOWN` (the untyped-driver path).
+/// `NUMERIC`, `TIMESTAMP`, `TIMESTAMPTZ`, `UUID`, `BYTEA`, `TEXT`/`VARCHAR`
+/// (implicit via fall-through), and `UNKNOWN` (the untyped-driver path).
 ///
-/// # TIMESTAMP / TIMESTAMPTZ
+/// # TIMESTAMP / TIMESTAMPTZ / UUID / BYTEA
 ///
-/// Text-format TIMESTAMP and TIMESTAMPTZ parameters are parsed directly to
-/// `ParamValue::Timestamp` / `ParamValue::Timestamptz`. This produces the
-/// correct typed `SqlValue` variant (Timestamp vs Timestamptz) through the
-/// resolver, ensuring the planner and engine see the right column type rather
-/// than a generic string that must be coerced.
+/// Text-format parameters of these types decode to the typed `ParamValue`
+/// (`Timestamp`, `Timestamptz`, `Uuid`, `Bytes`). The binder writes each as
+/// a typed literal, so a schemaless field stores the typed value, never its
+/// text. A BYTEA parameter reads the hex (`\x...`) or the escape form.
 ///
-/// If parsing fails the text is passed through as `ParamValue::Text` so the
-/// engine's string-coercion path can attempt a best-effort conversion — the
-/// same as all other text-passthrough types.
+/// Like NUMERIC, a parse failure errors rather than falling back to
+/// `ParamValue::Text`: text bound for a typed parameter that spells no value
+/// of the type would otherwise be stored as a string. A timestamp refuses
+/// with SQLSTATE 22007 (`invalid_datetime_format`), a UUID or BYTEA with
+/// 22P02 (`invalid_text_representation`), PostgreSQL's codes for the same
+/// input.
 ///
 /// # NUMERIC
 ///
@@ -263,13 +227,16 @@ fn decode_binary_timestamp(
 ///
 /// # Fallback policy (catch-all arm)
 ///
-/// Types the bind layer does not decode natively — `DATE`, `TIME`, `BYTEA`,
-/// `UUID`, `JSON`, `JSONB`, `INTERVAL`, array types, and user-defined types —
+/// `JSON` / `JSONB` text binds as the typed value it spells, and
+/// `INTERVAL` text as a duration; text that spells neither is refused.
+///
+/// Types the bind layer does not decode natively — `DATE`, `TIME`,
+/// text-format arrays, and user-defined types —
 /// fall through to `ParamValue::Text(text)`. The pgwire text representation of
 /// these types is well-defined and the AST bind emits it as a
 /// `SingleQuotedString`. Downstream, the planner/engine type-coerces the text
-/// via the same path used for literal strings in simple-query SQL. NUMERIC is
-/// the one exception to this policy: see above.
+/// via the same path used for literal strings in simple-query SQL. NUMERIC
+/// and the typed types above are the exceptions to this policy.
 ///
 /// Binary-format parameters are handled at a layer above this function
 /// (see `convert_portal_params`); only binary TEXT/VARCHAR/BPCHAR/UNKNOWN
@@ -285,6 +252,9 @@ pub(super) fn pgwire_text_to_param(
     pg_type: &Type,
     index: usize,
 ) -> PgWireResult<nodedb_sql::ParamValue> {
+    if is_tagged_type(pg_type) {
+        return Err(text_tagged(index));
+    }
     Ok(match *pg_type {
         Type::BOOL => {
             let lower = text.to_lowercase();
@@ -321,21 +291,17 @@ pub(super) fn pgwire_text_to_param(
             nodedb_sql::ParamValue::Decimal(d)
         }
         Type::TIMESTAMP => {
-            // Parse ISO 8601 / PostgreSQL timestamp text to a typed NaiveDateTime.
-            if let Some(dt) = nodedb_types::datetime::NdbDateTime::parse(text) {
-                nodedb_sql::ParamValue::Timestamp(dt)
-            } else {
-                nodedb_sql::ParamValue::Text(text.to_string())
-            }
+            nodedb_sql::ParamValue::Timestamp(text_timestamp(text, "timestamp", index)?)
         }
-        Type::TIMESTAMPTZ => {
-            // Parse ISO 8601 / PostgreSQL timestamptz text to a typed DateTime (UTC).
-            if let Some(dt) = nodedb_types::datetime::NdbDateTime::parse(text) {
-                nodedb_sql::ParamValue::Timestamptz(dt)
-            } else {
-                nodedb_sql::ParamValue::Text(text.to_string())
-            }
-        }
+        Type::TIMESTAMPTZ => nodedb_sql::ParamValue::Timestamptz(text_timestamp(
+            text,
+            "timestamp with time zone",
+            index,
+        )?),
+        Type::UUID => nodedb_sql::ParamValue::Uuid(text_uuid(text, index)?),
+        Type::BYTEA => nodedb_sql::ParamValue::Bytes(text_bytea(text, index)?),
+        Type::JSON | Type::JSONB => text_json(text, index)?,
+        Type::INTERVAL => nodedb_sql::ParamValue::Duration(text_interval(text, index)?),
         // Text-passthrough types: wire-format text is already the
         // canonical representation. Engine performs type coercion.
         _ => nodedb_sql::ParamValue::Text(text.to_string()),
@@ -409,10 +375,34 @@ mod tests {
     }
 
     #[test]
-    fn convert_uuid_binary_returns_error() {
+    fn convert_date_binary_returns_error() {
         // Pins the silent-misdecode fix: an unmodelled binary type must be
         // refused with 0A000, never guessed at as UTF-8 text.
-        assert_binary_type_rejected(Type::UUID, &[0u8; 16], "0A000");
+        assert_binary_type_rejected(Type::DATE, &[0u8; 4], "0A000");
+    }
+
+    /// A binary UUID is its 16 bytes and a binary BYTEA its raw bytes, each
+    /// decoded to its typed parameter.
+    #[test]
+    fn convert_uuid_and_bytea_binary_decode_typed() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid_bytes = nodedb_types::id_gen::uuid_to_bytes(uuid).expect("valid uuid");
+        let params = vec![
+            Some(Bytes::from(uuid_bytes.to_vec())),
+            Some(Bytes::from_static(&[0, 0xff, 7])),
+        ];
+        let types = vec![Some(Type::UUID), Some(Type::BYTEA)];
+        let result = convert_portal_params(&params, &types, &binary_format()).unwrap();
+        assert!(matches!(&result[0], nodedb_sql::ParamValue::Uuid(u) if u == uuid));
+        assert!(matches!(&result[1], nodedb_sql::ParamValue::Bytes(b) if b == &[0, 0xff, 7]));
+    }
+
+    #[test]
+    fn convert_uuid_binary_wrong_length_returns_22p02() {
+        let params = vec![Some(Bytes::from_static(&[0u8; 15]))];
+        let types = vec![Some(Type::UUID)];
+        let error = convert_portal_params(&params, &types, &binary_format()).unwrap_err();
+        assert!(error.to_string().contains("22P02"), "{error}");
     }
 
     /// Build a PostgreSQL binary NUMERIC payload: ndigits/weight/sign/dscale
@@ -681,23 +671,90 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_uuid_text() {
+    fn uuid_text_parses_to_canonical_typed() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        let value = pgwire_text_to_param(uuid, &Type::UUID, 0).unwrap();
-        assert!(matches!(&value, nodedb_sql::ParamValue::Text(text) if text == uuid));
+        let value = pgwire_text_to_param(&uuid.to_ascii_uppercase(), &Type::UUID, 0).unwrap();
+        assert!(matches!(&value, nodedb_sql::ParamValue::Uuid(u) if u == uuid));
+    }
+
+    /// Text bound for a typed parameter that spells no value of the type is
+    /// refused with PostgreSQL's SQLSTATE, never passed on as text.
+    #[test]
+    fn invalid_typed_text_refuses_with_its_sqlstate() {
+        for (text, ty, code) in [
+            ("not-a-uuid", Type::UUID, "22P02"),
+            ("\\xZZ", Type::BYTEA, "22P02"),
+            ("not a time", Type::TIMESTAMP, "22007"),
+            ("not a time", Type::TIMESTAMPTZ, "22007"),
+        ] {
+            let error = pgwire_text_to_param(text, &ty, 0).unwrap_err();
+            assert!(error.to_string().contains(code), "{ty}: {error}");
+        }
     }
 
     #[test]
-    fn passthrough_jsonb_text() {
-        let json = r#"{"a":1}"#;
-        let value = pgwire_text_to_param(json, &Type::JSONB, 0).unwrap();
-        assert!(matches!(&value, nodedb_sql::ParamValue::Text(text) if text == json));
+    fn jsonb_text_binds_as_a_typed_object() {
+        let value = pgwire_text_to_param(r#"{"a":1}"#, &Type::JSONB, 0).unwrap();
+        assert!(matches!(
+            &value,
+            nodedb_sql::ParamValue::Object(fields)
+                if matches!(fields.as_slice(), [(key, nodedb_sql::ParamValue::Int64(1))] if key == "a")
+        ));
+        assert!(pgwire_text_to_param("{", &Type::JSONB, 0).is_err());
+    }
+
+    /// A parameter of type `any` is a tagged NodeDB value in binary
+    /// format. Its text format is refused.
+    #[test]
+    fn a_tagged_param_binds_typed_and_its_text_form_is_refused() {
+        let array = nodedb_types::Value::Array(vec![
+            nodedb_types::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            nodedb_types::Value::Integer(1),
+        ]);
+        let params = vec![Some(Bytes::from(
+            zerompk::to_msgpack_vec(&array).expect("encode"),
+        ))];
+        let result = convert_portal_params(&params, &[Some(Type::ANY)], &binary_format()).unwrap();
+        assert!(matches!(
+            &result[0],
+            nodedb_sql::ParamValue::Array(items)
+                if matches!(items.as_slice(), [nodedb_sql::ParamValue::Uuid(_), nodedb_sql::ParamValue::Int64(1)])
+        ));
+        let params = vec![Some(Bytes::from_static(b"[1]"))];
+        let Err(PgWireError::UserError(info)) =
+            convert_portal_params(&params, &[Some(Type::ANY)], &text_format())
+        else {
+            panic!("the text form of a tagged parameter is refused");
+        };
+        assert_eq!(info.code, "0A000");
     }
 
     #[test]
-    fn passthrough_bytea_hex_text() {
+    fn a_binary_int8_array_binds_its_elements() {
+        let mut payload = Vec::new();
+        for word in [1i32, 0, 20, 2, 1] {
+            payload.extend_from_slice(&word.to_be_bytes());
+        }
+        for n in [3i64, 4] {
+            payload.extend_from_slice(&8i32.to_be_bytes());
+            payload.extend_from_slice(&n.to_be_bytes());
+        }
+        let params = vec![Some(Bytes::from(payload))];
+        let result =
+            convert_portal_params(&params, &[Some(Type::INT8_ARRAY)], &binary_format()).unwrap();
+        assert!(matches!(
+            &result[0],
+            nodedb_sql::ParamValue::Array(items)
+                if matches!(items.as_slice(), [nodedb_sql::ParamValue::Int64(3), nodedb_sql::ParamValue::Int64(4)])
+        ));
+    }
+
+    #[test]
+    fn bytea_hex_text_parses_to_bytes() {
         let value = pgwire_text_to_param("\\xDEADBEEF", &Type::BYTEA, 0).unwrap();
-        assert!(matches!(&value, nodedb_sql::ParamValue::Text(text) if text == "\\xDEADBEEF"));
+        assert!(
+            matches!(&value, nodedb_sql::ParamValue::Bytes(b) if b == &[0xde, 0xad, 0xbe, 0xef])
+        );
     }
 
     #[test]

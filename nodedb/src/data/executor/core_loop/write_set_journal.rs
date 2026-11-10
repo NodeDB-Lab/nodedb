@@ -296,13 +296,19 @@ impl CoreLoop {
                 format: "msgpack".into(),
                 detail: format!("write set capture plan encode: {e}"),
             })?;
+        let mut schemas = Vec::new();
+        let entries = entries
+            .iter()
+            .map(|entry| CapturedEntry::from_entry(entry, &mut schemas))
+            .collect::<crate::Result<Vec<_>>>()?;
         Ok(WriteSetCapture {
             tenant_id: task.request.tenant_id.as_u64(),
             vshard_id: task.request.vshard_id.as_u32(),
             database_id: task.request.database_id.as_u64(),
             collection: group.collection,
             origin: group.origin.as_u64(),
-            entries: entries.iter().map(CapturedEntry::from_entry).collect(),
+            entries,
+            schemas,
             origin_append: OriginAppend {
                 plan,
                 apply_key: group.apply_key,

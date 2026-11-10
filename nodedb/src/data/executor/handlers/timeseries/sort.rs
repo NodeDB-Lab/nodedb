@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_types::json_msgpack::instant_from_ext;
 
+use crate::data::executor::handlers::document::sort::compare::{is_decimal_key, native_decimal};
 use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
 
 /// Sort materialized result rows by the planner's ORDER BY terms.
@@ -27,9 +28,14 @@ use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
 ///
 /// Rows are compared on the keys in significance order. A field absent from a
 /// row compares as NULL, and NULL sorts last ascending — PostgreSQL's default.
-pub(in crate::data::executor) fn sort_rows(
+///
+/// `decimal_keys` flags the keys that read a DECIMAL column. A row carries a
+/// decimal as its text, so a flagged key orders by the decimal's value, as the
+/// document sort orders a `DECIMAL` key.
+pub(in crate::data::executor) fn sort_rows_with(
     rows: &mut [rmpv::Value],
     sort_keys: &[SortKeySpec],
+    decimal_keys: &[bool],
     crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if sort_keys.is_empty() {
@@ -42,7 +48,7 @@ pub(in crate::data::executor) fn sort_rows(
         .collect::<crate::Result<Vec<_>>>()?;
 
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| compare_key_rows(&keyed[a], &keyed[b], sort_keys));
+    order.sort_by(|&a, &b| compare_key_rows(&keyed[a], &keyed[b], sort_keys, decimal_keys));
 
     let original = rows.to_vec();
     for (dst, &src) in order.iter().enumerate() {
@@ -78,7 +84,12 @@ fn eval_row_keys(
     Ok(out)
 }
 
-fn compare_key_rows(a: &[rmpv::Value], b: &[rmpv::Value], sort_keys: &[SortKeySpec]) -> Ordering {
+fn compare_key_rows(
+    a: &[rmpv::Value],
+    b: &[rmpv::Value],
+    sort_keys: &[SortKeySpec],
+    decimal_keys: &[bool],
+) -> Ordering {
     for (idx, key) in sort_keys.iter().enumerate() {
         let av = a.get(idx).filter(|v| !matches!(v, rmpv::Value::Nil));
         let bv = b.get(idx).filter(|v| !matches!(v, rmpv::Value::Nil));
@@ -86,6 +97,9 @@ fn compare_key_rows(a: &[rmpv::Value], b: &[rmpv::Value], sort_keys: &[SortKeySp
         // the sort direction never flips.
         let ord = match key.order_nulls(av.is_none(), bv.is_none()) {
             Some(ord) => ord,
+            None if is_decimal_key(decimal_keys, idx) => {
+                key.direct(compare_decimals(av, bv).unwrap_or_else(|| compare_values(av, bv)))
+            }
             None => key.direct(compare_values(av, bv)),
         };
         if ord != Ordering::Equal {
@@ -93,6 +107,14 @@ fn compare_key_rows(a: &[rmpv::Value], b: &[rmpv::Value], sort_keys: &[SortKeySp
         }
     }
     Ordering::Equal
+}
+
+/// The order of two decimal key cells, each its text or a number. `None`
+/// when a side does not read as a decimal.
+fn compare_decimals(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> Option<Ordering> {
+    let a = native_decimal(&rmpv_to_value(a?))?;
+    let b = native_decimal(&rmpv_to_value(b?))?;
+    Some(a.cmp(&b))
 }
 
 /// Look up a field in an rmpv map row. `None` for a non-map row or a missing
@@ -166,6 +188,14 @@ fn as_number(value: &rmpv::Value) -> Option<nodedb_types::Value> {
 mod tests {
     use super::*;
 
+    fn sort_rows(
+        rows: &mut [rmpv::Value],
+        sort_keys: &[SortKeySpec],
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<()> {
+        sort_rows_with(rows, sort_keys, &[], crs)
+    }
+
     fn row(pairs: &[(&str, rmpv::Value)]) -> rmpv::Value {
         rmpv::Value::Map(
             pairs
@@ -182,6 +212,39 @@ mod tests {
                 _ => i64::MIN,
             })
             .collect()
+    }
+
+    /// A row carries a decimal as its text. A DECIMAL key orders by value,
+    /// an unflagged text key by its characters.
+    #[test]
+    fn a_decimal_key_orders_by_value() {
+        let text = |s: &str| rmpv::Value::String(s.into());
+        let rows = vec![
+            row(&[("p", text("10.5"))]),
+            row(&[("p", text("9.1"))]),
+            row(&[("p", text("12345678901234567.89"))]),
+        ];
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let order = |rows: &[rmpv::Value]| -> Vec<String> {
+            rows.iter()
+                .map(|r| match field_of(r, "p") {
+                    Some(rmpv::Value::String(s)) => s.as_str().unwrap_or("").to_string(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+        let mut by_value = rows.clone();
+        sort_rows_with(
+            &mut by_value,
+            &[SortKeySpec::column("p", true)],
+            &[true],
+            &crs,
+        )
+        .expect("sort");
+        assert_eq!(order(&by_value), ["9.1", "10.5", "12345678901234567.89"]);
+        let mut by_text = rows;
+        sort_rows(&mut by_text, &[SortKeySpec::column("p", true)], &crs).expect("sort");
+        assert_eq!(order(&by_text), ["10.5", "12345678901234567.89", "9.1"]);
     }
 
     #[test]

@@ -111,24 +111,17 @@ impl CoreLoop {
         }
 
         // ── Serialise to msgpack array ─────────────────────────────────────────
-        // Use value_to_msgpack (standard msgpack, not the zerompk tagged format)
-        // so the response passes through decode_payload_to_json correctly.
-        let mut payload: Vec<u8> = Vec::new();
-        nodedb_query::msgpack_scan::write_array_header(&mut payload, results.len());
-        for obj in &results {
-            match nodedb_types::value_to_msgpack(obj) {
-                Ok(mp) => payload.extend_from_slice(&mp),
-                Err(e) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("recursive value serialisation failed: {e}"),
-                        },
-                    );
-                }
-            }
+        // The rows feed the outer query's operators, so each value keeps its
+        // type. The public boundary renders them.
+        match crate::data::executor::response_codec::encode_native_rows(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("recursive value serialisation failed: {e}"),
+                },
+            ),
         }
-        self.response_with_payload(task, payload)
     }
 }
 

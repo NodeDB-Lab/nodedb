@@ -107,3 +107,79 @@ async fn native_select_on_shadowed_clone_reads_source_row() {
     drop(native_stream);
     srv.graceful_shutdown().await;
 }
+
+/// A native full scan and a native `UNION` over a Shadowed clone return the
+/// source-only rows. Both plans carry Exchange nodes, which the statement
+/// path resolves only after the clone read runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_scan_and_union_on_shadowed_clone_read_source_rows() {
+    let srv = TestServer::start().await;
+    for sql in [
+        "CREATE DATABASE ncu_src",
+        "USE DATABASE ncu_src",
+        "CREATE COLLECTION docs (id TEXT PRIMARY KEY, v INT)",
+        "CREATE COLLECTION notes (id TEXT PRIMARY KEY, v INT)",
+        "INSERT INTO docs (id, v) VALUES ('a', 1)",
+        "INSERT INTO docs (id, v) VALUES ('b', 2)",
+        "INSERT INTO notes (id, v) VALUES ('n', 3)",
+        "USE DATABASE default",
+        "CLONE DATABASE ncu_tgt FROM ncu_src",
+    ] {
+        srv.exec(sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+
+    let trust_username = srv
+        .shared
+        .credentials
+        .configured_trust_superuser()
+        .expect("read configured trust superuser")
+        .expect("harness runs in AuthMode::Trust");
+    let native_addr = format!("127.0.0.1:{}", srv.native_port)
+        .parse()
+        .expect("native addr");
+    let (mut native_stream, _ack) = do_handshake(native_addr, &HelloFrame::current())
+        .await
+        .expect("native handshake");
+    let auth = send_request(
+        &mut native_stream,
+        1,
+        OpCode::Auth,
+        TextFields {
+            auth: Some(AuthMethod::Trust {
+                username: trust_username,
+            }),
+            database: Some("ncu_tgt".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(auth.status, ResponseStatus::Ok, "native auth: {auth:?}");
+
+    let cases = [
+        ("SELECT v FROM docs", vec![1, 2]),
+        (
+            "SELECT v FROM docs UNION SELECT v FROM notes",
+            vec![1, 2, 3],
+        ),
+    ];
+    for (seq, (sql, expected)) in (2u64..).zip(cases) {
+        let read = send_sql(&mut native_stream, seq, sql).await;
+        assert_eq!(read.status, ResponseStatus::Ok, "{sql}: {read:?}");
+        let rows = read.rows.unwrap_or_else(|| panic!("{sql}: no rows"));
+        let mut values: Vec<i64> = rows
+            .iter()
+            .map(|row| match &row[0] {
+                Value::Integer(v) => *v,
+                other => panic!("{sql}: non-integer cell {other:?}"),
+            })
+            .collect();
+        values.sort_unstable();
+        assert_eq!(
+            values, expected,
+            "{sql} reads the source-only rows through the clone"
+        );
+    }
+
+    drop(native_stream);
+    srv.graceful_shutdown().await;
+}

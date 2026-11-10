@@ -10,14 +10,13 @@
 //!
 //! ## Why partitioning is correct
 //!
-//! Today's join matches rows by byte-equality of the extracted key ranges
-//! (see `hash.rs::HashIndex::probe` — equal byte ranges via memcmp). The
-//! partitioner here hashes those SAME extracted value bytes with a FIXED-SEED
-//! hasher, so two rows whose key bytes are equal always produce the same
+//! The join matches rows by equality of their canonical key identity (see
+//! `hash.rs::HashIndex`). The partitioner hashes that SAME identity with a
+//! FIXED-SEED hasher, so two rows whose keys match always produce the same
 //! `partition_hash` and therefore land in the same partition. Any pair that
 //! *could* match is never separated across partitions. Hash collisions between
 //! non-matching rows are harmless: the per-partition `probe_hash_index` still
-//! memcmp-rejects them exactly as the un-partitioned path does.
+//! compares identities exactly as the un-partitioned path does.
 
 use super::hash::{HashIndex, ProbeParams, probe_hash_index};
 
@@ -37,13 +36,14 @@ pub(super) struct GraceSpec<'a> {
     pub(super) emit_unmatched_right: bool,
 }
 
-/// Stable, fixed-seed partition hash over a document's join-key value bytes.
+/// Stable, fixed-seed partition hash over a document's join-key values.
 ///
-/// Mirrors `hash_join_key`'s extraction and missing-field handling EXACTLY:
-/// - present field → hash the raw extracted value bytes (`doc[start..end]`);
-/// - missing field → hash the `0xc0` (msgpack NIL) sentinel.
+/// Hashes the same canonical key identity [`HashIndex`] matches on, read
+/// through the row's object format. A missing field reads as NULL. A plain
+/// and a native row with equivalent key values co-locate. A row that is not
+/// a decodable object is an error.
 ///
-/// Only the VALUE bytes are hashed (never the field name), in `keys` order.
+/// Only the key VALUES are hashed (never the field name), in `keys` order.
 ///
 /// Uses [`std::hash::DefaultHasher`] (deterministic, fixed keys) rather than
 /// `RandomState`: build and probe sides MUST hash identically across calls so
@@ -56,7 +56,10 @@ pub(super) struct GraceSpec<'a> {
 /// `partition_hash_seeded(doc, keys, 0)` — the seed-`0` behavior is fixed and
 /// must NOT change, since the spiller's top-level partition routing depends on
 /// it being stable across calls.
-pub(super) fn partition_hash<S: AsRef<str>>(doc: &[u8], keys: &[S]) -> u64 {
+pub(super) fn partition_hash<S: AsRef<str>>(
+    doc: &[u8],
+    keys: &[S],
+) -> Result<u64, nodedb_query::EvalError> {
     // Delegate to the shared `nodedb-query` routing hash so the node-local grace
     // join and the cross-node shuffle producer compute byte-identical partitions
     // (build/probe co-location is a correctness invariant, not an optimization).
@@ -69,16 +72,20 @@ pub(super) fn partition_hash<S: AsRef<str>>(doc: &[u8], keys: &[S]) -> u64 {
 /// Re-partitioning a partition that overflowed its memory budget with the SAME
 /// hash would deterministically reproduce the same split (every row lands in the
 /// same sub-bucket), making no progress. Mixing a fresh `seed` into the hasher
-/// BEFORE the key bytes redistributes DISTINCT keys across the sub-buckets while
-/// preserving the co-location invariant WITHIN that seed: two rows with equal
-/// key bytes still hash identically (same seed, same bytes), so any pair that
+/// BEFORE the key identity redistributes DISTINCT keys across the sub-buckets
+/// while preserving the co-location invariant WITHIN that seed: two rows with
+/// equal keys still hash identically (same seed, same identity), so any pair that
 /// could match still co-locates in the same sub-partition. (Identical-key skew
 /// is therefore unsplittable at any seed — the depth cap in `grace_spill`
 /// handles that case with a clean `MemoryExhausted`.)
 ///
 /// The seed is written first so that the same `(seed, keys)` pair on the build
 /// and probe sides produces matching routing.
-pub(super) fn partition_hash_seeded<S: AsRef<str>>(doc: &[u8], keys: &[S], seed: u64) -> u64 {
+pub(super) fn partition_hash_seeded<S: AsRef<str>>(
+    doc: &[u8],
+    keys: &[S],
+    seed: u64,
+) -> Result<u64, nodedb_query::EvalError> {
     nodedb_query::partition_hash_seeded(doc, keys, seed)
 }
 
@@ -137,8 +144,14 @@ pub(super) fn grace_join_in_memory(
     // Degenerate / cross → single partition. Partitioning a cross/keyless join
     // by hash would break the cartesian product (every left row must see every
     // right row), so run the whole thing through one `HashIndex` / probe.
-    if join_type == "cross" || build_keys.is_empty() || probe_keys.is_empty() || partitions <= 1 {
-        let index = HashIndex::build(&build_docs, build_keys);
+    // `NOT IN` needs whole-build-side facts, so it runs as one partition.
+    if join_type == "cross"
+        || join_type == super::hash::NULL_AWARE_ANTI
+        || build_keys.is_empty()
+        || probe_keys.is_empty()
+        || partitions <= 1
+    {
+        let index = HashIndex::build(&build_docs, build_keys)?;
         return probe_hash_index(&ProbeParams {
             probe_docs: &probe_docs,
             index: &index,
@@ -158,11 +171,11 @@ pub(super) fn grace_join_in_memory(
     let mut probe_part: Vec<Vec<(String, Vec<u8>)>> = vec![vec![]; partitions];
 
     for row in build_docs {
-        let idx = (partition_hash(&row.1, build_keys) % partitions as u64) as usize;
+        let idx = (partition_hash(&row.1, build_keys)? % partitions as u64) as usize;
         build_part[idx].push(row);
     }
     for row in probe_docs {
-        let idx = (partition_hash(&row.1, probe_keys) % partitions as u64) as usize;
+        let idx = (partition_hash(&row.1, probe_keys)? % partitions as u64) as usize;
         probe_part[idx].push(row);
     }
 
@@ -171,7 +184,7 @@ pub(super) fn grace_join_in_memory(
     // globally, after unioning.
     let mut results: Vec<Vec<u8>> = Vec::new();
     for i in 0..partitions {
-        let index = HashIndex::build(&build_part[i], build_keys);
+        let index = HashIndex::build(&build_part[i], build_keys)?;
         let mut part_results = probe_hash_index(&ProbeParams {
             probe_docs: &probe_part[i],
             index: &index,
@@ -223,7 +236,7 @@ mod tests {
         probe_docs: &[(String, Vec<u8>)],
         spec: &GraceSpec,
     ) -> Vec<Vec<u8>> {
-        let index = HashIndex::build(build_docs, spec.build_keys);
+        let index = HashIndex::build(build_docs, spec.build_keys).unwrap();
         probe_hash_index(&ProbeParams {
             probe_docs,
             index: &index,
@@ -518,12 +531,18 @@ mod tests {
             ("y", serde_json::json!("different")),
         ]);
         let keys = ["k"];
-        assert_eq!(partition_hash(&a, &keys), partition_hash(&b, &keys));
+        assert_eq!(
+            partition_hash(&a, &keys).unwrap(),
+            partition_hash(&b, &keys).unwrap()
+        );
 
-        // Missing key on both sides hashes the NIL sentinel identically.
+        // A missing key on both sides reads NULL and hashes identically.
         let m1 = msgpack_row(&[("other", serde_json::json!(1))]);
         let m2 = msgpack_row(&[("nope", serde_json::json!(2))]);
-        assert_eq!(partition_hash(&m1, &keys), partition_hash(&m2, &keys));
+        assert_eq!(
+            partition_hash(&m1, &keys).unwrap(),
+            partition_hash(&m2, &keys).unwrap()
+        );
     }
 
     #[test]
@@ -534,8 +553,8 @@ mod tests {
         for v in 0..32i64 {
             let row = msgpack_row(&[("k", serde_json::json!(v))]);
             assert_eq!(
-                partition_hash(&row, &keys),
-                partition_hash_seeded(&row, &keys, 0),
+                partition_hash(&row, &keys).unwrap(),
+                partition_hash_seeded(&row, &keys, 0).unwrap(),
                 "partition_hash must equal seed=0 for v={v}"
             );
         }
@@ -553,7 +572,7 @@ mod tests {
             (0..64i64)
                 .map(|v| {
                     let row = msgpack_row(&[("k", serde_json::json!(v))]);
-                    partition_hash_seeded(&row, &keys, seed) % BUCKETS
+                    partition_hash_seeded(&row, &keys, seed).unwrap() % BUCKETS
                 })
                 .collect()
         };
@@ -569,8 +588,8 @@ mod tests {
         let b = msgpack_row(&[("k", serde_json::json!(42)), ("y", serde_json::json!("b"))]);
         for seed in [0u64, 1, 7, 99] {
             assert_eq!(
-                partition_hash_seeded(&a, &keys, seed),
-                partition_hash_seeded(&b, &keys, seed),
+                partition_hash_seeded(&a, &keys, seed).unwrap(),
+                partition_hash_seeded(&b, &keys, seed).unwrap(),
                 "equal key bytes must co-locate within seed={seed}"
             );
         }

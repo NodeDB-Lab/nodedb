@@ -144,9 +144,11 @@ impl CoreLoop {
         }
         let path =
             ts_collection_dir(&self.data_dir, database_id, tenant_id, root).join(CAGG_IMAGE_FILE);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
             Err(e) => {
                 return Err(crate::Error::Storage {
                     engine: "timeseries".into(),
@@ -186,9 +188,11 @@ impl CoreLoop {
     ) -> crate::Result<CaggImage> {
         let path =
             ts_collection_dir(&self.data_dir, database_id, tenant_id, root).join(CAGG_IMAGE_FILE);
-        match std::fs::read(&path) {
+        match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
             Ok(bytes) => Ok(decode_image(&bytes)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CaggImage::default()),
+            Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(CaggImage::default())
+            }
             Err(e) => Err(crate::Error::Storage {
                 engine: "timeseries".into(),
                 detail: format!("read {}: {e}", path.display()),

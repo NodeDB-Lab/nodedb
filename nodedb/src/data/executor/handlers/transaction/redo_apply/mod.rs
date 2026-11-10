@@ -36,6 +36,7 @@ mod entry;
 mod events;
 #[cfg(test)]
 mod install_refusal_tests;
+mod installed_document;
 mod passes;
 mod settle;
 mod snapshot_check;

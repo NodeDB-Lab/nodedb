@@ -18,6 +18,9 @@ pub type GraphCollKey = (DatabaseId, TenantId, String);
 /// `EdgeStore` / `ShardedCsrIndex` key an edge by.
 pub(super) type EdgeKey = (String, String, String);
 
+/// One staged edge put: `(collection, (src, label, dst), properties)`.
+pub type StagedEdgePut = (String, (String, String, String), Vec<u8>);
+
 /// Staged node-label delta: labels added and labels removed in this
 /// transaction. A label that appears in both (added then removed, or vice
 /// versa within the same statement sequence) is resolved by insertion order:

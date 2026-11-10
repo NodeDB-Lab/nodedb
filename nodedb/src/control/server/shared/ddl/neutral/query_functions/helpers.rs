@@ -9,9 +9,9 @@
 use nodedb_types::Value;
 use serde_json::{Map, Value as JsonValue};
 
-use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::project::push_flat_rows;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{ShapedRow, ShapedRows};
+use crate::data::executor::response_codec::{RowContext, decode_row_payload_value};
 
 use super::super::super::result::{DdlError, DdlResult};
 
@@ -30,16 +30,29 @@ pub fn parse_timestamp_secs(s: &str) -> Result<u64, DdlError> {
     Err(err("22007", &format!("cannot parse '{s}' as timestamp")))
 }
 
-/// Convert a JSON value to Decimal. Returns `None` for non-numeric values.
-pub fn json_to_decimal(v: &serde_json::Value) -> Option<rust_decimal::Decimal> {
-    if let Some(i) = v.as_i64() {
-        Some(rust_decimal::Decimal::from(i))
-    } else if let Some(f) = v.as_f64() {
-        rust_decimal::Decimal::try_from(f).ok()
-    } else if let Some(s) = v.as_str() {
-        s.parse().ok()
-    } else {
-        None
+/// Read a typed cell as a Decimal: a Decimal exactly, an integer, a float, or
+/// text that parses. Returns `None` for any other value.
+pub fn value_to_decimal(v: &Value) -> Option<rust_decimal::Decimal> {
+    match v {
+        Value::Decimal(d) => Some(*d),
+        Value::Integer(i) => Some(rust_decimal::Decimal::from(*i)),
+        Value::Float(f) => rust_decimal::Decimal::try_from(*f).ok(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// The text a typed cell matches as: the text a plain row stores it as.
+///
+/// A string, UUID or ULID is itself, a Decimal or duration its text, and an
+/// instant its ISO 8601 text. Any other value has no text form.
+pub fn value_text(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) | Value::Uuid(s) | Value::Ulid(s) => Some(s.clone()),
+        Value::Decimal(d) => Some(d.to_string()),
+        Value::Duration(d) => Some(d.to_string()),
+        Value::DateTime(dt) | Value::NaiveDateTime(dt) => Some(dt.to_string()),
+        _ => None,
     }
 }
 
@@ -56,31 +69,30 @@ pub fn single_result(value: &str) -> Vec<DdlResult> {
     ))]
 }
 
-/// Unwrap the `DocumentOp::Scan` raw-passthrough envelope (`{"id": ..,
-/// "data": {..fields..}}`) off each decoded row, so callers match and read
-/// stored fields directly rather than against the wire wrapper.
+/// Decode a `DocumentOp::Scan` payload into typed rows, with each row's
+/// `{id, data}` scan envelope unwrapped so callers read stored fields
+/// directly. Plain and native rows decode alike, and each field keeps its
+/// type.
 ///
 /// Reuses `response_shape::project::push_flat_rows` — the same unwrap the
 /// pgwire/HTTP row shaper applies — so there is exactly one definition of
-/// "unwrap a scan envelope" in the tree. Each JSON document is lifted to a
-/// typed value for the unwrap and its rows rendered back to JSON for the
-/// callers, which read fields as JSON. Rows that are not `{id, data}`
-/// wrapped (already-flat producers) pass through unchanged.
+/// "unwrap a scan envelope" in the tree.
 ///
 /// The callers read a row's identity under `id`, so a row that lacks `id`
 /// gains it here. These rows feed the query functions only and never reach
-/// a client as a result set.
-pub fn unwrap_scan_docs(docs: Vec<JsonValue>) -> Result<Vec<Map<String, JsonValue>>, DdlError> {
-    let mut rows = Vec::with_capacity(docs.len());
-    for doc in docs {
-        push_flat_rows(
-            Value::from(doc),
-            nodedb_types::DEFAULT_IDENTITY_COLUMN,
-            &mut rows,
-        )
-        .map_err(|e| DdlError::from_error(&e))?;
-    }
-    Ok(rows.iter().map(row_to_wire_json).collect())
+/// a client as a result set. A payload that does not decode is an error.
+pub fn scan_rows(payload: &[u8]) -> Result<Vec<ShapedRow>, DdlError> {
+    let decoded = decode_row_payload_value(payload, RowContext::ScanEnvelope)
+        .map_err(|e| DdlError::from_error_in_context("scan response does not decode", &e))?;
+    let mut rows = Vec::new();
+    push_flat_rows(
+        decoded,
+        RowContext::ScanEnvelope,
+        nodedb_types::DEFAULT_IDENTITY_COLUMN,
+        &mut rows,
+    )
+    .map_err(|e| DdlError::from_error(&e))?;
+    Ok(rows)
 }
 
 /// Build a zero-row `result` output.

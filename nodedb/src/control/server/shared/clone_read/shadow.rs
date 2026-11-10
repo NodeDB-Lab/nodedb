@@ -84,15 +84,15 @@ pub(super) fn row_keys(
     plan: &PhysicalPlan,
     payload: &[u8],
     declared_primary_key: Option<&str>,
-) -> HashSet<String> {
-    let wrapped = super::merge::wrap_single_map_as_array(apply_kv_wrap(plan, payload));
+) -> crate::Result<HashSet<String>> {
+    let wrapped = super::merge::wrap_single_map_as_array(apply_kv_wrap(plan, payload)?);
     let mut keys = HashSet::new();
     for_each_row(&wrapped, |row| {
         if let Some(key) = row_key(shape, row, declared_primary_key) {
             keys.insert(key);
         }
     });
-    keys
+    Ok(keys)
 }
 
 /// Drop every row of a msgpack array whose key is in `shadowed`. Returns the
@@ -222,11 +222,11 @@ mod tests {
             (11, body(&[("id", "d2"), ("content", "old2")])),
         ]);
 
-        let shadowed = row_keys(shape, &plan, &target, None);
+        let shadowed = row_keys(shape, &plan, &target, None).expect("keys");
         assert_eq!(shadowed, HashSet::from(["d1".to_string()]));
         let kept = drop_shadowed_rows(shape, &source, None, &shadowed).unwrap();
         assert_eq!(
-            row_keys(shape, &plan, &kept, None),
+            row_keys(shape, &plan, &kept, None).expect("keys"),
             HashSet::from(["d2".to_string()])
         );
     }
@@ -237,9 +237,13 @@ mod tests {
         let plan = doc_scan(Vec::new());
         let target = scan_rows(&[(50, body(&[("sku", "a"), ("id", "x")]))]);
         let source = scan_rows(&[(10, body(&[("sku", "a"), ("id", "y")]))]);
-        let shadowed = row_keys(RowScan::Document, &plan, &target, Some("sku"));
+        let shadowed = row_keys(RowScan::Document, &plan, &target, Some("sku")).expect("keys");
         let kept = drop_shadowed_rows(RowScan::Document, &source, Some("sku"), &shadowed).unwrap();
-        assert!(row_keys(RowScan::Document, &plan, &kept, Some("sku")).is_empty());
+        assert!(
+            row_keys(RowScan::Document, &plan, &kept, Some("sku"))
+                .expect("keys")
+                .is_empty()
+        );
     }
 
     /// Projected rows are never shadowed: their `id` can be a user column.
@@ -272,10 +276,10 @@ mod tests {
         ]));
 
         let plan = doc_scan(Vec::new());
-        let shadowed = row_keys(RowScan::Kv, &plan, &target, None);
+        let shadowed = row_keys(RowScan::Kv, &plan, &target, None).expect("keys");
         let kept = drop_shadowed_rows(RowScan::Kv, &source, None, &shadowed).unwrap();
         assert_eq!(
-            row_keys(RowScan::Kv, &plan, &kept, None),
+            row_keys(RowScan::Kv, &plan, &kept, None).expect("keys"),
             HashSet::from(["k2".to_string()])
         );
     }

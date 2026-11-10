@@ -602,6 +602,7 @@ mod tests {
             return_columns: Vec::new(),
             distinct: false,
             limit: None,
+            offset: None,
             order_by: Vec::new(),
             collection: Some("users".into()),
         };
@@ -637,6 +638,7 @@ mod tests {
             return_columns: Vec::new(),
             distinct: false,
             limit: None,
+            offset: None,
             order_by: Vec::new(),
             collection: None,
         };

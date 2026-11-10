@@ -130,9 +130,11 @@ pub(in crate::data::executor) fn decode_ts_stamp(
 /// Read the stamp in `dir`. A missing file names nothing.
 pub(in crate::data::executor) fn read_ts_stamp(dir: &Path) -> crate::Result<Option<TsReplayStamp>> {
     let path = dir.join(TS_STAMP_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => return Err(stamp_error(&path, "read", &e)),
     };
     decode_ts_stamp(&path, &bytes).map(Some)

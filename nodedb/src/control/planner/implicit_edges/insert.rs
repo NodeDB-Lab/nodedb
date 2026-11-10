@@ -149,7 +149,7 @@ pub async fn append_implicit_edge_tasks(
         let dst_surrogate = endpoint(&edge.dst)?;
 
         let properties = match edge.weight {
-            Some(w) => weight_properties(w),
+            Some(w) => weight_properties(w)?,
             None => Vec::new(),
         };
 

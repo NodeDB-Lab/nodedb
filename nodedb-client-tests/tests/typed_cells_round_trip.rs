@@ -5,8 +5,10 @@
 //! A strict document holds a `BYTEA`, a `VECTOR`, a `TIMESTAMP`, a
 //! `DECIMAL` and a `UUID` field. Read over the extended protocol, where
 //! `tokio_postgres` asks for binary results, every field comes back as its
-//! own typed `Value`, equal to what was written. Read over the simple
-//! protocol, every cell is its PostgreSQL text form.
+//! own typed `Value`, equal to what was written. A parameterless `SELECT`
+//! runs on the extended protocol too. A statement with no result shape at
+//! Parse runs on the simple protocol, where every cell is its PostgreSQL
+//! text form.
 
 use nodedb_client::{NodeDb, NodeDbRemote, Value};
 use nodedb_test_support::pgwire_harness::TestServer;
@@ -97,8 +99,12 @@ async fn remote_reads_bytes_vector_timestamp_decimal_and_uuid_typed() {
     server.graceful_shutdown().await;
 }
 
+/// A parameterless row query runs on the extended protocol, so its cells
+/// decode by column type exactly as a parameterized read's do. A statement
+/// with no result shape at Parse, such as `DESCRIBE`, stays on the simple
+/// protocol, and its cells are PostgreSQL text.
 #[tokio::test]
-async fn simple_protocol_cells_are_postgres_text() {
+async fn parameterless_select_cells_are_typed() {
     let server = TestServer::start().await;
     let remote = remote(&server).await;
     seed(&remote).await;
@@ -109,17 +115,60 @@ async fn simple_protocol_cells_are_postgres_text() {
             &[],
         )
         .await
-        .expect("simple-protocol read of the typed row");
+        .expect("parameterless read of the typed row");
     assert_eq!(
         result.rows,
         vec![vec![
-            Value::String("\\x0102ff".into()),
-            Value::String("{0.5,1.25,-2}".into()),
-            Value::String("12.50".into()),
-            Value::String(UUID.into()),
+            Value::Bytes(vec![0x01, 0x02, 0xff]),
+            Value::Array(vec![
+                Value::Float(0.5),
+                Value::Float(1.25),
+                Value::Float(-2.0)
+            ]),
+            Value::Decimal("12.50".parse().expect("decimal literal")),
+            Value::Uuid(UUID.into()),
         ]],
-        "bytea is \\x hex, a vector is a {{...}} literal, numeric keeps its scale"
+        "a parameterless SELECT reads every field as its typed value"
     );
+
+    let described = remote
+        .execute_sql("DESCRIBE typed_cells", &[])
+        .await
+        .expect("DESCRIBE on the simple protocol");
+    assert!(
+        described
+            .rows
+            .iter()
+            .flatten()
+            .all(|cell| matches!(cell, Value::String(_) | Value::Null)),
+        "simple-protocol cells are text: {:?}",
+        described.rows
+    );
+
+    server.graceful_shutdown().await;
+}
+
+/// `document_get` reads a declared `DECIMAL`, `UUID` and `TIMESTAMP` field
+/// from its exact JSON text to its typed value, scale included.
+#[tokio::test]
+async fn document_get_reads_declared_fields_typed() {
+    let server = TestServer::start().await;
+    let remote = remote(&server).await;
+    seed(&remote).await;
+
+    let doc = remote
+        .document_get("typed_cells", "r1")
+        .await
+        .expect("document_get of the typed row")
+        .expect("row r1 exists");
+    let price = match doc.get("price") {
+        Some(Value::Decimal(d)) => *d,
+        other => panic!("price is a Decimal, got {other:?}"),
+    };
+    assert_eq!(price.to_string(), "12.50");
+    assert_eq!(doc.get("uid"), Some(&Value::Uuid(UUID.into())));
+    let at = NdbDateTime::parse("2024-01-02T03:04:05Z").expect("valid instant");
+    assert_eq!(doc.get("at"), Some(&Value::NaiveDateTime(at)));
 
     server.graceful_shutdown().await;
 }

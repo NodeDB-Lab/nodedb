@@ -5,11 +5,42 @@
 use tracing::{info, warn};
 
 use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
+use nodedb_types::sync::wire::{ShapeSnapshotRefusal, ShapeSnapshotRejectMsg};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::sync::shape::handler::ShapeSnapshotData;
+use crate::control::server::sync::wire::{SyncFrame, SyncMessageType};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
+
+/// Why Origin produced no snapshot for an authorized shape. The subscriber
+/// receives it as a `ShapeSnapshotReject` frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SnapshotFailure {
+    pub refusal: ShapeSnapshotRefusal,
+    /// Detail for logs. Names no stored value.
+    pub detail: String,
+}
+
+impl SnapshotFailure {
+    pub(super) fn new(refusal: ShapeSnapshotRefusal, detail: impl Into<String>) -> Self {
+        Self {
+            refusal,
+            detail: detail.into(),
+        }
+    }
+
+    /// The `ShapeSnapshotReject` frame that tells the subscriber of `shape_id`
+    /// its snapshot failed.
+    pub(super) fn reject_frame(self, shape_id: &str) -> Option<SyncFrame> {
+        let reject = ShapeSnapshotRejectMsg {
+            shape_id: shape_id.to_string(),
+            refusal: self.refusal,
+            detail: self.detail,
+        };
+        SyncFrame::try_encode(SyncMessageType::ShapeSnapshotReject, &reject)
+    }
+}
 
 /// Everything a snapshot needs, resolved from the authorized session.
 ///
@@ -35,13 +66,16 @@ pub(super) struct SnapshotRequest<'a> {
 /// Dispatches into the Data Plane for Document shapes; returns lightweight or
 /// empty payloads for Vector / Graph / Array (see inline comments).
 ///
-/// Returns `None` when the snapshot cannot be produced — a policy refusal or
-/// a failed query. The caller sends no `ShapeSnapshot` at all in that case: an
-/// empty snapshot is an assertion that the shape matches nothing, and a client
-/// that believes it has a complete empty baseline will never ask again. An
-/// intentionally empty snapshot (a Graph shape, an unmatched Array) is still
-/// `Some`, because that answer is real.
-pub(super) async fn take_shape_snapshot(req: SnapshotRequest<'_>) -> Option<ShapeSnapshotData> {
+/// Returns a [`SnapshotFailure`] when the snapshot cannot be produced: a
+/// policy refusal, a failed query or rows the read does not produce. The
+/// caller answers it with a `ShapeSnapshotReject` frame and sends no
+/// `ShapeSnapshot`: an empty snapshot is an assertion that the shape matches
+/// nothing, and a client that believes it has a complete empty baseline will
+/// never ask again. An intentionally empty snapshot (a Graph shape, an
+/// unmatched Array) is still a snapshot, because that answer is real.
+pub(super) async fn take_shape_snapshot(
+    req: SnapshotRequest<'_>,
+) -> Result<ShapeSnapshotData, SnapshotFailure> {
     let SnapshotRequest {
         shared,
         session_id,
@@ -69,11 +103,11 @@ pub(super) async fn take_shape_snapshot(req: SnapshotRequest<'_>) -> Option<Shap
             })
             .await
         }
-        ShapeType::Vector { collection, .. } => Some(ShapeSnapshotData {
+        ShapeType::Vector { collection, .. } => Ok(ShapeSnapshotData {
             data: collection.as_bytes().to_vec(),
             doc_count: 0,
         }),
-        ShapeType::Graph { .. } => Some(ShapeSnapshotData::empty()),
+        ShapeType::Graph { .. } => Ok(ShapeSnapshotData::empty()),
         ShapeType::Array {
             array_name,
             coord_range,
@@ -85,7 +119,7 @@ pub(super) async fn take_shape_snapshot(req: SnapshotRequest<'_>) -> Option<Shap
                     array = %array_name,
                     "array shape subscribe: array not known to Origin schema registry"
                 );
-                return Some(ShapeSnapshotData::empty());
+                return Ok(ShapeSnapshotData::empty());
             }
             shared
                 .array_subscriber_cursors
@@ -95,14 +129,14 @@ pub(super) async fn take_shape_snapshot(req: SnapshotRequest<'_>) -> Option<Shap
                 array = %array_name,
                 "array shape subscribed; cursor initialized at HLC::ZERO"
             );
-            Some(ShapeSnapshotData::empty())
+            Ok(ShapeSnapshotData::empty())
         }
         _ => {
             warn!(
                 session = session_id,
                 "shape subscribe: unknown shape_type variant, sending empty snapshot"
             );
-            Some(ShapeSnapshotData::empty())
+            Ok(ShapeSnapshotData::empty())
         }
     }
 }
@@ -129,7 +163,9 @@ struct DocumentSnapshot<'a> {
 /// Column redaction applies for the same reason, and is applied to the
 /// delivered payload here rather than left to the SELECT-path shaping core
 /// this dispatch never reaches — see [`super::payload`].
-async fn document_snapshot(req: DocumentSnapshot<'_>) -> Option<ShapeSnapshotData> {
+async fn document_snapshot(
+    req: DocumentSnapshot<'_>,
+) -> Result<ShapeSnapshotData, SnapshotFailure> {
     use crate::bridge::envelope::PhysicalPlan;
     use crate::control::server::shared::ddl::user_dispatch::dispatch_for_identity;
     use nodedb_physical::physical_plan::DocumentOp;
@@ -162,7 +198,10 @@ async fn document_snapshot(req: DocumentSnapshot<'_>) -> Option<ShapeSnapshotDat
                 error = %error,
                 "shape snapshot refused: the subscriber's request scope could not be resolved"
             );
-            return None;
+            return Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::QueryFailed,
+                "the subscriber's request scope could not be resolved",
+            ));
         }
     };
 
@@ -177,7 +216,10 @@ async fn document_snapshot(req: DocumentSnapshot<'_>) -> Option<ShapeSnapshotDat
             field = %field,
             "shape snapshot refused: the shape predicate filters on a redacted column"
         );
-        return None;
+        return Err(SnapshotFailure::new(
+            ShapeSnapshotRefusal::PolicyRefused,
+            "the shape predicate filters on a redacted column",
+        ));
     }
 
     // The subscriber's own capability, not the system door: the scan is
@@ -221,9 +263,12 @@ async fn document_snapshot(req: DocumentSnapshot<'_>) -> Option<ShapeSnapshotDat
             warn!(
                 shape_id = %req.shape_id,
                 %error,
-                "shape snapshot query failed; sending no snapshot"
+                "shape snapshot query failed; sending a snapshot reject"
             );
-            None
+            Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::QueryFailed,
+                format!("the snapshot query failed: {error}"),
+            ))
         }
     }
 }

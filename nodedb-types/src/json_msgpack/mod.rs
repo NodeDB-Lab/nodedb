@@ -6,6 +6,7 @@ pub mod instant_ext;
 pub mod json_value;
 pub mod native_cell;
 pub mod reader;
+pub mod scalar_ext;
 pub mod transcoder;
 pub mod writer;
 
@@ -18,7 +19,9 @@ pub use instant_ext::{
 pub use json_value::JsonValue;
 pub use native_cell::NativeCell;
 pub use reader::{json_from_msgpack, value_from_msgpack};
+pub use scalar_ext::{EXT_DECIMAL, EXT_UUID, scalar_ext, scalar_from_ext};
 pub use transcoder::msgpack_to_json_string;
 pub use writer::{
-    json_to_msgpack, json_to_msgpack_or_empty, ordered_map_to_msgpack, value_to_msgpack,
+    json_to_msgpack, json_to_msgpack_or_empty, ordered_map_to_msgpack, plain_msgpack_keeps_type,
+    value_to_document_body, value_to_msgpack, value_to_typed_msgpack,
 };

@@ -8,147 +8,96 @@ use nodedb_sql::parser::preprocess::lex::{
 
 use super::result::DdlError;
 
-/// Split VALUES content respecting quoted strings and brackets.
+pub(crate) use super::sql_split::{split_value_tuples, split_values};
+
+/// Parse one `VALUES` cell to a typed value.
 ///
-/// `'hello', 42, 'it''s'` → `["'hello'", "42", "'it''s'"]`
-pub(crate) fn split_values(s: &str) -> Vec<&str> {
-    let mut results = Vec::new();
-    let mut start = 0;
-    let mut in_quote = false;
-    let mut bracket_depth: i32 = 0;
-    let bytes = s.as_bytes();
-
-    for i in 0..bytes.len() {
-        match bytes[i] {
-            b'\'' if bracket_depth == 0 => in_quote = !in_quote,
-            b'[' | b'(' if !in_quote => bracket_depth += 1,
-            b']' | b')' if !in_quote => bracket_depth = (bracket_depth - 1).max(0),
-            b',' if !in_quote && bracket_depth == 0 => {
-                results.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if start < s.len() {
-        results.push(&s[start..]);
-    }
-    results
-}
-
-/// Split the row list after `VALUES` into the inner text of each tuple.
-///
-/// `('a', 1), ('b', f(2))` → `["'a', 1", "'b', f(2)"]`. Parentheses inside a
-/// quoted string or a nested call are part of their tuple. Text between
-/// tuples other than whitespace and one comma is an error, and so is text
-/// after the last tuple.
-pub(crate) fn split_value_tuples(s: &str) -> Result<Vec<&str>, String> {
-    let bytes = s.as_bytes();
-    let mut tuples = Vec::new();
-    let mut i = 0;
-    let mut expect_comma = false;
-    while i < bytes.len() {
-        match bytes[i] {
-            b if b.is_ascii_whitespace() => i += 1,
-            b',' if expect_comma => {
-                expect_comma = false;
-                i += 1;
-            }
-            b'(' if !expect_comma => {
-                let close = tuple_close(bytes, i).ok_or_else(|| {
-                    format!("missing closing ) for VALUES row {}", tuples.len() + 1)
-                })?;
-                tuples.push(&s[i + 1..close]);
-                expect_comma = true;
-                i = close + 1;
-            }
-            _ => {
-                return Err(format!(
-                    "unexpected text in VALUES list at '{}'",
-                    s[i..].chars().take(24).collect::<String>()
-                ));
-            }
-        }
-    }
-    if tuples.is_empty() {
-        return Err("missing VALUES (...)".into());
-    }
-    if !expect_comma {
-        return Err("VALUES list ends with a comma".into());
-    }
-    Ok(tuples)
-}
-
-/// The index of the `)` that closes the `(` at `open`, skipping quoted
-/// strings (`''` is an escaped quote) and nested parentheses.
-fn tuple_close(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_quote = false;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => in_quote = !in_quote,
-            b'(' if !in_quote => depth += 1,
-            b')' if !in_quote => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Parse a SQL literal value to a `serde_json::Value`.
-pub(crate) fn parse_sql_value(val: &str, crs: &nodedb_crs::CrsContext<'_>) -> nodedb_types::Value {
+/// The cell resolves through the planner's own `VALUES` cell rule first, so
+/// a typed literal, a cast (`'...'::uuid`, `12.50::decimal`), a typed object
+/// and a fractional literal (an exact `Decimal`) keep the type the SQL
+/// `INSERT` path gives them. Text that spells no value of its type is
+/// refused with the planner's error. A cell the rule cannot read as a
+/// constant falls back to the forms below, and finally to its own text.
+pub(crate) fn parse_sql_value(
+    val: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> Result<nodedb_types::Value, nodedb_sql::SqlError> {
     let trimmed = val.trim();
+    match nodedb_sql::planner::dml_helpers::parse_values_cell(trimmed, crs) {
+        Ok(value) => return Ok(sql_value_to_ndb_value(value)),
+        Err(error) if is_data_error(&error) => return Err(error),
+        Err(_) => {}
+    }
     if nodedb_types::starts_with_ascii_case_insensitive(trimmed, "ARRAY[") && trimmed.ends_with(']')
     {
         let inner = trimmed
             .get("ARRAY[".len()..trimmed.len().saturating_sub(1))
             .unwrap_or_default();
+        // An inner list the tokenizer refuses stays the cell's text, as any
+        // other cell this reader cannot read.
         let items = if inner.trim().is_empty() {
-            Vec::new()
+            Some(Vec::new())
         } else {
-            split_values(inner)
-                .into_iter()
-                .map(|item| parse_sql_value(item, crs))
-                .collect()
+            match split_values(inner) {
+                Ok(items) => Some(
+                    items
+                        .into_iter()
+                        .map(|item| parse_sql_value(item, crs))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Err(_) => None,
+            }
         };
-        return nodedb_types::Value::Array(items);
+        if let Some(items) = items {
+            return Ok(nodedb_types::Value::Array(items));
+        }
     }
     if trimmed.eq_ignore_ascii_case("NULL") {
-        return nodedb_types::Value::Null;
+        return Ok(nodedb_types::Value::Null);
     }
     if trimmed.eq_ignore_ascii_case("TRUE") {
-        return nodedb_types::Value::Bool(true);
+        return Ok(nodedb_types::Value::Bool(true));
     }
     if trimmed.eq_ignore_ascii_case("FALSE") {
-        return nodedb_types::Value::Bool(false);
+        return Ok(nodedb_types::Value::Bool(false));
     }
-    if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+    if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
         let inner = &trimmed[1..trimmed.len() - 1];
         let unescaped = inner.replace("''", "'");
-        return nodedb_types::Value::String(unescaped);
+        return Ok(nodedb_types::Value::String(unescaped));
     }
     if let Ok(i) = trimmed.parse::<i64>() {
-        return nodedb_types::Value::Integer(i);
+        return Ok(nodedb_types::Value::Integer(i));
     }
     if let Ok(f) = trimmed.parse::<f64>() {
-        return nodedb_types::Value::Float(f);
+        return Ok(nodedb_types::Value::Float(f));
     }
     // Scalar function call like `now()` or `date_add(now(), '1h')`, or a
     // bare identifier like `current_timestamp` that SQL treats as a
     // zero-arg function. Route through the shared evaluator so the
     // UPSERT fast-path stays aligned with the SQL planner's VALUES path.
-    // Unknown names fall through to the legacy string behavior.
+    // Unknown names fall through to the cell's text.
     if let Some(v) = try_eval_scalar_function(trimmed, crs) {
-        return v;
+        return Ok(v);
     }
-    nodedb_types::Value::String(trimmed.to_string())
+    Ok(nodedb_types::Value::String(trimmed.to_string()))
+}
+
+/// Whether `error` refuses the cell's value itself (text that spells no
+/// value of its type, an overflow), rather than saying the cell is not a
+/// constant the `VALUES` rule reads.
+fn is_data_error(error: &nodedb_sql::SqlError) -> bool {
+    use nodedb_sql::SqlError;
+    matches!(
+        error,
+        SqlError::InvalidTextRepresentation { .. }
+            | SqlError::InvalidDatetimeFormat { .. }
+            | SqlError::ConstantOverflow { .. }
+            | SqlError::NumericLiteralOutOfRange { .. }
+            | SqlError::DivisionByZero
+            | SqlError::DataException { .. }
+            | SqlError::MathDomain(_)
+    )
 }
 
 /// Evaluate a scalar function expression like `now()` or a bare SQL
@@ -224,12 +173,20 @@ fn sql_value_to_ndb_value(v: nodedb_sql::types::SqlValue) -> nodedb_types::Value
         SqlValue::Decimal(d) => nodedb_types::Value::Decimal(d),
         SqlValue::String(s) => nodedb_types::Value::String(s),
         SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b),
+        SqlValue::Uuid(u) => nodedb_types::Value::Uuid(u),
+        SqlValue::Object(fields) => nodedb_types::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, sql_value_to_ndb_value(value)))
+                .collect(),
+        ),
         SqlValue::Array(a) => {
             nodedb_types::Value::Array(a.into_iter().map(sql_value_to_ndb_value).collect())
         }
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(dt),
         SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g),
+        SqlValue::Duration(d) => nodedb_types::Value::Duration(d),
     }
 }
 
@@ -360,27 +317,7 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        extract_clause, parse_ident_token, parse_sql_value, parse_stream_ident_token,
-        split_value_tuples,
-    };
-
-    #[test]
-    fn value_tuples_split_on_top_level_parentheses() {
-        let tuples = split_value_tuples("('a', 1), ('b)(', f(2, 3)) ,('it''s', ARRAY[1])")
-            .expect("three rows");
-        assert_eq!(
-            tuples,
-            vec!["'a', 1", "'b)(', f(2, 3)", "'it''s', ARRAY[1]"]
-        );
-    }
-
-    #[test]
-    fn malformed_value_tuples_are_refused() {
-        for input in ["", "('a'), ", "('a') ('b')", "('a'", "('a') ON CONFLICT"] {
-            assert!(split_value_tuples(input).is_err(), "{input}");
-        }
-    }
+    use super::{extract_clause, parse_ident_token, parse_sql_value, parse_stream_ident_token};
 
     #[test]
     fn bare_ident_token_lowercases() {
@@ -442,19 +379,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_value_keeps_typed_literals_and_objects_typed() {
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            parse_sql_value(&format!("UUID '{uuid}'"), &crs),
+            Ok(nodedb_types::Value::Uuid(uuid.into()))
+        );
+        assert_eq!(
+            parse_sql_value(&format!("'{uuid}'::UUID"), &crs),
+            Ok(nodedb_types::Value::Uuid(uuid.into()))
+        );
+        assert_eq!(
+            parse_sql_value("BYTEA '\\x01ff'", &crs),
+            Ok(nodedb_types::Value::Bytes(vec![1, 0xff]))
+        );
+        assert_eq!(
+            parse_sql_value(&format!("jsonb_build_object('u', UUID '{uuid}')"), &crs),
+            Ok(nodedb_types::Value::Object(
+                [("u".to_string(), nodedb_types::Value::Uuid(uuid.into()))].into()
+            ))
+        );
+        let exact: rust_decimal::Decimal = "12.50".parse().expect("decimal");
+        assert_eq!(
+            parse_sql_value("12.50", &crs),
+            Ok(nodedb_types::Value::Decimal(exact))
+        );
+        assert_eq!(
+            parse_sql_value("12.50::decimal", &crs),
+            Ok(nodedb_types::Value::Decimal(exact))
+        );
+    }
+
+    #[test]
+    fn parse_sql_value_refuses_text_its_type_cannot_read() {
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        assert!(matches!(
+            parse_sql_value("'nope'::uuid", &crs),
+            Err(nodedb_sql::SqlError::InvalidTextRepresentation { .. })
+        ));
+        assert_eq!(
+            parse_sql_value("some_identifier", &crs),
+            Ok(nodedb_types::Value::String("some_identifier".into()))
+        );
+    }
+
+    #[test]
     fn parse_sql_value_decodes_numeric_array_literals() {
         let value = parse_sql_value(
             "ARRAY[1.0, 2, 3.5]",
             &nodedb_crs::CrsContext::builtin_only(),
         );
+        let exact = |text: &str| nodedb_types::Value::Decimal(text.parse().expect("decimal"));
 
         assert_eq!(
             value,
-            nodedb_types::Value::Array(vec![
-                nodedb_types::Value::Float(1.0),
+            Ok(nodedb_types::Value::Array(vec![
+                exact("1.0"),
                 nodedb_types::Value::Integer(2),
-                nodedb_types::Value::Float(3.5),
-            ])
+                exact("3.5"),
+            ]))
         );
     }
 
@@ -467,13 +451,13 @@ mod tests {
 
         assert_eq!(
             value,
-            nodedb_types::Value::Array(vec![
+            Ok(nodedb_types::Value::Array(vec![
                 nodedb_types::Value::String("rust".into()),
                 nodedb_types::Value::Array(vec![
                     nodedb_types::Value::Integer(1),
                     nodedb_types::Value::Integer(2),
                 ]),
-            ])
+            ]))
         );
     }
 

@@ -266,6 +266,9 @@ fn defer_binding(plan: &mut PhysicalPlan, target_collection: String) {
 fn decode_bodies<B: AsRef<[u8]>>(bodies: &[B]) -> Vec<serde_json::Value> {
     bodies
         .iter()
-        .filter_map(|body| nodedb_types::json_from_msgpack(body.as_ref()).ok())
+        // A native body reads as the plain body of the same values.
+        .filter_map(|body| {
+            crate::data::executor::response_codec::decode_body_plain_json(body.as_ref()).ok()
+        })
         .collect()
 }

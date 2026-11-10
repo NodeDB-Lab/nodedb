@@ -5,17 +5,19 @@
 //! Returns the row with latest `time_column <= as_of` for the given key.
 
 use nodedb_sql::parser::query_function::TemporalLookupArgs;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::dispatch_utils;
+use crate::control::server::response_shape::cell::row_to_wire_json;
+use crate::control::server::response_shape::types::ShapedRow;
 use crate::control::state::SharedState;
+use crate::data::executor::response_codec::RowContext;
 use crate::types::{DatabaseId, TraceId};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
-use super::helpers::{empty_result, err, single_result, unwrap_scan_docs};
+use super::helpers::{empty_result, scan_rows, single_result, value_text};
 
 pub async fn temporal_lookup(
     state: &SharedState,
@@ -65,32 +67,31 @@ pub async fn temporal_lookup(
     .await
     .map_err(|e| DdlError::from_error_in_context("scan failed", &e))?;
 
-    let payload_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&scan_resp.payload);
-    let docs: Vec<serde_json::Value> = sonic_rs::from_str(&payload_json)
-        .map_err(|e| err("22P02", &format!("invalid JSON in scan response: {e}")))?;
     // The raw document-scan codec wraps each row as `{"id": .., "data": {..}}`;
-    // unwrap it so matching and redaction operate on the stored fields, not
-    // the wire wrapper.
-    let docs = unwrap_scan_docs(docs)?;
+    // `scan_rows` unwraps it so matching and redaction operate on the stored
+    // fields, typed, not the wire wrapper.
+    let docs = scan_rows(&scan_resp.payload)?;
 
     // Find the row with latest time_column <= as_of for the given key.
-    let mut best_doc: Option<&serde_json::Map<String, serde_json::Value>> = None;
+    let mut best_doc: Option<&ShapedRow> = None;
     let mut best_time = String::new();
 
     for obj in &docs {
-        let key_val = obj.get(&key_column).and_then(|v| v.as_str());
-        if key_val != Some(key_value.as_str()) {
+        let key_val = obj.get(&key_column).and_then(value_text);
+        if key_val.as_deref() != Some(key_value.as_str()) {
             continue;
         }
 
-        let time_val = obj.get(&time_column).and_then(|v| v.as_str()).unwrap_or("");
-        if time_val.is_empty() || time_val > as_of.as_str() {
+        let time_val = obj
+            .get(&time_column)
+            .and_then(value_text)
+            .unwrap_or_default();
+        if time_val.is_empty() || time_val.as_str() > as_of.as_str() {
             continue;
         }
 
-        if time_val > best_time.as_str() {
-            best_time = time_val.to_string();
+        if time_val > best_time {
+            best_time = time_val;
             best_doc = Some(obj);
         }
     }
@@ -103,9 +104,10 @@ pub async fn temporal_lookup(
     // and only the delivered row is rewritten.
     match best_doc {
         Some(obj) => {
-            let mut doc = serde_json::Value::Object(obj.clone());
+            // The client sees the row as every typed row renders.
+            let mut doc = serde_json::Value::Object(row_to_wire_json(obj));
             let redaction = gate.redaction_for([table.as_str()]);
-            gate.redact(&redaction, &mut doc);
+            gate.redact(&redaction, RowContext::Flat, &mut doc);
             Ok(single_result(&doc.to_string()))
         }
         None => Ok(empty_result()),

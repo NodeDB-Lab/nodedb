@@ -231,8 +231,8 @@ pub(crate) fn coerce_value(
         }
         SqlDataType::Decimal(Some(typmod)) => coerce_to_decimal(column, value, *typmod),
         SqlDataType::Vector(dim) => coerce_to_vector(column, value, *dim),
-        SqlDataType::String
-        | SqlDataType::Bool
+        SqlDataType::String => Ok(coerce_to_text(value)),
+        SqlDataType::Bool
         | SqlDataType::Bytes
         | SqlDataType::Decimal(None)
         | SqlDataType::Uuid
@@ -363,14 +363,29 @@ fn coerce_to_instant(column: &str, value: SqlValue, declared: &SqlDataType) -> R
             .and_then(|millis| NdbDateTime::from_millis(millis).ok())
             .map(tag)
             .ok_or_else(|| not_representable(column, &d.to_string(), declared_name)),
-        SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) | SqlValue::Geometry(_) => {
-            Err(SqlError::TypeMismatch {
-                detail: format!(
-                    "column '{column}': {} is not representable as {declared_name}",
-                    literal_kind(&value)
-                ),
-            })
-        }
+        SqlValue::Bool(_)
+        | SqlValue::Bytes(_)
+        | SqlValue::Uuid(_)
+        | SqlValue::Array(_)
+        | SqlValue::Object(_)
+        | SqlValue::Geometry(_)
+        | SqlValue::Duration(_) => Err(SqlError::TypeMismatch {
+            detail: format!(
+                "column '{column}': {} is not representable as {declared_name}",
+                literal_kind(&value)
+            ),
+        }),
+    }
+}
+
+/// Text column: a UUID or an instant becomes its PostgreSQL text, the
+/// assignment cast PostgreSQL applies storing either into `text`. Every
+/// other literal passes through.
+fn coerce_to_text(value: SqlValue) -> SqlValue {
+    match value {
+        SqlValue::Uuid(u) => SqlValue::String(u),
+        SqlValue::Timestamp(at) | SqlValue::Timestamptz(at) => SqlValue::String(at.to_iso8601()),
+        other => other,
     }
 }
 
@@ -403,10 +418,13 @@ fn literal_kind(value: &SqlValue) -> &'static str {
         SqlValue::Decimal(_) => "a decimal",
         SqlValue::String(_) => "text",
         SqlValue::Bytes(_) => "bytes",
+        SqlValue::Uuid(_) => "a uuid",
+        SqlValue::Object(_) => "an object",
         SqlValue::Array(_) => "an array",
         SqlValue::Timestamp(_) => "a timestamp",
         SqlValue::Timestamptz(_) => "a timestamptz",
         SqlValue::Geometry(_) => "a geometry",
+        SqlValue::Duration(_) => "a duration",
     }
 }
 
@@ -950,6 +968,29 @@ mod tests {
                 SqlError::VectorElementNotNumeric { ref column, dim: 2, .. } if column == "embedding"
             ),
             "{err}"
+        );
+    }
+
+    /// A UUID or an instant written to a text column is stored as its
+    /// PostgreSQL text. A UUID column keeps the typed UUID.
+    #[test]
+    fn a_uuid_or_instant_into_a_text_column_is_its_text() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let columns = [
+            column("note", SqlDataType::String),
+            column("uid", SqlDataType::Uuid),
+        ];
+        assert_eq!(
+            coerced(&columns, "note", SqlValue::Uuid(uuid.into())).expect("uuid to text"),
+            SqlValue::String(uuid.into())
+        );
+        assert_eq!(
+            coerced(&columns, "note", SqlValue::Timestamptz(early())).expect("instant to text"),
+            SqlValue::String(early().to_iso8601())
+        );
+        assert_eq!(
+            coerced(&columns, "uid", SqlValue::Uuid(uuid.into())).expect("uuid stays"),
+            SqlValue::Uuid(uuid.into())
         );
     }
 }

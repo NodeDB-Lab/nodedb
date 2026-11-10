@@ -14,7 +14,7 @@ fn seed_conflict_doc(
     coll: &str,
     doc_id: &str,
 ) {
-    send_ok(core, tx, rx, doc_put(coll, doc_id, b"seed"));
+    send_ok(core, tx, rx, doc_put(coll, doc_id, "seed"));
 }
 
 fn assert_no_rb_fail(resp: &nodedb::bridge::envelope::Response) {
@@ -222,7 +222,7 @@ fn rollback_crdt_doc_on_refusal() {
         &mut core,
         &mut tx,
         &mut rx,
-        doc_put("docs", "sentinel", b"original"),
+        doc_put("docs", "sentinel", "original"),
     );
 
     let resp = commit_plans(
@@ -231,7 +231,7 @@ fn rollback_crdt_doc_on_refusal() {
         &mut rx,
         vec![
             crdt_upsert("crdt_coll", "doc1", 301),
-            doc_put("docs", "sentinel", b"modified"),
+            doc_put("docs", "sentinel", "modified"),
             doc_conflict("docs", "conflict"),
         ],
         100,
@@ -241,7 +241,7 @@ fn rollback_crdt_doc_on_refusal() {
 
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs", "sentinel"));
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original"));
 }
 
 // ── CRDT × Graph ──────────────────────────────────────────────────────────────

@@ -6,7 +6,6 @@
 //! Fast: only scans recent rows, not full history.
 
 use nodedb_sql::parser::query_function::BalanceAsOfArgs;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -16,7 +15,9 @@ use crate::types::{DatabaseId, TraceId};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
-use super::helpers::{err, json_to_decimal, parse_timestamp_secs, single_result, unwrap_scan_docs};
+use super::helpers::{
+    err, parse_timestamp_secs, scan_rows, single_result, value_text, value_to_decimal,
+};
 
 pub async fn balance_as_of(
     state: &SharedState,
@@ -79,12 +80,16 @@ pub async fn balance_as_of(
             .await
             .map_err(|e| DdlError::from_error_in_context("point get failed", &e))?;
 
-            let doc_json =
-                crate::data::executor::response_codec::decode_payload_to_json(&get_resp.payload);
-            let doc: serde_json::Value =
-                sonic_rs::from_str(&doc_json).unwrap_or(serde_json::Value::Null);
+            // A point get answers the row body itself, plain or native. An
+            // absent row answers no bytes and holds no balance.
+            let doc = if get_resp.payload.is_empty() {
+                nodedb_types::Value::Null
+            } else {
+                crate::data::executor::response_codec::decode_row_body(&get_resp.payload)
+                    .map_err(|e| DdlError::from_error_in_context("point get does not decode", &e))?
+            };
             doc.get(&column)
-                .and_then(json_to_decimal)
+                .and_then(value_to_decimal)
                 .unwrap_or(rust_decimal::Decimal::ZERO)
         }
     };
@@ -147,27 +152,21 @@ pub async fn balance_as_of(
     .await
     .map_err(|e| DdlError::from_error_in_context("source scan failed", &e))?;
 
-    let source_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&source_resp.payload);
-    let source_docs: Vec<serde_json::Value> = sonic_rs::from_str(&source_json)
-        .map_err(|e| err("22P02", &format!("invalid JSON in source scan: {e}")))?;
-    // Unwrap the `{"id", "data"}` scan envelope so matching and `value_expr`
-    // evaluation read the stored fields, not the wire wrapper.
-    let source_docs = unwrap_scan_docs(source_docs)?;
+    // `scan_rows` unwraps the `{"id", "data"}` scan envelope so matching and
+    // `value_expr` evaluation read the stored fields, typed.
+    let source_docs = scan_rows(&source_resp.payload)?;
 
     // Sum value_expr for source rows where join_column = key AND created_at > as_of.
     let mut recent_sum = rust_decimal::Decimal::ZERO;
     for obj in &source_docs {
-        let join_val = obj.get(&mat_def.join_column).and_then(|v| v.as_str());
-        if join_val != Some(&key) {
+        let join_val = obj.get(&mat_def.join_column).and_then(value_text);
+        if join_val.as_deref() != Some(key.as_str()) {
             continue;
         }
 
-        let src_doc = serde_json::Value::Object(obj.clone());
-        let created_at = crate::data::executor::enforcement::retention::extract_created_at_secs(
-            &sonic_rs::to_vec(&src_doc)
-                .map_err(|e| DdlError::internal(format!("serialization failed: {e}")))?,
-        );
+        let src_val = nodedb_types::Value::Object(obj.clone().into_iter().collect());
+        let created_at =
+            crate::data::executor::enforcement::retention::created_at_secs_of(&src_val);
         if let Some(ts) = created_at {
             if ts <= as_of_secs {
                 continue;
@@ -176,22 +175,19 @@ pub async fn balance_as_of(
             continue;
         }
 
-        let src_val = nodedb_types::Value::from(src_doc.clone());
-        let delta_val = serde_json::Value::from(
-            mat_def
-                .value_expr
-                .eval(
-                    &src_val,
-                    &crate::control::crs_context::crs_context_for(state),
+        let delta_val = mat_def
+            .value_expr
+            .eval(
+                &src_val,
+                &crate::control::crs_context::crs_context_for(state),
+            )
+            .map_err(|e| {
+                err(
+                    crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
+                    &format!("BALANCE_AS_OF: value_expr failed to evaluate: {e}"),
                 )
-                .map_err(|e| {
-                    err(
-                        crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
-                        &format!("BALANCE_AS_OF: value_expr failed to evaluate: {e}"),
-                    )
-                })?,
-        );
-        if let Some(d) = json_to_decimal(&delta_val) {
+            })?;
+        if let Some(d) = value_to_decimal(&delta_val) {
             recent_sum += d;
         }
     }

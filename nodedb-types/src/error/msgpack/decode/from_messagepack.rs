@@ -163,6 +163,30 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 let (detail,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::ProgramLimitExceeded { detail })
             }
+            TAG_INVALID_ARGUMENT_FOR_LOGARITHM => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::InvalidArgumentForLogarithm { detail })
+            }
+            TAG_INVALID_ARGUMENT_FOR_POWER_FUNCTION => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::InvalidArgumentForPowerFunction { detail })
+            }
+            TAG_INVALID_TEXT_REPRESENTATION => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::InvalidTextRepresentation { detail })
+            }
+            TAG_INVALID_DATETIME_FORMAT => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::InvalidDatetimeFormat { detail })
+            }
+            TAG_DATETIME_FIELD_OVERFLOW => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::DatetimeFieldOverflow { detail })
+            }
+            TAG_DATATYPE_MISMATCH => {
+                let (detail,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::DatatypeMismatch { detail })
+            }
             TAG_INVALID_LIMIT_VALUE => {
                 let (clause, value) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::InvalidLimitValue { clause, value })
@@ -563,6 +587,38 @@ mod tests {
             detail: "WITH RECURSIVE CTE 'walk' exceeded max recursion depth 100".into(),
         };
         assert_eq!(roundtrip(&v), v);
+    }
+
+    #[test]
+    fn math_domain_roundtrip() {
+        let log = ErrorDetails::InvalidArgumentForLogarithm {
+            detail: "cannot take logarithm of zero".into(),
+        };
+        assert_eq!(roundtrip(&log), log);
+        let power = ErrorDetails::InvalidArgumentForPowerFunction {
+            detail: "cannot take square root of a negative number".into(),
+        };
+        assert_eq!(roundtrip(&power), power);
+    }
+
+    #[test]
+    fn text_and_datetime_roundtrip() {
+        for v in [
+            ErrorDetails::InvalidTextRepresentation {
+                detail: "invalid input syntax for type integer: \"abc\"".into(),
+            },
+            ErrorDetails::InvalidDatetimeFormat {
+                detail: "invalid input syntax for type timestamp: \"abc\"".into(),
+            },
+            ErrorDetails::DatetimeFieldOverflow {
+                detail: "date/time field value out of range".into(),
+            },
+            ErrorDetails::DatatypeMismatch {
+                detail: "column \"n\" is of type integer".into(),
+            },
+        ] {
+            assert_eq!(roundtrip(&v), v);
+        }
     }
 
     #[test]

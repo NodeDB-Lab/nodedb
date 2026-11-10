@@ -8,6 +8,7 @@ pub mod identifier;
 pub mod literals;
 pub mod operators;
 pub mod predicates;
+mod typed_literal;
 
 pub use entry::convert_expr;
 pub(in crate::resolver::expr) use entry::convert_expr_depth;

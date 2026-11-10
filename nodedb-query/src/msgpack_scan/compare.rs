@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hasher};
 use nodedb_types::read_instant;
 
 use crate::msgpack_scan::reader::{read_integer, read_null, read_numeric, str_bounds};
-use crate::numeric_cmp::cmp_numeric;
+use crate::numeric_cmp::cmp_numeric_total;
 
 /// Hash the raw bytes of a MessagePack value at `range` within `buf`.
 /// Uses a fast non-cryptographic hash suitable for hash joins and GROUP BY.
@@ -51,8 +51,8 @@ pub fn hash_field_bytes_with(
 /// Comparison order:
 /// 1. Null < Bool < Number < Instant < String < Binary < Array < Map < Ext
 /// 2. Within numbers: exact numeric order; integers (`uint64` included)
-///    never round through f64, an integer against a float compares
-///    exactly, and NaN sorts above every number and equals NaN
+///    never round through f64, an integer against a float
+///    compares exactly, and NaN sorts above every number and equals NaN
 /// 3. Within instants: by kind (UTC before naive), then signed epoch micros
 /// 4. Within strings: lexicographic on raw bytes (valid UTF-8 guarantees
 ///    byte order = Unicode code-point order for ASCII/Latin-1)
@@ -93,7 +93,7 @@ pub fn compare_field_bytes(
             // Exact: integers never round through f64. NaN sorts above
             // every number and equals NaN, so the order is total.
             match (read_numeric(a_buf, a_off), read_numeric(b_buf, b_off)) {
-                (Some(a), Some(b)) => cmp_numeric(a, b),
+                (Some(a), Some(b)) => cmp_numeric_total(a, b),
                 (Some(_), None) => Ordering::Greater,
                 (None, Some(_)) => Ordering::Less,
                 (None, None) => Ordering::Equal,

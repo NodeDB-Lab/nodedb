@@ -17,6 +17,7 @@
 
 pub mod apply;
 pub mod replication;
+pub mod snapshot_rules;
 pub mod store;
 pub mod types;
 

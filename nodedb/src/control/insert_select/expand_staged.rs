@@ -110,6 +110,7 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
                 // a plain INSERT takes.
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             post_set_op: PostSetOp::None,
             txn_id: task.txn_id,

@@ -12,10 +12,9 @@ use nodedb_physical::physical_plan::DocumentResolvedMutation;
 use tracing::debug;
 
 use super::apply_row::{ApplyResolvedDelete, ApplyResolvedPut};
+use super::apply_state::ResolvedApplyState;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::enforcement::unique::SubmittedWrite;
-use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::StorageKey;
 
@@ -38,48 +37,12 @@ impl CoreLoop {
         if let Err(code) = self.check_resolved_document_preconditions(task, tid, mutations) {
             return self.response_error(task, code);
         }
-        // Each mutation below commits on its own, so UNIQUE is judged on the
-        // statement's post-state before the first one lands.
-        if let Err(e) = self.check_resolved_document_unique(task, tid, mutations) {
-            return self.response_error(task, e);
-        }
-        // The gate stays on every write path even though
-        // `DecidedEarlierInRequest` makes this a no-op — a single path that
-        // skips it entirely is a hole future callers can fall into.
-        for mutation in mutations {
-            if let DocumentResolvedMutation::Put {
-                collection,
-                document_id,
-                value,
-                ..
-            } = mutation
-                && let Err(e) = rls_write_gate::admit_stored_row(
-                    rls_write_check,
-                    rls_write_gate::GatedRow {
-                        body: value,
-                        identity: &crate::engine::document::store::RowIdentity::from_user_key(
-                            document_id.as_str(),
-                        ),
-                        strict_schema: None,
-                        identity_column: &self.identity_column(
-                            task.request.database_id.as_u64(),
-                            tid,
-                            collection.as_str(),
-                        ),
-                    },
-                    tid,
-                    collection.as_str(),
-                    &self.crs_context(),
-                )
-            {
-                return self.response_error(task, e);
-            }
-        }
-
-        // Each mutation commits on its own, so a refusal after one landed
-        // carries the entries of every landed row.
-        let mut write_set = Vec::new();
-        let mut landed = 0u64;
+        let database_id = task.request.database_id.as_u64();
+        let txn = match self.sparse.begin_write() {
+            Ok(txn) => txn,
+            Err(error) => return self.response_error(task, error),
+        };
+        let mut state = ResolvedApplyState::default();
         for mutation in mutations {
             let applied = match mutation {
                 DocumentResolvedMutation::Put {
@@ -92,6 +55,8 @@ impl CoreLoop {
                     pk_bytes: _,
                 } => self.apply_resolved_document_put(
                     task,
+                    &txn,
+                    &mut state,
                     ApplyResolvedPut {
                         tid,
                         collection: collection.as_str(),
@@ -100,6 +65,7 @@ impl CoreLoop {
                         value,
                         precondition: precondition.as_deref(),
                         resolved_sum_targets,
+                        rls_write_check,
                     },
                 ),
                 DocumentResolvedMutation::Delete {
@@ -111,55 +77,84 @@ impl CoreLoop {
                     precondition: _,
                 } => self.apply_resolved_document_delete(
                     task,
+                    &txn,
+                    &mut state,
                     ApplyResolvedDelete {
                         tid,
                         collection: collection.as_str(),
                         document_id,
                         surrogate: *surrogate,
                         resolved_sum_targets,
+                        rls_write_check,
                     },
                 ),
             };
-            match applied {
-                Ok(entries) => {
-                    write_set.extend(entries);
-                    landed += 1;
-                }
-                Err(code) => {
-                    let code = crate::data::executor::handlers::partial_refusal::refusal_after_rows(
-                        landed, code,
-                    );
-                    return self.refusal_with_landed_rows(task, code, write_set);
-                }
+            if let Err(error) = applied {
+                let error = state.abort(self, database_id, tid, error);
+                return self.response_error(task, error);
             }
         }
 
-        let mut response = self.response_with_payload(task, response_payload.to_vec());
-        response.write_set = write_set;
+        let prepared = (|| -> crate::Result<_> {
+            self.check_written_unit_unique(&txn, database_id, tid, &state.touched)?;
+            for (collection, entries) in std::mem::take(&mut state.balanced) {
+                self.settle_balanced_entries(database_id, tid, &collection, entries)?;
+            }
+            let mut notes = Vec::with_capacity(state.write_set.len());
+            for entry in &state.write_set {
+                let ordinal = match &entry.effect {
+                    crate::bridge::envelope::RowEffect::InstalledPut { image, .. } => {
+                        image.version.sys_from
+                    }
+                    crate::bridge::envelope::RowEffect::Delete { system_from } => *system_from,
+                    _ => {
+                        return Err(crate::Error::Internal {
+                            detail: "resolved document capture contains a non-document effect"
+                                .into(),
+                        });
+                    }
+                };
+                let collection =
+                    entry
+                        .collection
+                        .as_deref()
+                        .ok_or_else(|| crate::Error::Internal {
+                            detail: "resolved document capture has no collection".into(),
+                        })?;
+                notes.push((
+                    self.prepare_surrogate_write(task, tid, collection, entry.surrogate)?,
+                    ordinal,
+                ));
+            }
+            Ok((response_payload.to_vec(), notes))
+        })();
+        let (payload, notes) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let error = state.abort(self, database_id, tid, error);
+                return self.response_error(task, error);
+            }
+        };
+        if let Err(error) = txn.commit() {
+            let error = crate::Error::Storage {
+                engine: "sparse".into(),
+                detail: format!("resolved document commit outcome is unknown: {error}"),
+            };
+            self.fail_journalled(&error);
+            let error = state.abort(self, database_id, tid, error);
+            return self.response_error(task, error);
+        }
+        for (note, ordinal) in notes {
+            self.publish_surrogate_write(note, ordinal);
+        }
+        self.checkpoint_coordinator
+            .mark_dirty("sparse", state.write_set.len());
+        for event in state.events {
+            event.publish(self, task);
+        }
+        let mut response = self.response_with_payload(task, payload);
+        response.write_set = state.write_set;
         response
-    }
-
-    /// Refuse the statement when its post-state gives one unique value two
-    /// owners. A value one mutation releases is free for another.
-    fn check_resolved_document_unique(
-        &self,
-        task: &ExecutionTask,
-        tid: u64,
-        mutations: &[DocumentResolvedMutation],
-    ) -> crate::Result<()> {
-        let writes: Vec<SubmittedWrite<'_>> = mutations
-            .iter()
-            .map(|mutation| SubmittedWrite {
-                collection: mutation.collection().as_str(),
-                surrogate: mutation.surrogate().as_u32(),
-                body: match mutation {
-                    DocumentResolvedMutation::Put { value, .. } => Some(value.as_slice()),
-                    DocumentResolvedMutation::Delete { .. } => None,
-                },
-                judged: true,
-            })
-            .collect();
-        self.check_submitted_unit_unique(task.request.database_id.as_u64(), tid, &writes)
     }
 
     /// Confirm every mutation still describes the row it was resolved against.

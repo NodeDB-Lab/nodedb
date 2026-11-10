@@ -10,6 +10,10 @@ use nodedb_types::Value;
 use crate::error::SqlError;
 
 use super::scan::{parse_object, skip_ws};
+use super::template::{Literal, into_value_map};
+
+/// One object literal whose values may hold `$N` parameter references.
+pub type ObjectTemplate = HashMap<String, Literal>;
 
 /// Parse a `{ key: value, ... }` object literal at the START of `s`.
 ///
@@ -34,7 +38,7 @@ pub fn parse_object_literal(s: &str) -> Option<Result<HashMap<String, Value>, Sq
     }
     let chars: Vec<char> = trimmed.chars().collect();
     let mut pos = 0;
-    Some(parse_object(&chars, &mut pos))
+    Some(parse_object(&chars, &mut pos).and_then(into_value_map))
 }
 
 /// Parse a `{ key: value, ... }` object literal that must be the WHOLE input.
@@ -44,6 +48,12 @@ pub fn parse_object_literal(s: &str) -> Option<Result<HashMap<String, Value>, Sq
 /// over, so a clause the caller wrote can never be discarded in silence. A
 /// trailing `;` is accepted — it terminates the statement, it is not content.
 pub fn parse_object_literal_complete(s: &str) -> Option<Result<HashMap<String, Value>, SqlError>> {
+    parse_object_template_complete(s).map(|parsed| parsed.and_then(into_value_map))
+}
+
+/// [`parse_object_literal_complete`] keeping each `$N` parameter reference,
+/// for a statement whose parameters bind after the rewrite.
+pub fn parse_object_template_complete(s: &str) -> Option<Result<ObjectTemplate, SqlError>> {
     let trimmed = s.trim();
     if !trimmed.starts_with('{') {
         return None;
@@ -65,11 +75,20 @@ pub fn parse_object_literal_complete(s: &str) -> Option<Result<HashMap<String, V
 pub fn parse_object_literal_array_complete(
     s: &str,
 ) -> Option<Result<Vec<HashMap<String, Value>>, SqlError>> {
+    parse_object_template_array_complete(s)
+        .map(|parsed| parsed.and_then(|objects| objects.into_iter().map(into_value_map).collect()))
+}
+
+/// [`parse_object_literal_array_complete`] keeping each `$N` parameter
+/// reference.
+pub fn parse_object_template_array_complete(
+    s: &str,
+) -> Option<Result<Vec<ObjectTemplate>, SqlError>> {
     let trimmed = s.trim();
     if !trimmed.starts_with('[') {
         return None;
     }
-    let objects = match parse_object_literal_array(trimmed)? {
+    let objects = match parse_object_template_array(trimmed)? {
         Ok(objects) => objects,
         Err(error) => return Some(Err(error)),
     };
@@ -87,6 +106,25 @@ pub fn parse_object_literal_array_complete(
         Some(rest) => Err(trailing_input_error("array of object literals", &rest)),
         None => Ok(objects),
     })
+}
+
+/// Byte offset just past the object literal, or array of object literals,
+/// that opens `s`.
+///
+/// `None` when `s` does not open with `{` or `[`, or the literal does not
+/// parse or close. The strict parsers then report the malformed literal.
+pub fn object_literal_end(s: &str) -> Option<usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let end = match chars.first()? {
+        '{' => {
+            let mut pos = 0;
+            parse_object(&chars, &mut pos).ok()?;
+            pos
+        }
+        '[' => matching_bracket(&chars)? + 1,
+        _ => return None,
+    };
+    Some(s.char_indices().nth(end).map_or(s.len(), |(byte, _)| byte))
 }
 
 /// The non-whitespace text remaining from `pos`, ignoring a trailing `;`.
@@ -147,6 +185,12 @@ fn matching_bracket(chars: &[char]) -> Option<usize> {
 pub fn parse_object_literal_array(
     s: &str,
 ) -> Option<Result<Vec<HashMap<String, Value>>, SqlError>> {
+    parse_object_template_array(s)
+        .map(|parsed| parsed.and_then(|objects| objects.into_iter().map(into_value_map).collect()))
+}
+
+/// [`parse_object_literal_array`] keeping each `$N` parameter reference.
+fn parse_object_template_array(s: &str) -> Option<Result<Vec<ObjectTemplate>, SqlError>> {
     let trimmed = s.trim();
     if !trimmed.starts_with('[') {
         return None;

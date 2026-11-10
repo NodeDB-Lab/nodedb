@@ -8,7 +8,8 @@
 //!
 //! Instant ext values (`fixext8` type 1 / 2) become `Value::DateTime` /
 //! `Value::NaiveDateTime`. A geometry ext (type 3) becomes
-//! `Value::Geometry`. Every other ext becomes `Value::Null`. Map keys that are not strings are
+//! `Value::Geometry`. A UUID ext (type 4) and a decimal ext (type 5) become
+//! `Value::Uuid` / `Value::Decimal`. Every other ext becomes `Value::Null`. Map keys that are not strings are
 //! rendered with `Debug`.
 
 use zerompk::{Read, SliceReader};
@@ -16,6 +17,7 @@ use zerompk::{Read, SliceReader};
 use super::super::error::{MsgpackError, MsgpackResult};
 use super::super::geometry_ext::geometry_from_ext;
 use super::super::instant_ext::instant_from_ext;
+use super::super::scalar_ext::scalar_from_ext;
 use crate::Value;
 
 const FIXEXT8: u8 = 0xD7;
@@ -102,7 +104,7 @@ pub(crate) fn read_native_value<'de, R: Read<'de>>(reader: &mut R) -> zerompk::R
                 Some((kind, micros)) => kind.from_micros(micros),
                 None => match geometry_from_ext(ext_type, &payload) {
                     Some(g) => Value::Geometry(g),
-                    None => Value::Null,
+                    None => scalar_from_ext(ext_type, &payload).unwrap_or(Value::Null),
                 },
             })
         }

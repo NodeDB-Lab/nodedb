@@ -20,7 +20,9 @@ use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::server::shared::metering::DetachedMeterGuard;
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec::{decode_payload_to_json, decode_payload_value};
+use crate::data::executor::response_codec::{
+    RowContext, decode_row_payload_to_json, decode_row_payload_value,
+};
 
 use super::super::types::wire_type::{TEXT_RESULTS, result_fields};
 use super::super::types::{error_to_pg_in_context, error_to_sqlstate, text_field};
@@ -40,6 +42,8 @@ pub(crate) struct StreamResponseContext {
     pub(crate) state: Arc<SharedState>,
     /// `None` when metering is disabled, or when this request is not billable.
     pub(crate) meter_guard: Option<DetachedMeterGuard>,
+    /// The row shape of the streamed plan's batches.
+    pub(crate) row_context: RowContext,
 }
 
 /// Build a streaming multi-row pgwire `Response` whose `DataRow`s are pulled
@@ -66,6 +70,7 @@ pub(crate) fn streaming_multirow_response(
         redaction,
         state,
         meter_guard,
+        row_context,
     } = context;
 
     let schema = Arc::new(vec![text_field("result")]);
@@ -105,7 +110,8 @@ pub(crate) fn streaming_multirow_response(
 
             // Each batch payload is a standalone msgpack array of rows; decode
             // to a JSON array and stream each element as its own pgwire row.
-            let text = decode_payload_to_json(&batch.payload);
+            let text = decode_row_payload_to_json(&batch.payload, row_context)
+                .map_err(|e| error_to_pg_in_context("failed to decode streamed batch", &e))?;
             if let Ok(serde_json::Value::Array(items)) =
                 sonic_rs::from_str::<serde_json::Value>(&text)
             {
@@ -117,7 +123,12 @@ pub(crate) fn streaming_multirow_response(
                     // cell rather than named columns, so it never reaches the
                     // shaping core — redact it here rather than let it be the
                     // one streamed shape that bypasses policy.
-                    redact_envelope_row(redaction.as_ref(), &state.redaction, &mut item);
+                    redact_envelope_row(
+                        redaction.as_ref(),
+                        &state.redaction,
+                        row_context,
+                        &mut item,
+                    );
                     let mut encoder = DataRowEncoder::new(row_schema.clone());
                     encoder.encode_field(&item.to_string()).map_err(|e| {
                         PgWireError::UserError(Box::new(ErrorInfo::new(
@@ -162,6 +173,7 @@ pub(crate) fn streaming_shaped_response(
         redaction,
         state,
         meter_guard,
+        row_context,
     } = context;
 
     let display_columns: Vec<String> = schema_out
@@ -221,7 +233,7 @@ pub(crate) fn streaming_shaped_response(
                 break;
             }
 
-            let value = decode_payload_value(&batch.payload)
+            let value = decode_row_payload_value(&batch.payload, row_context)
                 .map_err(|e| error_to_pg_in_context("failed to decode streamed batch", &e))?;
             // Resolved once before the first batch was pulled; this only
             // re-borrows it, so no batch can slip out ahead of the policy.
@@ -230,6 +242,7 @@ pub(crate) fn streaming_shaped_response(
             // needed per batch.
             let shaped = shape_decoded_rows(
                 value,
+                row_context,
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
                 None,
@@ -277,6 +290,7 @@ pub(crate) async fn streaming_star_response(
     stream: ResultStream,
     limit: usize,
     schema: &OutputSchema,
+    row_context: RowContext,
     redaction: Option<QueryRedaction>,
     state: &SharedState,
     meter_guard: Option<DetachedMeterGuard>,
@@ -302,7 +316,7 @@ pub(crate) async fn streaming_star_response(
             break;
         }
 
-        match decode_payload_value(&batch.payload) {
+        match decode_row_payload_value(&batch.payload, row_context) {
             Ok(nodedb_types::Value::Array(items)) => {
                 for item in items {
                     if values.len() >= limit {
@@ -343,6 +357,7 @@ pub(crate) async fn streaming_star_response(
 
     let shaped = match shape_decoded_rows(
         nodedb_types::Value::Array(values),
+        row_context,
         Some(schema),
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
         None,

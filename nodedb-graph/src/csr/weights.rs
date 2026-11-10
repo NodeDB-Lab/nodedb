@@ -186,35 +186,22 @@ impl CsrIndex {
     }
 }
 
-/// Extract the `"weight"` property from MessagePack-encoded edge properties.
+/// Extract the `"weight"` property from an edge's stored property image.
 ///
-/// Returns 1.0 if properties are empty, malformed, or don't contain a
-/// `"weight"` key. Handles F64, F32, and integer weight values; other
-/// numeric types default to 1.0.
+/// Reads the native tagged object and a plain MessagePack map alike. An
+/// Integer, Float or Decimal weight is the weight, a Decimal rounded to the
+/// nearest `f64`. Returns 1.0 when the properties are empty or malformed,
+/// carry no `"weight"`, or carry a non-numeric one.
 pub fn extract_weight_from_properties(properties: &[u8]) -> f64 {
     if properties.is_empty() {
         return 1.0;
     }
-    let Ok(val) = rmpv::decode::read_value(&mut &properties[..]) else {
+    let Ok(view) = nodedb_types::ObjectView::new(properties) else {
         return 1.0;
     };
-    match val {
-        rmpv::Value::Map(entries) => {
-            for (k, v) in entries {
-                if let rmpv::Value::String(ref s) = k
-                    && s.as_str() == Some("weight")
-                {
-                    return match v {
-                        rmpv::Value::F64(f) => f,
-                        rmpv::Value::F32(f) => f as f64,
-                        rmpv::Value::Integer(i) => i.as_f64().unwrap_or(1.0),
-                        _ => 1.0,
-                    };
-                }
-            }
-            1.0
-        }
-        _ => 1.0,
+    match view.get("weight") {
+        Ok(Some(value)) => crate::properties::property_weight(&value).unwrap_or(1.0),
+        Ok(None) | Err(_) => 1.0,
     }
 }
 
@@ -311,36 +298,56 @@ mod tests {
         assert_eq!(extract_weight_from_properties(b""), 1.0);
     }
 
+    fn stored(fields: Vec<(&str, nodedb_types::Value)>) -> Vec<u8> {
+        crate::properties::encode_edge_properties(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+        .expect("encode properties")
+    }
+
     #[test]
     fn extract_weight_f64() {
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("weight".into()),
-            rmpv::Value::F64(0.75),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        let buf = stored(vec![("weight", nodedb_types::Value::Float(0.75))]);
         assert_eq!(extract_weight_from_properties(&buf), 0.75);
     }
 
     #[test]
     fn extract_weight_integer() {
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("weight".into()),
-            rmpv::Value::Integer(rmpv::Integer::from(42)),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        let buf = stored(vec![("weight", nodedb_types::Value::Integer(42))]);
         assert_eq!(extract_weight_from_properties(&buf), 42.0);
     }
 
     #[test]
-    fn extract_weight_missing_key() {
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("color".into()),
-            rmpv::Value::String("red".into()),
+    fn extract_weight_decimal() {
+        let buf = stored(vec![(
+            "weight",
+            nodedb_types::Value::Decimal("12.50".parse().expect("decimal")),
         )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        assert_eq!(extract_weight_from_properties(&buf), 12.5);
+    }
+
+    #[test]
+    fn extract_weight_from_a_plain_map() {
+        let buf = nodedb_types::json_msgpack::value_to_msgpack(&nodedb_types::Value::Object(
+            [("weight".to_string(), nodedb_types::Value::Float(2.5))].into(),
+        ))
+        .expect("encode plain");
+        assert_eq!(extract_weight_from_properties(&buf), 2.5);
+    }
+
+    #[test]
+    fn extract_weight_missing_key() {
+        let buf = stored(vec![("color", nodedb_types::Value::String("red".into()))]);
         assert_eq!(extract_weight_from_properties(&buf), 1.0);
+    }
+
+    #[test]
+    fn a_non_numeric_or_malformed_weight_defaults_to_one() {
+        let buf = stored(vec![("weight", nodedb_types::Value::String("5".into()))]);
+        assert_eq!(extract_weight_from_properties(&buf), 1.0);
+        assert_eq!(extract_weight_from_properties(&[0xc1]), 1.0);
     }
 }

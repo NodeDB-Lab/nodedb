@@ -4,8 +4,6 @@
 
 use nodedb_physical::physical_plan::DocumentOp;
 
-use crate::engine::document::store::{RowIdentity, StorageKey};
-
 use super::context::RlsCtx;
 
 /// Exhaustive over [`DocumentOp`] so a new document operation forces a
@@ -116,44 +114,26 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
              carries no row filter",
         ),
 
-        // Admit the write image now (plan carries the full post-image),
-        // then inject the read filter for independent `RETURNING` visibility.
+        // Materialization decides the stored row, so its policy travels to apply.
         DocumentOp::PointPut {
             collection,
-            value,
             rls_filters,
-            surrogate,
+            rls_write_check,
             ..
         }
         | DocumentOp::PointInsert {
             collection,
-            value,
             rls_filters,
-            surrogate,
+            rls_write_check,
             ..
-        } => {
-            let identity = StorageKey::for_surrogate(*surrogate).to_identity();
-            ctx.admit_document_write_image(collection, &identity, value)?;
-            ctx.set_post_filters(collection, rls_filters)
         }
-
-        DocumentOp::BatchInsert {
+        | DocumentOp::BatchInsert {
             collection,
-            documents,
             rls_filters,
-            surrogates,
+            rls_write_check,
             ..
         } => {
-            // Every row is gated. A row whose surrogate is not yet assigned
-            // falls back to its document id, which a declared key already
-            // carries in the body.
-            for (index, (document_id, value)) in documents.iter().enumerate() {
-                let identity = surrogates.get(index).map_or_else(
-                    || RowIdentity::from_user_key(document_id.clone()),
-                    |s| StorageKey::for_surrogate(*s).to_identity(),
-                );
-                ctx.admit_document_write_image(collection, &identity, value)?;
-            }
+            ctx.set_write_check(collection, rls_write_check)?;
             ctx.set_post_filters(collection, rls_filters)
         }
 
@@ -322,6 +302,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })
     }
 
@@ -343,63 +324,87 @@ mod tests {
         })
     }
 
-    /// The compiled write predicate a plan carries into the Data Plane.
+    /// The compiled write predicate travels to the materialized-row gate.
     fn write_check(plan: &PhysicalPlan) -> &nodedb_types::RlsWriteCheck {
-        match plan {
-            PhysicalPlan::Document(DocumentOp::PointUpdate {
-                rls_write_check, ..
-            })
-            | PhysicalPlan::Document(DocumentOp::BulkDelete {
-                rls_write_check, ..
-            })
-            | PhysicalPlan::Document(DocumentOp::Merge {
-                rls_write_check, ..
-            })
-            | PhysicalPlan::Document(DocumentOp::Upsert {
-                rls_write_check, ..
-            }) => rls_write_check,
-            other => panic!("plan shape changed: {other:?}"),
+        plan.sole_rls_write_check().expect("document write check")
+    }
+
+    #[test]
+    fn insert_carries_policy_without_judging_submitted_fields() {
+        let store = store_with_write_policy("orders");
+        for value in [body("42"), body("99"), vec![0x80]] {
+            let mut plan = point_insert("orders", "42");
+            let PhysicalPlan::Document(DocumentOp::PointInsert {
+                value: submitted, ..
+            }) = &mut plan
+            else {
+                panic!("point insert fixture");
+            };
+            *submitted = value.clone();
+            inject(&mut plan, &store).expect("compile authenticated policy");
+            assert!(write_check(&plan).has_predicate());
+            let PhysicalPlan::Document(DocumentOp::PointInsert {
+                value: submitted, ..
+            }) = plan
+            else {
+                panic!("point insert fixture");
+            };
+            assert_eq!(submitted, value, "materialization owns the row image");
         }
     }
 
-    /// The insert body is the row that will exist afterwards, so a conforming
-    /// row is admitted and a violating one fails the statement.
     #[test]
-    fn insert_is_admitted_or_rejected_on_its_own_post_image() {
+    fn point_put_carries_authenticated_policy_and_replaces_untrusted_verdict() {
         let store = store_with_write_policy("orders");
-
-        let mut conforming = point_insert("orders", "42");
-        assert!(inject(&mut conforming, &store).is_ok());
-
-        let mut violating = point_insert("orders", "99");
-        assert!(matches!(
-            inject(&mut violating, &store),
-            Err(crate::Error::RejectedAuthz { .. })
-        ));
+        let mut plan = PhysicalPlan::Document(DocumentOp::PointPut {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                "orders",
+            ),
+            document_id: "d1".into(),
+            value: vec![0x80],
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"d1".to_vec(),
+            returning: None,
+            rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            resolved_sum_targets: Vec::new(),
+        });
+        inject(&mut plan, &store).expect("compile authenticated policy");
+        assert!(
+            write_check(&plan).has_predicate(),
+            "caller verdict cannot bypass policy"
+        );
     }
 
-    /// A batch fails whole when any one of its rows violates the policy: a
-    /// silently dropped row will report a write that never happened.
     #[test]
-    fn batch_insert_is_rejected_when_any_row_violates_the_policy() {
+    fn batch_insert_carries_policy_for_every_materialized_row() {
         let store = store_with_write_policy("orders");
+        let documents = vec![("d1".into(), body("42")), ("d2".into(), body("99"))];
         let mut plan = PhysicalPlan::Document(DocumentOp::BatchInsert {
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "orders",
             ),
-            documents: vec![("d1".into(), body("42")), ("d2".into(), body("99"))],
+            documents: documents.clone(),
             if_absent: false,
             surrogates: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
         });
-        assert!(matches!(
-            inject(&mut plan, &store),
-            Err(crate::Error::RejectedAuthz { .. })
-        ));
+        inject(&mut plan, &store).expect("compile authenticated policy");
+        assert!(write_check(&plan).has_predicate());
+        let PhysicalPlan::Document(DocumentOp::BatchInsert {
+            documents: submitted,
+            ..
+        }) = plan
+        else {
+            panic!("batch insert fixture");
+        };
+        assert_eq!(submitted, documents);
     }
 
     /// An unresolvable `$auth.*` reference in a write predicate denies the
@@ -599,10 +604,8 @@ mod tests {
         let mut conforming = point_insert("orders", "42");
         assert!(inject(&mut conforming, &store).is_ok());
         let mut violating = point_insert("orders", "99");
-        assert!(matches!(
-            inject(&mut violating, &store),
-            Err(crate::Error::RejectedAuthz { .. })
-        ));
+        inject(&mut violating, &store).expect("ship policy for materialized image");
+        assert!(write_check(&violating).has_predicate());
     }
 
     /// A read policy alone leaves the write gate empty — the write half is
@@ -622,11 +625,16 @@ mod tests {
     /// With no policy at all every write shape runs untouched.
     #[test]
     fn writes_without_a_policy_record_that_injection_ran() {
-        // `point_insert` has no write-check slot to stamp; only update is.
         let mut insert = point_insert("orders", "99");
         let insert_before = insert.clone();
         assert!(inject_without_policy(&mut insert).is_ok());
-        assert_eq!(insert, insert_before);
+        assert_eq!(
+            write_check(&insert),
+            &nodedb_types::RlsWriteCheck::NoPolicyApplies
+        );
+        let mut normalized_insert = insert.clone();
+        super::super::plan::test_support::reset_write_check(&mut normalized_insert);
+        assert_eq!(normalized_insert, insert_before);
 
         let mut update = point_update("orders");
         let update_before = update.clone();

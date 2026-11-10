@@ -39,9 +39,11 @@ impl CoreLoop {
     /// in sync on segment-iteration changes.
     ///
     /// Every result row is a `Value::Object` built by
-    /// `row_to_projected_value` and encoded by `encode_value_vec`, so a
-    /// declared `TIMESTAMP` / `TIMESTAMPTZ` cell reaches the client as a
-    /// typed instant from either phase.
+    /// `row_to_projected_value` and encoded by `encode_native_rows`, so each
+    /// cell keeps its declared type from either phase: a `DECIMAL` or `UUID`
+    /// cell a join, aggregate or gather reads matches the same value read
+    /// from a native stored row, and a `TIMESTAMP` / `TIMESTAMPTZ` cell stays
+    /// a typed instant. The public boundary renders them.
     pub(in crate::data::executor) fn execute_columnar_scan(
         &mut self,
         task: &ExecutionTask,
@@ -127,7 +129,7 @@ impl CoreLoop {
             Some(e) => e,
             None => {
                 // Empty result for missing collection.
-                return match response_codec::encode_value_vec(&[]) {
+                return match response_codec::encode_native_rows(&[]) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
                 };
@@ -371,7 +373,7 @@ impl CoreLoop {
             .map(|(_, _, obj)| obj)
             .collect();
 
-        let payload = match response_codec::encode_value_vec(&results) {
+        let payload = match response_codec::encode_native_rows(&results) {
             Ok(payload) => payload,
             Err(e) => {
                 return self.response_error(task, ErrorCode::from(e));
@@ -605,7 +607,11 @@ mod tests {
     }
 
     fn decode_rows(payload: &[u8]) -> Vec<Value> {
-        match nodedb_types::value_from_msgpack(payload).expect("decode scan payload") {
+        let rows = crate::data::executor::response_codec::decode_row_payload_value(
+            payload,
+            crate::data::executor::response_codec::RowContext::Flat,
+        );
+        match rows.expect("decode scan payload") {
             Value::Array(rows) => rows,
             other => panic!("scan payload must be an array of rows: {other:?}"),
         }

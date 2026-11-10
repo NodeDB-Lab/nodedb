@@ -2,8 +2,6 @@
 
 //! Conversions between `Value` and `serde_json::Value`.
 
-use std::str::FromStr;
-
 use super::core::Value;
 
 impl From<Value> for serde_json::Value {
@@ -31,18 +29,21 @@ impl From<Value> for serde_json::Value {
                 serde_json::Value::String(dt.to_string())
             }
             Value::Duration(d) => serde_json::Value::String(d.to_string()),
-            Value::Decimal(d) => {
-                // Represent as a JSON Number so clients see a numeric type,
-                // not a quoted string. `from_str` handles the decimal notation
-                // produced by rust_decimal's `to_string`. An integer past the
-                // 64-bit range parses to a rounded float, so it keeps its
-                // exact digits as a string.
-                let s = d.to_string();
-                match serde_json::Number::from_str(&s) {
-                    Ok(n) if !(d.scale() == 0 && n.is_f64()) => serde_json::Value::Number(n),
-                    _ => serde_json::Value::String(s),
-                }
-            }
+            // THE JSON rule for a DECIMAL, on every JSON output path: a JSON
+            // string holding its exact digits and scale (`"1.50"`). Never a
+            // JSON number: serde_json holds a number as an f64, which loses
+            // scale and precision. A plain-stored DECIMAL is the same text,
+            // so plain and native rows render alike.
+            //
+            // The one exception is not a SQL DECIMAL: an unsigned integer
+            // above `i64::MAX` that `Value::from_u64` carries as a scale-0
+            // decimal. It is a `u64`, which a JSON number holds exactly, and
+            // the plain writer stores it as a `uint64`, which renders as that
+            // same number.
+            Value::Decimal(d) => match Value::decimal_as_wide_u64(&d) {
+                Some(wide) => serde_json::Value::Number(wide.into()),
+                None => serde_json::Value::String(d.to_string()),
+            },
             Value::Geometry(g) => serde_json::to_value(g).unwrap_or(serde_json::Value::Null),
             Value::Range { .. } | Value::Record { .. } => serde_json::Value::Null,
             Value::Vector(v) => {
@@ -130,12 +131,22 @@ mod tests {
         assert_eq!(max, serde_json::json!(u64::MAX));
     }
 
+    /// A DECIMAL renders as a JSON string of its exact digits and scale,
+    /// never a JSON number that an f64 would round.
     #[test]
-    fn decimal_to_json_is_number_not_string() {
-        let d = rust_decimal::Decimal::new(12345, 2); // 123.45
-        let json = serde_json::Value::from(Value::Decimal(d));
-        assert!(json.is_number(), "expected JSON Number, got {json:?}");
-        assert_eq!(json.to_string(), "123.45");
+    fn decimal_to_json_is_its_exact_text() {
+        for (decimal, text) in [
+            (rust_decimal::Decimal::new(12345, 2), "123.45"),
+            (rust_decimal::Decimal::new(150, 2), "1.50"),
+            (
+                "12345678901234567.89".parse().unwrap(),
+                "12345678901234567.89",
+            ),
+            (rust_decimal::Decimal::new(5, 0), "5"),
+        ] {
+            let json = serde_json::Value::from(Value::Decimal(decimal));
+            assert_eq!(json, serde_json::Value::String(text.into()));
+        }
     }
 
     // ── Documented-lossy JSON boundary conversions ────────────────────────

@@ -4,9 +4,7 @@
 
 use nodedb_types::timeseries::{SeriesId, SeriesKey, SymbolDictionary};
 
-use super::super::types::{
-    ColumnData, ColumnType, ColumnarDrainResult, ColumnarFlushView, max_system_ts_of,
-};
+use super::super::types::{ColumnData, ColumnarDrainResult, ColumnarFlushView, max_system_ts_of};
 use super::table::ColumnarMemtable;
 
 impl ColumnarMemtable {
@@ -42,13 +40,7 @@ impl ColumnarMemtable {
             // DictEncoded columns are drained by swapping in a fresh Symbol
             // placeholder. The flusher converts Symbol → DictEncoded during
             // segment encoding once it has enough cardinality data.
-            let col_type = match col {
-                ColumnData::Timestamp(_) => *schema_type,
-                ColumnData::Float64(_) => ColumnType::Float64,
-                ColumnData::Int64(_) => ColumnType::Int64,
-                ColumnData::Symbol(_) | ColumnData::DictEncoded { .. } => *schema_type,
-            };
-            let mut empty = ColumnData::new(col_type);
+            let mut empty = ColumnData::new(*schema_type);
             std::mem::swap(col, &mut empty);
             drained_columns.push(empty);
         }
@@ -96,15 +88,7 @@ impl ColumnarMemtable {
         let n_usize = n as usize;
         let ts_idx = self.schema.timestamp_idx;
         for col in &mut self.columns {
-            match col {
-                ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.truncate(n_usize),
-                ColumnData::Float64(v) => v.truncate(n_usize),
-                ColumnData::Symbol(v) => v.truncate(n_usize),
-                ColumnData::DictEncoded { ids, valid, .. } => {
-                    ids.truncate(n_usize);
-                    valid.truncate(n_usize);
-                }
-            }
+            col.truncate_rows(n_usize);
         }
         self.row_count = n;
         // Recompute ts range from surviving timestamps.
@@ -119,17 +103,7 @@ impl ColumnarMemtable {
         self.memory_bytes = self
             .columns
             .iter()
-            .map(|c| match c {
-                ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.capacity() * 8,
-                ColumnData::Float64(v) => v.capacity() * 8,
-                ColumnData::Symbol(v) => v.capacity() * 4,
-                ColumnData::DictEncoded {
-                    ids,
-                    valid,
-                    dictionary,
-                    ..
-                } => ids.capacity() * 4 + valid.capacity() + dictionary.len() * 32,
-            })
+            .map(ColumnData::memory_bytes)
             .sum::<usize>()
             + super::table::dictionary_string_bytes(&self.symbol_dicts);
         self.recount_series(known);
@@ -149,21 +123,7 @@ impl ColumnarMemtable {
         }
         let n_usize = n as usize;
         for col in &mut self.columns {
-            match col {
-                ColumnData::Timestamp(v) | ColumnData::Int64(v) => {
-                    *v = v.split_off(n_usize.min(v.len()));
-                }
-                ColumnData::Float64(v) => {
-                    *v = v.split_off(n_usize.min(v.len()));
-                }
-                ColumnData::Symbol(v) => {
-                    *v = v.split_off(n_usize.min(v.len()));
-                }
-                ColumnData::DictEncoded { ids, valid, .. } => {
-                    *ids = ids.split_off(n_usize.min(ids.len()));
-                    *valid = valid.split_off(n_usize.min(valid.len()));
-                }
-            }
+            col.drop_front_rows(n_usize);
         }
         self.row_count -= n;
         let ts_idx = self.schema.timestamp_idx;
@@ -174,17 +134,7 @@ impl ColumnarMemtable {
         self.memory_bytes = self
             .columns
             .iter()
-            .map(|c| match c {
-                ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.capacity() * 8,
-                ColumnData::Float64(v) => v.capacity() * 8,
-                ColumnData::Symbol(v) => v.capacity() * 4,
-                ColumnData::DictEncoded {
-                    ids,
-                    valid,
-                    dictionary,
-                    ..
-                } => ids.capacity() * 4 + valid.capacity() + dictionary.len() * 32,
-            })
+            .map(ColumnData::memory_bytes)
             .sum::<usize>()
             + super::table::dictionary_string_bytes(&self.symbol_dicts);
         self.recount_series(known);

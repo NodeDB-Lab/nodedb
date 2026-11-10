@@ -56,7 +56,11 @@ impl CoreLoop {
                 // Every aggregate path finalizes, filters, sorts, and cuts
                 // under the keys' row names. The aliases apply to the final
                 // rows, so a derived table or an outer query reads them.
-                let renames = crate::util::row_rename::group_key_renames(group_by, group_key_aliases);
+                let renames = crate::util::row_rename::group_key_renames(
+                    group_by,
+                    group_key_aliases,
+                    aggregates,
+                );
                 if renames.is_empty() || response.status != crate::bridge::envelope::Status::Ok {
                     return response;
                 }

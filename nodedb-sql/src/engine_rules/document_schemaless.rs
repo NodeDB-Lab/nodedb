@@ -11,6 +11,7 @@ pub struct SchemalessRules;
 impl EngineRules for SchemalessRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Insert(InsertPlan {
+            returning: None,
             collection: p.collection,
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -24,6 +25,7 @@ impl EngineRules for SchemalessRules {
 
     fn plan_insert_select(&self, p: InsertSelectParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::InsertSelect {
+            returning: None,
             target: p.collection,
             source: p.source,
             column_map: p.column_map,
@@ -33,6 +35,7 @@ impl EngineRules for SchemalessRules {
 
     fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Upsert(UpsertPlan {
+            returning: None,
             collection: p.collection,
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -104,6 +107,7 @@ impl EngineRules for SchemalessRules {
 
     fn plan_delete(&self, p: DeleteParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Delete {
+            returning: None,
             collection: p.collection,
             engine: EngineType::DocumentSchemaless,
             filters: p.filters,

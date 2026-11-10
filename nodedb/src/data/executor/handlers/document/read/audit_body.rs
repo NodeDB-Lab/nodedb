@@ -25,17 +25,12 @@ use crate::data::executor::strict_format;
 pub(super) fn strict_audit_body(body: &[u8], schema: &StrictSchema) -> crate::Result<Vec<u8>> {
     use nodedb_types::Value;
 
-    let msgpack = strict_format::binary_tuple_to_msgpack(body, schema).ok_or_else(|| {
+    let value = strict_format::binary_tuple_to_value(body, schema).ok_or_else(|| {
         crate::Error::Serialization {
             format: "binary-tuple".into(),
             detail: "decode strict document body for audit-log scan".into(),
         }
     })?;
-    let value =
-        nodedb_types::value_from_msgpack(&msgpack).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("decode strict document body for audit-log scan: {e}"),
-        })?;
     let mut obj = match value {
         Value::Object(map) => map,
         other => {
@@ -48,7 +43,7 @@ pub(super) fn strict_audit_body(body: &[u8], schema: &StrictSchema) -> crate::Re
     for reserved in BITEMPORAL_RESERVED_COLUMNS {
         obj.remove(reserved);
     }
-    nodedb_types::value_to_msgpack(&Value::Object(obj)).map_err(|e| crate::Error::Serialization {
+    zerompk::to_msgpack_vec(&Value::Object(obj)).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("re-encode stripped strict audit-log body: {e}"),
     })
@@ -61,8 +56,8 @@ pub(super) fn strict_audit_body(body: &[u8], schema: &StrictSchema) -> crate::Re
 /// `_ts_system` renders its millisecond (`ordinal_to_ms`), the unit
 /// `AS OF SYSTEM TIME` takes. Valid-time is surfaced raw — `i64::MIN` /
 /// `i64::MAX` sentinels mean "unbounded" (matching how columnar/timeseries
-/// emit their real Int64 temporal columns). Non-object bodies are wrapped in a
-/// fresh object carrying only the temporal columns. The triple is uniform
+/// emit their real Int64 temporal columns). Non-object bodies return a
+/// serialization error. The triple is uniform
 /// across both Document engines and columnar/timeseries.
 pub(super) fn inject_temporal_columns(
     body: &[u8],
@@ -71,14 +66,23 @@ pub(super) fn inject_temporal_columns(
     valid_until_ms: i64,
 ) -> crate::Result<Vec<u8>> {
     use nodedb_types::Value;
-    let value =
-        nodedb_types::value_from_msgpack(body).map_err(|e| crate::Error::Serialization {
+    let value = crate::data::executor::doc_format::decode_document_value(body).map_err(|e| {
+        crate::Error::Serialization {
             format: "msgpack".into(),
             detail: format!("decode document body for audit-log scan: {e}"),
-        })?;
+        }
+    })?;
     let mut obj = match value {
         Value::Object(map) => map,
-        _ => std::collections::HashMap::new(),
+        other => {
+            return Err(crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!(
+                    "document body for audit-log scan is not an object: {}",
+                    other.type_name()
+                ),
+            });
+        }
     };
     obj.insert(
         TS_SYSTEM.to_string(),
@@ -86,7 +90,7 @@ pub(super) fn inject_temporal_columns(
     );
     obj.insert(TS_VALID_FROM.to_string(), Value::Integer(valid_from_ms));
     obj.insert(TS_VALID_UNTIL.to_string(), Value::Integer(valid_until_ms));
-    nodedb_types::value_to_msgpack(&Value::Object(obj)).map_err(|e| crate::Error::Serialization {
+    zerompk::to_msgpack_vec(&Value::Object(obj)).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("re-encode document body with audit temporal columns: {e}"),
     })
@@ -106,7 +110,7 @@ mod tests {
     }
 
     fn decode(bytes: &[u8]) -> std::collections::HashMap<String, Value> {
-        match nodedb_types::value_from_msgpack(bytes).expect("decode") {
+        match crate::data::executor::doc_format::decode_document_value(bytes).expect("decode") {
             Value::Object(m) => m,
             other => panic!("expected object, got {other:?}"),
         }
@@ -159,17 +163,40 @@ mod tests {
     }
 
     #[test]
-    fn inject_wraps_non_object_body_in_fresh_object() {
+    fn inject_rejects_non_document_body() {
         let body = nodedb_types::value_to_msgpack(&Value::Integer(42)).unwrap();
-        let out = inject_temporal_columns(&body, 7 * nodedb_types::NANOS_PER_MS, 8, 9).unwrap();
-        let m = decode(&out);
-        assert_eq!(m.get(TS_SYSTEM), Some(&Value::Integer(7)));
-        assert_eq!(m.get(TS_VALID_FROM), Some(&Value::Integer(8)));
-        assert_eq!(m.get(TS_VALID_UNTIL), Some(&Value::Integer(9)));
-        assert_eq!(
-            m.len(),
-            3,
-            "non-object body yields a fresh object carrying only the temporal columns"
+        let stored = body.clone();
+        let error = inject_temporal_columns(&body, 7, 8, 9).expect_err("non-document body");
+        assert!(error.to_string().contains("audit-log scan"));
+        assert_eq!(body, stored);
+    }
+
+    #[test]
+    fn native_audit_body_retains_nested_values() {
+        let fields = Value::Object(
+            [
+                (
+                    "decimal".into(),
+                    Value::Decimal(rust_decimal::Decimal::new(123456789, 8)),
+                ),
+                (
+                    "uuid".into(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                ("bytes".into(), Value::Bytes(vec![0, 255])),
+            ]
+            .into_iter()
+            .collect(),
         );
+        let body = zerompk::to_msgpack_vec(&Value::Object(
+            [("nested".into(), Value::Array(vec![fields.clone()]))]
+                .into_iter()
+                .collect(),
+        ))
+        .expect("encode native body");
+        let output = inject_temporal_columns(&body, 7, 8, 9).expect("audit body");
+        let decoded = decode(&output);
+        assert_eq!(decoded.get("nested"), Some(&Value::Array(vec![fields])));
+        assert_eq!(decoded.get(TS_VALID_FROM), Some(&Value::Integer(8)));
     }
 }

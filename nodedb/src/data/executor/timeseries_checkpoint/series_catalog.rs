@@ -92,9 +92,11 @@ pub(in crate::data::executor) fn read_ts_series_catalog(
     dir: &Path,
 ) -> crate::Result<Option<SeriesCatalog>> {
     let path = dir.join(TS_SERIES_CATALOG_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => return Err(catalog_error(&path, "read", &e)),
     };
     decode_ts_series_catalog(&bytes, &path).map(Some)

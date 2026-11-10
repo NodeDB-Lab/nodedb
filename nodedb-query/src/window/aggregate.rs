@@ -143,7 +143,7 @@ fn aggregate_slice(
                     .count() as u64,
             ),
         },
-        "avg" => frame_sum(arg_values, start_idx, end_idx).avg()?,
+        "avg" => frame_sum(arg_values, start_idx, end_idx).avg_value()?,
         "min" | "max" => {
             let want_max = spec.func_name == "max";
             let Some(values) = arg_values else {
@@ -353,7 +353,11 @@ mod tests {
         let mut rows = keyed(&vals);
         apply_aggregate_window(&mut rows, &indices, &make_spec("avg", "v", whole()), &crs())
             .unwrap();
-        assert_eq!(res(&rows[0]), Value::Float(9_007_199_254_740_992.0));
+        // PostgreSQL: avg over these bigints is 9007199254740992.5000.
+        assert_eq!(
+            res(&rows[0]),
+            Value::Decimal(rust_decimal::Decimal::from_str_exact("9007199254740992.5000").unwrap())
+        );
     }
 
     #[test]

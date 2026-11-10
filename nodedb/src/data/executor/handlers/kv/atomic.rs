@@ -532,7 +532,7 @@ mod tests {
 
     /// The `{key, value}` row a KV write event carries for `stored`.
     fn kv_row(key: &str, stored: &[u8]) -> Vec<u8> {
-        nodedb_query::msgpack_scan::kv_row_msgpack(key, stored)
+        nodedb_query::msgpack_scan::kv_row_msgpack(key, stored).expect("row")
     }
 
     fn columns(bytes: &[u8]) -> HashMap<String, Value> {

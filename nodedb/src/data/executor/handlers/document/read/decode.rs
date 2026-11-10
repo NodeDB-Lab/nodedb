@@ -56,12 +56,14 @@ pub(in crate::data::executor) fn decode_scanned_row(
                 // A row written before the collection became strict is still a
                 // schemaless MessagePack body; its own decode error is the one
                 // worth reporting when that reading fails too.
-                None => doc_format::decode_document(raw),
+                None => doc_format::render_document_json(raw),
             }
         }
+        // The image is plain or native. A native image renders as its plain
+        // form reads, so both storage forms of one row render alike.
         SparseBodyFormatRef::Document | SparseBodyFormatRef::VectorSidecar => match normalized {
-            Some(image) => doc_format::decode_document(image),
-            None => doc_format::decode_document(&sparse_body_to_msgpack(raw, format)),
+            Some(image) => doc_format::render_document_json(image),
+            None => doc_format::render_document_json(&sparse_body_to_msgpack(raw, format)?),
         },
     }
 }
@@ -176,7 +178,8 @@ mod tests {
         let image = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
             &tagged,
             SparseBodyFormatRef::VectorSidecar,
-        );
+        )
+        .expect("normalize sidecar");
 
         assert_eq!(
             decode_scanned_row(&tagged, Some(&*image), SparseBodyFormatRef::VectorSidecar)
@@ -236,12 +239,80 @@ mod tests {
         let image = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
             &tuple,
             SparseBodyFormatRef::Strict(&schema),
-        );
+        )
+        .expect("normalize strict tuple");
 
         assert_eq!(
             decode_scanned_row(&tuple, Some(&*image), SparseBodyFormatRef::Strict(&schema))
                 .expect("strict tuple must decode"),
             serde_json::json!({"id": "u1", "name": "Ada"}),
+        );
+    }
+
+    /// A native image renders as `value_to_wire_json` renders its typed
+    /// value: Decimal as its exact text, UUID and instant as their text, a
+    /// nested object as an object, and a plain array field as an array. A
+    /// plain image renders unchanged. A malformed native image is an error.
+    #[test]
+    fn a_native_image_renders_as_its_typed_value() {
+        let row = Value::Object(
+            [
+                ("id".to_owned(), Value::String("r1".into())),
+                (
+                    "price".to_owned(),
+                    Value::Decimal("123.45".parse().unwrap()),
+                ),
+                (
+                    "uid".to_owned(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                (
+                    "seen".to_owned(),
+                    Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                        1_583_402_400_000_000,
+                    )),
+                ),
+                (
+                    "meta".to_owned(),
+                    Value::Object([("k".to_owned(), Value::Integer(1))].into()),
+                ),
+                (
+                    "tags".to_owned(),
+                    Value::Array(vec![Value::Integer(7), Value::String("x".into())]),
+                ),
+            ]
+            .into(),
+        );
+        let native = zerompk::to_msgpack_vec(&row).expect("encode native");
+        let plain = nodedb_types::value_to_msgpack(&row).expect("encode plain");
+
+        let rendered = decode_scanned_row(&native, Some(&native), SparseBodyFormatRef::Document)
+            .expect("native image renders");
+        assert_eq!(rendered, crate::util::wire_json::value_to_wire_json(&row));
+        assert_eq!(
+            decode_scanned_document(&native, SparseBodyFormatRef::Document)
+                .expect("native body renders"),
+            rendered
+        );
+        assert_eq!(rendered["price"], "123.45");
+        assert_eq!(rendered["uid"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(rendered["seen"], "2020-03-05T10:00:00.000000Z");
+        assert_eq!(rendered["meta"], serde_json::json!({"k": 1}));
+        assert_eq!(rendered["tags"], serde_json::json!([7, "x"]));
+
+        let plain_rendered =
+            decode_scanned_row(&plain, Some(&plain), SparseBodyFormatRef::Document)
+                .expect("plain image renders");
+        assert_eq!(
+            plain_rendered,
+            nodedb_types::json_from_msgpack(&plain).expect("plain json")
+        );
+        assert_eq!(plain_rendered["price"], "123.45");
+
+        let malformed = [0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
+        assert!(
+            decode_scanned_row(&malformed, Some(&malformed), SparseBodyFormatRef::Document)
+                .is_err()
         );
     }
 }

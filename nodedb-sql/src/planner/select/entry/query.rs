@@ -190,6 +190,21 @@ mod tests {
         assert!(matches!(*left, SqlPlan::Scan { .. }));
     }
 
+    /// `NOT IN (subquery)` plans the null-aware anti join, so the executor
+    /// applies SQL's NULL rules. `NOT EXISTS` keeps the plain anti join.
+    #[test]
+    fn not_in_subquery_plans_a_null_aware_anti_join() {
+        let plan = plan_select_sql(
+            "SELECT category FROM products WHERE category NOT IN (SELECT category FROM products WHERE qty > 100)",
+        );
+        let SqlPlan::Join { join_type, on, .. } = plan else {
+            panic!("expected anti join");
+        };
+        assert_eq!(join_type, JoinType::AntiNullAware);
+        assert_eq!(join_type.as_str(), "anti_null_aware");
+        assert_eq!(on, vec![("category".into(), "category".into())]);
+    }
+
     #[test]
     fn scalar_subquery_defers_projection_until_after_join_filter() {
         let plan = plan_select_sql(

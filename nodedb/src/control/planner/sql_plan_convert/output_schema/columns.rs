@@ -164,11 +164,13 @@ pub(super) fn column_types_for<C: SqlCatalog + ?Sized>(
 /// the projection aliased the key (`SELECT k AS label ... GROUP BY k` yields
 /// output column `label`, matching Postgres), otherwise the key's own name.
 ///
-/// The aggregate renames an aliased key to its alias in every result row, so
-/// an aliased key reads its alias. An unaliased key reads its row name: the
-/// raw grouped column name, qualified when the key is, or for a computed key
-/// the shared index-based `computed_group_key_name` (`group_0`), the exact
-/// name the aggregate spec emits the evaluated value under.
+/// The aggregate renames an aliased key to its alias in every result row
+/// unless another cell of the row ends under that name, so an aliased key
+/// reads `final_name`, the key the rename leaves it under. An unaliased key
+/// reads its row name: the raw grouped column name, qualified when the key
+/// is, or for a computed key the shared index-based `computed_group_key_name`
+/// (`group_0`), the exact name the aggregate spec emits the evaluated value
+/// under.
 ///
 /// The output type is the grouped column's catalog type when the key is a bare
 /// column (resolved from `types`, default `Text`); a computed-expression key is
@@ -177,6 +179,7 @@ pub(super) fn group_by_key_column(
     expr: &SqlExpr,
     index: usize,
     alias: Option<&str>,
+    final_name: &str,
     types: &HashMap<String, DdlColType>,
 ) -> OutputColumn {
     let (row_name, display_name, ty) = match expr {
@@ -200,7 +203,7 @@ pub(super) fn group_by_key_column(
     match alias {
         Some(alias) => OutputColumn {
             display_name: alias.to_string(),
-            lookup_key: alias.to_string(),
+            lookup_key: final_name.to_string(),
             ty,
         },
         None => OutputColumn {

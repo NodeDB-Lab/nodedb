@@ -36,16 +36,15 @@ impl AggAccum {
                 }
             }
             AggAccum::SumAvgDistinct { seen } => {
-                // Dedupe by raw msgpack bytes of the extracted value so
+                // Dedupe by the tagged identity of the extracted value so
                 // SUM(DISTINCT col) / AVG(DISTINCT col) only credit each
-                // distinct value once. NULL bytes (msgpack `0xc0`) are
-                // ignored — they cannot meaningfully participate in a
-                // numeric aggregate. The contributed number is stored
+                // distinct value once. `extract_bytes` yields no identity
+                // for NULL, which cannot participate in a numeric
+                // aggregate. The contributed number is stored
                 // alongside the key so finalize can derive an
                 // order-independent sum (which also makes the state
                 // mergeable across spilled runs).
                 if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && bytes != [0xc0u8]
                     && let Entry::Vacant(slot) = seen.entry(bytes)
                     && let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref(), crs)?
                 {
@@ -55,9 +54,7 @@ impl AggAccum {
             AggAccum::Min { best } => feed_extremum(best, agg, doc, false, crs)?,
             AggAccum::Max { best } => feed_extremum(best, agg, doc, true, crs)?,
             AggAccum::CountDistinct { seen } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && bytes != [0xc0u8]
-                {
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     seen.insert(bytes);
                 }
             }
@@ -67,9 +64,7 @@ impl AggAccum {
                 }
             }
             AggAccum::Hll { hll } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && bytes != [0xc0u8]
-                {
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     hll.add(fnv1a(&bytes));
                 }
             }
@@ -79,9 +74,7 @@ impl AggAccum {
                 }
             }
             AggAccum::TopK { ss, .. } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && bytes != [0xc0u8]
-                {
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     ss.add(fnv1a(&bytes));
                 }
             }
@@ -94,7 +87,6 @@ impl AggAccum {
             }
             AggAccum::ArrayAggDistinct { seen, values } => {
                 if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && bytes != [0xc0u8]
                     && !seen.contains(&bytes)
                     && let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
                 {

@@ -48,7 +48,9 @@ impl CsrIndex {
     }
 
     /// Add a stored edge record scoped to `collection`. Its weight is the
-    /// `weight` key of the msgpack `properties`, `1.0` when absent.
+    /// `weight` of the stored property object (see
+    /// [`crate::csr::weights::extract_weight_from_properties`]), `1.0` when
+    /// absent.
     pub fn insert_record_edge(
         &mut self,
         src: &str,

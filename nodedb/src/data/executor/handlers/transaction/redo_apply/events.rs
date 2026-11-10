@@ -188,16 +188,24 @@ impl CoreLoop {
             .filter(|write| write.emits_event)
             .map(|write| {
                 let id = write.identity.as_str();
-                let new_value = write.new_body.as_deref().map(|body| {
-                    self.body_event_image(database_id, tid, &write.collection, id, body)
-                });
-                // A stored strict row that does not decode has no image: the
-                // event names the fault instead.
-                let old_image = write.old_value.as_deref().map(|stored| {
-                    self.stored_event_image(database_id, tid, &write.collection, id, stored)
-                });
-                let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(_))));
-                let old_value = old_image.and_then(Result::ok);
+                let (new_value, old_value, image_fault, op) = match write.event {
+                    Some(event) => {
+                        let op = if event.old_value.is_some() {
+                            WriteOp::Update
+                        } else {
+                            WriteOp::Insert
+                        };
+                        (Some(event.new_value), event.old_value, None, op)
+                    }
+                    None => {
+                        // A deleted strict row that does not decode names its image fault.
+                        let old_image = write.old_value.as_deref().map(|stored| {
+                            self.stored_event_image(database_id, tid, &write.collection, id, stored)
+                        });
+                        let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(_))));
+                        (None, old_image.and_then(Result::ok), image_fault, write.op)
+                    }
+                };
                 let source =
                     committed_source(rows, record_source, document_source, &write.collection, id);
                 DeferredWrite {
@@ -206,7 +214,7 @@ impl CoreLoop {
                     image_fault,
                     source,
                     collection: write.collection,
-                    op: write.op,
+                    op,
                     identity: write.identity,
                 }
             })

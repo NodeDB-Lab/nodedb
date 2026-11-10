@@ -74,7 +74,11 @@ pub(super) async fn execute_facet_counts_sql(
             )))
         })?;
 
-    Ok(vec![multirow_payload_to_response(&resp.payload)?.response])
+    Ok(vec![multirow_payload_to_response(
+        &resp.payload,
+        // Facet counts are flat rows.
+        crate::data::executor::response_codec::RowContext::Flat,
+    )?])
 }
 
 /// Execute `SELECT SEARCH_WITH_FACETS(query => '...', facets => [...])`.
@@ -142,15 +146,33 @@ pub(super) async fn execute_search_with_facets_sql(
     // Step 3: Assemble combined response.
     let results_json: Vec<serde_json::Value> = search_results
         .iter()
-        .filter_map(|s| sonic_rs::from_str(s).ok())
-        .collect();
+        .map(|s| {
+            sonic_rs::from_str(s).map_err(|e| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    nodedb_types::error::sqlstate::INTERNAL_ERROR.to_owned(),
+                    format!("search results do not decode as JSON: {e}"),
+                )))
+            })
+        })
+        .collect::<PgWireResult<_>>()?;
 
     let facets_json: serde_json::Value = if facet_resp.payload.is_empty() {
         serde_json::json!({})
     } else {
-        let text =
-            crate::data::executor::response_codec::decode_payload_to_json(&facet_resp.payload);
-        sonic_rs::from_str(&text).unwrap_or(serde_json::json!({}))
+        // Facet counts are flat value/count rows, never document bodies.
+        let text = crate::data::executor::response_codec::decode_row_payload_to_json(
+            &facet_resp.payload,
+            crate::data::executor::response_codec::RowContext::Flat,
+        )
+        .map_err(|e| super::super::types::error_to_pg(&e))?;
+        sonic_rs::from_str(&text).map_err(|e| {
+            PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                nodedb_types::error::sqlstate::INTERNAL_ERROR.to_owned(),
+                format!("facet counts do not decode as JSON: {e}"),
+            )))
+        })?
     };
 
     let combined = serde_json::json!({
@@ -159,7 +181,10 @@ pub(super) async fn execute_search_with_facets_sql(
     });
 
     let payload = sonic_rs::to_vec(&combined).unwrap_or_default();
-    Ok(vec![multirow_payload_to_response(&payload)?.response])
+    Ok(vec![multirow_payload_to_response(
+        &payload,
+        crate::data::executor::response_codec::RowContext::Flat,
+    )?])
 }
 
 // ── Parsing helpers ───────────────────────────────────────────────────

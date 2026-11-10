@@ -15,7 +15,9 @@ use super::super::aggregate::{
 use super::super::expr::convert_sort_keys;
 use super::super::filter::{serialize_filters, serialize_timeseries_filters};
 use super::super::scan_params::ScanParams;
-use super::super::value::{sql_value_to_bytes, sql_value_to_nodedb_value, sql_value_to_string};
+use super::super::value::{
+    sql_value_to_bytes, sql_value_to_index_text, sql_value_to_nodedb_value, sql_value_to_string,
+};
 use crate::control::planner::sql_plan_convert::valid_time_point;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -283,12 +285,12 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
     let physical = PhysicalPlan::Document(DocumentOp::IndexedFetch {
         collection: qualified_collection,
         path: field.into(),
-        value: sql_value_to_string(value),
+        value: sql_value_to_index_text(value),
         also: also
             .iter()
             .map(|probe| nodedb_physical::physical_plan::IndexProbe {
                 path: probe.field.clone(),
-                value: sql_value_to_string(&probe.value),
+                value: sql_value_to_index_text(&probe.value),
             })
             .collect(),
         filters: filter_bytes,

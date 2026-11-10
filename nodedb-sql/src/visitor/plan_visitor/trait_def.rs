@@ -77,6 +77,7 @@ pub trait PlanVisitor {
         ttl_secs: u64,
         intent: KvInsertIntent,
         on_conflict_updates: &[(String, SqlExpr)],
+        returning: Option<&crate::types::ResolvedReturning>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::Upsert`].
@@ -89,6 +90,7 @@ pub trait PlanVisitor {
         source: &SqlPlan,
         column_map: &[(String, SqlExpr)],
         source_columns: &[(String, String)],
+        returning: Option<&crate::types::ResolvedReturning>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::Update`].
@@ -99,7 +101,7 @@ pub trait PlanVisitor {
         assignments: &[(String, SqlExpr)],
         filters: &[Filter],
         target_keys: &[SqlValue],
-        returning: bool,
+        returning: Option<&crate::types::ResolvedReturning>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::UpdateFrom`].
@@ -112,6 +114,7 @@ pub trait PlanVisitor {
         engine: EngineType,
         filters: &[Filter],
         target_keys: &[SqlValue],
+        returning: Option<&crate::types::ResolvedReturning>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::Truncate`].
@@ -143,6 +146,7 @@ pub trait PlanVisitor {
         &mut self,
         collection: &str,
         rows: &[Vec<(String, SqlValue)>],
+        returning: Option<&crate::types::ResolvedReturning>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::VectorSearch`].

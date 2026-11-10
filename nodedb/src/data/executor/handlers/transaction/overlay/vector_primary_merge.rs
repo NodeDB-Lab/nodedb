@@ -18,12 +18,12 @@ use nodedb_types::{StorageKey, Surrogate};
 
 use super::StagedVectorRow;
 use super::merge::merge_staged_rows;
-use super::vector_merge::{VectorMergeParams, payload_atom_matches, reindex_after_removal};
+use super::vector_merge::{VectorMergeParams, reindex_after_removal};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::hybrid_key::HybridFusionKey;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::response_codec::VectorSearchHit;
-use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
+use crate::data::executor::scan_normalize::sparse_row_to_native_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
@@ -59,12 +59,12 @@ fn staged_vector_scan_body(
     match shape {
         SidecarRowShape::Stored => Ok(row.sidecar),
         SidecarRowShape::Normalized => {
-            let (_, normalized) = sparse_row_to_doc(
+            let (_, normalized) = sparse_row_to_native_doc(
                 key,
                 &row.sidecar,
                 SparseBodyFormatRef::VectorSidecar,
                 identity_column,
-            );
+            )?;
             match vector_field {
                 Some(field) => {
                     crate::data::executor::handlers::vector_row_column::with_vector_column(
@@ -158,9 +158,14 @@ impl CoreLoop {
                     drop_hit(hits, &mut seen, &key);
                     continue;
                 }
-                let normalized =
-                    sparse_body_to_msgpack(&row.sidecar, SparseBodyFormatRef::VectorSidecar)
-                        .into_owned();
+                let identity_column =
+                    self.identity_column(database_id.as_u64(), tid.as_u64(), collection);
+                let (_, normalized) = sparse_row_to_native_doc(
+                    &StorageKey::for_surrogate(Surrogate::new(surrogate)),
+                    &row.sidecar,
+                    SparseBodyFormatRef::VectorSidecar,
+                    &identity_column,
+                )?;
                 let passes_bitmap =
                     filter_bitmap.is_none_or(|fb| fb.contains(Surrogate::new(surrogate)));
                 if !passes_bitmap || !sidecar_passes_payload_filters(&normalized, payload_filters)?
@@ -221,14 +226,46 @@ fn sidecar_passes_payload_filters(
     if payload_filters.is_empty() {
         return Ok(true);
     }
-    let doc: serde_json::Value =
-        nodedb_types::json_from_msgpack(normalized).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
+    let doc = nodedb_types::object_msgpack::decode_object(normalized).map_err(|e| {
+        crate::Error::Codec {
             detail: format!("staged vector-primary sidecar decode: {e}"),
-        })?;
-    Ok(payload_filters
-        .iter()
-        .all(|atom| payload_atom_matches(atom, &|name| doc.get(name.to_ascii_lowercase()))))
+        }
+    })?;
+    for atom in payload_filters {
+        use nodedb_types::PayloadAtom;
+        let matches = match atom {
+            PayloadAtom::Eq(name, expected) => doc
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|actual| actual.eq_coerced(expected)),
+            PayloadAtom::In(name, expected) => doc
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|actual| expected.iter().any(|expected| actual.eq_coerced(expected))),
+            PayloadAtom::Range {
+                field,
+                low,
+                low_inclusive,
+                high,
+                high_inclusive,
+            } => doc.get(&field.to_ascii_lowercase()).is_some_and(|actual| {
+                low.as_ref().is_none_or(|low| {
+                    nodedb_query::value_ops::numeric_order(actual, low)
+                        .is_some_and(|order| order.is_gt() || (order.is_eq() && *low_inclusive))
+                }) && high.as_ref().is_none_or(|high| {
+                    nodedb_query::value_ops::numeric_order(actual, high)
+                        .is_some_and(|order| order.is_lt() || (order.is_eq() && *high_inclusive))
+                })
+            }),
+            _ => {
+                return Err(crate::Error::Codec {
+                    detail: "unsupported staged vector-primary payload filter".into(),
+                });
+            }
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -245,8 +282,14 @@ mod tests {
     }
 
     fn normalized(owner: &str, score: i64) -> Vec<u8> {
-        sparse_body_to_msgpack(&sidecar(owner, score), SparseBodyFormatRef::VectorSidecar)
-            .into_owned()
+        sparse_row_to_native_doc(
+            &StorageKey::for_surrogate(Surrogate::new(9)),
+            &sidecar(owner, score),
+            SparseBodyFormatRef::VectorSidecar,
+            "id",
+        )
+        .expect("native sidecar")
+        .1
     }
 
     #[test]
@@ -288,12 +331,12 @@ mod tests {
             Some("vec"),
         )
         .expect("decode");
-        let doc: serde_json::Value = nodedb_types::json_from_msgpack(&body).expect("json");
+        let doc = nodedb_types::object_msgpack::decode_object(&body).expect("native object");
         assert_eq!(doc.get("owner").and_then(|v| v.as_str()), Some("carol"));
         assert_eq!(doc.get("id").and_then(|v| v.as_str()), Some("r1"));
         assert_eq!(
             doc.get("vec"),
-            Some(&serde_json::json!([1.0, 0.0])),
+            Some(&Value::Array(vec![Value::Float(1.0), Value::Float(0.0)])),
             "a normalized staged row carries its staged vector"
         );
         assert_eq!(

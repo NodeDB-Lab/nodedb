@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use nodedb_columnar::VersionCut;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::row_shape::sparse_row_to_doc;
+use crate::data::executor::row_shape::sparse_row_to_native_doc;
 use crate::engine::sparse::btree_versioned::VersionedScanParams;
 
 /// The bodies of one spatial read's candidates, read lazily: the sparse
@@ -73,12 +73,11 @@ impl CoreLoop {
         )?;
         let format = self.sparse_body_format(engine_key.0, engine_key.1, collection);
         let identity_column = self.identity_column(database_id, tid, collection);
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|(key, raw)| {
-                sparse_row_to_doc(&key, &raw, format.as_format_ref(), &identity_column)
+                sparse_row_to_native_doc(&key, &raw, format.as_format_ref(), &identity_column)
             })
-            .collect())
+            .collect()
     }
 
     /// The body of candidate `doc_id` the read of `bodies` sees, normalised
@@ -121,7 +120,7 @@ impl CoreLoop {
                 );
                 let identity_column = self.identity_column(database_id, tid, collection);
                 let (_, doc) =
-                    sparse_row_to_doc(&key, &raw, format.as_format_ref(), &identity_column);
+                    sparse_row_to_native_doc(&key, &raw, format.as_format_ref(), &identity_column)?;
                 return Ok(Some(doc));
             }
         }

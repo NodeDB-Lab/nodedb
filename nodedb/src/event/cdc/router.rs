@@ -426,8 +426,9 @@ pub struct BufferStats {
 }
 
 /// Deserialize bytes (MessagePack or JSON) to serde_json::Value.
+/// A native body reads as the plain body of the same values.
 fn deserialize_to_json(bytes: &[u8]) -> Option<serde_json::Value> {
-    nodedb_types::json_from_msgpack(bytes)
+    crate::data::executor::response_codec::decode_body_plain_json(bytes)
         .ok()
         .or_else(|| sonic_rs::from_slice::<serde_json::Value>(bytes).ok())
 }

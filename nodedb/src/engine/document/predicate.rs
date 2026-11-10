@@ -23,7 +23,7 @@ use nodedb_query::expr_parse;
 use nodedb_types::Value;
 
 /// A parsed partial-index predicate, ready for per-row evaluation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexPredicate {
     expr: SqlExpr,
 }

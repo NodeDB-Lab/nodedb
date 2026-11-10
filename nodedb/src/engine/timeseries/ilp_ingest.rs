@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 
 use super::columnar_memtable::{ColumnType, ColumnValue, ColumnarMemtable};
+use super::declared_cell::{DeclaredCellError, declared_cell, field_kind};
 use super::ilp::{FieldValue, IlpLine};
 use nodedb_types::DatabaseId;
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
@@ -133,7 +134,14 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
             first_rejection.get_or_insert(conflict);
             continue;
         }
-        let (ts_ms, values) = line_row(&schema, line, default_timestamp_ms, stamp);
+        let (ts_ms, values) = match line_row(&schema, line, default_timestamp_ms, stamp) {
+            Ok(row) => row,
+            Err(error) => {
+                rejected += 1;
+                first_rejection.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        };
         // A measurement without its database's form names no collection.
         let key = match row_series_key(database_id, line.measurement.as_ref(), &schema, &values) {
             Ok(key) => key,
@@ -209,8 +217,13 @@ pub fn line_type_conflict(
             .map(|(_, column_type)| *column_type)
     };
     for (key, _) in &line.tags {
-        if let Some(column_type @ (ColumnType::Float64 | ColumnType::Int64)) =
-            column_type(key.as_ref())
+        if let Some(
+            column_type @ (ColumnType::Float64
+            | ColumnType::Int64
+            | ColumnType::Decimal(_)
+            | ColumnType::Uuid
+            | ColumnType::Bool),
+        ) = column_type(key.as_ref())
         {
             return Some(format!(
                 "type conflict on '{key}': a tag cannot be stored in a {column_type:?} column"
@@ -231,10 +244,18 @@ pub fn line_type_conflict(
                 "value {u} of '{key}' is out of range for a {column_type:?} column"
             ));
         }
+        // A DECIMAL, UUID or BOOLEAN column reads its field exactly, or
+        // refuses it with the reason.
+        if let Err(error) = declared_cell(key.as_ref(), column_type, value) {
+            return Some(error.to_string());
+        }
         let fits = match column_type {
             ColumnType::Float64 | ColumnType::Int64 => !matches!(value, FieldValue::Str(_)),
             ColumnType::Symbol | ColumnType::Text => matches!(value, FieldValue::Str(_)),
-            ColumnType::Timestamp(_) => true,
+            ColumnType::Timestamp(_)
+            | ColumnType::Decimal(_)
+            | ColumnType::Uuid
+            | ColumnType::Bool => true,
         };
         if !fits {
             return Some(format!(
@@ -245,17 +266,6 @@ pub fn line_type_conflict(
         }
     }
     None
-}
-
-/// The ILP type name of `value`, for a type-conflict reason.
-fn field_kind(value: &FieldValue<'_>) -> &'static str {
-    match value {
-        FieldValue::Float(_) => "float",
-        FieldValue::Int(_) => "integer",
-        FieldValue::UInt(_) => "unsigned integer",
-        FieldValue::Bool(_) => "boolean",
-        FieldValue::Str(_) => "string",
-    }
 }
 
 /// Record a stored row in the last-value cache: its first Float64 value
@@ -286,12 +296,16 @@ pub fn update_last_value(
 
 /// The timestamp and the column values `line` stores under `schema`, in
 /// schema order.
+///
+/// A DECIMAL, UUID or BOOLEAN field that its column does not take is an
+/// error, never a coerced cell. [`line_type_conflict`] refuses such a line
+/// first, so an admitted line always has a row.
 pub fn line_row(
     schema: &super::columnar_memtable::ColumnarSchema,
     line: &IlpLine<'_>,
     default_timestamp_ms: i64,
     stamp: Option<RowStamp>,
-) -> (i64, Vec<ColumnValue>) {
+) -> Result<(i64, Vec<ColumnValue>), DeclaredCellError> {
     let ts_ms = line
         .timestamp_ns
         .map(|ns| ns / 1_000_000) // ns → ms
@@ -342,10 +356,24 @@ pub fn line_row(
                     };
                     values.push(ColumnValue::Int64(val));
                 }
+                ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => {
+                    let field = line
+                        .fields
+                        .iter()
+                        .find(|(key, _)| key.as_ref() == col_name)
+                        .map(|(_, value)| value);
+                    let cell = match field {
+                        Some(value) => {
+                            declared_cell(col_name, *col_type, value)?.unwrap_or(ColumnValue::Null)
+                        }
+                        None => ColumnValue::Null,
+                    };
+                    values.push(cell);
+                }
             }
         }
     }
-    (ts_ms, values)
+    Ok((ts_ms, values))
 }
 
 /// Read a non-designated timestamp column's value from the line's field set.
@@ -535,7 +563,7 @@ mod tests {
             system_ordinal: 7_000_000_123,
             bitemporal: false,
         });
-        let (_, values) = line_row(&schema, &lines[0], 0, stamp);
+        let (_, values) = line_row(&schema, &lines[0], 0, stamp).expect("row");
         assert_eq!(values[sys_idx], ColumnValue::Int64(7_000_000_123));
     }
 
@@ -853,7 +881,7 @@ mod tests {
             .expect("parse line")
             .into_lines();
         let line = parsed.first().expect("one line");
-        let (_, values) = line_row(&schema, line, 0, None);
+        let (_, values) = line_row(&schema, line, 0, None).expect("row");
         assert_eq!(values[1], ColumnValue::Null, "absent tag is NULL");
         assert_eq!(
             values[2],

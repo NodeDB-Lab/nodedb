@@ -153,7 +153,10 @@ fn crdt_upsert(id: &str, surrogate: u32) -> PhysicalPlan {
     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, USERS),
         document_id: id.to_string(),
-        fields_json: r#"{"a":1}"#.to_string(),
+        fields: nodedb_physical::physical_plan::encode_fields_body(
+            &std::collections::HashMap::from([("a".to_string(), nodedb_types::Value::Integer(1))]),
+        )
+        .expect("fields body encodes"),
         surrogate: Surrogate::new(surrogate),
         partial: false,
         verb: CrdtWriteVerb::Insert,
@@ -256,6 +259,7 @@ fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
             v,
             d,
             &WriteGroupRecord {
+                schemas: Vec::new(),
                 group: WriteGroup::announcing(origin.as_u64()),
                 ops: Vec::new(),
                 redo: None,

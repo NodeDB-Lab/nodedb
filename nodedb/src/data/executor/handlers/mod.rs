@@ -68,6 +68,8 @@ pub mod returning_doc;
 pub mod returning_rows;
 pub mod rls_eval;
 pub mod rls_write_gate;
+#[cfg(test)]
+mod rls_write_gate_replication_tests;
 pub mod scan_budget;
 pub mod scoped_rows;
 mod search_cut;
@@ -130,5 +132,6 @@ pub mod vector_upsert;
 pub mod vector_write;
 pub mod verify_hash_chain;
 pub mod write_batch;
+mod write_batch_apply;
 pub mod write_body;
 pub mod write_match_cut;

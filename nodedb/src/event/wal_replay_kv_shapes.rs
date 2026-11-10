@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use nodedb_types::RowIdentity;
 
+use crate::event::image_fault::ImageFault;
 use crate::event::types::{RecordPosition, RowId, WriteEvent, WriteOp};
 use crate::event::wal_replay_scope::ReplayScope;
 
@@ -51,6 +52,19 @@ fn decode_kv_rewrite_event_fields(payload: &[u8]) -> Option<(String, Vec<u8>, Ve
     (disc == "kv_rewrite").then_some((collection, key, value))
 }
 
+/// The `{key, value}` row image of a replayed KV body. `None` when the row
+/// does not encode: the event then names the fault ([`ImageFault`]) and the
+/// delivery pipeline dead-letters it.
+fn replay_row_image(key: &str, value: &[u8]) -> Option<Vec<u8>> {
+    match nodedb_query::msgpack_scan::kv_row_msgpack(key, value) {
+        Ok(row) => Some(row),
+        Err(e) => {
+            tracing::warn!(key, error = %e, "KV replay row image does not encode");
+            None
+        }
+    }
+}
+
 /// The event a KV put-family `Put` payload replays as, or `None` when the
 /// payload is not a bound record of that family. `kv_put` and `kv_rewrite`
 /// name one row, and `kv_batch_put` names its batch.
@@ -74,9 +88,9 @@ pub(super) fn parse_kv_put_family(
         *sequence += 1;
         let key_str = String::from_utf8_lossy(&key);
         // The same `{key, value}` row image the live KV write event carries.
-        let row = nodedb_query::msgpack_scan::kv_row_msgpack(&key_str, &value);
+        let row = replay_row_image(&key_str, &value);
         let (system_time_ms, valid_time_ms) =
-            crate::event::bitemporal_extract::extract_stamps(Some(&row));
+            crate::event::bitemporal_extract::extract_stamps(row.as_deref());
         // AUDIT_DML rows replayed from WAL after a crash carry user_id = None and
         // statement_digest = None; pre-crash audit rows are durable in the catalog.
         // Widening the WAL record format to carry these fields is tracked separately.
@@ -91,14 +105,14 @@ pub(super) fn parse_kv_put_family(
             tenant_id,
             vshard_id,
             source: sources.other,
-            new_value: Some(Arc::from(row.as_slice())),
+            image_fault: ImageFault::of(row.is_none(), false),
+            new_value: row.as_deref().map(Arc::from),
             old_value: None,
             system_time_ms,
             valid_time_ms,
             user_id: None,
             statement_digest: None,
             commit_hlc,
-            image_fault: None,
         });
     }
 
@@ -107,9 +121,9 @@ pub(super) fn parse_kv_put_family(
     if let Some((collection, key, value)) = decode_kv_rewrite_event_fields(payload) {
         *sequence += 1;
         let key_str = String::from_utf8_lossy(&key);
-        let row = nodedb_query::msgpack_scan::kv_row_msgpack(&key_str, &value);
+        let row = replay_row_image(&key_str, &value);
         let (system_time_ms, valid_time_ms) =
-            crate::event::bitemporal_extract::extract_stamps(Some(&row));
+            crate::event::bitemporal_extract::extract_stamps(row.as_deref());
         return Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
@@ -121,14 +135,14 @@ pub(super) fn parse_kv_put_family(
             tenant_id,
             vshard_id,
             source: sources.other,
-            new_value: Some(Arc::from(row.as_slice())),
+            image_fault: ImageFault::of(row.is_none(), false),
+            new_value: row.as_deref().map(Arc::from),
             old_value: None,
             system_time_ms,
             valid_time_ms,
             user_id: None,
             statement_digest: None,
             commit_hlc,
-            image_fault: None,
         });
     }
 

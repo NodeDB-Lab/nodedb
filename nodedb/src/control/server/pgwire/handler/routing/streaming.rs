@@ -10,21 +10,20 @@
 
 use std::sync::Arc;
 
-use pgwire::api::results::{Response, Tag};
+use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use nodedb_physical::physical_plan::{ExchangeMode, ExchangeOp, PhysicalPlan, QueryOp};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
+use crate::bridge::envelope::describe_row_context;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::compose::{self, ShapeOutcome};
+use crate::control::server::exchange::streamable::{StreamableScan, open_streamable_scan};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::shared::session::SessionId;
 
 use super::super::super::types::error_to_sqlstate;
-use super::super::super::types::shape_error_to_pg;
 use super::super::core::NodeDbPgHandler;
-use super::super::plan::{PlanKind, multirow_payload_to_response};
+use super::super::plan::PlanKind;
 use super::super::stream_response;
 use super::result_shaping::ResultShaping;
 
@@ -53,8 +52,9 @@ impl NodeDbPgHandler {
     ///   - `PlanKind::MultiRow` (the streamed shape is one TEXT column),
     ///   - autocommit (not inside a BEGIN..COMMIT block — in-block reads
     ///     participate in snapshot-isolation read tracking on the normal path),
-    ///   - the plan is `Exchange{Gather{as_aggregate:false}}` over a scan for
-    ///     which [`PhysicalPlan::is_streamable_unordered_scan`] holds.
+    ///   - [`open_streamable_scan`] clears the plan: an
+    ///     `Exchange{Gather{as_aggregate:false}}` over a streamable unordered
+    ///     scan that reads through no unmaterialized clone.
     ///
     /// The returned stream is `Send + 'static`: it owns a cloned `Arc<SharedState>`
     /// and the scan plan, borrowing neither `self` nor `task`.
@@ -82,43 +82,14 @@ impl NodeDbPgHandler {
             return Ok(None);
         }
 
-        let PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
-            child,
-            mode: ExchangeMode::Gather {
-                as_aggregate: false,
-            },
-        })) = &task.plan
-        else {
-            return Ok(None);
-        };
-
-        if !child.is_streamable_unordered_scan() {
-            return Ok(None);
-        }
-
-        // Permission was already checked by the caller before this point.
-        let limit = child.streamable_scan_limit();
-        // Clone the child and owned state so the row stream is `Send + 'static`
-        // and does not borrow `self` or `task`.
-        let child_plan = (**child).clone();
-        let mut child_task = task.clone();
-        child_task.plan = child_plan.clone();
-        let tenant_id = child_task.tenant_id;
+        // The row stream owns a cloned `Arc<SharedState>` and the scan plan,
+        // so it is `Send + 'static` and borrows neither `self` nor `task`.
         let state = std::sync::Arc::clone(&self.state);
-        let emitter =
-            crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
-        let checked_child =
-            match crate::control::server::shared::clone_write::intercept_and_authorize(
-                crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
-                    state: &state,
-                    task: child_task,
-                    identity,
-                    tenant_id,
-                    permissions: &state.permissions,
-                    roles: &state.roles,
-                    emitter: &emitter,
-                },
-            )
+        let Some(StreamableScan {
+            checked: checked_child,
+            child_plan,
+            limit,
+        }) = open_streamable_scan(&state, identity, task)
             .await
             .map_err(|e| {
                 let (severity, code, message) = error_to_sqlstate(&e);
@@ -127,55 +98,10 @@ impl NodeDbPgHandler {
                     code.to_owned(),
                     message,
                 )))
-            })? {
-                // The clone-write hook fully handled this write locally — return
-                // its shaped response directly rather than opening a stream. A
-                // streamable child is a plain unordered scan in every eligible
-                // case here (the eligibility gate above only admits `Gather` over
-                // `is_streamable_unordered_scan`), so this is unreachable in
-                // practice; it is still handled because `Response` can represent
-                // it, unlike the native/HTTP streaming siblings.
-                crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(resp) => {
-                    let payload = resp.payload.as_ref();
-                    let response = if payload.is_empty() {
-                        Response::Execution(Tag::new("OK"))
-                    } else {
-                        let redaction = QueryRedaction::for_plan(
-                            task.tenant_id,
-                            task.database_id,
-                            auth,
-                            &child_plan,
-                        );
-                        // The gate above admits no Control-Plane computed
-                        // column, so no session sequence access is needed.
-                        match compose::shape_payload_no_plan(
-                            payload,
-                            plan_kind,
-                            shaping.projection,
-                            Some(redaction.ctx(&state.redaction)),
-                            None,
-                            &crate::control::crs_context::crs_set_for(&state),
-                        )
-                        .map_err(|e| shape_error_to_pg(&e))?
-                        {
-                            ShapeOutcome::Rows(shaped) => {
-                                let (response, _notice) = crate::control::server::pgwire::handler::shape_encode::shaped_query_response(
-                                shaped,
-                                shaping.formats,
-                            );
-                                response
-                            }
-                            ShapeOutcome::Passthrough => {
-                                multirow_payload_to_response(payload)?.response
-                            }
-                        }
-                    };
-                    return Ok(Some(response));
-                }
-                crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(
-                    checked,
-                ) => checked,
-            };
+            })?
+        else {
+            return Ok(None);
+        };
 
         // The gateway routes the scan to its owning vShard (local or remote
         // over the L4 QUIC streaming transport) and merges per-route streams.
@@ -246,6 +172,7 @@ impl NodeDbPgHandler {
                         redaction,
                         state: std::sync::Arc::clone(&state),
                         meter_guard,
+                        row_context: describe_row_context(&child_plan),
                     },
                 )
             }
@@ -254,6 +181,7 @@ impl NodeDbPgHandler {
                     stream,
                     limit,
                     s,
+                    describe_row_context(&child_plan),
                     redaction,
                     &state,
                     meter_guard,
@@ -268,6 +196,7 @@ impl NodeDbPgHandler {
                     redaction,
                     state: std::sync::Arc::clone(&state),
                     meter_guard,
+                    row_context: describe_row_context(&child_plan),
                 },
             ),
         };

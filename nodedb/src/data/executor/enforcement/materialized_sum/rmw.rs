@@ -56,6 +56,8 @@ pub(in crate::data::executor) struct BalanceRmw<'a> {
     /// Join value that resolved to `surrogate`, for the typed not-found error.
     pub join_value: &'a str,
     pub wal_lsn: Option<Lsn>,
+    /// Who checks the actual final UNIQUE claims of derived target rows.
+    pub target_unique: crate::data::executor::enforcement::unique::UniqueJudge,
     /// The TARGET collection's declared `PRIMARY KEY` column, when it has
     /// one. Names the target row in its event and redo entry.
     pub target_declared_primary_key: Option<&'a str>,
@@ -174,7 +176,7 @@ impl CoreLoop {
                 // one the engine maintains.
                 user_roles: &[],
                 enforce: false,
-                unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
+                unique: params.target_unique,
                 wal_lsn: params.wal_lsn,
                 resolved_targets: &[],
                 // A derived write carries no user intent: guards inject, and
@@ -182,7 +184,7 @@ impl CoreLoop {
                 guards: crate::data::executor::enforcement::typeguard::GuardScope::InjectOnly,
             },
         );
-        let outcome = match put {
+        let mut outcome = match put {
             Ok(outcome) => outcome,
             Err(e) => {
                 // A rejection late in `apply_point_put` lands after it has already
@@ -203,11 +205,41 @@ impl CoreLoop {
         // target declares one, else the decimal surrogate.
         let identity =
             RowIdentity::of_stored_row(&body, params.target_declared_primary_key, storage_key);
+        let event = match self.prepare_installed_put_event(
+            &crate::data::executor::core_loop::redo_image::WriteSetRow {
+                database_id: params.database_id,
+                tid: params.tid,
+                collection: params.target_collection,
+                identity: identity.clone(),
+            },
+            &outcome.installed,
+            outcome.prior_value.as_deref(),
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.doc_cache.invalidate(
+                    params.database_id,
+                    params.tid,
+                    params.target_collection,
+                    &storage_key,
+                );
+                let undone = self.undo_memory_effects(
+                    params.database_id,
+                    params.tid,
+                    std::mem::take(&mut outcome.memory_undo),
+                );
+                return Err(
+                    crate::data::executor::handlers::transaction::undo::memory::abort_error(
+                        error, undone,
+                    ),
+                );
+            }
+        };
         Ok(TargetWrite {
             collection: params.target_collection.to_string(),
             surrogate: params.surrogate,
             identity,
-            body,
+            event,
             outcome,
         })
     }

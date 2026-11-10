@@ -14,16 +14,12 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::WriteSetRow;
-use crate::data::executor::handlers::returning_doc;
-use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec, StorageMode, UpdateValue};
 use nodedb_types::Surrogate;
 
-use super::super::update_reindex_secondary::UpdateSecondaryReindex;
 use super::persist::PointUpdatePersist;
 use super::post_image::PointUpdateImage;
 
@@ -127,12 +123,6 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        // Any non-literal assignment forces the slow decode→eval→re-encode path,
-        // because we need the current document to evaluate against.
-        let has_expr = updates
-            .iter()
-            .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
-
         let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let database_id = task.request.database_id.as_u64();
         // The ordinal the apply stamps the row's new version with. A
@@ -165,21 +155,11 @@ impl CoreLoop {
                     return self.response_error(task, e);
                 }
 
-                let has_generated = self.doc_configs.get(&config_key).is_some_and(|c| {
-                    !c.enforcement.generated_columns.is_empty()
-                        && crate::data::executor::handlers::generated::needs_recomputation(
-                            updates,
-                            &c.enforcement.generated_columns,
-                        )
-                });
-
                 let updated_bytes = match self.build_point_update_image(PointUpdateImage {
                     config_key: &config_key,
                     current_bytes: &current_bytes,
                     updates,
                     is_strict,
-                    has_generated,
-                    has_expr,
                     bitemporal,
                     sys_from: sys_from_for_encode,
                     declared_primary_key,
@@ -238,132 +218,53 @@ impl CoreLoop {
                     return self.response_error(task, e);
                 }
 
-                let write_result = self.persist_point_update(PointUpdatePersist {
-                    config_key: &config_key,
+                let image = match self.capture_stored_document(
+                    &config_key,
+                    &updated_bytes,
+                    crate::bridge::envelope::RowVersion::open(sys_from_for_encode),
+                ) {
+                    Ok(image) => image,
+                    Err(error) => return self.response_error(task, error),
+                };
+                let prepared_note =
+                    match self.prepare_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+                        Ok(note) => note,
+                        Err(error) => return self.response_error(task, error),
+                    };
+                let prepared_response = match returning {
+                    Some(spec) => self.prepare_stored_returning_response(
+                        task,
+                        spec,
+                        rls_filters,
+                        strict_schema.as_ref(),
+                        &identity_column,
+                        &[(&document_identity, updated_bytes.as_slice())],
+                    ),
+                    None => Ok(self.response_affected(task, 1)),
+                };
+                let mut response = match prepared_response {
+                    Ok(response) => response,
+                    Err(error) => return self.response_error(task, error),
+                };
+                let (write_set, event) = match self.persist_point_update(PointUpdatePersist {
                     database_id,
                     tid,
                     collection,
-                    storage_key: &storage_key,
-                    current_bytes: &current_bytes,
-                    updated_bytes: &updated_bytes,
-                    sys_from: sys_from_for_encode,
+                    storage_key,
+                    identity: document_identity.clone(),
+                    image,
                     wal_lsn: task.wal_lsn(),
                     resolved_sum_targets,
-                });
-                match write_result {
-                    Ok(target_write_set) => {
-                        // Note the committed row's write against its
-                        // surrogate and collection.
-                        if let Err(e) =
-                            self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
-                        {
-                            return self.response_error(task, e);
-                        }
-                        self.doc_cache.put(
-                            task.request.database_id.as_u64(),
-                            tid,
-                            collection,
-                            &storage_key,
-                            sys_from_for_encode,
-                            &updated_bytes,
-                        );
-
-                        let has_vectors = self.collection_has_vectors(database_id, tid, collection);
-                        if let Err(e) =
-                            self.update_reindex_vector_and_sparse(UpdateSecondaryReindex {
-                                database_id,
-                                tid,
-                                collection,
-                                storage_key,
-                                new_body: &updated_bytes,
-                                is_strict,
-                                has_vectors,
-                                sys_from: sys_from_for_encode,
-                            })
-                        {
-                            return self.response_error(task, e);
-                        }
-
-                        // Emit update event to Event Plane. `current_bytes`
-                        // is the pre-update row already read above; the
-                        // helper derives `WriteOp::Update` from the Some
-                        // prior + Some new pair and handles strict→msgpack
-                        // conversion on both sides.
-                        self.emit_put_event(
-                            task,
-                            tid,
-                            collection,
-                            document_identity.clone(),
-                            &updated_bytes,
-                            Some(&current_bytes),
-                        );
-
-                        // Build the response for both the RETURNING and
-                        // non-RETURNING branches first, then carry the row's
-                        // post-image back in the write-set so the Control Plane
-                        // journals it after apply: the autocommit WAL path mints
-                        // no pre-dispatch record for a PointUpdate.
-                        let mut response = if let Some(spec) = returning {
-                            // Post-update image, decoded in the collection's
-                            // storage mode; the user-visible key fills in under
-                            // the identity column only when the row lacks it.
-                            let doc = match returning_doc::from_stored(
-                                &updated_bytes,
-                                &document_identity,
-                                strict_schema.as_ref(),
-                                &identity_column,
-                            ) {
-                                Ok(doc) => doc,
-                                Err(e) => return self.response_error(task, e),
-                            };
-                            match returning_rows::build_rows_payload(
-                                spec,
-                                rls_filters,
-                                &[doc],
-                                &self.crs_context(),
-                            ) {
-                                Ok(payload) => self.response_with_payload(task, payload),
-                                Err(e) => {
-                                    return self.response_error(
-                                        task,
-                                        ErrorCode::Internal {
-                                            detail: format!("RETURNING encode: {e}"),
-                                        },
-                                    );
-                                }
-                            }
-                        } else {
-                            let mut payload = Vec::with_capacity(16);
-                            nodedb_query::msgpack_scan::write_map_header(&mut payload, 1);
-                            nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", 1);
-                            self.response_with_payload(task, payload)
-                        };
-                        // The row's version landed at the system time the
-                        // update encoded it with, valid for all time.
-                        response.write_set = match self.stored_row_image(
-                            WriteSetRow {
-                                database_id,
-                                tid,
-                                collection,
-                                surrogate: surrogate.as_u32(),
-                                identity: document_identity,
-                            },
-                            &updated_bytes,
-                            sys_from_for_encode,
-                        ) {
-                            Ok(image) => vec![image],
-                            Err(e) => return self.response_error(task, e),
-                        };
-                        // Derived target rows live in a DIFFERENT collection
-                        // than this statement's, so each carries its own
-                        // `Some(collection)` and homes to that collection's
-                        // vShard. Appended rather than replacing: the row's own
-                        // redo above and these are both required.
-                        response.write_set.extend(target_write_set);
-                        response
-                    }
-                    Err(e) => self.response_error(task, e),
-                }
+                }) {
+                    Ok(write_set) => write_set,
+                    Err(error) => return self.response_error(task, error),
+                };
+                response.write_set = write_set;
+                self.publish_surrogate_write(prepared_note, sys_from_for_encode);
+                self.checkpoint_coordinator.mark_dirty("sparse", 1);
+                self.emit_prepared_put_event(task, collection, document_identity, &event);
+                response.watermark_lsn = self.watermark;
+                response
             }
             Ok(None) => self.point_update_matched_nothing(task),
             Err(e) => self.response_error(task, e),
@@ -511,6 +412,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &targets,
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
         .status
     }
@@ -620,6 +522,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &[],
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
         .status
     }
@@ -702,6 +605,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &[],
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert_eq!(inserted.status, Status::Ok);
 

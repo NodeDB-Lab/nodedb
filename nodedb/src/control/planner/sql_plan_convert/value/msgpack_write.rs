@@ -119,10 +119,20 @@ pub(crate) fn write_msgpack_value_with(
             // json_from_msgpack / value_from_msgpack decode it without loss.
             None => write_msgpack_str(buf, &d.to_string()),
         },
-        SqlValue::String(s) => write_msgpack_str(buf, s),
+        // A plain map has no UUID kind: the canonical text. A row that must
+        // keep the UUID typed is written as a native object instead, see
+        // `document_body`.
+        SqlValue::String(s) | SqlValue::Uuid(s) => write_msgpack_str(buf, s),
         SqlValue::Array(arr) => {
             write_msgpack_array_header(buf, arr.len());
             for item in arr {
+                write_msgpack_value_with(buf, item, instants)?;
+            }
+        }
+        SqlValue::Object(fields) => {
+            write_msgpack_map_header(buf, fields.len());
+            for (key, item) in fields {
+                write_msgpack_str(buf, key);
                 write_msgpack_value_with(buf, item, instants)?;
             }
         }
@@ -142,6 +152,10 @@ pub(crate) fn write_msgpack_value_with(
                 })?;
             buf.extend_from_slice(&ext);
         }
+        // A plain map has no duration kind: its text. A row that must keep
+        // the duration typed is written as a native object, see
+        // `document_body`.
+        SqlValue::Duration(d) => write_msgpack_str(buf, &d.to_string()),
     }
     Ok(())
 }

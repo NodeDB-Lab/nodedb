@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Numeric readings and their total order, shared by every comparison path.
+//! Numeric readings and their orders, shared by every comparison path.
 //!
 //! - An integer reads as an exact `i128`. `i128` holds every `i64` and
 //!   every `u64`.
@@ -9,14 +9,21 @@
 //!   `Decimal` too.
 //! - A float reads as an `f64`.
 //! - Integer and decimal pairs compare exactly. An integer against a float
-//!   compares exactly. A decimal against a float compares as `f64`.
-//! - NaN sorts above every number and equals NaN, as in PostgreSQL. The
-//!   order is total, so a sort over it never panics.
+//!   compares exactly.
+//! - [`cmp_numeric`] is the predicate order. A decimal against a float
+//!   compares as the decimal rounded to the nearest `f64`, as PostgreSQL
+//!   casts `numeric` to `float8`, so `float_col = 0.1` matches.
+//! - [`cmp_numeric_total`] is the sort order. A decimal against a float
+//!   compares exactly, so the order is transitive across every mix.
+//! - NaN sorts above every number and equals NaN, as in PostgreSQL.
+//!   [`cmp_numeric_total`] is a total order, so a sort over it never panics.
 
 use std::cmp::Ordering;
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+
+use crate::decimal_float::{cmp_decimal_float_exact, decimal_to_f64};
 
 /// The numeric reading of a value for comparison and summation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -99,7 +106,10 @@ fn cmp_int_decimal(i: i128, d: Decimal) -> Ordering {
     }
 }
 
-/// Total order of two numeric readings. See the module docs for the rule.
+/// Predicate order of two numeric readings. See the module docs for the
+/// rule. A decimal equals the float it rounds to while it can still order
+/// apart from an integer that float equals, so this order is not
+/// transitive across kinds. Sorts use [`cmp_numeric_total`].
 pub fn cmp_numeric(a: Numeric, b: Numeric) -> Ordering {
     match (a, b) {
         (Numeric::Int(x), Numeric::Int(y)) => x.cmp(&y),
@@ -108,9 +118,21 @@ pub fn cmp_numeric(a: Numeric, b: Numeric) -> Ordering {
         (Numeric::Decimal(x), Numeric::Decimal(y)) => x.cmp(&y),
         (Numeric::Int(x), Numeric::Float(y)) => cmp_int_float(x, y),
         (Numeric::Float(x), Numeric::Int(y)) => cmp_int_float(y, x).reverse(),
-        (Numeric::Decimal(x), Numeric::Float(y)) => cmp_f64(x.as_f64(), y),
-        (Numeric::Float(x), Numeric::Decimal(y)) => cmp_f64(x, y.as_f64()),
+        (Numeric::Decimal(x), Numeric::Float(y)) => cmp_f64(decimal_to_f64(x), y),
+        (Numeric::Float(x), Numeric::Decimal(y)) => cmp_f64(x, decimal_to_f64(y)),
         (Numeric::Float(x), Numeric::Float(y)) => cmp_f64(x, y),
+    }
+}
+
+/// Exact total order of two numeric readings, for sorting and extremum
+/// selection. [`cmp_numeric`] with a decimal against a float compared
+/// exactly instead of as `f64`. Every pair orders exactly, so the order is
+/// transitive across integer, decimal and float readings.
+pub fn cmp_numeric_total(a: Numeric, b: Numeric) -> Ordering {
+    match (a, b) {
+        (Numeric::Decimal(x), Numeric::Float(y)) => cmp_decimal_float_exact(x, y),
+        (Numeric::Float(x), Numeric::Decimal(y)) => cmp_decimal_float_exact(y, x).reverse(),
+        _ => cmp_numeric(a, b),
     }
 }
 
@@ -122,7 +144,7 @@ pub fn cmp_numeric(a: Numeric, b: Numeric) -> Ordering {
 pub fn numeric_bucket_bits(n: Numeric) -> u64 {
     let f = match n {
         Numeric::Int(i) => i as f64,
-        Numeric::Decimal(d) => d.as_f64(),
+        Numeric::Decimal(d) => decimal_to_f64(d),
         Numeric::Float(f) => f,
     };
     if f.is_nan() {
@@ -135,8 +157,8 @@ pub fn numeric_bucket_bits(n: Numeric) -> u64 {
 }
 
 /// Equality of two numeric readings for a coerced `=`: [`cmp_numeric`]
-/// orders the pair `Equal`. Exact for every pair, as PostgreSQL float `=`
-/// is, and NaN equals NaN.
+/// orders the pair `Equal`. Exact for integer and decimal pairs, a decimal
+/// against a float compares as its nearest `f64`, and NaN equals NaN.
 pub fn numeric_eq(a: Numeric, b: Numeric) -> bool {
     cmp_numeric(a, b) == Ordering::Equal
 }
@@ -245,5 +267,65 @@ mod tests {
             Numeric::Int(Decimal::MAX.mantissa())
         );
         assert_eq!(decimal_reading(&dec("0.25")), Numeric::Decimal(dec("0.25")));
+    }
+
+    /// The total order keeps a decimal past `2^53` exactly above the float
+    /// below it, so integer, float and decimal readings sort transitively.
+    #[test]
+    fn total_order_compares_decimal_and_float_exactly() {
+        let float = Numeric::Float(9_007_199_254_740_992.0);
+        let int = Numeric::Int(9_007_199_254_740_993);
+        let high = Numeric::Decimal(dec("9007199254740993.0001"));
+        assert_eq!(cmp_numeric_total(float, int), Ordering::Less);
+        assert_eq!(cmp_numeric_total(int, high), Ordering::Less);
+        assert_eq!(cmp_numeric_total(float, high), Ordering::Less);
+        assert_eq!(cmp_numeric_total(high, float), Ordering::Greater);
+        let tenth = Numeric::Float(0.1);
+        assert_eq!(
+            cmp_numeric_total(Numeric::Decimal(dec("0.1")), tenth),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp_numeric_total(Numeric::Decimal(dec("0.5")), Numeric::Float(0.5)),
+            Ordering::Equal
+        );
+    }
+
+    /// The predicate order reads a decimal as its nearest `f64`, correctly
+    /// rounded, so `0.1` text equals the float `0.1` and a decimal just
+    /// above an odd integer past `2^53` rounds up, never down.
+    #[test]
+    fn predicate_order_rounds_decimal_to_nearest_float() {
+        assert_eq!(
+            cmp_numeric(Numeric::Decimal(dec("0.1")), Numeric::Float(0.1)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_numeric(
+                Numeric::Decimal(dec("9007199254740993.0001")),
+                Numeric::Float(9_007_199_254_740_992.0)
+            ),
+            Ordering::Greater
+        );
+    }
+
+    /// Readings `cmp_numeric` orders `Equal` share a bucket across kinds.
+    #[test]
+    fn equal_readings_share_a_bucket() {
+        let pairs = [
+            (Numeric::Decimal(dec("0.1")), Numeric::Float(0.1)),
+            (
+                Numeric::Decimal(dec("4503599627370495.5")),
+                Numeric::Float(4_503_599_627_370_495.5),
+            ),
+            (
+                Numeric::Int(9_007_199_254_740_992),
+                Numeric::Float(9_007_199_254_740_992.0),
+            ),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(cmp_numeric(a, b), Ordering::Equal);
+            assert_eq!(numeric_bucket_bits(a), numeric_bucket_bits(b));
+        }
     }
 }

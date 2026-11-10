@@ -5,8 +5,10 @@
 //! The rule, applied the same way everywhere:
 //!
 //! - An integer input adds exactly into an `i128`. A `u64` above `i64::MAX`
-//!   and an integral `Decimal` are integer inputs.
-//! - A fractional `Decimal` adds exactly into a `Decimal`.
+//!   added through [`ExactSum::add_u64`] is an integer input.
+//! - A `Decimal` is a numeric input. It adds exactly into a `Decimal`,
+//!   keeping its scale. A scale-0 one outside the `i64` range adds into the
+//!   `i128`, which holds it exactly, and still makes the input numeric.
 //! - A float input adds into a Neumaier-compensated `f64`. Once the float
 //!   total is not finite, compensation stops and the total stays as IEEE
 //!   arithmetic gives it: an overflow is `Infinity`, `Infinity` plus
@@ -16,14 +18,17 @@
 //!   keeps a `DECIMAL` column exact.
 //! - SUM with only integer inputs is an `Integer` when the total fits `i64`.
 //!   A larger total is a `Decimal`.
-//! - SUM with a fractional `Decimal` input and no float input is a
-//!   `Decimal`: the exact integer part plus the exact decimal part.
+//! - SUM with a numeric input and no float input is a `Decimal`: the exact
+//!   integer part plus the exact decimal part. It is never an `Integer`,
+//!   whatever the total, as PostgreSQL's `sum(numeric)` is numeric.
 //! - An exact total past the `Decimal` range is
 //!   [`EvalError::NumericOverflow`].
 //! - SUM with at least one float input is a `Float`: the exact parts plus
 //!   the float part.
-//! - AVG is a `Float`. With no float input it divides the exact total by the
-//!   count, with no rounding of the total first.
+//! - AVG with no float input is a `Decimal`, as PostgreSQL's `avg` over
+//!   integers and numerics: the exact total over the count at PostgreSQL's
+//!   division scale ([`crate::numeric_div`]). AVG with a float input is a
+//!   `Float`.
 //! - SUM and AVG over no input are NULL.
 //! - Two partial accumulators merge without loss: the integer parts add
 //!   exactly, so a shard or spill merge gives the single-pass result.
@@ -42,9 +47,9 @@ use crate::numeric_cmp::{Numeric, parse_numeric_str};
 pub struct ExactSum {
     /// Exact total of the integer inputs.
     int: i128,
-    /// Exact total of the fractional `Decimal` inputs.
+    /// Exact total of the `Decimal` inputs the `i128` does not hold.
     frac: Decimal,
-    /// At least one fractional `Decimal` input was added.
+    /// At least one `Decimal` input was added: SUM and AVG are numeric.
     has_decimal: bool,
     /// An exact total (`int` or `frac`) left its range.
     exact_overflow: bool,
@@ -98,10 +103,15 @@ impl ExactSum {
         true
     }
 
-    /// Add one `Decimal` input: an integral one into the integer total, any
-    /// other into the exact decimal total.
+    /// Add one `Decimal` input, a numeric input. A scale-0 one outside the
+    /// `i64` range adds into the exact integer total, which holds it past
+    /// the `Decimal` range. Any other adds into the exact decimal total with
+    /// its scale.
     pub fn add_decimal(&mut self, d: Decimal) {
-        if d.fract().is_zero()
+        self.has_decimal = true;
+        let outside_i64 = d.to_i64().is_none();
+        if d.scale() == 0
+            && outside_i64
             && let Some(i) = d.to_i128()
         {
             self.add_int(i);
@@ -111,7 +121,6 @@ impl ExactSum {
             Some(total) => self.frac = total,
             None => self.exact_overflow = true,
         }
-        self.has_decimal = true;
         self.count += 1;
     }
 
@@ -179,12 +188,25 @@ impl ExactSum {
             .checked_add(self.frac)
     }
 
-    /// AVG of the inputs as a `Float`. NULL for no input.
-    pub fn avg(&self) -> Result<Value, EvalError> {
-        match self.avg_f64()? {
-            Some(avg) => Ok(Value::Float(avg)),
-            None => Ok(Value::Null),
+    /// SQL AVG of the inputs, typed as PostgreSQL types it. With a float
+    /// input it is a `Float`, the total over the count. Otherwise it is a
+    /// `Decimal`, the exact integer and numeric total over the count at
+    /// PostgreSQL's division scale ([`crate::numeric_div`]). NULL for no
+    /// input.
+    pub fn avg_value(&self) -> Result<Value, EvalError> {
+        if self.count == 0 {
+            return Ok(Value::Null);
         }
+        if self.exact_overflow {
+            return Err(EvalError::NumericOverflow { function: "avg" });
+        }
+        if self.has_float {
+            return Ok(Value::Float(self.sum_f64() / self.count as f64));
+        }
+        self.exact_decimal_total()
+            .and_then(|total| crate::numeric_div::numeric_div(total, Decimal::from(self.count)))
+            .map(Value::Decimal)
+            .ok_or(EvalError::NumericOverflow { function: "avg" })
     }
 
     /// AVG of the inputs as an `f64`. `None` for no input.
@@ -400,7 +422,7 @@ mod tests {
             Err(EvalError::NumericOverflow { function: "sum" })
         );
         assert_eq!(
-            acc.avg(),
+            acc.avg_value(),
             Err(EvalError::NumericOverflow { function: "avg" })
         );
     }
@@ -423,7 +445,7 @@ mod tests {
     fn empty_is_null() {
         let acc = ExactSum::new();
         assert_eq!(acc.sum().unwrap(), Value::Null);
-        assert_eq!(acc.avg().unwrap(), Value::Null);
+        assert_eq!(acc.avg_value().unwrap(), Value::Null);
         assert_eq!(sum_of(&[Value::String("x".into())]).unwrap(), Value::Null);
     }
 
@@ -432,12 +454,14 @@ mod tests {
         let mut acc = ExactSum::new();
         acc.add_i64(ABOVE);
         acc.add_i64(AT);
-        // Exact mean is 2^53 + 0.5; the f64 nearest is 2^53.
-        assert_eq!(acc.avg().unwrap(), Value::Float(AT as f64));
+        // PostgreSQL: avg(9007199254740993, 9007199254740992) is
+        // 9007199254740992.5000. The total's weight leaves 4 digits.
+        assert_eq!(avg_text_of(&acc), "9007199254740992.5000");
         let mut big = ExactSum::new();
         big.add_i64(i64::MAX);
         big.add_i64(i64::MAX);
-        assert_eq!(big.avg().unwrap(), Value::Float(i64::MAX as f64));
+        // PostgreSQL: avg(i64::MAX, i64::MAX) is 9223372036854775807.
+        assert_eq!(avg_text_of(&big), "9223372036854775807");
         let mut ints = ExactSum::new();
         ints.add_i64(10);
         ints.add_i64(20);
@@ -485,7 +509,7 @@ mod tests {
         let mut avg = ExactSum::new();
         avg.add_f64(1e308);
         avg.add_f64(1e308);
-        assert_eq!(avg.avg().unwrap(), Value::Float(f64::INFINITY));
+        assert_eq!(avg.avg_value().unwrap(), Value::Float(f64::INFINITY));
         let mut mixed = ExactSum::new();
         mixed.add_i64(5);
         mixed.add_f64(f64::INFINITY);
@@ -594,12 +618,54 @@ mod tests {
         assert_eq!(sum_of(&with_float).unwrap(), Value::Float(0.75));
     }
 
+    /// A numeric input makes SUM numeric whatever the total: a scale-0
+    /// numeric past `i64` that cancels to a small total stays a `Decimal`.
+    /// Integer-only input keeps an `Integer` SUM.
+    #[test]
+    fn numeric_input_never_sums_to_an_integer() {
+        let big = Decimal::from_i128_with_scale(100_000_000_000_000_000_000, 0);
+        let mut acc = ExactSum::new();
+        acc.add_value(&Value::Decimal(big));
+        acc.add_value(&Value::Decimal(-big + Decimal::from(3)));
+        assert_eq!(acc.sum().unwrap(), Value::Decimal(Decimal::from(3)));
+        let mut small = ExactSum::new();
+        small.add_value(&Value::Decimal(Decimal::from(2)));
+        small.add_i64(5);
+        assert_eq!(small.sum().unwrap(), Value::Decimal(Decimal::from(7)));
+        let mut ints = ExactSum::new();
+        ints.add_i64(2);
+        ints.add_i64(5);
+        assert_eq!(ints.sum().unwrap(), Value::Integer(7));
+    }
+
+    /// The numeric flag crosses a shard merge and the partial-state
+    /// encoding, so a merged SUM types as the single-pass one.
+    #[test]
+    fn numeric_flag_survives_merge_and_encoding() {
+        let big = Decimal::from_i128_with_scale(100_000_000_000_000_000_000, 0);
+        let mut shard_a = ExactSum::new();
+        shard_a.add_value(&Value::Decimal(big));
+        let mut shard_b = ExactSum::new();
+        shard_b.add_value(&Value::Decimal(-big));
+        shard_b.add_i64(4);
+        let bytes = zerompk::to_msgpack_vec(&shard_a).unwrap();
+        let mut merged: ExactSum = zerompk::from_msgpack(&bytes).unwrap();
+        merged.merge(&shard_b);
+        assert_eq!(merged.sum().unwrap(), Value::Decimal(Decimal::from(4)));
+        let mut int_shard = ExactSum::new();
+        int_shard.add_i64(4);
+        let mut int_merged = ExactSum::new();
+        int_merged.merge(&int_shard);
+        assert_eq!(int_merged.sum().unwrap(), Value::Integer(4));
+    }
+
     #[test]
     fn decimal_avg_divides_the_exact_total() {
         let mut acc = ExactSum::new();
         acc.add_value(&Value::Decimal(dec("0.1")));
         acc.add_value(&Value::Decimal(dec("0.2")));
-        assert_eq!(acc.avg().unwrap(), Value::Float(0.15));
+        // PostgreSQL: avg(0.1, 0.2) is 0.15000000000000000000.
+        assert_eq!(avg_text_of(&acc), "0.15000000000000000000");
     }
 
     #[test]
@@ -665,5 +731,48 @@ mod tests {
                 0
             ))
         );
+    }
+
+    fn avg_text(inputs: &[&str]) -> String {
+        let mut acc = ExactSum::new();
+        for d in inputs {
+            acc.add_decimal(dec(d));
+        }
+        avg_text_of(&acc)
+    }
+
+    /// The text of a numeric AVG.
+    fn avg_text_of(acc: &ExactSum) -> String {
+        match acc.avg_value().unwrap() {
+            Value::Decimal(avg) => avg.to_string(),
+            other => panic!("AVG over integers and numerics is a Decimal, got {other:?}"),
+        }
+    }
+
+    /// AVG over integers and numerics is the exact total over the count at
+    /// PostgreSQL's division scale. A float input makes it a `Float`.
+    #[test]
+    fn avg_over_decimals_is_an_exact_decimal() {
+        // PostgreSQL: avg(0.1000000000000000001, 0.2000000000000000002)
+        // = 0.15000000000000000015.
+        assert_eq!(
+            avg_text(&["0.1000000000000000001", "0.2000000000000000002"]),
+            "0.15000000000000000015"
+        );
+        // PostgreSQL: avg(1.0, 2.0) = 1.5000000000000000, avg(1.5, 2.5) =
+        // 2.0000000000000000, avg(1, 2, 2) over numeric = 1.6666666666666667.
+        assert_eq!(avg_text(&["1.0", "2.0"]), "1.5000000000000000");
+        assert_eq!(avg_text(&["1.5", "2.5"]), "2.0000000000000000");
+        assert_eq!(avg_text(&["1", "2", "2"]), "1.6666666666666667");
+        let mut acc = ExactSum::new();
+        acc.add_decimal(dec("0.1"));
+        acc.add_f64(1.0);
+        assert!(matches!(acc.avg_value().unwrap(), Value::Float(_)));
+        let mut ints = ExactSum::new();
+        ints.add_i64(1);
+        ints.add_i64(2);
+        // PostgreSQL: avg(1, 2) over integers is 1.5000000000000000.
+        assert_eq!(avg_text_of(&ints), "1.5000000000000000");
+        assert_eq!(ExactSum::new().avg_value().unwrap(), Value::Null);
     }
 }

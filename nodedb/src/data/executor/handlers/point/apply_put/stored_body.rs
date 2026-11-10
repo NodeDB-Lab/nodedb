@@ -12,8 +12,7 @@ use nodedb_types::Surrogate;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::chain_guard::ChainIntent;
 use crate::data::executor::enforcement::typeguard::GuardScope;
-use crate::data::executor::handlers::write_body;
-use crate::data::executor::{doc_format, strict_format};
+use crate::data::executor::strict_format;
 use crate::types::{DatabaseId, TenantId};
 
 /// Inputs to [`CoreLoop::build_stored_body`].
@@ -45,8 +44,6 @@ pub(in crate::data::executor) struct StoredBody {
 
 impl CoreLoop {
     /// Build the canonical body and the stored image for one incoming write.
-    /// A body with no readable fields skips generated-column evaluation and
-    /// stores as supplied; the strict encode below still rejects it.
     pub(in crate::data::executor) fn build_stored_body(
         &self,
         input: StoredBodyInput<'_>,
@@ -69,70 +66,76 @@ impl CoreLoop {
             .intents
             .get(&(config_key.clone(), surrogate.as_u32()));
         if let Some(ChainIntent::Keep { stored }) = intent {
-            return self.kept_stored_body(config_key, stored);
+            let mut body = self.kept_stored_body(config_key, stored)?;
+            let schema = self.capture_storage_schema(config_key)?;
+            body.value = super::installed_schema::canonical_stored(
+                &body.stored,
+                &schema,
+                Some(crate::bridge::envelope::RowVersion {
+                    sys_from,
+                    valid_from_ms,
+                    valid_until_ms,
+                }),
+            )?;
+            return Ok(body);
         }
-        let link_after = match intent {
-            Some(ChainIntent::Link { head }) => Some(head),
-            _ => None,
-        };
+        let frozen = self.freeze_document_body(super::frozen_body::FreezeDocumentBodyInput {
+            config_key,
+            surrogate,
+            value,
+            guards,
+        })?;
+        self.complete_frozen_body(&frozen, bitemporal, sys_from, valid_from_ms, valid_until_ms)
+    }
 
-        // Apply typeguards and generated columns before encoding. A refused
-        // write keeps its own error code: a typeguard violation, or the
-        // evaluation error of a generated expression.
-        let value = if let Some(config) = self.doc_configs.get(config_key)
-            && write_body::rewrites_body(config)
-        {
-            if let Ok(mut doc) = doc_format::decode_document(value) {
-                write_body::materialize_write_body(config, &mut doc, guards, &self.crs_context())
-                    .map_err(crate::Error::DataPlane)?;
-                doc_format::encode_to_msgpack(&doc)
-            } else {
-                value.to_vec()
-            }
-        } else {
-            doc_format::canonicalize_document_for_storage(value)
-        };
-
-        // A declared numeric column holds the value its type stores. Runs
-        // after the generated columns, so a generated value is re-typed too.
-        let value = strict_format::coerce_declared_body(value, self.declared_columns(config_key))?;
-
-        // Strict (Binary Tuple) pipeline: inject an auto-generated `_rowid`
-        // from the surrogate if the schema declares one and the client
-        // payload lacks it, then encode into Binary Tuple.
+    pub(super) fn complete_frozen_body(
+        &self,
+        frozen: &super::frozen_body::FrozenDocumentBody,
+        bitemporal: bool,
+        sys_from: i64,
+        valid_from_ms: i64,
+        valid_until_ms: i64,
+    ) -> crate::Result<StoredBody> {
+        let config_key = &frozen.config_key;
+        frozen.check(self, config_key, frozen.surrogate)?;
+        let value = frozen.value.clone();
         let Some(config) = self.doc_configs.get(config_key) else {
             return Ok(StoredBody {
                 stored: value.clone(),
                 value,
             });
         };
+        let link_after = match self
+            .chain
+            .intents
+            .get(&(config_key.clone(), frozen.surrogate.as_u32()))
+        {
+            Some(ChainIntent::Link { head }) => {
+                let current = self
+                    .chain
+                    .heads
+                    .get(config_key)
+                    .cloned()
+                    .unwrap_or_else(crate::types::hash_chain::ChainHead::genesis);
+                if *head != current {
+                    return Err(crate::Error::DataPlane(
+                        crate::bridge::envelope::ErrorCode::ConflictRetry,
+                    ));
+                }
+                Some(head)
+            }
+            Some(ChainIntent::Keep { .. }) => {
+                return Err(crate::Error::DataPlane(
+                    crate::bridge::envelope::ErrorCode::ConflictRetry,
+                ));
+            }
+            None => None,
+        };
         let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
             config.storage_mode
         else {
             let value = match link_after {
-                Some(head) => {
-                    // A chained row carries its identity inside the linked
-                    // contents: a minted row gets its identity column from its
-                    // surrogate here, as a strict row gets `_rowid` below. A
-                    // copy under a new surrogate then keeps both its identity
-                    // and its link. A declared-key row holds its key and gains
-                    // no `id`. A body that is not an object is left for the
-                    // link to refuse.
-                    let value = if nodedb_query::msgpack_scan::map_header(&value, 0).is_some() {
-                        nodedb_query::msgpack_scan::inject_str_field(
-                            &value,
-                            config
-                                .declared_key
-                                .as_deref()
-                                .unwrap_or(nodedb_types::DEFAULT_IDENTITY_COLUMN),
-                            &surrogate.as_u32().to_string(),
-                        )
-                    } else {
-                        value
-                    };
-                    let encode = |body: &[u8]| -> crate::Result<Vec<u8>> { Ok(body.to_vec()) };
-                    self.link_value(config, &value, head, &encode)?
-                }
+                Some(head) => self.link_value(config, &value, head, &|body| Ok(body.to_vec()))?,
                 None => value,
             };
             return Ok(StoredBody {
@@ -140,24 +143,6 @@ impl CoreLoop {
                 value,
             });
         };
-
-        let value_with_rowid: Option<Vec<u8>> = if schema
-            .columns
-            .first()
-            .is_some_and(|c| c.name == "_rowid" && !c.nullable)
-            && let Ok(mut decoded) = nodedb_types::json_from_msgpack(&value)
-            && let serde_json::Value::Object(ref mut obj) = decoded
-            && !obj.contains_key("_rowid")
-        {
-            obj.insert(
-                "_rowid".to_string(),
-                serde_json::Value::Number((surrogate.0 as i64).into()),
-            );
-            Some(nodedb_types::json_to_msgpack(&decoded).unwrap_or_else(|_| value.clone()))
-        } else {
-            None
-        };
-        let value = value_with_rowid.unwrap_or(value);
 
         let collection = &config_key.2;
         let encode = |body: &[u8]| {
@@ -180,6 +165,16 @@ impl CoreLoop {
         };
         let stored = encode(&value)?;
 
+        let schema = self.capture_storage_schema(config_key)?;
+        let value = super::installed_schema::canonical_stored(
+            &stored,
+            &schema,
+            Some(crate::bridge::envelope::RowVersion {
+                sys_from,
+                valid_from_ms,
+                valid_until_ms,
+            }),
+        )?;
         Ok(StoredBody { value, stored })
     }
 }

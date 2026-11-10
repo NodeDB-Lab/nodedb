@@ -15,7 +15,7 @@ use crate::types::DatabaseId;
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::refuse_gate::RefusingReadGate;
 use super::parse::{extract_function_args, extract_number_after};
-use super::support::ddl_err;
+use super::support::{bfs_node_ids, ddl_err};
 
 /// What the walk delivers instead of row bodies, for the refusal message.
 const CHILDREN_WHAT: &str =
@@ -84,13 +84,7 @@ pub async fn tree_children(
     .await
     .map_err(|e| DdlError::from_error_in_context("BFS failed", &e))?;
 
-    let bfs_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&bfs_result.payload);
-    let node_ids: Vec<String> = sonic_rs::from_str::<Vec<serde_json::Value>>(&bfs_json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+    let node_ids = bfs_node_ids(&bfs_result.payload)?;
 
     let mut rows: Vec<Map<String, JsonValue>> = Vec::with_capacity(node_ids.len());
     for id in &node_ids {

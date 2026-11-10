@@ -331,7 +331,14 @@ pub(super) fn convert_one(
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let mut visitor = super::visitor::ConvertVisitor { tenant_id, ctx };
-    nodedb_sql::dispatch(&mut visitor, plan)
+    let mut tasks = nodedb_sql::dispatch(&mut visitor, plan)?;
+    if let Some(returning) = plan.returning() {
+        use crate::control::server::shared::returning::{
+            attach_returning_spec, stored_columns_spec,
+        };
+        attach_returning_spec(&mut tasks, &stored_columns_spec(&returning.projection))?;
+    }
+    Ok(tasks)
 }
 
 #[cfg(test)]

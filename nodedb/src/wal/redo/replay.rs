@@ -108,7 +108,17 @@ fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Reconstitut
             }
             Some(RecordType::WriteGroup) => {
                 let group = WriteGroupRecord::from_bytes(&record.payload)?;
-                (group.group.origin_at(record.header.lsn), group.ops)
+                let mut ops = group.ops;
+                for sub in &mut ops {
+                    if let Some(installed) =
+                        super::installed_document::InstalledDocumentRedo::<u32>::decode(
+                            &sub.payload,
+                        )?
+                    {
+                        sub.payload = installed.resolve(&group.schemas)?.encode()?;
+                    }
+                }
+                (group.group.origin_at(record.header.lsn), ops)
             }
             _ => continue,
         };

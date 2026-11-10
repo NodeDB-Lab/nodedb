@@ -69,7 +69,7 @@ impl zerompk::ToMessagePack for TextFields {
         write_opt_field!(writer, FID_FROM_NODE, self.from_node);
         write_opt_field!(writer, FID_TO_NODE, self.to_node);
         write_opt_field!(writer, FID_EDGE_TYPE, self.edge_type);
-        write_opt_field!(json writer, FID_PROPERTIES, self.properties);
+        write_opt_field!(writer, FID_PROPERTIES, self.properties);
         write_opt_field!(writer, FID_QUERY_TEXT, self.query_text);
         write_opt_field!(writer, FID_VECTOR_WEIGHT, self.vector_weight);
         write_opt_field!(writer, FID_FUZZY, self.fuzzy);
@@ -135,7 +135,7 @@ impl zerompk::ToMessagePack for TextFields {
         write_opt_field!(writer, FID_LIST_INDEX, self.list_index);
         write_opt_field!(writer, FID_LIST_FROM_INDEX, self.list_from_index);
         write_opt_field!(writer, FID_LIST_TO_INDEX, self.list_to_index);
-        write_opt_field!(writer, FID_LIST_FIELDS_JSON, self.list_fields_json);
+        write_opt_field!(writer, FID_LIST_FIELDS, self.list_fields);
         write_opt_field!(writer, FID_TEXT_MODE, self.text_mode);
         write_opt_field!(writer, FID_ALLOWED_IDS, self.allowed_ids);
 

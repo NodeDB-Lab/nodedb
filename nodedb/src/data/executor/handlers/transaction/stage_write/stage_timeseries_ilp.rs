@@ -78,11 +78,16 @@ impl CoreLoop {
                         args.surrogates.len()
                     ),
                 })?;
-            let body = nodedb_types::value_to_msgpack(&rmpv_to_value(image)).map_err(|e| {
-                ErrorCode::Internal {
-                    detail: format!("timeseries insert: row encode failed: {e}"),
-                }
-            })?;
+            // The image renders a decimal and a UUID as text; the staged
+            // body carries them typed, as a committed row reads them.
+            let body = self
+                .staged_ts_body(
+                    args.task.request.database_id,
+                    TenantId::new(args.tid),
+                    args.collection,
+                    rmpv_to_value(image),
+                )
+                .map_err(ErrorCode::from)?;
             let ctx = StageCtx::new(
                 args.task,
                 args.tid,

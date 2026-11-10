@@ -29,8 +29,9 @@ pub fn process_write_event_for_mvs(event: &WriteEvent, registry: &MvRegistry, st
     }
 
     // Deserialize new_value for field extraction.
+    // A native body reads as the plain body of the same values.
     let new_value: Option<serde_json::Value> = event.new_value.as_ref().and_then(|bytes| {
-        nodedb_types::json_from_msgpack(bytes)
+        crate::data::executor::response_codec::decode_body_plain_json(bytes)
             .ok()
             .or_else(|| sonic_rs::from_slice(bytes).ok())
     });

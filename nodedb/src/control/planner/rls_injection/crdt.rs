@@ -171,7 +171,7 @@ mod tests {
                 "notes",
             ),
             document_id: "d1".into(),
-            fields_json: "{}".into(),
+            fields: Vec::new(),
             surrogate: nodedb_types::Surrogate::new(1),
             partial: false,
             verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,

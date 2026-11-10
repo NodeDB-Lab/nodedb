@@ -319,6 +319,7 @@ impl CoreLoop {
                     self,
                     &row_txn,
                     &write_hook::HookCtx {
+                        target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                         database_id,
                         tid,
                         collection,

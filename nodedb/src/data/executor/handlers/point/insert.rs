@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::{submitted_row_image, versioned_point_images};
+use crate::data::executor::core_loop::redo_image::{WriteSetRow, versioned_point_images};
 use crate::data::executor::enforcement::chain_guard::{self, AbandonedWrite, ChainGuard};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
@@ -37,6 +37,8 @@ pub(in crate::data::executor) struct PointInsertParams<'a> {
     pub returning: Option<&'a ReturningSpec>,
     /// Compiled read policy bounding which of those rows may be shown back.
     pub rls_filters: &'a [u8],
+    /// The write policy judges the exact prepared post-image.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     /// Join-key VALUE → target row surrogate for every materialized-sum target
     /// this insert may credit, resolved on the Control Plane at plan time. The
     /// Data Plane never derives it: the primary-key → surrogate map is catalog
@@ -63,6 +65,7 @@ impl CoreLoop {
             if_absent,
             returning,
             rls_filters,
+            rls_write_check,
             resolved_sum_targets,
             deferred_sum_targets,
         } = p;
@@ -87,12 +90,19 @@ impl CoreLoop {
             resolved_targets: resolved_sum_targets,
             deferred_sum_targets,
             wal_lsn: task.wal_lsn(),
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
         };
 
         // Hash chaining marks the row before the write, so `build_stored_body`
         // writes its link into the stored body — not through the image funnel,
         // which only sees a write that has already been applied. This handler is
         // INSERT-shaped by construction, so every write it performs is a link.
+        let prepared_note =
+            match self.prepare_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+                Ok(note) => note,
+                Err(error) => return self.response_error(task, error),
+            };
+
         let mut chain = ChainGuard::begin(self, database_id, tid, collection);
         if let Err(e) = chain.chain_insert(self, surrogate, value) {
             return self.response_error(task, e);
@@ -175,24 +185,37 @@ impl CoreLoop {
 
         // `apply_point_put` returns prior bytes if any — for PointInsert that
         // is `None` because the probe above already rejected the conflict case.
-        let mut outcome = match self.apply_point_put(
-            &txn,
-            PointPutParams {
-                database_id: task.request.database_id.as_u64(),
-                tid,
-                collection,
-                storage_key,
-                surrogate,
-                value,
-                index_text: true,
-                user_roles: &task.request.user_roles,
-                enforce: true,
-                unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
-                wal_lsn: task.wal_lsn(),
-                resolved_targets: resolved_sum_targets,
-                guards: crate::data::executor::enforcement::typeguard::GuardScope::Document,
-            },
-        ) {
+        let mut outcome = match self
+            .prepare_point_put(
+                &txn,
+                PointPutParams {
+                    database_id: task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    storage_key,
+                    surrogate,
+                    value,
+                    index_text: true,
+                    user_roles: &task.request.user_roles,
+                    enforce: true,
+                    unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
+                    wal_lsn: task.wal_lsn(),
+                    resolved_targets: resolved_sum_targets,
+                    guards: crate::data::executor::enforcement::typeguard::GuardScope::Document,
+                },
+            )
+            .and_then(|prepared| {
+                crate::data::executor::handlers::rls_write_gate::admit_installed_row(
+                    rls_write_check,
+                    prepared.installed(),
+                    &document_identity,
+                    &self.identity_column(database_id, tid, collection),
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                )?;
+                self.apply_prepared_point_put(&txn, prepared)
+            }) {
             Ok(o) => o,
             Err(e) => {
                 let e = chain_guard::abort_after_apply(
@@ -208,7 +231,7 @@ impl CoreLoop {
         // The advanced head lands in the SAME transaction as the row whose hash
         // it is, so head and row commit or roll back as one unit.
         if let Err(e) = chain
-            .settle(self, surrogate, &outcome.stored_value)
+            .settle_installed(self, surrogate, &mut outcome.installed)
             .and_then(|()| chain.persist_head(self, &txn))
         {
             let e = chain_guard::abort_after_apply(
@@ -223,15 +246,20 @@ impl CoreLoop {
 
         // Image-folding enforcement runs one level ABOVE `apply_point_put` and
         // inside THIS transaction, so a materialized-sum target write lands or
-        // rolls back with the row that credited it. The post-image is the
-        // SUBMITTED body, never the chained one: `_chain_hash` is a wrapper the
-        // chain adds around the row and no constraint is declared over it.
+        // rolls back with the row that credited it. Both images describe the
+        // actual stored mutation, including defaults, coercions, and generated fields.
         let enforcement = match write_hook::run(
             self,
             &txn,
             &hook_ctx,
-            WriteImages::Insert {
-                new: ImageBody::Submitted(value),
+            match outcome.prior_value.as_deref() {
+                Some(old) => WriteImages::Update {
+                    old: ImageBody::Stored(old),
+                    new: ImageBody::Stored(&outcome.installed.stored),
+                },
+                None => WriteImages::Insert {
+                    new: ImageBody::Stored(&outcome.installed.stored),
+                },
             },
         ) {
             Ok(enforcement) => enforcement,
@@ -253,6 +281,24 @@ impl CoreLoop {
         let target_write_set = write_hook::target_write_set(&enforcement.target_writes);
         let target_writes = enforcement.target_writes;
 
+        if let Err(error) = self.check_source_and_targets_unique(
+            &txn,
+            database_id,
+            tid,
+            (collection, storage_key),
+            &target_writes,
+        ) {
+            let error = chain_guard::abort_after_apply(
+                self,
+                &mut chain,
+                AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                    .undo(std::mem::take(&mut outcome.memory_undo))
+                    .targets(target_writes),
+                error,
+            );
+            return self.response_error(task, error);
+        }
+
         // BALANCED is settled before the commit, so a single-row insert of one
         // journal leg — unbalanced by the constraint's own definition when the
         // statement is its own transaction — leaves nothing behind.
@@ -270,7 +316,79 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
+        let stored_value = &outcome.installed.stored;
+        let prepared_response = if let Some(spec) = returning {
+            let strict_schema = self.strict_schema_for(
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection,
+            );
+            self.prepare_stored_returning_response(
+                task,
+                spec,
+                rls_filters,
+                strict_schema.as_ref(),
+                &self.identity_column(database_id, tid, collection),
+                &[(&document_identity, stored_value.as_slice())],
+            )
+        } else {
+            // The row was inserted: exactly one row affected.
+            Ok(self.response_affected(task, 1))
+        };
+        let mut response = match prepared_response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = chain_guard::abort_after_apply(
+                    self,
+                    &mut chain,
+                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                        .undo(std::mem::take(&mut outcome.memory_undo))
+                        .targets(target_writes),
+                    error,
+                );
+                return self.response_error(task, error);
+            }
+        };
+        // The row's version key was decided here, so its stamped image
+        // replaces the unstamped pre-dispatch record.
+        let event = match self.prepare_installed_put_event(
+            &WriteSetRow {
+                database_id,
+                tid,
+                collection,
+                identity: document_identity.clone(),
+            },
+            &outcome.installed,
+            outcome.prior_value.as_deref(),
+        ) {
+            Ok(event) => event,
+            Err(error) => {
+                let error = chain_guard::abort_after_apply(
+                    self,
+                    &mut chain,
+                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
+                        .undo(std::mem::take(&mut outcome.memory_undo))
+                        .targets(target_writes),
+                    error,
+                );
+                return self.response_error(task, error);
+            }
+        };
+        let image = crate::bridge::envelope::WriteSetEntry::installed_put(
+            surrogate.as_u32(),
+            document_identity.clone(),
+            outcome.installed.clone(),
+            event.clone(),
+        );
+        response.write_set = versioned_point_images(image);
+        response.write_set.extend(target_write_set);
+
         if let Err(e) = txn.commit() {
+            self.seal_journalled();
+            self.fail_stop_core(
+                crate::data::executor::core_loop::fail_stop::FailStopCause::WriteSetUnpersisted,
+                &format!("document commit outcome is unknown: {e}"),
+            );
             let e = chain_guard::abort_after_apply(
                 self,
                 &mut chain,
@@ -287,14 +405,7 @@ impl CoreLoop {
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32()) {
-            return self.response_error(task, e);
-        }
-
-        // The exact bytes storage holds. A `RETURNING` projection reads
-        // these rather than `value`, so it reports the generated columns and
-        // injected `_rowid` the encode pipeline added on the way to disk.
-        let stored_value = std::mem::take(&mut outcome.stored_value);
+        self.publish_surrogate_write(prepared_note, outcome.installed.version.sys_from);
 
         // Implicit graph-edge extraction now lives on the Control Plane
         // (`control/planner/implicit_edges/`): a `_from`/`_to` document is
@@ -306,42 +417,9 @@ impl CoreLoop {
 
         // The plan's `document_id` is the identity INSERT minted for this
         // row, and the identity the WAL journals for it.
-        self.emit_put_event(
-            task,
-            tid,
-            collection,
-            document_identity.clone(),
-            value,
-            None,
-        );
+        self.emit_prepared_put_event(task, collection, document_identity.clone(), &event);
 
-        let mut response = if let Some(spec) = returning {
-            let strict_schema = self.strict_schema_for(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-            );
-            self.stored_returning_response(
-                task,
-                spec,
-                rls_filters,
-                strict_schema.as_ref(),
-                &self.identity_column(database_id, tid, collection),
-                &[(&document_identity, stored_value.as_slice())],
-            )
-        } else {
-            // The row was inserted: exactly one row affected.
-            self.response_affected(task, 1)
-        };
-        // The row's version key was decided here, so its stamped image
-        // replaces the unstamped pre-dispatch record.
-        response.write_set = versioned_point_images(submitted_row_image(
-            surrogate.as_u32(),
-            document_identity,
-            value.to_vec(),
-            outcome.version_sys_from,
-        ));
-        response.write_set.extend(target_write_set);
+        response.watermark_lsn = self.watermark;
         response
     }
 }
@@ -472,6 +550,7 @@ mod tests {
             if_absent: false,
             returning: None,
             rls_filters: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: &targets,
             deferred_sum_targets: &[],
         })
@@ -518,6 +597,7 @@ mod tests {
             if_absent: false,
             returning: None,
             rls_filters: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: &[],
             deferred_sum_targets: &[],
         })

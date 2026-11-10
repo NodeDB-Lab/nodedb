@@ -210,14 +210,22 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::NumericValueOutOfRange { detail } => {
             NodeDbError::numeric_value_out_of_range(detail.clone())
         }
-        // The public class `code_for_sqlstate` gives `22P02`, `22007`,
-        // `22008` and `42804`.
-        Error::InvalidTextRepresentation { detail }
-        | Error::InvalidDatetimeFormat { detail }
-        | Error::DatetimeFieldOverflow { detail } => NodeDbError::data_exception(detail.clone()),
-        Error::DatatypeMismatch { detail } => {
-            NodeDbError::from_wire(nodedb_types::error::ErrorCode::BAD_REQUEST, detail.clone())
+        Error::InvalidArgumentForLogarithm { detail } => {
+            NodeDbError::invalid_argument_for_logarithm(detail.clone())
         }
+        Error::InvalidArgumentForPowerFunction { detail } => {
+            NodeDbError::invalid_argument_for_power_function(detail.clone())
+        }
+        Error::InvalidTextRepresentation { detail } => {
+            NodeDbError::invalid_text_representation(detail.clone())
+        }
+        Error::InvalidDatetimeFormat { detail } => {
+            NodeDbError::invalid_datetime_format(detail.clone())
+        }
+        Error::DatetimeFieldOverflow { detail } => {
+            NodeDbError::datetime_field_overflow(detail.clone())
+        }
+        Error::DatatypeMismatch { detail } => NodeDbError::datatype_mismatch(detail.clone()),
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())
         }

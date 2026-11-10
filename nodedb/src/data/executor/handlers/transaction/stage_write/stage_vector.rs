@@ -66,10 +66,13 @@ pub(super) struct StageVectorInsertParams<'a> {
 
 /// The client identity of a vector-primary row, read from its sidecar by
 /// the rule INSERT mints it with. A sidecar with no identity column yields
-/// the decimal surrogate.
-pub(super) fn staged_vector_row_identity(sidecar: &[u8], key: StorageKey) -> RowIdentity {
-    let normalized = sparse_body_to_msgpack(sidecar, SparseBodyFormatRef::VectorSidecar);
-    RowIdentity::of_stored_row(&normalized, None, key)
+/// the decimal surrogate. A sidecar that does not normalize is an error.
+pub(super) fn staged_vector_row_identity(
+    sidecar: &[u8],
+    key: StorageKey,
+) -> crate::Result<RowIdentity> {
+    let normalized = sparse_body_to_msgpack(sidecar, SparseBodyFormatRef::VectorSidecar)?;
+    Ok(RowIdentity::of_stored_row(&normalized, None, key))
 }
 
 /// The staged body for `vector` and `fields`: the sidecar encoded exactly

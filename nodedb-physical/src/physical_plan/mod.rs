@@ -53,7 +53,7 @@ pub use calvin_reply::{
 pub use cluster_array::ClusterArrayOp;
 pub use cluster_event::{ClusterEventOp, MAX_REMOTE_CDC_COMMITTED_OFFSETS};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};
-pub use crdt::{CrdtOp, CrdtWriteVerb};
+pub use crdt::{CrdtOp, CrdtWriteVerb, decode_fields_body, encode_fields_body};
 pub use document::{
     BalancedDef, DeclaredColumn, DocumentOp, DocumentPageSource, DocumentResolveOutcome,
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,

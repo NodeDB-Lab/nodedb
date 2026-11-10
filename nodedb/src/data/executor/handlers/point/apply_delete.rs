@@ -206,7 +206,13 @@ impl CoreLoop {
         if let Some(ref body) = prior {
             let sys_from = match carried_sys_from {
                 Some(sys_from) => sys_from,
-                None => self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
+                None => self.row_version_ordinal_in_txn(
+                    txn,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                )?,
             };
             version_sys_from = Some(sys_from);
             // A `body` that does not decode fails the delete: its index
@@ -227,7 +233,16 @@ impl CoreLoop {
         // or a fresh one when no row was stored.
         let index_ordinal = match version_sys_from {
             Some(sys_from) => sys_from,
-            None => self.bitemporal_ordinal(),
+            None => match carried_sys_from {
+                Some(sys_from) => sys_from,
+                None => self.row_version_ordinal_in_txn(
+                    txn,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                )?,
+            },
         };
 
         // Cascade 1: Remove from full-text inverted index. The inverted

@@ -71,6 +71,7 @@ pub struct DocumentIndexLookupVisitArgs<'a> {
 
 /// Parameters for [`super::trait_def::PlanVisitor::insert`].
 pub struct InsertVisitArgs<'a> {
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
     pub collection: &'a str,
     pub engine: EngineType,
     /// The lowering these rows take, decided by the engine's `EngineRules`.
@@ -83,6 +84,7 @@ pub struct InsertVisitArgs<'a> {
 
 /// Parameters for [`super::trait_def::PlanVisitor::upsert`].
 pub struct UpsertVisitArgs<'a> {
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
     pub collection: &'a str,
     pub engine: EngineType,
     /// The lowering these rows take, decided by the engine's `EngineRules`.
@@ -103,7 +105,7 @@ pub struct UpdateFromVisitArgs<'a> {
     pub source_join_col: &'a str,
     pub assignments: &'a [(String, SqlExpr)],
     pub target_filters: &'a [Filter],
-    pub returning: bool,
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::join`].
@@ -330,7 +332,7 @@ pub struct MergeVisitArgs<'a> {
     pub source_join_col: &'a str,
     pub source_alias: &'a str,
     pub clauses: &'a [MergePlanClause],
-    pub returning: bool,
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::lateral_top_k`].
@@ -362,6 +364,7 @@ pub struct LateralLoopVisitArgs<'a> {
 
 /// Parameters for [`super::trait_def::PlanVisitor::vector_primary_insert`].
 pub struct VectorPrimaryInsertVisitArgs<'a> {
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
     pub collection: &'a str,
     pub field: &'a str,
     pub quantization: nodedb_types::VectorQuantization,
@@ -375,6 +378,7 @@ pub struct VectorPrimaryInsertVisitArgs<'a> {
 
 /// Parameters for [`super::trait_def::PlanVisitor::vector_primary_delete`].
 pub struct VectorPrimaryDeleteVisitArgs<'a> {
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
     pub collection: &'a str,
     pub field: &'a str,
     pub filters: &'a [Filter],
@@ -393,6 +397,6 @@ pub struct VectorPrimaryUpdateVisitArgs<'a> {
     pub assignments: &'a [(String, SqlExpr)],
     pub filters: &'a [Filter],
     pub target_keys: &'a [SqlValue],
-    pub returning: bool,
+    pub returning: Option<&'a crate::types::ResolvedReturning>,
     pub primary_key: Option<&'a str>,
 }

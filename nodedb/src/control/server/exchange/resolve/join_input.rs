@@ -7,11 +7,12 @@ use nodedb_physical::physical_plan::{
     ExchangeMode, ExchangeOp, GatheredSource, PhysicalPlan, QueryOp,
 };
 
+use crate::bridge::envelope::describe_row_context;
 use crate::control::server::exchange::read_scope::ReadScope;
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec::flatten_to_relational_rows;
+use crate::data::executor::response_codec::{RowContext, flatten_rows_in_context};
 
-use crate::control::server::exchange::full_scan::{ScanSide, full_scan_plan_for_collection};
+use crate::control::server::exchange::full_scan::{ScanSide, read_set_scan_plan};
 use crate::control::server::exchange::gather::gather_all_vshards;
 use crate::control::server::exchange::gather_outcome::GatherOutcome;
 
@@ -73,9 +74,10 @@ pub(super) async fn resolve_join_input(
             // `scope` requires.
             let sources = gathered_sources(&child, database_id)?;
             let array_rows = is_cluster_array_read(&child);
+            let row_context = describe_row_context(&child);
             let outcome = Box::pin(gather_all_vshards(state, *child, scope)).await?;
             capture_gathered_reads(state, scope, &sources, &outcome, captures)?;
-            let rows = relational_rows(array_rows, &outcome, false)?;
+            let rows = relational_rows(array_rows, &outcome, false, row_context)?;
             Ok(Some(Box::new(provider_scan_of_rows(rows, sources))))
         }
 
@@ -113,10 +115,11 @@ pub(super) async fn resolve_join_input(
         })) => {
             let sources = gathered_sources(&child, database_id)?;
             let array_rows = is_cluster_array_read(&child);
+            let row_context = describe_row_context(&child);
             // Read from every vShard's owner, as the Broadcast arm does.
             let outcome = Box::pin(gather_all_vshards(state, *child, scope)).await?;
             capture_gathered_reads(state, scope, &sources, &outcome, captures)?;
-            let rows = relational_rows(array_rows, &outcome, as_aggregate)?;
+            let rows = relational_rows(array_rows, &outcome, as_aggregate, row_context)?;
             Ok(Some(Box::new(provider_scan_of_rows(rows, sources))))
         }
 
@@ -145,17 +148,18 @@ fn capture_gathered_reads(
         let GatheredSource::Collection(collection) = source else {
             continue;
         };
-        if let Some(scan_plan) = full_scan_plan_for_collection(
+        // A collection the catalog no longer holds still records its read,
+        // as an absence read: a concurrent create-and-populate conflicts.
+        let scan_plan = read_set_scan_plan(
             state,
             scope.database_id,
             scope.tenant_id,
             ScanSide::read_set_only(collection),
-        )? {
-            captures.push(DistributedReadCapture {
-                scan_plan,
-                read_vshards: outcome.read_vshards.clone(),
-            });
-        }
+        )?;
+        captures.push(DistributedReadCapture {
+            scan_plan,
+            read_vshards: outcome.read_vshards.clone(),
+        });
     }
     Ok(())
 }
@@ -191,16 +195,19 @@ async fn search_hits_input(
 /// it, so the gathered rows are filtered per side *before* the join, exactly
 /// as the local name-scan this gather replaces filtered them.
 ///
-/// Returns `Ok(None)` (the name-scan fallback) when the catalog has no record
-/// for the collection. This is graceful degradation, never an error: a missing
-/// catalog entry on the coordinator falls back to the existing by-name scan on
-/// the executing node.
+/// The build side is always gathered, never scanned by name on the probe's
+/// core: a by-name scan there reads only that core's part of a sharded
+/// collection. A collection the catalog does not hold is a
+/// `CollectionNotFound` error, and one dropped since planning is
+/// `CollectionDeactivated` (see [`require_full_scan_plan`]).
+///
+/// [`require_full_scan_plan`]: crate::control::server::exchange::full_scan::require_full_scan_plan
 pub(super) async fn gather_join_build_side(
     state: &SharedState,
     scope: ReadScope,
     side: ScanSide<'_>,
     captures: &mut Vec<DistributedReadCapture>,
-) -> crate::Result<Option<Box<PhysicalPlan>>> {
+) -> crate::Result<Box<PhysicalPlan>> {
     let ReadScope {
         database_id,
         tenant_id,
@@ -208,28 +215,17 @@ pub(super) async fn gather_join_build_side(
         ..
     } = scope;
     // Build an unprojected full-collection scan for the engine via the shared
-    // builder, carrying this side's read policy. `Ok(None)` (no catalog / unknown
-    // collection) keeps the existing graceful name-scan fallback — never an
-    // error. The build side of a hash join must be COMPLETE (every build row is
-    // needed for correct match output); the shared builder uses an unbounded
-    // scan, which is allocation-safe (see `full_scan`).
-    //
-    // (Memory for a very large build relation is the inherent cost of a hash
-    // join; spill-to-disk is a future optimization, not a reason to truncate. The
-    // probe side's local name-scan and the converter's 10k default for unbounded
-    // SELECTs remain separately capped — that engine-wide unbounded-scan limit is
-    // its own effort and is the remaining truncation source, TRACKED.)
-    let Some(scan_plan) =
-        crate::control::server::exchange::full_scan::full_scan_plan_for_collection(
-            state,
-            database_id,
-            tenant_id,
-            side,
-        )?
-    else {
-        // No catalog on this node, or unknown collection: fall back to name-scan.
-        return Ok(None);
-    };
+    // builder, carrying this side's read policy. The build side of a hash join
+    // must be COMPLETE (every build row is needed for correct match output),
+    // so a collection the catalog cannot resolve is an error, never a by-name
+    // scan; the shared builder uses an unbounded scan, which is
+    // allocation-safe (see `full_scan`).
+    let scan_plan = crate::control::server::exchange::full_scan::require_full_scan_plan(
+        state,
+        database_id,
+        tenant_id,
+        side,
+    )?;
 
     // Capture the build/right collection's read for the transaction read-set:
     // its own bare full-collection scan plan + the vShards its gather reads.
@@ -249,6 +245,7 @@ pub(super) async fn gather_join_build_side(
     // plan is Exchange-free), but the future must be heap-indirected so its size
     // is finite.
     let sources = gathered_sources(&scan_plan, database_id)?;
+    let row_context = describe_row_context(&scan_plan);
     let outcome = Box::pin(gather_all_vshards(state, scan_plan, scope)).await?;
 
     if let Some(scan_plan) = capture_plan {
@@ -258,25 +255,111 @@ pub(super) async fn gather_join_build_side(
         });
     }
 
-    Ok(Some(Box::new(provider_scan_of_rows(
-        flatten_to_relational_rows(&outcome.merged_rows(false)?),
+    Ok(Box::new(provider_scan_of_rows(
+        flatten_rows_in_context(&outcome.merged_rows(false)?, row_context)?,
         sources,
-    ))))
+    )))
 }
 
 /// The relational rows of a gathered join input. A cluster array read
 /// (`array_rows`) keeps its rows as it emits them. Any other plan's merged
-/// rows pass through the storage flatten. `as_aggregate` finalizes the
-/// merged rows of a `Gather{as_aggregate}`.
+/// rows flatten under `row_context`, the row shape of the gathered plan: a
+/// scan's `{id, data}` envelopes unwrap, and flat rows stay as they are.
+/// `as_aggregate` finalizes the merged rows of a `Gather{as_aggregate}`.
 fn relational_rows(
     array_rows: bool,
     outcome: &GatherOutcome,
     as_aggregate: bool,
+    row_context: RowContext,
 ) -> crate::Result<Vec<u8>> {
     if array_rows {
         return outcome.merged_array();
     }
-    Ok(flatten_to_relational_rows(
-        &outcome.merged_rows(as_aggregate)?,
-    ))
+    flatten_rows_in_context(&outcome.merged_rows(as_aggregate)?, row_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::response_codec::encode_binary_rows;
+    use nodedb_physical::physical_plan::{DocumentOp, SetOpKind};
+    use nodedb_types::{DatabaseId, QualifiedCollection, Value};
+
+    fn scan() -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::Scan {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
+            filters: Vec::new(),
+            limit: 10,
+            offset: 0,
+            sort_keys: Vec::new(),
+            distinct: false,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
+            valid_at_ms: None,
+            prefilter: None,
+        })
+    }
+
+    /// A gathered derived table: its rows are flat relational rows.
+    fn subquery() -> PhysicalPlan {
+        PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
+            child: Box::new(PhysicalPlan::Query(QueryOp::SetOp {
+                inputs: vec![scan(), scan()],
+                op: SetOpKind::UnionAll,
+                columns: vec![
+                    vec!["k".to_string(), "data".to_string()],
+                    vec!["k".to_string(), "data".to_string()],
+                ],
+            })),
+            mode: ExchangeMode::Gather {
+                as_aggregate: false,
+            },
+        }))
+    }
+
+    fn row(k: i64, data: Value) -> Vec<u8> {
+        nodedb_types::value_to_msgpack(&Value::Object(
+            [
+                ("k".to_string(), Value::Integer(k)),
+                ("data".to_string(), data),
+            ]
+            .into(),
+        ))
+        .unwrap()
+    }
+
+    /// A JOIN input from a subquery whose rows are `{k, data}` keeps both
+    /// columns: the row shape comes from the plan, so a column named `data`
+    /// is never read as a scan envelope's body.
+    #[test]
+    fn subquery_rows_named_k_and_data_keep_both_columns() {
+        let rows = vec![
+            row(
+                1,
+                Value::Object([("x".to_string(), Value::Integer(1))].into()),
+            ),
+            row(2, Value::String("y".into())),
+        ];
+        let outcome = GatherOutcome::without_reads(vec![encode_binary_rows(&rows)]);
+        let context = describe_row_context(&subquery());
+        assert_eq!(context, RowContext::Flat);
+        assert_eq!(
+            relational_rows(false, &outcome, false, context).unwrap(),
+            encode_binary_rows(&rows)
+        );
+    }
+
+    /// The same rows under a scan's row shape are not envelopes: they carry
+    /// no `id`, so the split is an error, never a guess.
+    #[test]
+    fn flat_rows_under_a_scan_shape_are_an_error() {
+        let rows = vec![row(1, Value::Integer(1))];
+        let outcome = GatherOutcome::without_reads(vec![encode_binary_rows(&rows)]);
+        assert!(matches!(
+            relational_rows(false, &outcome, false, describe_row_context(&scan())),
+            Err(crate::Error::Codec { .. })
+        ));
+    }
 }

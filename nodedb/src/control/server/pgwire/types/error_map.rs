@@ -128,6 +128,16 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DataException { detail } => {
             ("ERROR", sqlstate::DATA_EXCEPTION, detail.clone())
         }
+        crate::Error::InvalidArgumentForLogarithm { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM,
+            detail.clone(),
+        ),
+        crate::Error::InvalidArgumentForPowerFunction { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+            detail.clone(),
+        ),
         crate::Error::MixedSrid { .. } => ("ERROR", sqlstate::DATA_EXCEPTION, err.to_string()),
         crate::Error::UnknownSrid { .. } => ("ERROR", sqlstate::DATA_EXCEPTION, err.to_string()),
         crate::Error::NumericValueOutOfRange { detail } => (

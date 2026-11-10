@@ -45,6 +45,7 @@ fn procedure_dml_creates_replicated_entry() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     let entry = encode_entry(
         TenantId::new(1),
@@ -103,6 +104,7 @@ fn procedure_writes_replicate_independently() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

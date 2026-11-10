@@ -106,7 +106,7 @@ fn ack_of(frame: Option<SyncFrame>) -> KvPushAckMsg {
 async fn a_pushed_row_dispatches_its_stored_body_and_acks_applied() {
     let mut session = authenticated();
     let mock = MockDispatcher::answering(applied_at);
-    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 5);
+    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 5);
 
     let ack = ack_of(session.handle_kv_push(&msg, &mock).await);
 
@@ -131,7 +131,7 @@ async fn a_pushed_row_dispatches_its_stored_body_and_acks_applied() {
 async fn a_resent_push_acks_duplicate() {
     let mut session = authenticated();
     let mock = MockDispatcher::answering(duplicate);
-    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 5);
+    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 5);
 
     let ack = ack_of(session.handle_kv_push(&msg, &mock).await);
 
@@ -178,9 +178,9 @@ async fn a_row_that_is_not_a_row_map_is_rejected_and_its_sequence_is_skipped() {
 async fn an_expired_put_applies_as_a_delete() {
     let mut session = authenticated();
     let mock = MockDispatcher::answering(applied_at);
-    let mut msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 7);
+    let mut msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 7);
     msg.op = KvPushOp::Put {
-        row: kv_row_msgpack("k1", b"v1"),
+        row: kv_row_msgpack("k1", b"v1").expect("row"),
         expire_at_ms: 1,
     };
 
@@ -197,7 +197,7 @@ async fn an_expired_put_applies_as_a_delete() {
 async fn an_unauthenticated_push_is_fenced_without_dispatch() {
     let mut session = SyncSession::new("kv-push".to_string());
     let mock = MockDispatcher::answering(applied_at);
-    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 1);
+    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 1);
 
     let ack = ack_of(session.handle_kv_push(&msg, &mock).await);
 
@@ -215,7 +215,7 @@ async fn typed_refusal_preserves_its_actual_frontier() {
             provenance: write.provenance.clone(),
         }))
     });
-    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 5);
+    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 5);
     let ack = ack_of(session.handle_kv_push(&msg, &mock).await);
     assert!(matches!(ack.status, AckStatus::Rejected { .. }));
     assert_eq!(ack.applied_seq, 19);
@@ -226,7 +226,7 @@ async fn typed_refusal_preserves_its_actual_frontier() {
 #[tokio::test]
 async fn unknown_dispatch_and_malformed_payload_close_without_ack() {
     let mut session = authenticated();
-    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1"), 5);
+    let msg = put_msg("k1", kv_row_msgpack("k1", b"v1").expect("row"), 5);
     let unknown = MockDispatcher::answering(|_| {
         Err(crate::Error::RetryableRefusal {
             reason: "timeout".into(),

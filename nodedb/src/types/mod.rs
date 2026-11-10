@@ -2,8 +2,10 @@
 
 pub mod consistency;
 pub mod core_route;
+pub mod document_event;
 pub mod hash_chain;
 pub mod id;
+pub mod installed_document;
 pub mod lsn;
 pub mod read_shards;
 pub mod record_home;
@@ -16,6 +18,7 @@ pub mod source_stamp;
 
 pub use consistency::ReadConsistency;
 pub use core_route::core_for_vshard;
+pub use document_event::DocumentPutEvent;
 pub use id::{DatabaseId, DocumentId, RequestId, TenantId, TxnId, VShardId};
 pub use lsn::Lsn;
 pub use nodedb_types::{KeyRepr, SpanId, TraceId};
@@ -30,3 +33,7 @@ pub use snapshot_calvin::{
 };
 pub use snapshot_index::{FieldIndexImage, VectorIndexHistory};
 pub use source_stamp::{DocVersionStamp, KvVersionStamp};
+
+pub use installed_document::{
+    CapturedInstalledDocument, InstalledDocument, SharedInstalledDocument,
+};

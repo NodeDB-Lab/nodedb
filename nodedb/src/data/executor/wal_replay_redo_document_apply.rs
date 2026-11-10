@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Restart-replay writes of one document redo sub-record.
+//! Restart-replay writes of one submitted document redo sub-record.
 //!
 //! Each op runs through the shared core write path (`apply_point_put` /
 //! `apply_point_delete`) in its own redb write transaction, with
@@ -9,7 +9,7 @@
 //!
 //! ## Hash-chained collections
 //!
-//! A redo put carries the SUBMITTED body. The chain link is derived at install
+//! An unmigrated submitted redo put carries the SUBMITTED body. The chain link is derived at install
 //! time from the head the install sees, so it is in no WAL record. Replay
 //! therefore marks the row through [`ChainGuard::chain_redo_put`]: a row
 //! already installed is stored again with its durable bytes and the head
@@ -83,6 +83,9 @@ impl CoreLoop {
         // The row's in-memory index entries, kept so a failed settle or
         // commit can reverse them.
         let mut memory_undo = Vec::new();
+        // A replayed put installs a logged record: it never evaluates a
+        // volatile DEFAULT.
+        let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, true);
         let applied = self
             .apply_point_put(
                 &txn,
@@ -108,9 +111,10 @@ impl CoreLoop {
             )
             .and_then(|mut outcome| {
                 memory_undo = std::mem::take(&mut outcome.memory_undo);
-                chain.settle(self, surrogate, &outcome.stored_value)
+                chain.settle(self, surrogate, &outcome.installed.stored)
             })
             .and_then(|()| chain.persist_head(self, &txn));
+        self.apply_scope.journaled = previous_journaled;
         // An error drops the write txn un-committed, which rolls it back.
         let committed = applied.and_then(|()| {
             txn.commit().map_err(|e| crate::Error::Storage {

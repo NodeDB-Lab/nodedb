@@ -502,6 +502,7 @@ mod tests {
                 Rec::Group(group) => (
                     RecordType::WriteGroup,
                     crate::wal::WriteGroupRecord {
+                        schemas: Vec::new(),
                         group: *group,
                         ops: vec![crate::wal::RedoSubRecord {
                             record_type: RecordType::Put as u32,

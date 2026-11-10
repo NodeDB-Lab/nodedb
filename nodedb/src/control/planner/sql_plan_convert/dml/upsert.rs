@@ -14,7 +14,7 @@ use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
 use super::super::convert::ConvertContext;
-use super::super::value::{assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array};
+use super::super::value::{assignments_to_update_values, document_row_body, rows_to_msgpack_array};
 use super::insert::{
     build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, doc_identity_keys,
     is_auto_rowid_pk, resolve_doc_identity_with_declared,
@@ -110,7 +110,8 @@ pub(in super::super) fn convert_upsert(
     for row in rows {
         match route {
             WriteRoute::Document => {
-                let value_bytes = row_to_msgpack(row)?;
+                let value_bytes =
+                    document_row_body(row, declared_pk.as_deref().unwrap_or(primary_key))?;
                 let (doc_id, surrogate) = resolve_doc_identity_with_declared(
                     ctx,
                     key,
@@ -134,7 +135,7 @@ pub(in super::super) fn convert_upsert(
                     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                         collection: qualified_collection.clone(),
                         document_id: doc_id,
-                        fields_json: super::crdt_gate::row_to_fields_json(row)?,
+                        fields: super::crdt_gate::row_to_fields_body(row)?,
                         surrogate,
                         partial: false,
                         verb: CrdtWriteVerb::Upsert,

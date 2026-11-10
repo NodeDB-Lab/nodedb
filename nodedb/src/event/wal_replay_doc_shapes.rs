@@ -21,7 +21,7 @@ use crate::wal::{DocumentDeleteRedo, DocumentPutRedo};
 pub(super) struct DocPut {
     pub collection: String,
     pub document_id: String,
-    pub value: Vec<u8>,
+    pub event: crate::types::document_event::DocumentPutEvent,
     /// `(system_time_ms, valid_time_ms)` the record carries: `Some` system
     /// time for a bitemporal record, the millisecond of its system-time
     /// ordinal, `None` for a plain one. A valid time of `i64::MIN` means
@@ -30,18 +30,36 @@ pub(super) struct DocPut {
 }
 
 /// Decode a surrogate-carrying document put in either form.
-pub(super) fn decode_doc_put(payload: &[u8]) -> Option<DocPut> {
-    DocumentPutRedo::decode(payload).map(|put| DocPut {
+pub(super) fn decode_doc_put(payload: &[u8]) -> crate::Result<Option<DocPut>> {
+    let installed = crate::wal::redo::installed_document::InstalledDocumentRedo::<
+        nodedb_physical::physical_plan::StorageMode,
+    >::decode(payload)?;
+    if let Some(put) = installed {
+        return Ok(Some(DocPut {
+            collection: put.collection,
+            document_id: put.document_id,
+            event: put.event,
+            stamps: Some((
+                nodedb_types::ordinal_to_ms(put.image.version.sys_from),
+                (put.image.version.valid_from_ms != i64::MIN)
+                    .then_some(put.image.version.valid_from_ms),
+            )),
+        }));
+    }
+    Ok(DocumentPutRedo::decode(payload).map(|put| DocPut {
         collection: put.collection,
         document_id: put.document_id,
-        value: put.value,
+        event: crate::types::document_event::DocumentPutEvent {
+            new_value: put.value,
+            old_value: None,
+        },
         stamps: put.stamp.map(|stamp| {
             (
                 nodedb_types::ordinal_to_ms(stamp.sys_from),
                 (stamp.valid_from_ms != i64::MIN).then_some(stamp.valid_from_ms),
             )
         }),
-    })
+    }))
 }
 
 /// Decode a surrogate-carrying document delete in either form, as
@@ -71,10 +89,10 @@ mod tests {
             i64::MAX,
         ))
         .expect("encode");
-        let put = decode_doc_put(&payload).expect("decodes");
+        let put = decode_doc_put(&payload).expect("decode").expect("put");
         assert_eq!(put.collection, "c");
         assert_eq!(put.document_id, "d1");
-        assert_eq!(put.value, vec![1u8]);
+        assert_eq!(put.event.new_value, vec![1u8]);
         assert_eq!(put.stamps, Some((10, None)));
     }
 
@@ -82,7 +100,7 @@ mod tests {
     fn a_plain_put_decodes_without_a_stamp() {
         let prov: Option<SyncProvenance> = None;
         let payload = zerompk::to_msgpack_vec(&("c", "d1", vec![1u8], prov, 7u32)).expect("encode");
-        let put = decode_doc_put(&payload).expect("decodes");
+        let put = decode_doc_put(&payload).expect("decode").expect("put");
         assert_eq!(put.document_id, "d1");
         assert_eq!(put.stamps, None);
     }

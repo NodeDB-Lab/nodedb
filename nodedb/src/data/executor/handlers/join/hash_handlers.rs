@@ -225,30 +225,10 @@ impl CoreLoop {
             let mut resolved: Vec<String> = join.on.iter().map(|(l, _)| l.clone()).collect();
             if let Some((_, first_doc)) = docs.first() {
                 for key in &mut resolved {
-                    if msgpack_scan::extract_field(first_doc, 0, key).is_none() {
-                        let suffix = format!(".{key}");
-                        if let Some((count, mut pos)) = msgpack_scan::map_header(first_doc, 0) {
-                            let mut found: Option<String> = None;
-                            for _ in 0..count {
-                                if let Some(field_name) = msgpack_scan::read_str(first_doc, pos)
-                                    && field_name.ends_with(&suffix)
-                                {
-                                    found = Some(field_name.to_string());
-                                    break;
-                                }
-                                pos = match msgpack_scan::skip_value(first_doc, pos) {
-                                    Some(p) => p,
-                                    None => break,
-                                };
-                                pos = match msgpack_scan::skip_value(first_doc, pos) {
-                                    Some(p) => p,
-                                    None => break,
-                                };
-                            }
-                            if let Some(resolved_key) = found {
-                                *key = resolved_key;
-                            }
-                        }
+                    match msgpack_scan::resolve_qualified_key(first_doc, key) {
+                        Ok(Some(qualified)) => *key = qualified,
+                        Ok(None) => {}
+                        Err(e) => return self.response_error(join.task, ErrorCode::from(e)),
                     }
                 }
             }
@@ -388,7 +368,10 @@ impl CoreLoop {
             return err;
         }
 
-        let right_index = HashIndex::build(&right_docs, &right_keys);
+        let right_index = match HashIndex::build(&right_docs, &right_keys) {
+            Ok(index) => index,
+            Err(e) => return self.response_error(join.task, ErrorCode::from(e)),
+        };
 
         // Bound the emitted output.
         //

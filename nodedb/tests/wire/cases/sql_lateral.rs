@@ -148,16 +148,20 @@ async fn lateral_top_k_outer_side_reads_a_cte() {
     );
 }
 
-/// A set-operation CTE on the outer side has no one plan to run. The join
-/// refuses it. Taking its first branch drops the other branch's rows.
+/// A set-operation CTE on the outer side is merged on the coordinator, and
+/// the join reads the rows of every branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lateral_outer_set_operation_cte_is_refused() {
+async fn lateral_outer_set_operation_cte_reads_every_branch() {
     let server = TestServer::start().await;
     setup_users_events(&server).await;
 
-    server
-        .expect_error(
-            "WITH c AS (SELECT id FROM lat_users UNION ALL SELECT id FROM lat_users) \
+    let mut rows = server
+        .query_text(
+            "WITH c AS (\
+                 SELECT id FROM lat_users WHERE name = 'Alice' \
+                 UNION ALL \
+                 SELECT id FROM lat_users WHERE name = 'Bob'\
+             ) \
              SELECT c.id \
              FROM c, \
                   LATERAL (\
@@ -166,9 +170,16 @@ async fn lateral_outer_set_operation_cte_is_refused() {
                       ORDER BY e.score DESC \
                       LIMIT 1\
                   ) best",
-            "physical tasks",
         )
-        .await;
+        .await
+        .unwrap();
+    rows.sort_unstable();
+
+    assert_eq!(
+        rows,
+        vec!["u1".to_string(), "u2".to_string()],
+        "each branch's user joins its one best event"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -308,6 +308,7 @@ pub(super) fn ordinary_task(id: u64) -> ExecutionTask {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     ExecutionTask::new(request)
 }

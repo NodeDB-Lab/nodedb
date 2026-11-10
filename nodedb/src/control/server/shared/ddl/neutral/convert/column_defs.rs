@@ -106,7 +106,7 @@ fn parse_column_defs(s: &str) -> Result<Vec<nodedb_types::columnar::ColumnDef>, 
 
     // The list splits on top-level commas, so a parameter list keeps its own
     // comma and `amount DECIMAL(10, 2)` stays one column definition.
-    for part in split_values(inner) {
+    for part in split_values(inner).map_err(|detail| err("42601", detail))? {
         let part = part.trim();
         if part.is_empty() {
             continue;

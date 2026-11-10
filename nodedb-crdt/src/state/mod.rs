@@ -18,7 +18,9 @@ pub mod preview;
 pub mod rekey;
 pub mod remove_fields;
 pub(crate) mod restore_containers;
+mod row_deep;
 pub mod row_image;
+pub mod row_write;
 pub mod snapshot;
 mod write_fork;
 pub mod write_set;
@@ -33,4 +35,5 @@ pub use preview::{
     DEFAULT_MAX_ENCODED_DELTA_OPS, DEFAULT_MAX_POST_IMAGE_BYTES,
 };
 pub use row_image::RowImage;
+pub use row_write::RowWrite;
 pub use write_set::WriteSetImport;

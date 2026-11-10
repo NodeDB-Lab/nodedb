@@ -56,7 +56,7 @@ fn hash_value(value: &JsonValue) -> String {
 /// The value `mode` produces for a typed field whose present value is
 /// `current`. A mask or hash renders through the JSON path: the hash input
 /// is the cell's wire JSON, exactly what the JSON row would have held.
-fn redacted_typed_value(mode: &RedactionMode, current: Option<&Value>) -> Value {
+pub(super) fn redacted_typed_value(mode: &RedactionMode, current: Option<&Value>) -> Value {
     match mode {
         RedactionMode::Mask(mask) => Value::String(mask.clone()),
         RedactionMode::Hash => {

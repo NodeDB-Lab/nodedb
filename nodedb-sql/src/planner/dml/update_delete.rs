@@ -22,6 +22,21 @@ use crate::types::*;
 
 /// Plan an UPDATE statement.
 pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    let plans = plan_update_rows(stmt, catalog)?;
+    let ast::Statement::Update(update) = stmt else {
+        return Ok(plans);
+    };
+    let alias = crate::parser::normalize::table_name_from_factor(&update.table.relation)?
+        .and_then(|(_, alias)| alias);
+    crate::planner::returning::attach_returning(
+        plans,
+        update.returning.as_deref(),
+        alias.as_deref(),
+        catalog,
+    )
+}
+
+fn plan_update_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     let ast::Statement::Update(update) = stmt else {
         return Err(SqlError::Parse {
             detail: "expected UPDATE statement".into(),
@@ -86,7 +101,7 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
             assignments: assigns,
             filters,
             target_keys,
-            returning: update.returning.is_some(),
+            returning: None,
         });
     }
 
@@ -96,7 +111,7 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
         assignments: assigns,
         filters,
         target_keys,
-        returning: update.returning.is_some(),
+        returning: None,
     })
 }
 
@@ -137,6 +152,28 @@ pub(super) fn convert_assignments(
 
 /// Plan a DELETE statement.
 pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    let plans = plan_delete_rows(stmt, catalog)?;
+    let ast::Statement::Delete(delete) = stmt else {
+        return Ok(plans);
+    };
+    let tables = match &delete.from {
+        ast::FromTable::WithFromKeyword(tables) | ast::FromTable::WithoutKeyword(tables) => tables,
+    };
+    let alias = tables
+        .first()
+        .map(|table| crate::parser::normalize::table_name_from_factor(&table.relation))
+        .transpose()?
+        .flatten()
+        .and_then(|(_, alias)| alias);
+    crate::planner::returning::attach_returning(
+        plans,
+        delete.returning.as_deref(),
+        alias.as_deref(),
+        catalog,
+    )
+}
+
+fn plan_delete_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     let ast::Statement::Delete(delete) = stmt else {
         return Err(SqlError::Parse {
             detail: "expected DELETE statement".into(),

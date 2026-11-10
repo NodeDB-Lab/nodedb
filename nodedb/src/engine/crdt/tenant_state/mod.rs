@@ -19,8 +19,9 @@ pub mod preview;
 pub mod rows;
 mod snapshot_io;
 mod snapshot_restore;
+pub mod staged_write;
 pub mod validate;
 
 pub use apply_target::ApplyTarget;
-pub use apply_validated::{DeltaSigningAdmission, ValidatedApplyOutcome};
+pub use apply_validated::{DeltaSigningAdmission, StagedInstall, ValidatedApplyOutcome};
 pub use core::TenantCrdtEngine;

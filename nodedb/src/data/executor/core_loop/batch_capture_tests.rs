@@ -58,16 +58,21 @@ fn shared_batches_capture_each_distinct_and_repeated_rows_own_version() {
             assert_eq!(capture.origin, id);
             assert_eq!(response.write_set.len(), 2);
             assert_eq!(capture.entries.len(), 2);
-            let entries = capture.write_set();
+            let entries = capture.write_set().expect("capture entries");
             for (reported, captured) in response.write_set.iter().zip(&entries) {
                 assert_eq!(reported.effect, captured.effect);
                 assert_eq!(reported.identity, captured.identity);
                 assert_eq!(reported.surrogate, captured.surrogate);
             }
             let image = &entries[0];
-            let RowEffect::Put { value, version } = &image.effect else {
+            let RowEffect::InstalledPut {
+                image: installed,
+                event,
+            } = &image.effect
+            else {
                 panic!("first entry must be the stamped put image");
             };
+            let version = installed.version;
             assert!(matches!(entries[1].effect, RowEffect::CancelForward));
             let surrogate = if repeated { 1 } else { id as u32 };
             assert_eq!(image.surrogate, surrogate);
@@ -79,8 +84,9 @@ fn shared_batches_capture_each_distinct_and_repeated_rows_own_version() {
                 assert!(version.sys_from > previous);
             }
             previous_ordinal = Some(version.sys_from);
-            let submitted = doc_format::decode_document(value).expect("decode submitted image");
-            assert_eq!(submitted["value"].as_u64(), Some(id));
+            let canonical =
+                doc_format::decode_document(&installed.canonical).expect("decode canonical image");
+            assert_eq!(canonical["value"].as_u64(), Some(id));
             let body = core
                 .sparse
                 .versioned_get_as_of(
@@ -94,7 +100,30 @@ fn shared_batches_capture_each_distinct_and_repeated_rows_own_version() {
                 .expect("read version")
                 .expect("version exists");
             let actual = doc_format::decode_document(&body).expect("decode stored version");
-            assert_eq!(actual["value"], submitted["value"]);
+            assert_eq!(body, installed.stored);
+            assert_eq!(actual, canonical);
+            // The public event image is the stored row plus the identity a
+            // schemaless read injects under the identity column.
+            let event_value =
+                doc_format::decode_document(&event.new_value).expect("decode event image");
+            let mut expected_event = actual.clone();
+            expected_event
+                .as_object_mut()
+                .expect("stored row is an object")
+                .insert(
+                    nodedb_types::DEFAULT_IDENTITY_COLUMN.to_string(),
+                    serde_json::Value::String(image.identity.as_str().to_string()),
+                );
+            assert_eq!(event_value, expected_event);
+            if repeated && id == 2 {
+                let prior = doc_format::decode_document(
+                    event.old_value.as_deref().expect("prior row image"),
+                )
+                .expect("decode prior image");
+                assert_eq!(prior["value"].as_u64(), Some(1));
+            } else {
+                assert!(event.old_value.is_none());
+            }
         }
     }
 }

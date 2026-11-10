@@ -9,9 +9,10 @@
 mod dispatch;
 mod entry;
 mod merge;
+mod set_op;
 mod shadow;
 mod temporal;
 
 pub(in crate::control::server) use entry::{
-    CloneReadInterceptParams, CloneReadOutcome, maybe_intercept_clone_read,
+    CloneReadAnswer, CloneReadInterceptParams, CloneReadOutcome, maybe_intercept_clone_read,
 };

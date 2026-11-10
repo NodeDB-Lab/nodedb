@@ -47,7 +47,13 @@ mod tests {
         let op = CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
             document_id: "n1".to_string(),
-            fields_json: r#"{"title":"a"}"#.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "title".to_string(),
+                    nodedb_types::Value::String("a".into()),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: Surrogate::new(5),
             partial: false,
             verb: CrdtWriteVerb::Insert,

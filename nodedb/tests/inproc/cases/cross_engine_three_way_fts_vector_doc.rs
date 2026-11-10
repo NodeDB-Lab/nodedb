@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use nodedb::bridge::envelope::{Priority, Request, Status};
 use nodedb::data::executor::core_loop::CoreLoop;
-use nodedb::data::executor::response_codec::decode_payload_to_json;
 use nodedb::types::*;
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, TextOp, VectorOp};
@@ -107,7 +106,13 @@ fn send_ok(
 // ── Helper: parse a JSON response payload ────────────────────────────────
 
 fn parse_json(payload: &[u8]) -> serde_json::Value {
-    let s = decode_payload_to_json(payload);
+    // Search and scan payloads decode as rows; a native row renders as its
+    // typed values.
+    let s = nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("payload rows decode");
     serde_json::from_str(&s).unwrap_or(serde_json::Value::Array(vec![]))
 }
 
@@ -202,6 +207,7 @@ fn three_way_fts_vector_doc_bitmap() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -229,6 +235,7 @@ fn three_way_fts_vector_doc_bitmap() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }

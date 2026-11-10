@@ -49,6 +49,7 @@ fn async_trigger_not_in_raft_log() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
 
     // to_replicated_entry converts the plan to a Raft log entry.
@@ -284,6 +285,7 @@ fn procedure_dml_is_normal_write() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     // This is a normal write → replicates via Raft.
     assert!(

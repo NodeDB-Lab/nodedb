@@ -77,7 +77,13 @@ pub(super) fn redacted_scan_keys(
 ) -> Option<Vec<Vec<u8>>> {
     let mut entries = scan_entries(payload)?;
     for entry in &mut entries {
-        redact_envelope_row(redaction, store, entry);
+        // KV entries are flat field maps.
+        redact_envelope_row(
+            redaction,
+            store,
+            crate::data::executor::response_codec::RowContext::Flat,
+            entry,
+        );
     }
     Some(entry_keys(&entries))
 }

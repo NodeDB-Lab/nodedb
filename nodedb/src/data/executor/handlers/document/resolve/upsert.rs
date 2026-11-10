@@ -65,7 +65,7 @@ impl CoreLoop {
         // field of the incoming body. Typeguards judge those fields and the
         // fields a guard injects. An insert is judged whole.
         let assigned: Vec<String> = if on_conflict_updates.is_empty() {
-            match nodedb_types::value_from_msgpack(value) {
+            match crate::data::executor::doc_format::decode_document_value(value) {
                 Ok(nodedb_types::Value::Object(fields)) => fields.into_keys().collect(),
                 _ => Vec::new(),
             }

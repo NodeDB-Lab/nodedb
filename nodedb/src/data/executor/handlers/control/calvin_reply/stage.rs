@@ -489,7 +489,7 @@ mod tests {
             columns: ReturningColumns::Named(
                 columns
                     .iter()
-                    .map(|name| ReturningItem {
+                    .map(|name| ReturningItem::Column {
                         name: (*name).to_string(),
                         alias: None,
                     })
@@ -552,6 +552,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -565,6 +566,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -744,6 +746,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let response = commit(&[plan], |_| {});
         assert_eq!(returned(&response), vec![text("one"), text("two")]);
@@ -851,7 +854,13 @@ mod tests {
         let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: coll("tasks"),
             document_id: "t1".to_string(),
-            fields_json: r#"{"title":"kept"}"#.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "title".to_string(),
+                    nodedb_types::Value::String("kept".into()),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: Surrogate::new(71),
             partial: false,
             verb: CrdtWriteVerb::Insert,

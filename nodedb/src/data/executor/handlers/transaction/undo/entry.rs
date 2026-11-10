@@ -286,9 +286,6 @@ pub(in crate::data::executor) enum UndoEntry {
     },
     /// Undo a CRDT write by putting the collection's Loro document back.
     CrdtCollection(Box<super::crdt_collection::CrdtCollectionUndo>),
-    /// Undo a CRDT scalar write to one document row by putting the row's
-    /// scalar fields back.
-    CrdtRow(Box<super::crdt_row::CrdtRowUndo>),
     /// Undo an array cell write by putting back the memtable tiles it
     /// touched.
     ArrayTiles {

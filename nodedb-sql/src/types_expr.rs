@@ -21,7 +21,14 @@ pub enum SqlValue {
     Bool(bool),
     Null,
     Bytes(Vec<u8>),
+    /// Typed UUID: `UUID '...'`, `'...'::uuid`, or a `uuid` parameter.
+    /// Holds the canonical text: lowercase, hyphenated.
+    Uuid(String),
     Array(Vec<SqlValue>),
+    /// A typed object: `jsonb_build_object('k', v, ...)` in a `VALUES` row,
+    /// the form a nested `{ ... }` object literal rewrites to. Fields keep
+    /// their written order and their exact types.
+    Object(Vec<(String, SqlValue)>),
     /// Typed naive timestamp literal: `TIMESTAMP '...'` or `'...'::TIMESTAMP`.
     Timestamp(NdbDateTime),
     /// Typed timezone-aware timestamp literal: `TIMESTAMPTZ '...'` or `'...'::TIMESTAMPTZ`.
@@ -29,6 +36,8 @@ pub enum SqlValue {
     /// A geometry: what a geometry-returning call folds to. Carries its
     /// SRID, Z and M.
     Geometry(nodedb_types::geometry::SridGeometry),
+    /// A typed duration: `'90s'::duration`, or an `interval` parameter.
+    Duration(nodedb_types::NdbDuration),
 }
 
 /// SQL-side payload-bitmap predicate atom. Mirrors `nodedb_types::PayloadAtom`

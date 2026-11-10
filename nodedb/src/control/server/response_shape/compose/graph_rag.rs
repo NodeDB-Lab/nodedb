@@ -5,7 +5,7 @@
 use nodedb_types::Value;
 
 use crate::control::sequence::SequenceAccess;
-use crate::data::executor::response_codec::decode_payload_value;
+use crate::data::executor::response_codec::{RowContext, decode_payload_value};
 
 use super::super::redaction::RedactionCtx;
 use super::super::schema::OutputSchema;
@@ -31,13 +31,28 @@ pub fn shape_graph_rag(
         return Ok(empty_shaped());
     };
     let Value::Object(mut fields) = decoded else {
-        return shape_decoded_rows(decoded, projection, redaction, sequences, crs_set);
+        return shape_decoded_rows(
+            decoded,
+            RowContext::Flat,
+            projection,
+            redaction,
+            sequences,
+            crs_set,
+        );
     };
     let notice = fields.get("metadata").and_then(metadata_notice);
     let rows = fields
         .remove("results")
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    let mut shaped = shape_decoded_rows(rows, projection, redaction, sequences, crs_set)?;
+    // Fused hits are flat rows that carry no document body.
+    let mut shaped = shape_decoded_rows(
+        rows,
+        RowContext::Flat,
+        projection,
+        redaction,
+        sequences,
+        crs_set,
+    )?;
     if projection.is_none_or(|p| p.is_star || p.columns.is_empty()) {
         order_and_type_columns(&mut shaped);
     }

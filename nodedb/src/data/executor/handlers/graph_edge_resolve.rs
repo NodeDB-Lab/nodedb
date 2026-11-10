@@ -37,18 +37,19 @@ impl CoreLoop {
             );
         };
 
-        let stored = self
-            .edge_store
-            .get_edge(
-                task.request.database_id.as_u64(),
-                TenantId::new(tid),
-                collection.as_str(),
-                src_id,
-                label,
-                dst_id,
-            )
-            .ok()
-            .flatten();
+        // A read error is not an absent edge: deciding "no live edge" on it
+        // would report 0 affected for an edge that may exist.
+        let stored = match self.edge_store.get_edge(
+            task.request.database_id.as_u64(),
+            TenantId::new(tid),
+            collection.as_str(),
+            src_id,
+            label,
+            dst_id,
+        ) {
+            Ok(stored) => stored,
+            Err(error) => return self.response_error(task, error),
+        };
 
         match crate::data::executor::handlers::rls_write_gate::admit_edge_properties(
             rls_write_check,

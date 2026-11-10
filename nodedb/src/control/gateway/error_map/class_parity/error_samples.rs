@@ -219,6 +219,8 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::DivisionByZero,
         E::DataException { detail: text() },
+        E::InvalidArgumentForLogarithm { detail: text() },
+        E::InvalidArgumentForPowerFunction { detail: text() },
         E::MixedSrid {
             collection: collection(),
             field: "loc".into(),

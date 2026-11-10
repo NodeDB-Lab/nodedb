@@ -10,7 +10,8 @@ mod frames;
 mod server;
 
 pub use frames::{
-    RESPONSE_BOUND, do_handshake, do_handshake_from, open_trust_session, read_frame,
-    send_api_key_auth, send_request, send_request_within, send_sql, write_frame,
+    FrameEncoding, RESPONSE_BOUND, do_handshake, do_handshake_from, open_trust_session, read_frame,
+    send_api_key_auth, send_request, send_request_encoded, send_request_msgpack,
+    send_request_within, send_sql, write_frame,
 };
 pub use server::NativeTestServer;

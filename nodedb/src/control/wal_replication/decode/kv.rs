@@ -610,7 +610,7 @@ mod tests {
         let tenant = TenantId::new(1);
         let vshard = VShardId::new(0);
         let spec = ReturningSpec {
-            columns: ReturningColumns::Named(vec![ReturningItem {
+            columns: ReturningColumns::Named(vec![ReturningItem::Column {
                 name: "balance".into(),
                 alias: None,
             }]),

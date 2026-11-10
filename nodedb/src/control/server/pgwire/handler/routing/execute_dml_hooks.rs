@@ -201,6 +201,7 @@ impl NodeDbPgHandler {
         match shape_payload_no_plan(
             resp.payload.as_ref(),
             plan_kind,
+            crate::bridge::envelope::describe_row_context(plan),
             projection,
             Some(redaction.ctx(&self.state.redaction)),
             None,

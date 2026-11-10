@@ -65,6 +65,7 @@ pub fn split_redo(record: &RedoRecord, max_payload: usize) -> crate::Result<Spli
     let continuation_budget = remaining(
         max_payload,
         super::group::WriteGroupRecord {
+            schemas: Vec::new(),
             group: super::group::WriteGroup::continuing(u64::MAX, u32::MAX),
             ops: Vec::new(),
             redo: Some(metadata.clone()),
@@ -164,6 +165,7 @@ mod tests {
         assert!(split.origin.to_bytes().expect("encode").len() <= max);
         for (index, chunk) in (1u32..).zip(&split.continuations) {
             let bytes = super::super::group::WriteGroupRecord {
+                schemas: Vec::new(),
                 group: super::super::group::WriteGroup::continuing(9, index),
                 ops: chunk.clone(),
                 redo: Some(split.metadata.clone()),

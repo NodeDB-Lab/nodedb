@@ -38,11 +38,15 @@ pub(in crate::data::executor) fn merge_field_updates(
     updates: &[(String, Vec<u8>)],
     declared: &[DeclaredColumn],
 ) -> Result<FieldSetComputation, ErrorCode> {
+    // The merged row re-encodes in the shape it was read in, so a native row
+    // keeps its typed columns. A fresh row is a plain map.
+    let mut shape = KvBodyShape::Map;
     let mut doc = match current {
         None => std::collections::HashMap::new(),
         Some(body) => {
-            let (row, shape) = kv_body_to_row(body)
+            let (row, read_shape) = kv_body_to_row(body)
                 .map_err(|e| ErrorCode::from(crate::Error::from(KvBodyError::from(e))))?;
+            shape = read_shape;
             if shape == KvBodyShape::Raw {
                 return Err(ErrorCode::TypeMismatch {
                     collection: collection.to_string(),
@@ -77,7 +81,7 @@ pub(in crate::data::executor) fn merge_field_updates(
     }
     coerce_declared_row(&mut doc, declared).map_err(ErrorCode::from)?;
 
-    let new_value = row_to_kv_body(&Value::Object(doc), KvBodyShape::Map)
+    let new_value = row_to_kv_body(&Value::Object(doc), shape)
         .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
 
     Ok(FieldSetComputation {

@@ -15,12 +15,20 @@ pub(super) fn sql_value_to_ndb(v: SqlValue) -> nodedb_types::Value {
         SqlValue::Decimal(d) => nodedb_types::Value::Decimal(d),
         SqlValue::String(s) => nodedb_types::Value::String(s),
         SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b),
+        SqlValue::Uuid(u) => nodedb_types::Value::Uuid(u),
+        SqlValue::Object(fields) => nodedb_types::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, sql_value_to_ndb(value)))
+                .collect(),
+        ),
         SqlValue::Array(a) => {
             nodedb_types::Value::Array(a.into_iter().map(sql_value_to_ndb).collect())
         }
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(dt),
         SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g),
+        SqlValue::Duration(d) => nodedb_types::Value::Duration(d),
     }
 }
 
@@ -41,9 +49,21 @@ pub fn default_value_to_sql(column: &str, value: nodedb_types::Value) -> crate::
         nodedb_types::Value::Decimal(d) => SqlValue::Decimal(d),
         nodedb_types::Value::String(s) => SqlValue::String(s),
         nodedb_types::Value::Bytes(b) => SqlValue::Bytes(b),
+        nodedb_types::Value::Uuid(u) => SqlValue::Uuid(u),
+        nodedb_types::Value::Object(fields) => {
+            let mut fields: Vec<(String, nodedb_types::Value)> = fields.into_iter().collect();
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            SqlValue::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, item)| default_value_to_sql(column, item).map(|item| (key, item)))
+                    .collect::<crate::Result<Vec<_>>>()?,
+            )
+        }
         nodedb_types::Value::NaiveDateTime(dt) => SqlValue::Timestamp(dt),
         nodedb_types::Value::DateTime(dt) => SqlValue::Timestamptz(dt),
         nodedb_types::Value::Geometry(g) => SqlValue::Geometry(g),
+        nodedb_types::Value::Duration(d) => SqlValue::Duration(d),
         nodedb_types::Value::Array(items) => SqlValue::Array(
             items
                 .into_iter()

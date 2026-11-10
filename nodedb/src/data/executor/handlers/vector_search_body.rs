@@ -51,7 +51,7 @@ impl CoreLoop {
                 crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                     &bytes,
                     format.as_format_ref(),
-                )
+                )?
                 .into_owned(),
             );
         }

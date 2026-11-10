@@ -76,13 +76,14 @@ pub(crate) fn extract_msgpack_elements(payload: &[u8]) -> crate::Result<Vec<Vec<
 /// bytes.
 ///
 /// A scan answers a msgpack array of rows. A point read answers its one row
-/// as a bare msgpack map, and that map is the payload's one row. An empty
-/// payload holds no rows. Any other payload is a `Codec` error from
-/// [`extract_msgpack_elements`].
+/// as a bare msgpack map or a bare native object (`[7, {...}]`), and that
+/// row is the payload's one row: a native object is never split into its two
+/// array elements. An empty payload holds no rows. Any other payload is a
+/// `Codec` error from [`extract_msgpack_elements`].
 pub(crate) fn payload_rows(payload: &[u8]) -> crate::Result<Vec<Vec<u8>>> {
-    let single_row = msgpack_scan::map_header(payload, 0).is_some()
+    let single_map = msgpack_scan::map_header(payload, 0).is_some()
         && msgpack_scan::skip_value(payload, 0) == Some(payload.len());
-    if single_row {
+    if single_map || crate::data::executor::response_codec::is_native_row(payload) {
         return Ok(vec![payload.to_vec()]);
     }
     extract_msgpack_elements(payload)
@@ -243,6 +244,21 @@ mod tests {
     #[test]
     fn a_point_read_map_is_one_row() {
         assert_eq!(payload_rows(&map_row(3)).expect("rows"), vec![map_row(3)]);
+    }
+
+    /// A point read's bare native row is one row, never its two elements.
+    #[test]
+    fn a_point_read_native_row_is_one_row() {
+        let native = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(
+            [("k".to_string(), nodedb_types::Value::Integer(3))].into(),
+        ))
+        .expect("encode native");
+        assert_eq!(payload_rows(&native).expect("rows"), vec![native.clone()]);
+        let merged = merge_payload_rows(std::slice::from_ref(&native)).expect("merge");
+        assert_eq!(
+            extract_msgpack_elements(&merged).expect("extract"),
+            vec![native]
+        );
     }
 
     #[test]

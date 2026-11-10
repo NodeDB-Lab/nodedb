@@ -3,8 +3,6 @@
 //! Retention and legal hold enforcement: reject DELETE operations that
 //! violate data retention policies or active legal holds.
 
-use sonic_rs;
-
 use crate::bridge::envelope::ErrorCode;
 use nodedb_physical::physical_plan::EnforcementOptions;
 
@@ -157,26 +155,25 @@ fn split_number_unit(s: &str) -> (&str, &str) {
 /// Tries: `created_at` (integer seconds or millis), `_created_at`,
 /// `timestamp` fields. Returns `None` if no timestamp field is found.
 pub fn extract_created_at_secs(doc_bytes: &[u8]) -> Option<u64> {
-    if doc_bytes.is_empty() {
-        return None;
-    }
-    let first = doc_bytes[0];
-    let is_msgpack = (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF;
-    let val: serde_json::Value = if is_msgpack {
-        nodedb_types::json_from_msgpack(doc_bytes)
-            .ok()
-            .or_else(|| sonic_rs::from_slice(doc_bytes).ok())?
-    } else {
-        sonic_rs::from_slice(doc_bytes).ok()?
-    };
+    let val = crate::data::executor::doc_format::decode_document_value(doc_bytes).ok()?;
+    created_at_secs_of(&val)
+}
 
+/// [`extract_created_at_secs`] over an already-decoded row.
+pub fn created_at_secs_of(val: &nodedb_types::Value) -> Option<u64> {
     let obj = val.as_object()?;
 
     for field in &["created_at", "_created_at", "timestamp"] {
         if let Some(v) = obj.get(*field) {
-            if let Some(n) = v.as_u64() {
-                // Heuristic: if > 1e12, it's milliseconds; otherwise seconds.
-                return Some(if n > 1_000_000_000_000 { n / 1000 } else { n });
+            if let nodedb_types::Value::Decimal(decimal) = v
+                && let Some(n) = nodedb_types::Value::decimal_as_wide_u64(decimal)
+            {
+                return Some(n / 1000);
+            }
+            if let nodedb_types::Value::DateTime(timestamp)
+            | nodedb_types::Value::NaiveDateTime(timestamp) = v
+            {
+                return Some((timestamp.micros / 1_000_000) as u64);
             }
             if let Some(n) = v.as_i64() {
                 let n = n as u64;
@@ -197,6 +194,16 @@ pub fn extract_created_at_secs(doc_bytes: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tagged_timestamps_keep_retention_age() {
+        let fields = std::collections::HashMap::from([(
+            "created_at".into(),
+            nodedb_types::Value::Integer(1_700_000_000),
+        )]);
+        let bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(fields)).unwrap();
+        assert_eq!(extract_created_at_secs(&bytes), Some(1_700_000_000));
+    }
 
     fn dur(count: u32, unit: RetentionUnit) -> RetentionDuration {
         RetentionDuration { count, unit }

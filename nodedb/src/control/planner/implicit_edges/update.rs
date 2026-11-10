@@ -75,11 +75,11 @@ pub struct EdgeFieldOverrides {
 /// UPDATE's SET assignments.
 ///
 /// For each reserved string field (`_from`/`_to`/`_type`) found: a `Literal`
-/// that decodes (via the same rmpv path `extract_edge` uses) to a string yields
+/// that decodes (as `extract_edge` reads an edge field) to a string yields
 /// [`FieldUpdate::Set`]; a null or non-string literal yields
 /// [`FieldUpdate::Cleared`]; an absent field stays [`FieldUpdate::Unchanged`].
-/// The numeric `weight` field is decoded the same rmpv way `extract_edge`
-/// decodes it: a finite f64 (from an F64 / F32 / Integer literal) yields
+/// The numeric `weight` field is decoded the way `extract_edge` decodes it: a
+/// finite f64 (from a Float, Integer or Decimal literal) yields
 /// [`WeightUpdate::Set`]; a null / non-numeric / non-finite literal yields
 /// [`WeightUpdate::Cleared`]; an absent field stays [`WeightUpdate::Unchanged`].
 /// An `Expr` assignment to one of the three reserved STRING fields returns a
@@ -142,24 +142,20 @@ pub fn parse_edge_field_overrides(
 }
 
 /// Decode a standard-msgpack literal value, returning `Some(s)` only when it is
-/// a string. Mirrors `extract_edge`'s rmpv decode of edge-field values.
+/// a string, as `extract_edge` reads an edge field.
 fn decode_literal_string(bytes: &[u8]) -> Option<String> {
-    let decoded = crate::util::bounded_msgpack::read_value(bytes).ok()?;
-    decoded.as_str().map(str::to_string)
+    match nodedb_types::value_from_msgpack(bytes).ok()? {
+        nodedb_types::Value::String(s) => Some(s),
+        _ => None,
+    }
 }
 
 /// Decode a standard-msgpack literal value into a FINITE f64, returning `None`
-/// for null / non-numeric / non-finite. Mirrors the numeric `weight` decode in
-/// `extract_edge` (F64 / F32 / Integer → f64, filtered to finite).
+/// for null / non-numeric / non-finite. Reads the weight as `extract_edge`
+/// does (`nodedb_graph::property_weight`: Integer, Float or Decimal).
 fn decode_literal_weight(bytes: &[u8]) -> Option<f64> {
-    let decoded = crate::util::bounded_msgpack::read_value(bytes).ok()?;
-    match decoded {
-        rmpv::Value::F64(f) => Some(f),
-        rmpv::Value::F32(f) => Some(f as f64),
-        rmpv::Value::Integer(i) => i.as_f64(),
-        _ => None,
-    }
-    .filter(|w| w.is_finite())
+    let decoded = nodedb_types::value_from_msgpack(bytes).ok()?;
+    nodedb_graph::property_weight(&decoded).filter(|w| w.is_finite())
 }
 
 /// The canonical edge identity used for the diff: `(from, to, resolved-label)`.

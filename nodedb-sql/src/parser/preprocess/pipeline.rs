@@ -198,10 +198,10 @@ mod tests {
     #[test]
     fn a_clause_after_the_object_literal_is_refused_not_dropped() {
         for sql in [
-            "INSERT INTO users { name: 'alice' } RETURNING *",
-            "UPSERT INTO users { name: 'alice' } RETURNING *",
             "INSERT INTO users { name: 'alice' } ON CONFLICT (id) DO NOTHING",
-            "INSERT INTO users [{ name: 'alice' }] RETURNING *",
+            "UPSERT INTO users { name: 'alice' } ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO users [{ name: 'alice' }] ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO users { name: 'alice' } RETURNING",
         ] {
             let error = super::preprocess(sql)
                 .expect_err("a clause the brace form cannot carry must fail the statement");
@@ -210,6 +210,33 @@ mod tests {
                 detail.contains("RETURNING") || detail.contains("ON CONFLICT"),
                 "the refusal must name the clause it could not carry; sql = {sql}, got {detail}"
             );
+        }
+    }
+
+    /// A `RETURNING` list after the literal is carried onto the rebuilt
+    /// statement verbatim, on every form, so the planner answers it.
+    #[test]
+    fn a_returning_list_after_the_object_literal_is_carried() {
+        for (sql, upsert, rebuilt) in [
+            (
+                "INSERT INTO users { name: 'alice' } RETURNING *",
+                false,
+                "INSERT INTO users (name) VALUES ('alice') RETURNING *",
+            ),
+            (
+                "UPSERT INTO users { name: 'alice' } RETURNING id;",
+                true,
+                "INSERT INTO users (name) VALUES ('alice') RETURNING id",
+            ),
+            (
+                "INSERT INTO users [{ name: 'a]' }] returning upper(name) AS n",
+                false,
+                "INSERT INTO users (name) VALUES ('a]') returning upper(name) AS n",
+            ),
+        ] {
+            let result = pp(sql).expect("the object literal rewrites");
+            assert_eq!(result.is_upsert, upsert, "{sql}");
+            assert_eq!(result.sql, rebuilt, "{sql}");
         }
     }
 

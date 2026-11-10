@@ -74,20 +74,28 @@ pub(in crate::data::executor) fn merge_state_frames(
         // `?` upholds the crate-wide contract without a reachable error path.
         let key = msgpack_scan::build_group_key(&row, &row_keys, crs)?;
 
-        // Extract the `__agg_state` binary field.
-        let (val_start, _val_end) = msgpack_scan::extract_field(&row, 0, AGG_STATE_FIELD)
+        // Extract the `__agg_state` binary field through the row's object
+        // format: the producer emits native tagged rows.
+        let view = nodedb_types::ObjectView::new(&row).map_err(|e| crate::Error::Codec {
+            detail: format!("shuffle-aggregate row is not an object: {e}"),
+        })?;
+        let state_value = view
+            .get(AGG_STATE_FIELD)
+            .map_err(|e| crate::Error::Codec {
+                detail: format!("shuffle-aggregate `{AGG_STATE_FIELD}` decode: {e}"),
+            })?
             .ok_or_else(|| crate::Error::Codec {
                 detail: format!("shuffle-aggregate row missing `{AGG_STATE_FIELD}` field"),
             })?;
-        let mut off = val_start;
-        let state_bytes =
-            msgpack_scan::read_bin_advance(&row, &mut off).ok_or_else(|| crate::Error::Codec {
+        let nodedb_types::Value::Bytes(state_bytes) = state_value else {
+            return Err(crate::Error::Codec {
                 detail: format!("shuffle-aggregate `{AGG_STATE_FIELD}` is not binary"),
-            })?;
+            });
+        };
 
         // The producer encodes GroupState as MessagePack.
         let state: GroupState =
-            zerompk::from_msgpack(state_bytes).map_err(|e| crate::Error::Codec {
+            zerompk::from_msgpack(&state_bytes).map_err(|e| crate::Error::Codec {
                 detail: format!("shuffle-aggregate partial-state decode: {e}"),
             })?;
 
@@ -193,9 +201,9 @@ mod tests {
     }
 
     /// Accumulate `docs` into per-group `GroupState`s, keyed exactly the way the
-    /// producer keys them (`build_group_key`), and emit one framed partial-state
-    /// row per group — the `[u32 LE len][msgpack {g, __agg_state}]` format the
-    /// consumer reads.
+    /// producer keys them (`build_group_key_values`, first row as the
+    /// representative), and frame the production producer's native rows — the
+    /// `[u32 LE len][native {g, __agg_state}]` format the consumer reads.
     fn write_partial_state_frames(
         path: &std::path::Path,
         specs: &[AggregateSpec],
@@ -203,8 +211,8 @@ mod tests {
         docs: &[Vec<u8>],
     ) {
         let mut groups: HashMap<String, GroupState> = HashMap::new();
-        for doc in docs {
-            let key = nodedb_query::msgpack_scan::build_group_key(
+        for (seq, doc) in docs.iter().enumerate() {
+            let (key, values) = nodedb_query::msgpack_scan::build_group_key_values(
                 doc,
                 group_by,
                 &nodedb_crs::CrsContext::builtin_only(),
@@ -212,37 +220,17 @@ mod tests {
             .expect("group key");
             groups
                 .entry(key)
-                .or_insert_with(|| GroupState::new(specs).expect("group state"))
+                .or_insert_with(|| {
+                    GroupState::with_key(specs, seq as u64, values).expect("group state")
+                })
                 .feed(specs, doc, &nodedb_crs::CrsContext::builtin_only())
                 .expect("feed");
         }
 
+        let rows = crate::data::executor::core_loop::CoreLoop::partial_state_rows(groups, group_by)
+            .expect("partial-state rows");
         let mut f = std::fs::File::create(path).expect("create frame file");
-        for (key, state) in groups {
-            // Recover the GROUP BY column values from the JSON-array key (same
-            // as the production producer) and re-emit them as flat row fields.
-            let parts: Vec<serde_json::Value> = sonic_rs::from_str(&key).expect("key json");
-            let mut row: HashMap<String, Value> = HashMap::new();
-            let mut part_idx = 0usize;
-            for spec in group_by {
-                if spec.field.is_none() {
-                    continue;
-                }
-                let jv = parts
-                    .get(part_idx)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                row.insert(spec.output_name.clone(), Value::from(jv));
-                part_idx += 1;
-            }
-            let state_bytes = zerompk::to_msgpack_vec(&state).expect("state msgpack");
-            row.insert(
-                super::AGG_STATE_FIELD.to_string(),
-                Value::Bytes(state_bytes),
-            );
-
-            let row_bytes =
-                nodedb_types::value_to_msgpack(&Value::Object(row)).expect("encode row");
+        for row_bytes in rows {
             let len = u32::try_from(row_bytes.len()).expect("row fits u32");
             f.write_all(&len.to_le_bytes()).expect("write len");
             f.write_all(&row_bytes).expect("write body");
@@ -379,5 +367,109 @@ mod tests {
                 "aggregate values for group {k} must equal the single-pass union aggregate"
             );
         }
+    }
+
+    /// Typed group keys cross the shuffle natively: a `Decimal` and a `Uuid`
+    /// group key reach the consumer typed, and producers that saw
+    /// `Decimal(5.00)` and `Integer(5)` merge into one group with one
+    /// deterministic representative.
+    #[test]
+    fn typed_group_keys_cross_the_shuffle_and_merge_canonically() {
+        let specs = vec![make_spec("count", "*")];
+        let group_by = vec![GroupKeySpec::column("g")];
+        let doc = |value: Value| {
+            zerompk::to_msgpack_vec(&Value::Object(
+                [("g".to_owned(), value)].into_iter().collect(),
+            ))
+            .expect("native doc")
+        };
+        let uuid = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let decimal = Value::Decimal("5.00".parse().expect("decimal"));
+        let docs_a = vec![doc(decimal.clone()), doc(uuid.clone())];
+        let docs_b = vec![doc(Value::Integer(5))];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("typed.frames");
+        let path_b = dir.path().join("typed_b.frames");
+        write_partial_state_frames(&path, &specs, &group_by, &docs_a);
+        write_partial_state_frames(&path_b, &specs, &group_by, &docs_b);
+        let mut bytes = std::fs::read(&path).expect("read a");
+        bytes.extend(std::fs::read(&path_b).expect("read b"));
+        std::fs::write(&path, bytes).expect("concat");
+
+        let merged = merge_state_frames(
+            &path,
+            &group_by,
+            &specs,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
+        assert_eq!(merged.len(), 2);
+        let mut seen: Vec<(Vec<Value>, Vec<Value>)> = merged
+            .into_values()
+            .map(|state| {
+                let key = state.key_values().expect("representative").to_vec();
+                let counts = state
+                    .finalize(&specs)
+                    .expect("finalize")
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect();
+                (key, counts)
+            })
+            .collect();
+        seen.sort_by_key(|(key, _)| format!("{key:?}"));
+        // Both producers admitted the group at `seq` 0, so the encoded
+        // representative decides: `Integer(5)` encodes below `Decimal(5.00)`.
+        assert!(seen.contains(&(vec![Value::Integer(5)], vec![Value::Integer(2)])));
+        assert!(!seen.iter().any(|(key, _)| key == &vec![decimal.clone()]));
+        assert!(seen.contains(&(vec![uuid], vec![Value::Integer(1)])));
+    }
+
+    /// The representative does not depend on frame arrival order: two
+    /// producers whose first rows of one group differ in type give the same
+    /// output in either order.
+    #[test]
+    fn representative_is_independent_of_arrival_order() {
+        let specs = vec![make_spec("count", "*")];
+        let group_by = vec![GroupKeySpec::column("g")];
+        let doc = |value: Value| {
+            zerompk::to_msgpack_vec(&Value::Object(
+                [("g".to_owned(), value)].into_iter().collect(),
+            ))
+            .expect("native doc")
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_a = dir.path().join("a.frames");
+        let path_b = dir.path().join("b.frames");
+        write_partial_state_frames(
+            &path_a,
+            &specs,
+            &group_by,
+            &[doc(Value::Decimal("5.00".parse().expect("decimal")))],
+        );
+        write_partial_state_frames(&path_b, &specs, &group_by, &[doc(Value::Integer(5))]);
+        let merged_in = |first: &std::path::Path, second: &std::path::Path, name: &str| {
+            let path = dir.path().join(name);
+            let mut bytes = std::fs::read(first).expect("read first");
+            bytes.extend(std::fs::read(second).expect("read second"));
+            std::fs::write(&path, bytes).expect("concat");
+            let merged = merge_state_frames(
+                &path,
+                &group_by,
+                &specs,
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("merge");
+            assert_eq!(merged.len(), 1);
+            merged
+                .into_values()
+                .map(|state| state.key_values().expect("representative").to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            merged_in(&path_a, &path_b, "ab.frames"),
+            merged_in(&path_b, &path_a, "ba.frames")
+        );
     }
 }

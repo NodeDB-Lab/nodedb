@@ -52,6 +52,24 @@ pub(in crate::data::executor) fn build_graph_overlay_delta(
     delta
 }
 
+/// The property images of a transaction's staged edge puts, keyed by
+/// `(collection, src, label, dst)`, for a MATCH's relationship properties: a
+/// staged put's map replaces the stored one. `collection` limits the map to
+/// the MATCH's `IN '<collection>'`. `None` spans every collection.
+pub(in crate::data::executor) fn staged_edge_property_map(
+    overlay: &GraphTxnOverlay,
+    database_id: DatabaseId,
+    tenant: TenantId,
+    collection: Option<&str>,
+) -> crate::engine::graph::pattern::executor::StagedEdgeProperties {
+    overlay
+        .staged_edge_puts(database_id, tenant)
+        .into_iter()
+        .filter(|(coll, _, _)| collection.is_none_or(|c| c == coll))
+        .map(|(coll, (src, label, dst), image)| ((coll, src, label, dst), image))
+        .collect()
+}
+
 /// Merge a transaction's staged GRAPH edge writes into the durable `(label,
 /// node)` neighbours of `node_id` in `direction`.
 ///

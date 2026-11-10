@@ -504,7 +504,7 @@ mod tests {
     fn columnar_ingest_returning_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Named(vec![
-                nodedb_physical::physical_plan::ReturningItem {
+                nodedb_physical::physical_plan::ReturningItem::Column {
                     name: "id".into(),
                     alias: None,
                 },

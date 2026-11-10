@@ -9,39 +9,25 @@ use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
 use pgwire::error::PgWireResult;
 use sonic_rs;
 
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::{RowContext, decode_row_payload_to_json};
 
-use super::super::types::text_field;
+use super::super::types::{error_to_pg_in_context, text_field};
 
 pub(super) use crate::control::server::response_shape::types::{PlanKind, describe_plan};
 
-/// Outcome of shaping a Data Plane payload into a pgwire `Response`.
-///
-/// `notice` is set when the response shaper detected a condition the client
-/// must know about (e.g. `truncated_before_horizon` on an array slice).
-/// Callers forward it to the per-connection notice queue.
-pub(super) struct ShapedResponse {
-    pub response: Response,
-    pub notice: Option<String>,
-}
-
-impl From<Response> for ShapedResponse {
-    fn from(response: Response) -> Self {
-        Self {
-            response,
-            notice: None,
-        }
-    }
-}
-
-/// Render a payload as rows of one `result` text column. A row that fails
-/// to encode fails the statement with the encoder's own error.
-pub(super) fn multirow_payload_to_response(payload: &[u8]) -> PgWireResult<ShapedResponse> {
+/// Render a payload as rows of one `result` text column. `context` is the
+/// row shape of the payload's producer. A row that fails to encode fails the
+/// statement with the encoder's own error.
+pub(super) fn multirow_payload_to_response(
+    payload: &[u8],
+    context: RowContext,
+) -> PgWireResult<Response> {
     let schema = Arc::new(vec![text_field("result")]);
     if payload.is_empty() {
-        return Ok(Response::Query(QueryResponse::new(schema, stream::empty())).into());
+        return Ok(Response::Query(QueryResponse::new(schema, stream::empty())));
     }
-    let text = decode_payload_to_json(payload);
+    let text = decode_row_payload_to_json(payload, context)
+        .map_err(|e| error_to_pg_in_context("failed to decode result rows", &e))?;
 
     // For multi-row results, parse the JSON array and stream each
     // element as a separate pgwire row. This avoids materializing
@@ -53,14 +39,20 @@ pub(super) fn multirow_payload_to_response(payload: &[u8]) -> PgWireResult<Shape
             encoder.encode_field(&item.to_string())?;
             rows.push(Ok(encoder.take_row()));
         }
-        return Ok(Response::Query(QueryResponse::new(schema, stream::iter(rows))).into());
+        return Ok(Response::Query(QueryResponse::new(
+            schema,
+            stream::iter(rows),
+        )));
     }
 
     // Single document or non-array: send as one row.
     let mut encoder = DataRowEncoder::new(schema.clone());
     encoder.encode_field(&text)?;
     let row = encoder.take_row();
-    Ok(Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into())
+    Ok(Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(vec![Ok(row)]),
+    )))
 }
 
 #[cfg(test)]
@@ -77,8 +69,9 @@ mod tests {
 
     #[test]
     fn an_empty_payload_is_an_empty_result_set() {
-        let shaped = multirow_payload_to_response(&[]).expect("an empty payload encodes");
-        assert!(matches!(shaped.response, Response::Query(_)));
+        let response =
+            multirow_payload_to_response(&[], RowContext::Flat).expect("an empty payload encodes");
+        assert!(matches!(response, Response::Query(_)));
     }
 
     /// The folded Calvin upsert tag renders as the SQL `UPSERT` command.

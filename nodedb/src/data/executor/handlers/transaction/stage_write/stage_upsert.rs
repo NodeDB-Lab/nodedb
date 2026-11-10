@@ -18,6 +18,7 @@ use nodedb_types::columnar::StrictSchema;
 use super::context::StageCtx;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::typeguard::GuardScope;
 use crate::data::executor::handlers::upsert::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::handlers::write_body;
@@ -113,11 +114,9 @@ impl CoreLoop {
             });
 
         let existing_val = self.decode_doc_value(current_bytes, strict_schema.as_ref())?;
-        let new_val =
-            nodedb_types::value_from_msgpack(value).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("staged upsert value: {e}"),
-            })?;
+        // The incoming body and a base-storage row can each be a plain map or
+        // a native object, so both decode as documents.
+        let new_val = doc_format::decode_document_value(value)?;
 
         // The fields this merge writes: the `ON CONFLICT DO UPDATE SET`
         // targets, else every field of the incoming body.
@@ -192,8 +191,8 @@ impl CoreLoop {
     }
 
     /// Decode a stored body to `nodedb_types::Value`, strict (Binary Tuple,
-    /// with a msgpack migration fallback) or schemaless (msgpack) --
-    /// mirrors `execute_upsert`'s existing-document decode.
+    /// with a msgpack migration fallback) or schemaless (a plain map or a
+    /// native object) -- mirrors `execute_upsert`'s existing-document decode.
     fn decode_doc_value(
         &self,
         bytes: &[u8],
@@ -204,9 +203,6 @@ impl CoreLoop {
         {
             return Ok(v);
         }
-        nodedb_types::value_from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("staged upsert existing document: {e}"),
-        })
+        doc_format::decode_document_value(bytes)
     }
 }

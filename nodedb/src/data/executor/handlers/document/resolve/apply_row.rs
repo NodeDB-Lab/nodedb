@@ -1,364 +1,268 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Landing one already-decided document mutation.
-//!
-//! Each arm runs the same write the live handler runs for the same row, then
-//! the event and write note once it commits. Nothing here
-//! recomputes an image or re-decides a policy — both were settled by resolve.
+//! Apply one resolved document mutation inside its statement's transaction.
 
 use nodedb_physical::physical_plan::ResolvedSumTarget;
-use nodedb_types::Surrogate;
+use nodedb_types::{RlsWriteCheck, Surrogate};
+use redb::WriteTransaction;
 
-use crate::bridge::envelope::{ErrorCode, WriteSetEntry};
+use crate::bridge::envelope::WriteSetEntry;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::{removed_row_image, submitted_row_image};
-use crate::data::executor::enforcement::chain_guard::{
-    AbandonedWrite, ChainGuard, abandon_write, abort_after_apply,
-};
+use crate::data::executor::core_loop::redo_image::{WriteSetRow, removed_row_image};
+use crate::data::executor::enforcement::chain_guard::ChainGuard;
+use crate::data::executor::enforcement::typeguard::GuardScope;
+use crate::data::executor::enforcement::unique::UniqueJudge;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
-use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 
-/// One already-decided row write, as the apply loop hands it over.
+use super::apply_state::{ResolvedApplyState, ResolvedEvent};
+
 pub(super) struct ApplyResolvedPut<'a> {
     pub tid: u64,
     pub collection: &'a str,
-    /// The row's client identity, as `RETURNING` and CDC name it.
     pub document_id: &'a str,
     pub surrogate: Surrogate,
-    /// Pre-encode MessagePack body — the write path encodes the strict Binary
-    /// Tuple from it.
     pub value: &'a [u8],
-    /// The stored pre-image the drift check just confirmed, `None` when the row
-    /// was absent and still is.
     pub precondition: Option<&'a [u8]>,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    pub rls_write_check: &'a RlsWriteCheck,
 }
 
-/// One already-decided row removal.
 pub(super) struct ApplyResolvedDelete<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub document_id: &'a str,
     pub surrogate: Surrogate,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    pub rls_write_check: &'a RlsWriteCheck,
 }
 
 impl CoreLoop {
-    /// Store one resolved row and report the redo entries it owes.
+    /// Prepare, admit, and install one row without committing or publishing.
     pub(super) fn apply_resolved_document_put(
         &mut self,
         task: &ExecutionTask,
+        txn: &WriteTransaction,
+        state: &mut ResolvedApplyState,
         put: ApplyResolvedPut<'_>,
-    ) -> Result<Vec<WriteSetEntry>, ErrorCode> {
-        let ApplyResolvedPut {
-            tid,
-            collection,
-            document_id,
-            surrogate,
-            value,
-            precondition,
-            resolved_sum_targets,
-        } = put;
+    ) -> crate::Result<()> {
         let database_id = task.request.database_id.as_u64();
-        let storage_key = StorageKey::for_surrogate(surrogate);
-        // The resolve pass carried the identity INSERT minted for this row;
-        // the event and the redo entry both name the row by it.
-        let row_identity = RowIdentity::from_user_key(document_id);
-
-        // A row absent before this write is a link of a HASH_CHAIN target.
-        let mut chain = ChainGuard::begin(self, database_id, tid, collection);
-        if precondition.is_none() {
-            chain
-                .chain_insert(self, surrogate, value)
-                .map_err(ErrorCode::from)?;
-        }
-        let txn = match self.sparse.begin_write() {
-            Ok(txn) => txn,
-            Err(e) => {
-                chain.restore(self);
-                return Err(ErrorCode::from(e));
+        let storage_key = StorageKey::for_surrogate(put.surrogate);
+        let identity = RowIdentity::from_user_key(put.document_id);
+        state.touched.push((put.collection.to_owned(), storage_key));
+        let mut chain = ChainGuard::begin(self, database_id, put.tid, put.collection);
+        let result = (|| -> crate::Result<()> {
+            if chain.enabled()
+                && self
+                    .current_row_body_in_txn(
+                        txn,
+                        database_id,
+                        put.tid,
+                        put.collection,
+                        &storage_key,
+                    )?
+                    .is_none()
+            {
+                chain.chain_insert(self, put.surrogate, put.value)?;
             }
-        };
-
-        // The put below ends the row's prior vector nodes at the new
-        // version's ordinal. Its in-memory undo joins this list, so an abort
-        // puts the prior nodes back.
-        let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        let mut outcome = match self.apply_point_put(
-            &txn,
-            PointPutParams {
-                database_id,
-                tid,
-                collection,
-                storage_key,
-                surrogate,
-                value,
-                index_text: true,
-                user_roles: &task.request.user_roles,
-                enforce: true,
-                unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
-                wal_lsn: task.wal_lsn(),
-                resolved_targets: resolved_sum_targets,
-                // An insert is judged whole here. A merge or update body is a
-                // post-image the resolve pass already judged on its assigned
-                // fields, so its guards only inject again.
-                guards: if precondition.is_none() {
-                    crate::data::executor::enforcement::typeguard::GuardScope::Document
-                } else {
-                    crate::data::executor::enforcement::typeguard::GuardScope::InjectOnly
+            let prepared = self.prepare_point_put(
+                txn,
+                PointPutParams {
+                    database_id,
+                    tid: put.tid,
+                    collection: put.collection,
+                    storage_key,
+                    surrogate: put.surrogate,
+                    value: put.value,
+                    index_text: true,
+                    user_roles: &task.request.user_roles,
+                    enforce: true,
+                    unique: UniqueJudge::Unit,
+                    wal_lsn: task.wal_lsn(),
+                    resolved_targets: put.resolved_sum_targets,
+                    // Resolve already judged assigned fields on existing rows.
+                    guards: if put.precondition.is_none() {
+                        GuardScope::Document
+                    } else {
+                        GuardScope::InjectOnly
+                    },
                 },
-            },
-        ) {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                // Dropping `txn` reverses the write but not the cache entry
-                // or the prior vector removal.
-                let e = abort_after_apply(
-                    self,
-                    &mut chain,
-                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                        .undo(memory_undo),
-                    e,
-                );
-                return Err(ErrorCode::from(e));
-            }
-        };
-        memory_undo.append(&mut outcome.memory_undo);
-        if let Err(e) = chain
-            .settle(self, surrogate, &outcome.stored_value)
-            .and_then(|()| chain.persist_head(self, &txn))
-        {
-            let e = abort_after_apply(
-                self,
-                &mut chain,
-                AbandonedWrite::row(database_id, tid, collection, &storage_key).undo(memory_undo),
-                e,
-            );
-            return Err(ErrorCode::from(e));
-        }
+            )?;
+            rls_write_gate::admit_installed_row(
+                put.rls_write_check,
+                prepared.installed(),
+                &identity,
+                &self.identity_column(database_id, put.tid, put.collection),
+                put.tid,
+                put.collection,
+                &self.crs_context(),
+            )?;
+            let mut outcome = self.apply_prepared_point_put(txn, prepared)?;
+            state.undo.append(&mut outcome.memory_undo);
+            chain.settle_installed(self, put.surrogate, &mut outcome.installed)?;
+            chain.persist_head(self, txn)?;
 
-        let hook_ctx = HookCtx {
-            database_id,
-            tid,
-            collection,
-            resolved_targets: resolved_sum_targets,
-            deferred_sum_targets: &[],
-            wal_lsn: task.wal_lsn(),
-        };
-        let images = match precondition {
-            Some(old) => WriteImages::Update {
-                old: ImageBody::Stored(old),
-                new: ImageBody::Submitted(value),
-            },
-            None => WriteImages::Insert {
-                new: ImageBody::Submitted(value),
-            },
-        };
-        let enforcement = match write_hook::run(self, &txn, &hook_ctx, images) {
-            Ok(enforcement) => enforcement,
-            Err(e) => {
-                let e = abort_after_apply(
-                    self,
-                    &mut chain,
-                    AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                        .undo(memory_undo),
-                    e,
-                );
-                return Err(ErrorCode::from(e));
-            }
-        };
-        let target_write_set = write_hook::target_write_set(&enforcement.target_writes);
-        let target_writes = enforcement.target_writes;
-
-        if let Err(e) =
-            self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
-        {
-            let e = abort_after_apply(
-                self,
-                &mut chain,
-                AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                    .undo(memory_undo)
-                    .targets(target_writes),
-                e,
-            );
-            return Err(ErrorCode::from(e));
-        }
-
-        if let Err(e) = txn.commit() {
-            let e = abort_after_apply(
-                self,
-                &mut chain,
-                AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                    .undo(memory_undo)
-                    .targets(target_writes),
-                crate::Error::Storage {
-                    engine: "sparse".into(),
-                    detail: format!("commit: {e}"),
+            let event = self.prepare_installed_put_event(
+                &WriteSetRow {
+                    database_id,
+                    tid: put.tid,
+                    collection: put.collection,
+                    identity: identity.clone(),
                 },
+                &outcome.installed,
+                outcome.prior_value.as_deref(),
+            )?;
+            state.write_set.push(
+                WriteSetEntry::installed_put(
+                    put.surrogate.as_u32(),
+                    identity.clone(),
+                    outcome.installed.clone(),
+                    event.clone(),
+                )
+                .in_collection(put.collection.to_owned()),
             );
-            return Err(ErrorCode::from(e));
-        }
-        self.checkpoint_coordinator.mark_dirty("sparse", 1);
-
-        let stored_bytes = outcome.stored_value;
-        self.emit_put_event(
-            task,
-            tid,
-            collection,
-            row_identity.clone(),
-            &stored_bytes,
-            precondition,
-        );
-        self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
-            .map_err(ErrorCode::from)?;
-
-        // The row, journalled after apply from the body `apply_point_put`
-        // took. A resolved write's mutations can name several collections,
-        // so the entry names its own.
-        let mut write_set = vec![
-            submitted_row_image(
-                surrogate.as_u32(),
-                row_identity,
-                value.to_vec(),
-                outcome.version_sys_from,
-            )
-            .in_collection(collection.to_string()),
-        ];
-        // Derived target rows live in a DIFFERENT collection, so each carries
-        // its own `Some(collection)` and homes to that collection's vShard.
-        write_set.extend(target_write_set);
-        Ok(write_set)
+            state.events.push(ResolvedEvent::Put {
+                collection: put.collection.to_owned(),
+                identity,
+                event,
+            });
+            // Current-state effects never run for a carried historical version.
+            if outcome.history.is_none() {
+                let images = match outcome.prior_value.as_deref() {
+                    Some(old) => WriteImages::Update {
+                        old: ImageBody::Stored(old),
+                        new: ImageBody::Stored(&outcome.installed.stored),
+                    },
+                    None => WriteImages::Insert {
+                        new: ImageBody::Stored(&outcome.installed.stored),
+                    },
+                };
+                let enforcement = write_hook::run(
+                    self,
+                    txn,
+                    &HookCtx {
+                        database_id,
+                        tid: put.tid,
+                        collection: put.collection,
+                        resolved_targets: put.resolved_sum_targets,
+                        deferred_sum_targets: &[],
+                        wal_lsn: task.wal_lsn(),
+                        target_unique: UniqueJudge::Unit,
+                    },
+                    images,
+                )?;
+                state.retain_enforcement(put.collection, enforcement);
+            }
+            Ok(())
+        })();
+        // Retain even an unsettled guard so the statement clears its pending intent on refusal.
+        state.chains.push(chain);
+        result
     }
 
-    /// Remove one resolved row and report the redo entries it owes.
+    /// Install one removal and queue its publication inside the statement boundary.
     pub(super) fn apply_resolved_document_delete(
         &mut self,
         task: &ExecutionTask,
+        txn: &WriteTransaction,
+        state: &mut ResolvedApplyState,
         del: ApplyResolvedDelete<'_>,
-    ) -> Result<Vec<WriteSetEntry>, ErrorCode> {
-        let ApplyResolvedDelete {
-            tid,
-            collection,
-            document_id,
-            surrogate,
-            resolved_sum_targets,
-        } = del;
+    ) -> crate::Result<()> {
         let database_id = task.request.database_id.as_u64();
-
-        let txn = self.sparse.begin_write().map_err(ErrorCode::from)?;
-        let mut outcome = self
-            .apply_point_delete(
-                &txn,
-                PointDeleteParams {
-                    database_id,
-                    tid,
-                    collection,
-                    document_id,
-                    surrogate,
-                    user_roles: &task.request.user_roles,
-                    enforce: true,
-                    resolved_targets: resolved_sum_targets,
-                },
-            )
-            .map_err(ErrorCode::from)?;
-        // Every abort below drops `txn` uncommitted, which reverses the
-        // durable writes only. `abandon_write` reverses the in-memory
-        // cascades and the target rows' cache and index entries.
-        let storage_key = StorageKey::for_surrogate(surrogate);
-        let memory_undo = std::mem::take(&mut outcome.memory_undo);
-
-        let hook_ctx = HookCtx {
-            database_id,
-            tid,
-            collection,
-            resolved_targets: resolved_sum_targets,
-            deferred_sum_targets: &[],
-            wal_lsn: task.wal_lsn(),
-        };
-        // The pre-image is the ONLY image a delete has, and it is what tells the
-        // fold to take the removed row's contribution off the total.
-        let enforcement = match outcome.prior_value {
-            Some(ref old) => match write_hook::run(
-                self,
-                &txn,
-                &hook_ctx,
-                WriteImages::Delete {
-                    old: ImageBody::Stored(old),
-                },
-            ) {
-                Ok(enforcement) => enforcement,
-                Err(e) => {
-                    let e = abandon_write(
-                        self,
-                        AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                            .undo(memory_undo),
-                        e,
-                    );
-                    return Err(ErrorCode::from(e));
-                }
-            },
-            None => Default::default(),
-        };
-        let target_write_set = write_hook::target_write_set(&enforcement.target_writes);
-        let target_writes = enforcement.target_writes;
-
-        if let Err(e) =
-            self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
+        let storage_key = StorageKey::for_surrogate(del.surrogate);
+        let identity = RowIdentity::from_user_key(del.document_id);
+        state.touched.push((del.collection.to_owned(), storage_key));
+        if let Some(prior) =
+            self.current_row_body_in_txn(txn, database_id, del.tid, del.collection, &storage_key)?
         {
-            let e = abandon_write(
-                self,
-                AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                    .undo(memory_undo)
-                    .targets(target_writes),
-                e,
-            );
-            return Err(ErrorCode::from(e));
+            let schema = self.capture_storage_schema(&(
+                crate::types::DatabaseId::new(database_id),
+                crate::types::TenantId::new(del.tid),
+                del.collection.to_owned(),
+            ))?;
+            let strict_schema = match schema.as_ref() {
+                nodedb_physical::physical_plan::StorageMode::Schemaless => None,
+                nodedb_physical::physical_plan::StorageMode::Strict { schema } => Some(schema),
+            };
+            rls_write_gate::admit_stored_row(
+                del.rls_write_check,
+                rls_write_gate::GatedRow {
+                    body: &prior,
+                    identity: &identity,
+                    strict_schema,
+                    identity_column: &self.identity_column(database_id, del.tid, del.collection),
+                },
+                del.tid,
+                del.collection,
+                &self.crs_context(),
+            )?;
         }
-
-        if let Err(e) = txn.commit() {
-            let e = abandon_write(
-                self,
-                AbandonedWrite::row(database_id, tid, collection, &storage_key)
-                    .undo(memory_undo)
-                    .targets(target_writes),
-                crate::Error::DataPlane(ErrorCode::Internal {
-                    detail: format!("commit: {e}"),
-                }),
-            );
-            return Err(ErrorCode::from(e));
-        }
-        self.checkpoint_coordinator.mark_dirty("sparse", 1);
-
-        if let Some(prior_bytes) = outcome.prior_value.as_deref() {
-            self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
-                .map_err(ErrorCode::from)?;
-            self.emit_document_delete_event(
-                task,
-                tid,
-                collection,
-                RowIdentity::from_user_key(document_id),
-                Some(prior_bytes),
-            );
-        }
-        // The removal, journalled after apply, naming its own collection,
-        // then the target rows its debit rewrote.
-        let mut write_set = Vec::with_capacity(target_write_set.len() + 1);
-        // A tombstone ordinal exists exactly when a live row was closed.
-        if let (Some(_), Some(sys_from)) = (&outcome.prior_value, outcome.version_sys_from) {
-            write_set.push(
-                removed_row_image(
-                    surrogate.as_u32(),
-                    RowIdentity::from_user_key(document_id),
-                    sys_from,
+        let mut outcome = self.apply_point_delete(
+            txn,
+            PointDeleteParams {
+                database_id,
+                tid: del.tid,
+                collection: del.collection,
+                document_id: del.document_id,
+                surrogate: del.surrogate,
+                user_roles: &task.request.user_roles,
+                enforce: true,
+                resolved_targets: del.resolved_sum_targets,
+            },
+        )?;
+        state.undo.append(&mut outcome.memory_undo);
+        if let Some(prior) = outcome.prior_value.as_deref() {
+            let old_value = self
+                .stored_event_image(
+                    database_id,
+                    del.tid,
+                    del.collection,
+                    identity.as_str(),
+                    prior,
                 )
-                .in_collection(collection.to_string()),
-            );
+                .map_err(|_| crate::Error::Serialization {
+                    format: "binary_tuple".into(),
+                    detail: format!(
+                        "deleted event row '{}' of '{}' cannot decode before statement commit",
+                        identity.as_str(),
+                        del.collection
+                    ),
+                })?;
+            state.events.push(ResolvedEvent::Delete {
+                collection: del.collection.to_owned(),
+                identity: identity.clone(),
+                old_value,
+            });
+            if let Some(sys_from) = outcome.version_sys_from {
+                state.write_set.push(
+                    removed_row_image(del.surrogate.as_u32(), identity, sys_from)
+                        .in_collection(del.collection.to_owned()),
+                );
+            }
+            if outcome.history.is_none() {
+                let enforcement = write_hook::run(
+                    self,
+                    txn,
+                    &HookCtx {
+                        database_id,
+                        tid: del.tid,
+                        collection: del.collection,
+                        resolved_targets: del.resolved_sum_targets,
+                        deferred_sum_targets: &[],
+                        wal_lsn: task.wal_lsn(),
+                        target_unique: UniqueJudge::Unit,
+                    },
+                    WriteImages::Delete {
+                        old: ImageBody::Stored(prior),
+                    },
+                )?;
+                state.retain_enforcement(del.collection, enforcement);
+            }
         }
-        write_set.extend(target_write_set);
-        Ok(write_set)
+        Ok(())
     }
 }

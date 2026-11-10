@@ -361,6 +361,7 @@ mod tests {
             "date_diff",
             &[naive("2020-03-05T10:00:00"), naive("2020-03-05T09:00:00")],
         );
-        assert_eq!(diff, Some(Value::Integer(3600)));
+        // Seconds as float8, whole or not.
+        assert_eq!(diff, Some(Value::Float(3600.0)));
     }
 }

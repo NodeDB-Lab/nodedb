@@ -95,23 +95,30 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
     identity_column: &str,
     crs: &CrsContext<'_>,
 ) -> Result<bool, EvalError> {
-    let decoded;
-    let stored: &[u8] = match strict_schema {
-        Some(schema) => match strict_format::binary_tuple_columns_to_msgpack(
-            body,
-            schema,
-            &ScanFilter::referenced_fields(filters),
-        ) {
-            Some(msgpack) => {
-                decoded = msgpack;
-                &decoded
-            }
+    let mut doc = match strict_schema {
+        Some(schema) => match strict_format::binary_tuple_to_row_value(body, schema) {
+            Some(value) => value,
             None => return Ok(false),
         },
-        None => body,
+        None => crate::data::executor::doc_format::decode_document_value(body).map_err(|_| {
+            EvalError::ArgumentType {
+                function: "stored document predicate",
+                position: 1,
+                expected: "readable document body",
+                got: "malformed document body",
+            }
+        })?,
     };
-    let image = super::super::row_shape::inject_row_identity(stored, row_key, identity_column);
-    ScanFilter::all_match_binary(filters, &image, crs)
+    if !matches!(doc, nodedb_types::Value::Object(_)) {
+        return Err(EvalError::ArgumentType {
+            function: "stored document predicate",
+            position: 1,
+            expected: "document object",
+            got: doc.type_name(),
+        });
+    }
+    super::super::row_shape::attach_sparse_row_identity(&mut doc, row_key, identity_column);
+    ScanFilter::all_match_value(filters, &doc, crs)
 }
 
 impl CoreLoop {
@@ -167,5 +174,65 @@ impl CoreLoop {
                 crs,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::scan_filter::FilterOp;
+    use nodedb_types::{Surrogate, Value};
+
+    #[test]
+    fn native_predicate_reads_exact_fields_and_stored_identity() {
+        let key = StorageKey::for_surrogate(Surrogate::new(7));
+        let amount = Value::Decimal("9007199254740993.0001".parse().expect("decimal"));
+        let doc = Value::Object(
+            [
+                ("amount".into(), amount.clone()),
+                (nodedb_types::ROWID_COLUMN.into(), Value::Integer(42)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let bytes = zerompk::to_msgpack_vec(&doc).expect("native body");
+        let filters = [
+            ScanFilter {
+                field: "amount".into(),
+                op: FilterOp::Eq,
+                value: amount,
+                clauses: vec![],
+                expr: None,
+            },
+            ScanFilter {
+                field: "sku".into(),
+                op: FilterOp::Eq,
+                value: Value::String("42".into()),
+                clauses: vec![],
+                expr: None,
+            },
+        ];
+        assert!(
+            matches_with_resolved_schema(
+                None,
+                &filters,
+                &key,
+                &bytes,
+                "sku",
+                &CrsContext::builtin_only()
+            )
+            .expect("predicate")
+        );
+        assert!(
+            matches_with_resolved_schema(
+                None,
+                &filters,
+                &key,
+                &[0x92, 0x01],
+                "sku",
+                &CrsContext::builtin_only()
+            )
+            .is_err()
+        );
     }
 }

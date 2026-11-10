@@ -26,8 +26,11 @@ pub struct MatchQuery {
     pub return_columns: Vec<ReturnColumn>,
     /// Whether RETURN DISTINCT was specified.
     pub distinct: bool,
-    /// LIMIT on returned rows.
+    /// LIMIT on returned rows: the cap on the merged result, after ORDER BY
+    /// and OFFSET.
     pub limit: Option<usize>,
+    /// OFFSET: rows of the ordered, merged result to skip before LIMIT.
+    pub offset: Option<usize>,
     /// ORDER BY clauses.
     pub order_by: Vec<OrderByColumn>,
     /// Optional collection name from `IN 'collection'` clause.
@@ -231,6 +234,52 @@ impl MatchQuery {
         names
     }
 
+    /// Every `(binding, field)` property access the query makes: a dotted
+    /// RETURN or ORDER BY expression, and a WHERE predicate with a field.
+    pub fn property_accesses(&self) -> Vec<(&str, &str)> {
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        for col in &self.return_columns {
+            out.extend(col.expr.split_once('.'));
+        }
+        for col in &self.order_by {
+            out.extend(col.expr.split_once('.'));
+        }
+        for predicate in &self.where_predicates {
+            match predicate {
+                WherePredicate::Equals { binding, field, .. }
+                | WherePredicate::Comparison { binding, field, .. }
+                    if !field.is_empty() =>
+                {
+                    out.push((binding.as_str(), field.as_str()));
+                }
+                WherePredicate::Equals { .. }
+                | WherePredicate::Comparison { .. }
+                | WherePredicate::NotExists { .. } => {}
+            }
+        }
+        out
+    }
+
+    /// The edge variables whose properties the query reads. A row carries
+    /// each one's property object from the moment the edge is bound.
+    pub fn edge_property_vars(&self) -> std::collections::HashSet<String> {
+        let edges = self.bound_edge_names();
+        self.property_accesses()
+            .into_iter()
+            .filter(|(binding, _)| edges.iter().any(|e| e == binding))
+            .map(|(binding, _)| binding.to_string())
+            .collect()
+    }
+
+    /// Every edge binding of the query's top-level clauses, by variable name.
+    pub fn edge_bindings(&self) -> impl Iterator<Item = &EdgeBinding> {
+        self.clauses
+            .iter()
+            .flat_map(|c| c.patterns.iter())
+            .flat_map(|chain| chain.triples.iter())
+            .map(|triple| &triple.edge)
+    }
+
     /// Get all unique edge variable names bound in the query.
     pub fn bound_edge_names(&self) -> Vec<String> {
         let mut names = Vec::new();
@@ -307,6 +356,7 @@ mod tests {
             return_columns: vec![],
             distinct: false,
             limit: None,
+            offset: None,
             order_by: vec![],
             collection: None,
         };
@@ -359,6 +409,7 @@ mod tests {
             }],
             distinct: false,
             limit: Some(10),
+            offset: None,
             order_by: vec![],
             collection: None,
         };

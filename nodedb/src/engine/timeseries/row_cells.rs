@@ -62,8 +62,29 @@ pub fn memtable_cell(
             }
             _ => Value::Null,
         },
+        ColumnType::Decimal(_) => decimal_value(mt.column(col_idx).as_decimals()[idx]),
+        ColumnType::Uuid => uuid_value(mt.column(col_idx).as_uuids()[idx]),
+        ColumnType::Bool => bool_value(mt.column(col_idx).as_bools()[idx]),
     };
     Ok(value)
+}
+
+/// The `Value` of a decimal cell. A NULL cell reads as `Value::Null`.
+pub fn decimal_value(cell: Option<rust_decimal::Decimal>) -> Value {
+    cell.map_or(Value::Null, Value::Decimal)
+}
+
+/// The `Value` of a UUID cell, in the canonical lowercase hyphenated text
+/// every native UUID decoder renders. A NULL cell reads as `Value::Null`.
+pub fn uuid_value(cell: Option<[u8; 16]>) -> Value {
+    cell.map_or(Value::Null, |bytes| {
+        Value::Uuid(uuid::Uuid::from_bytes(bytes).to_string())
+    })
+}
+
+/// The `Value` of a boolean cell. A NULL cell reads as `Value::Null`.
+pub fn bool_value(cell: Option<bool>) -> Value {
+    cell.map_or(Value::Null, Value::Bool)
 }
 
 /// A flushed-partition cell that does not read as its declared type.
@@ -139,6 +160,11 @@ pub fn read_partition_cell(
                 Value::Null
             }
         }
+        (ColumnType::Decimal(_), ColumnData::Decimal(v)) => {
+            decimal_value(*v.get(idx).ok_or(out_of_range)?)
+        }
+        (ColumnType::Uuid, ColumnData::Uuid(v)) => uuid_value(*v.get(idx).ok_or(out_of_range)?),
+        (ColumnType::Bool, ColumnData::Bool(v)) => bool_value(*v.get(idx).ok_or(out_of_range)?),
         (declared, stored) => {
             return Err(PartitionCellError::TypeMismatch {
                 stored: stored_kind(stored),
@@ -157,6 +183,9 @@ fn stored_kind(data: &ColumnData) -> &'static str {
         ColumnData::Int64(_) => "int64",
         ColumnData::Symbol(_) => "symbol",
         ColumnData::DictEncoded { .. } => "dictionary-encoded",
+        ColumnData::Decimal(_) => "decimal",
+        ColumnData::Uuid(_) => "uuid",
+        ColumnData::Bool(_) => "bool",
     }
 }
 
@@ -201,6 +230,9 @@ mod tests {
             (ColumnData::Int64(vec![1]), ColumnType::Int64),
             (ColumnData::Float64(vec![1.0]), ColumnType::Float64),
             (ColumnData::Symbol(vec![0]), ColumnType::Symbol),
+            (ColumnData::Decimal(vec![None]), ColumnType::Decimal(None)),
+            (ColumnData::Uuid(vec![None]), ColumnType::Uuid),
+            (ColumnData::Bool(vec![None]), ColumnType::Bool),
         ];
         for (data, ty) in &short {
             assert!(matches!(
@@ -221,6 +253,9 @@ mod tests {
             ColumnType::Int64,
             ColumnType::Symbol,
             ColumnType::Text,
+            ColumnType::Decimal(None),
+            ColumnType::Uuid,
+            ColumnType::Bool,
         ] {
             assert!(matches!(
                 read_partition_cell(&floats, ty, 0, &dicts, 0),
@@ -252,6 +287,30 @@ mod tests {
                 Value::Null,
             ),
             (ColumnData::Symbol(vec![9]), ColumnType::Symbol, Value::Null),
+            (
+                ColumnData::Decimal(vec![Some("12345678901234567.89".parse().expect("decimal"))]),
+                ColumnType::Decimal(None),
+                Value::Decimal("12345678901234567.89".parse().expect("decimal")),
+            ),
+            (
+                ColumnData::Uuid(vec![Some(
+                    *uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+                        .expect("uuid")
+                        .as_bytes(),
+                )]),
+                ColumnType::Uuid,
+                Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            (
+                ColumnData::Bool(vec![Some(true)]),
+                ColumnType::Bool,
+                Value::Bool(true),
+            ),
+            (
+                ColumnData::Decimal(vec![None]),
+                ColumnType::Decimal(None),
+                Value::Null,
+            ),
         ];
         for (data, ty, expected) in &cases {
             assert_eq!(

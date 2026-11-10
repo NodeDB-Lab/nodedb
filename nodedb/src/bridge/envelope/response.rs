@@ -14,7 +14,7 @@ use nodedb_types::RowIdentity;
 ///
 /// Every document and edge write handler reports every row it stores or
 /// removes that its pre-dispatch WAL record does not carry exactly: the
-/// post-image of an update, a bulk or batch write, a derived
+/// installed image of an update, a bulk or batch write, a derived
 /// materialized-sum target row, the stamped image of a versioned row, and an
 /// edge version or tombstone at its decided ordinal. The Control
 /// Plane journals the entries, in entry order, as the parts of the write's
@@ -41,16 +41,12 @@ pub struct WriteSetEntry {
 }
 
 /// The effect one [`WriteSetEntry`] reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RowEffect {
-    /// The row holds `value` now. `value` is the MessagePack body the write
-    /// path encodes into storage, never a strict Binary Tuple: replay hands
-    /// it to that same encoder.
-    Put {
-        value: Vec<u8>,
-        /// The version key the row landed at. Every document write stamps
-        /// its version, so replay installs the row at exactly this key.
-        version: RowVersion,
+    /// Exact installed bytes, decoding witness, and prepared public event pair.
+    InstalledPut {
+        image: crate::types::installed_document::SharedInstalledDocument,
+        event: crate::types::document_event::DocumentPutEvent,
     },
     /// The row is gone.
     Delete {
@@ -80,7 +76,17 @@ pub enum EdgeImage {
 
 /// The version key a row landed at. Replay installs the row at exactly this
 /// key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct RowVersion {
     /// The version's system-time ordinal.
     pub sys_from: i64,
@@ -100,12 +106,17 @@ impl RowVersion {
 }
 
 impl WriteSetEntry {
-    /// The row identified by `surrogate` now holds `value`, at `version`.
-    pub fn put(surrogate: u32, identity: RowIdentity, value: Vec<u8>, version: RowVersion) -> Self {
+    /// The row holds this exact installed image.
+    pub fn installed_put(
+        surrogate: u32,
+        identity: RowIdentity,
+        image: crate::types::installed_document::SharedInstalledDocument,
+        event: crate::types::document_event::DocumentPutEvent,
+    ) -> Self {
         Self {
             surrogate,
             identity,
-            effect: RowEffect::Put { value, version },
+            effect: RowEffect::InstalledPut { image, event },
             collection: None,
         }
     }

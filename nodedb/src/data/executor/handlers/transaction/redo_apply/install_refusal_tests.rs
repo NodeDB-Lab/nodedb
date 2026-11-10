@@ -95,6 +95,7 @@ fn document_insert() -> PhysicalPlan {
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -202,7 +203,13 @@ fn crdt_upsert() -> PhysicalPlan {
     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "tasks"),
         document_id: "t1".to_string(),
-        fields_json: r#"{"title":"kept"}"#.to_string(),
+        fields: nodedb_physical::physical_plan::encode_fields_body(
+            &std::collections::HashMap::from([(
+                "title".to_string(),
+                nodedb_types::Value::String("kept".into()),
+            )]),
+        )
+        .expect("fields body encodes"),
         surrogate: Surrogate::new(71),
         partial: false,
         verb: CrdtWriteVerb::Insert,
@@ -421,6 +428,7 @@ fn indexed_document_put() -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 

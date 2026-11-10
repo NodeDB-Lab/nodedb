@@ -100,6 +100,8 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::InvalidTextRepresentation { .. }
         | Error::DatatypeMismatch { .. }
         | Error::InvalidDatetimeFormat { .. }
+        | Error::InvalidArgumentForLogarithm { .. }
+        | Error::InvalidArgumentForPowerFunction { .. }
         | Error::DatetimeFieldOverflow { .. }
         | Error::InvalidLimitValue { .. }
         | Error::RetryableSchemaChanged { .. }

@@ -2,8 +2,12 @@
 
 //! WAL replay arm for the Document engine.
 //!
-//! Every stored document row has a WAL record carrying its post-image, and
-//! this arm applies them all in LSN order: the standalone records of
+//! Installed-document records carry exact stored bytes, canonical fields,
+//! version bounds, schema witnesses, and chain heads. Their replay bypasses
+//! defaults, generated expressions, and chain derivation. Submitted transaction
+//! origins retain their existing execution path until their outcomes migrate.
+//!
+//! This arm applies document records in LSN order: the standalone records of
 //! autocommit writes, and the sub-records of committed `TransactionRedo`
 //! records and of `WriteGroup` records alike. A point write's pre-dispatch
 //! record carries the row its plan names. The parts of a write's
@@ -18,8 +22,7 @@
 //!
 //! ## Record payload shape
 //!
-//! One encoding serves every producer (`wal_dispatch::document`) and this
-//! decoder:
+//! Submitted origins use these tuple encodings (`wal_dispatch::document`):
 //!
 //! * PUT — `(collection, document_id, value, Option<SyncProvenance>, surrogate)`.
 //!   The trailing `surrogate` is the stable identity `apply_point_put` keys on,
@@ -161,6 +164,69 @@ impl CoreLoop {
             let record_lsn = record.header.lsn;
 
             if is_put {
+                let installed = match crate::wal::redo::installed_document::InstalledDocumentRedo::<
+                    nodedb_physical::physical_plan::StorageMode,
+                >::decode(&record.payload)
+                {
+                    Ok(installed) => installed,
+                    Err(error) => {
+                        self.replay_record_unapplied(
+                            "document",
+                            "installed_decode",
+                            record_lsn,
+                            &error.to_string(),
+                        );
+                        continue;
+                    }
+                };
+                if let Some(installed) = installed {
+                    if tombstones.is_tombstoned(
+                        database_id,
+                        tenant_id,
+                        &installed.collection,
+                        record_lsn,
+                    ) {
+                        continue;
+                    }
+                    if installed.surrogate == Surrogate::ZERO.as_u32() {
+                        self.replay_record_unapplied(
+                            "document",
+                            "installed_identity",
+                            record_lsn,
+                            "installed document carries no surrogate",
+                        );
+                        continue;
+                    }
+                    if self.claim_for_validation() {
+                        continue;
+                    }
+                    let collection = installed.collection.clone();
+                    let surrogate = installed.surrogate;
+                    match self.replay_installed_document(
+                        database_id,
+                        tenant_id,
+                        record_lsn,
+                        installed,
+                    ) {
+                        Ok(()) => {
+                            puts += 1;
+                            self.note_replay_write(
+                                database_id,
+                                tenant_id,
+                                &collection,
+                                Some(KeyRepr::Surrogate(surrogate)),
+                                record_lsn,
+                            );
+                        }
+                        Err(error) => self.replay_record_unapplied(
+                            "document",
+                            "installed_put",
+                            record_lsn,
+                            &error.to_string(),
+                        ),
+                    }
+                    continue;
+                }
                 // A KV value must never be read as a document body.
                 if is_kv_put_record(&record.payload) {
                     continue;

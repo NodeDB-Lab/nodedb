@@ -12,6 +12,7 @@ pub mod query;
 
 pub use collection::{CollectionInfo, ColumnInfo, IndexSpec, IndexState};
 pub use filter::{CompareOp, Filter, FilterExpr};
+pub use plan::ResolvedReturning;
 pub use plan::{
     AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArraySlicePlan, CreateArrayPlan,
     CreateIndexPlan, CtePlan, DeleteArrayPlan, DocumentIndexLookupPlan, DropIndexPlan,

@@ -590,6 +590,7 @@ mod tests {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -601,6 +602,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -770,6 +772,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         ];
         for p in &plans {
@@ -1093,7 +1096,7 @@ mod tests {
                 document_id: "d".into(),
                 list_path: "$.l".into(),
                 index: 0,
-                fields_json: "{}".into(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
             }),
             PhysicalPlan::Crdt(CrdtOp::ListDelete {
@@ -1124,7 +1127,7 @@ mod tests {
             PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 document_id: "d".into(),
-                fields_json: "{}".into(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
                 partial: false,
                 verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,

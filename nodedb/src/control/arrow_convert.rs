@@ -86,9 +86,15 @@ pub fn json_rows_to_record_batch(json_str: &str) -> Option<RecordBatch> {
 /// Convert a msgpack payload of rows into an Arrow RecordBatch.
 ///
 /// This keeps the internal transport in msgpack and only decodes to JSON at
-/// the Arrow conversion boundary.
+/// the Arrow conversion boundary. The rows are flat aggregate rows. A native
+/// object row renders as its typed values do. A native row that does not
+/// decode yields `None`.
 pub fn msgpack_rows_to_record_batch(payload: &[u8]) -> Option<RecordBatch> {
-    let json = crate::data::executor::response_codec::decode_payload_to_json(payload);
+    let json = crate::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        crate::data::executor::response_codec::RowContext::Flat,
+    )
+    .ok()?;
     json_rows_to_record_batch(&json)
 }
 

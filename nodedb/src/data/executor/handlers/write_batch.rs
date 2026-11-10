@@ -7,9 +7,8 @@ use tracing::debug;
 use crate::bridge::dispatch::JournalGroup;
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::{submitted_row_image, versioned_point_images};
-use crate::data::executor::enforcement::unique::{SubmittedWrite, UniqueJudge};
-use crate::data::executor::handlers::point::apply_put::{PointPutOutcome, PointPutParams};
+use crate::data::executor::core_loop::redo_image::{WriteSetRow, versioned_point_images};
+use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::DocumentOp;
 
@@ -44,57 +43,6 @@ impl CoreLoop {
         self.doc_configs.get(&key).is_some_and(|config| {
             config.enforcement.hash_chain || config.enforcement.has_image_enforcement()
         })
-    }
-
-    /// Judge the UNIQUE claims of the last put in `tasks`. Every task is its
-    /// own statement, applied after the tasks before it in one uncommitted
-    /// transaction, so its claims meet the committed index as those tasks
-    /// leave it. A probe of the committed index alone admits two tasks
-    /// of the batch claiming one value.
-    fn check_batched_put_unique(&self, tasks: &[ExecutionTask]) -> crate::Result<()> {
-        let Some((last, earlier)) = tasks.split_last() else {
-            return Ok(());
-        };
-        let PhysicalPlan::Document(DocumentOp::PointPut { collection, .. }) = last.plan() else {
-            return Ok(());
-        };
-        let database_id = last.request.database_id;
-        let tenant_id = last.request.tenant_id;
-        if self
-            .unique_config(
-                database_id.as_u64(),
-                tenant_id.as_u64(),
-                collection.as_str(),
-            )
-            .is_none()
-        {
-            return Ok(());
-        }
-        let unit: Vec<SubmittedWrite<'_>> = earlier
-            .iter()
-            .map(|task| (task, false))
-            .chain(std::iter::once((last, true)))
-            .filter_map(|(task, judged)| match task.plan() {
-                PhysicalPlan::Document(DocumentOp::PointPut {
-                    collection: written,
-                    value,
-                    surrogate,
-                    ..
-                }) if task.request.database_id == database_id
-                    && task.request.tenant_id == tenant_id
-                    && written.as_str() == collection.as_str() =>
-                {
-                    Some(SubmittedWrite {
-                        collection: written.as_str(),
-                        surrogate: surrogate.as_u32(),
-                        body: Some(value.as_slice()),
-                        judged,
-                    })
-                }
-                _ => None,
-            })
-            .collect();
-        self.check_submitted_unit_unique(database_id.as_u64(), tenant_id.as_u64(), &unit)
     }
 
     /// Batch-coalesce consecutive PointPut tasks from the front of the task queue.
@@ -172,63 +120,102 @@ impl CoreLoop {
         // Track per-task success/failure for individual responses, and
         // capture the prior stored bytes per row so the Event Plane emit
         // below can resolve Insert vs Update from the actual mutation.
-        let mut results: Vec<Result<PointPutOutcome, crate::bridge::envelope::Response>> =
-            Vec::with_capacity(batch.len());
-        for (index, task) in batch.iter().enumerate() {
+        let applied = self.apply_batched_puts(&txn, &batch);
+        let mut results = applied.outcomes;
+        let apply_failed = applied.apply_failed;
+        let mut prepared_images: Vec<Option<_>> = (0..batch.len()).map(|_| None).collect();
+        let mut preparation_error = None;
+        for (index, (task, result)) in batch.iter().zip(&results).enumerate() {
+            let Ok(outcome) = result else {
+                continue;
+            };
             let PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
-                value,
+                document_id,
                 surrogate,
-                resolved_sum_targets,
                 ..
             }) = task.plan()
             else {
-                unreachable!("batch only contains PointPut");
-            };
-            let tid = task.request.tenant_id.as_u64();
-            let db_id = task.request.database_id.as_u64();
-            let storage_key = crate::engine::document::store::StorageKey::for_surrogate(*surrogate);
-            let applied = self
-                .check_batched_put_unique(&batch[..=index])
-                .and_then(|()| {
-                    self.apply_point_put(
-                        &txn,
-                        PointPutParams {
-                            database_id: db_id,
-                            tid,
-                            collection: collection.as_str(),
-                            storage_key,
-                            surrogate: *surrogate,
-                            value,
-                            index_text: true,
-                            user_roles: &task.request.user_roles,
-                            enforce: true,
-                            unique: UniqueJudge::Unit,
-                            wal_lsn: task.wal_lsn(),
-                            resolved_targets: resolved_sum_targets.as_slice(),
-                            guards:
-                                crate::data::executor::enforcement::typeguard::GuardScope::Document,
+                preparation_error = Some((
+                    index,
+                    self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: "coalesced write does not contain a document put".into(),
                         },
-                    )
-                });
-            // The error keeps its own code: a UNIQUE refusal answers 23505.
-            results.push(applied.map_err(|e| self.response_error(task, e)));
+                    ),
+                ));
+                break;
+            };
+            let identity =
+                crate::engine::document::store::RowIdentity::from_user_key(document_id.as_str());
+            let event = match self.prepare_installed_put_event(
+                &WriteSetRow {
+                    database_id: task.request.database_id.as_u64(),
+                    tid: task.request.tenant_id.as_u64(),
+                    collection: collection.as_str(),
+                    identity: identity.clone(),
+                },
+                &outcome.installed,
+                outcome.prior_value.as_deref(),
+            ) {
+                Ok(event) => event,
+                Err(error) => {
+                    preparation_error = Some((index, self.response_error(task, error)));
+                    break;
+                }
+            };
+            let image = crate::bridge::envelope::WriteSetEntry::installed_put(
+                surrogate.as_u32(),
+                identity,
+                outcome.installed.clone(),
+                event.clone(),
+            );
+            prepared_images[index] = Some((versioned_point_images(image), event));
         }
 
-        // If ANY write failed hard (document put error), abort the batch.
-        let any_hard_failure = results.iter().any(|r| r.is_err());
+        if preparation_error.is_none() {
+            for (index, ((task, result), image)) in
+                batch.iter().zip(&results).zip(&prepared_images).enumerate()
+            {
+                if result.is_ok() && image.is_none() {
+                    preparation_error = Some((
+                        index,
+                        self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!(
+                                    "coalesced request {} has no prepared capture",
+                                    task.request_id().as_u64()
+                                ),
+                            },
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // Every fallible capture and event preparation precedes the shared commit.
+        let any_hard_failure = apply_failed || preparation_error.is_some();
         if any_hard_failure {
-            // Don't commit — transaction is dropped (implicit rollback).
-            // Send error responses for failed tasks, put successful ones back.
+            // Application and event errors abandon every provisional write.
             drop(txn);
             let fatal = self.abandon_batched_puts(&batch, &mut results);
             let count = batch.len();
             let mut responses = Vec::with_capacity(count);
-            for (task, result) in batch.iter().zip(results) {
-                let response = match (&fatal, result) {
-                    (Some(code), _) => self.response_error(task, code.clone()),
-                    (None, Err(err_response)) => err_response,
-                    (None, Ok(_)) => self.response_error(
+            for (index, (task, result)) in batch.iter().zip(results).enumerate() {
+                let preparation_response = match preparation_error.take() {
+                    Some((failed, response)) if failed == index => Some(response),
+                    pending => {
+                        preparation_error = pending;
+                        None
+                    }
+                };
+                let response = match (&fatal, preparation_response, result) {
+                    (Some(code), _, _) => self.response_error(task, code.clone()),
+                    (None, Some(response), _) | (None, None, Err(response)) => response,
+                    (None, None, Ok(_)) => self.response_error(
                         task,
                         ErrorCode::Internal {
                             detail: "batch aborted due to sibling failure".into(),
@@ -245,6 +232,13 @@ impl CoreLoop {
 
         // Commit once for all writes.
         let commit_result = txn.commit();
+        if let Err(error) = &commit_result {
+            self.seal_journalled();
+            self.fail_stop_core(
+                crate::data::executor::core_loop::fail_stop::FailStopCause::WriteSetUnpersisted,
+                &format!("coalesced document commit outcome is unknown: {error}"),
+            );
+        }
         let fatal = match commit_result {
             Ok(()) => None,
             Err(_) => self.abandon_batched_puts(&batch, &mut results),
@@ -252,10 +246,10 @@ impl CoreLoop {
 
         let count = batch.len();
         let mut responses = Vec::with_capacity(count);
-        for (task, result) in batch.iter().zip(results) {
-            let response = match (&commit_result, &fatal, result) {
-                (Err(_), Some(code), _) => self.response_error(task, code.clone()),
-                (Ok(()), _, Ok(outcome)) => {
+        for ((task, result), prepared_image) in batch.iter().zip(results).zip(prepared_images) {
+            let response = match (&commit_result, &fatal, result, prepared_image) {
+                (Err(_), Some(code), _, _) => self.response_error(task, code.clone()),
+                (Ok(()), _, Ok(_), Some((write_set, event))) => {
                     let mut response = self.response_ok(task);
                     // Emit write event for each successful batched PointPut.
                     // The Insert vs Update tag is derived from the prior
@@ -263,31 +257,30 @@ impl CoreLoop {
                     if let PhysicalPlan::Document(DocumentOp::PointPut {
                         collection,
                         document_id,
-                        surrogate,
-                        value,
                         ..
                     }) = task.plan()
                     {
-                        let tid = task.request.tenant_id.as_u64();
-                        let prior = outcome.prior_value.as_deref();
                         // The plan's `document_id` is the row's client identity,
                         // the same one `execute_point_put` emits and the WAL
                         // journals.
                         let identity = crate::engine::document::store::RowIdentity::from_user_key(
                             document_id.as_str(),
                         );
-                        response.write_set = versioned_point_images(submitted_row_image(
-                            surrogate.as_u32(),
-                            identity.clone(),
-                            value.to_vec(),
-                            outcome.version_sys_from,
-                        ));
-                        self.emit_put_event(task, tid, collection.as_str(), identity, value, prior);
+                        response.write_set = write_set;
+                        self.emit_prepared_put_event(task, collection.as_str(), identity, &event);
                     }
                     response
                 }
-                (Ok(()), _, Err(response)) => response,
-                (Err(e), None, _) => self.response_error(
+                (Ok(()), _, Err(response), _) => response,
+                (Ok(()), _, Ok(_), None) => {
+                    let error = crate::Error::Storage {
+                        engine: "journal".into(),
+                        detail: "committed coalesced put lacks its prepared capture; close and reopen the handle".into(),
+                    };
+                    self.fail_journalled(&error);
+                    self.response_error(task, error)
+                }
+                (Err(e), None, _, _) => self.response_error(
                     task,
                     ErrorCode::Internal {
                         detail: format!("batch commit: {e}"),

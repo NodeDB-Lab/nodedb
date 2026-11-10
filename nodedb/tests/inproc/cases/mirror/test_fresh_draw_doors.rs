@@ -87,8 +87,10 @@ async fn native_plan_builder_doors_draw_nothing_on_a_mirror() {
             OpCode::VectorBatchInsert,
             TextFields {
                 collection: Some("docs".to_string()),
+                // No id: a keyed batch writes rows, a headless one draws
+                // anonymous surrogates.
                 vectors: Some(vec![BatchVector {
-                    id: "v1".to_string(),
+                    id: String::new(),
                     embedding: vec![0.5, 0.5],
                     metadata: None,
                 }]),

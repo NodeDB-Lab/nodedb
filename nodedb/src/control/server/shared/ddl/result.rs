@@ -263,12 +263,16 @@ pub fn code_for_sqlstate(sqlstate_str: &str) -> ErrorCode {
         // non-retriable client error.
         sqlstate::GROUPING_ERROR => ErrorCode::BAD_REQUEST,
         sqlstate::DATA_EXCEPTION => ErrorCode::DATA_EXCEPTION,
-        // A bad parameter value, text representation, datetime format,
-        // datetime range or COPY file format is a data exception: class
-        // `22`, the class the code renders back.
-        "22023" | "22P02" | "22007" | "22008" | sqlstate::BAD_COPY_FILE_FORMAT => {
-            ErrorCode::DATA_EXCEPTION
+        sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM => ErrorCode::INVALID_ARGUMENT_FOR_LOGARITHM,
+        sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION => {
+            ErrorCode::INVALID_ARGUMENT_FOR_POWER_FUNCTION
         }
+        sqlstate::INVALID_TEXT_REPRESENTATION => ErrorCode::INVALID_TEXT_REPRESENTATION,
+        sqlstate::INVALID_DATETIME_FORMAT => ErrorCode::INVALID_DATETIME_FORMAT,
+        sqlstate::DATETIME_FIELD_OVERFLOW => ErrorCode::DATETIME_FIELD_OVERFLOW,
+        // A bad parameter value or COPY file format is a data exception:
+        // class `22`, the class the code renders back.
+        "22023" | sqlstate::BAD_COPY_FILE_FORMAT => ErrorCode::DATA_EXCEPTION,
         sqlstate::NUMERIC_VALUE_OUT_OF_RANGE => ErrorCode::OVERFLOW,
         sqlstate::DIVISION_BY_ZERO => ErrorCode::DIVISION_BY_ZERO,
         sqlstate::INVALID_LIMIT_VALUE => ErrorCode::INVALID_LIMIT_VALUE,
@@ -324,7 +328,7 @@ pub fn code_for_sqlstate(sqlstate_str: &str) -> ErrorCode {
         // non-retriable.
         "42P17" | "42809" | "42P16" => ErrorCode::BAD_REQUEST,
         // A declared literal the column type cannot represent.
-        sqlstate::DATATYPE_MISMATCH => ErrorCode::BAD_REQUEST,
+        sqlstate::DATATYPE_MISMATCH => ErrorCode::DATATYPE_MISMATCH,
         // Default "object not in prerequisite state" meaning of `55006`;
         // `CLONE_DEPENDENCY` and `CLONE_WRITE_REQUIRES_MATERIALIZE` are
         // ambiguous-typed and cannot reach this function.

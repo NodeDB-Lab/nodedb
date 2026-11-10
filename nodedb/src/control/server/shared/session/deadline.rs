@@ -48,7 +48,7 @@ pub fn statement_budget(
 /// trigger body, a constraint sub-query) cannot leave its own budget behind for
 /// the statement that follows.
 pub struct StatementScope {
-    previous: Option<Instant>,
+    previous: Option<(Instant, Duration)>,
 }
 
 impl Drop for StatementScope {
@@ -66,17 +66,26 @@ impl Drop for StatementScope {
 /// store is a no-op and every envelope site falls back to the node default, so
 /// installing the guard is always safe.
 pub fn enter(statement_timeout: Option<Duration>, default_deadline_secs: u64) -> StatementScope {
-    let previous = current();
-    store(Some(
-        Instant::now() + statement_budget(statement_timeout, default_deadline_secs),
-    ));
+    let previous = with_scope(None, |scope| scope.statement_deadline.get());
+    let budget = statement_budget(statement_timeout, default_deadline_secs);
+    store(Some((Instant::now() + budget, budget)));
     StatementScope { previous }
 }
 
 /// The current statement's deadline, or `None` when no statement scope is
 /// installed on this task.
 pub fn current() -> Option<Instant> {
+    with_scope(None, |scope| scope.statement_deadline.get()).map(|(at, _)| at)
+}
+
+/// The whole budget the current statement was given, or `default_deadline_secs`
+/// outside a statement scope. A deadline error reports it: the time left is
+/// zero by then.
+pub fn statement_total_budget(default_deadline_secs: u64) -> Duration {
     with_scope(None, |scope| scope.statement_deadline.get())
+        .map_or(Duration::from_secs(default_deadline_secs), |(_, budget)| {
+            budget
+        })
 }
 
 /// The absolute instant a Control -> Data request built right now must carry.
@@ -169,8 +178,8 @@ pub fn enter_cleanup(default_deadline_secs: u64) -> StatementScope {
     enter(None, default_deadline_secs)
 }
 
-fn store(deadline: Option<Instant>) {
-    with_scope((), |scope| scope.statement_deadline.set(deadline));
+fn store(bound: Option<(Instant, Duration)>) {
+    with_scope((), |scope| scope.statement_deadline.set(bound));
 }
 
 #[cfg(test)]
@@ -244,6 +253,24 @@ mod tests {
                 Some(outer_deadline),
                 "a nested statement must not leave its budget behind"
             );
+        })
+        .await;
+    }
+
+    /// The whole budget stays readable after the deadline passed, and a
+    /// nested statement restores the outer budget.
+    #[tokio::test]
+    async fn the_total_budget_survives_the_deadline() {
+        assert_eq!(statement_total_budget(30), Duration::from_secs(30));
+        conn_scope::scoped(async {
+            let _outer = enter(Some(Duration::from_millis(1)), 30);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert_eq!(statement_total_budget(30), Duration::from_millis(1));
+            {
+                let _inner = enter(None, 7);
+                assert_eq!(statement_total_budget(30), Duration::from_secs(7));
+            }
+            assert_eq!(statement_total_budget(30), Duration::from_millis(1));
         })
         .await;
     }

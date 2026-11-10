@@ -103,6 +103,8 @@ impl GatewayErrorMap {
             | Error::InvalidTextRepresentation { .. }
             | Error::DatatypeMismatch { .. }
             | Error::InvalidDatetimeFormat { .. }
+            | Error::InvalidArgumentForLogarithm { .. }
+            | Error::InvalidArgumentForPowerFunction { .. }
             | Error::DatetimeFieldOverflow { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }

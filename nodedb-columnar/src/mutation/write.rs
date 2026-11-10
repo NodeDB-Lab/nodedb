@@ -194,6 +194,21 @@ impl MutationEngine {
         Ok(self.delete_bound(pk_bytes, location, stamp))
     }
 
+    /// Delete the complete primary key extracted from a schema-shaped typed row.
+    pub fn delete_row(
+        &mut self,
+        values: &[Value],
+        stamp: i64,
+    ) -> Result<MutationResult, ColumnarError> {
+        let pk_bytes = self.extract_pk_bytes(values)?;
+        let location = self
+            .pk_index
+            .get(&pk_bytes)
+            .copied()
+            .ok_or(ColumnarError::PrimaryKeyNotFound)?;
+        Ok(self.delete_bound(pk_bytes, location, stamp))
+    }
+
     /// End the row `pk_bytes` binds at `location` and unbind it.
     fn delete_bound(
         &mut self,

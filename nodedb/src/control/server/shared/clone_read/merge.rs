@@ -2,17 +2,20 @@
 
 //! Pure msgpack merge/filter helpers for the clone CoW read-path.
 
-/// If `payload` is a msgpack map (a single row from a point-get), wrap it as a
-/// 1-element msgpack array so that tombstone filters and `merge_msgpack_arrays`
-/// operate on a uniform array shape.  If `payload` is already an array (from a
-/// scan) or is empty, return it unchanged.
+/// If `payload` is a single row from a point-get (a msgpack map or a native
+/// object `[7, {…}]`), wrap it as a 1-element msgpack array so that tombstone
+/// filters and `merge_msgpack_arrays` operate on a uniform array shape. If
+/// `payload` is already a row array (from a scan) or is empty, return it
+/// unchanged.
 pub(super) fn wrap_single_map_as_array(payload: Vec<u8>) -> Vec<u8> {
     use nodedb_query::msgpack_scan;
     if payload.is_empty() {
         return payload;
     }
-    // Already an array — leave as-is.
-    if msgpack_scan::array_header(&payload, 0).is_some() {
+    // A native object is one row, though its bytes open with an array header.
+    let single_native_row = crate::data::executor::response_codec::is_native_row(&payload);
+    // Already a row array — leave as-is.
+    if !single_native_row && msgpack_scan::array_header(&payload, 0).is_some() {
         return payload;
     }
     // Single map row: wrap as fixarray(1) + map bytes.
@@ -188,5 +191,30 @@ pub(super) fn unwrap_single_row(payload: Vec<u8>) -> Vec<u8> {
     match msgpack_scan::skip_value(&payload, body_start) {
         Some(end) => payload[body_start..end].to_vec(),
         None => payload,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A native point-get body is one row: it wraps to a one-row array and
+    /// unwraps back to the same bytes.
+    #[test]
+    fn a_native_row_wraps_as_one_row() {
+        let row = nodedb_types::Value::Object(std::collections::HashMap::from([(
+            "id".to_string(),
+            nodedb_types::Value::String("n1".into()),
+        )]));
+        let native = zerompk::to_msgpack_vec(&row).expect("encode native row");
+        assert!(crate::data::executor::response_codec::is_native_row(
+            &native
+        ));
+        let wrapped = wrap_single_map_as_array(native.clone());
+        assert_eq!(
+            nodedb_query::msgpack_scan::array_header(&wrapped, 0).map(|(n, _)| n),
+            Some(1)
+        );
+        assert_eq!(unwrap_single_row(wrapped), native);
     }
 }

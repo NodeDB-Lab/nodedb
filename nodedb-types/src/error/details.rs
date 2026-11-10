@@ -141,6 +141,29 @@ pub enum ErrorDetails {
     /// `detail` names the limit.
     #[serde(rename = "program_limit_exceeded")]
     ProgramLimitExceeded { detail: String },
+    /// `ln` or `log` of zero or a negative number. `detail` is the full
+    /// message.
+    #[serde(rename = "invalid_argument_for_logarithm")]
+    InvalidArgumentForLogarithm { detail: String },
+    /// `sqrt` of a negative number, or `power` outside its domain. `detail`
+    /// is the full message.
+    #[serde(rename = "invalid_argument_for_power_function")]
+    InvalidArgumentForPowerFunction { detail: String },
+    /// Text that spells no value of the target type. `detail` is the full
+    /// message.
+    #[serde(rename = "invalid_text_representation")]
+    InvalidTextRepresentation { detail: String },
+    /// Text that spells no value of a date or time type. `detail` is the
+    /// full message.
+    #[serde(rename = "invalid_datetime_format")]
+    InvalidDatetimeFormat { detail: String },
+    /// A date or time field outside its range. `detail` is the full message.
+    #[serde(rename = "datetime_field_overflow")]
+    DatetimeFieldOverflow { detail: String },
+    /// A value whose type the target type cannot hold. `detail` is the full
+    /// message.
+    #[serde(rename = "datatype_mismatch")]
+    DatatypeMismatch { detail: String },
     /// A LIMIT/OFFSET/FETCH bound resolved outside `[0, usize::MAX]`.
     #[serde(rename = "invalid_limit_value")]
     InvalidLimitValue { clause: String, value: String },

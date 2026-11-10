@@ -11,7 +11,7 @@
 
 use super::super::helpers::{doc_surrogate, make_ctx, payload_value, send_ok};
 use super::basic_scans::build_msgpack_map;
-use nodedb::data::executor::response_codec;
+use nodedb::data::executor::response_codec::{self, RowContext};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, QueryOp};
 
 fn coll(name: &str) -> nodedb_types::QualifiedCollection {
@@ -32,6 +32,7 @@ fn put(ctx: &mut super::super::helpers::TestCtx, collection: &str, id: &str) {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 }
@@ -59,7 +60,8 @@ fn input_of(ctx: &mut super::super::helpers::TestCtx, collection: &str) -> Box<P
     );
     Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
         provider: None,
-        rows: response_codec::flatten_to_relational_rows(&payload),
+        rows: response_codec::flatten_rows_in_context(&payload, RowContext::ScanEnvelope)
+            .expect("document scan rows split"),
         sources: Vec::new(),
         filters: Vec::new(),
         projection: Vec::new(),

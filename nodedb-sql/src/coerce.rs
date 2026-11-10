@@ -114,9 +114,20 @@ pub fn as_usize_literal(value: &ast::Value) -> Result<usize, InvalidRowBoundLite
 /// (a column reference, a function call, an arithmetic expression) is not
 /// a literal the planner can read — it fails with the expression's
 /// `Display` text as `raw`.
+///
+/// A whole `NUMERIC` parameter binds as the typed literal `NUMERIC '10'`,
+/// so that form reads as its digits.
 pub fn expr_as_usize_literal(expr: &ast::Expr) -> Result<usize, InvalidRowBoundLiteral> {
     match expr {
         ast::Expr::Value(v) => as_usize_literal(&v.value),
+        ast::Expr::TypedString(ts)
+            if matches!(
+                ts.data_type,
+                ast::DataType::Numeric(_) | ast::DataType::Decimal(_) | ast::DataType::Dec(_)
+            ) =>
+        {
+            as_usize_literal(&ts.value.value)
+        }
         other => Err(InvalidRowBoundLiteral {
             raw: other.to_string(),
         }),
@@ -166,6 +177,19 @@ pub fn as_f64_literal(value: &ast::Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usize_from_a_whole_numeric_param() {
+        let expr = ast::Expr::TypedString(ast::TypedString {
+            data_type: ast::DataType::Numeric(ast::ExactNumberInfo::None),
+            value: ast::ValueWithSpan {
+                value: ast::Value::SingleQuotedString("10".into()),
+                span: sqlparser::tokenizer::Span::empty(),
+            },
+            uses_odbc_syntax: false,
+        });
+        assert_eq!(expr_as_usize_literal(&expr), Ok(10));
+    }
 
     #[test]
     fn usize_from_number() {

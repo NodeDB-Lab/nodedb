@@ -88,11 +88,17 @@ pub(crate) async fn build_batch_insert(
             detail: "vectors array is empty".to_string(),
         });
     }
-
+    // A batch whose vectors name their ids writes each as a row under its
+    // id, as a single `VectorInsert` does. Only a batch naming no id is a
+    // headless index insert.
+    if super::vector_row::batch_is_keyed(batch_vectors)? {
+        return super::vector_row::build_row_batch(ctx, fields, collection, batch_vectors).await;
+    }
     let dim = batch_vectors[0].embedding.len();
     let vectors: Vec<Vec<f32>> = batch_vectors.iter().map(|v| v.embedding.clone()).collect();
 
-    // Headless batch — every vector gets a fresh anonymous surrogate.
+    // Headless batch: no vector names an id, so each gets a fresh anonymous
+    // surrogate.
     let assigner = &ctx.state.surrogate_assigner;
     let surrogates = assigner
         .assign_anonymous_many(
@@ -123,6 +129,11 @@ pub(crate) async fn build_insert(
             detail: "missing 'vector'".to_string(),
         })?
         .clone();
+    // Fields in `data` make this a row write: the vector and the fields land
+    // as one row under the request's document id.
+    if let Some(body) = fields.data.as_deref() {
+        return super::vector_row::build_row_insert(ctx, fields, collection, vector, body).await;
+    }
     let dim = vector.len();
     let field_name = fields.field_name.clone().unwrap_or_default();
 

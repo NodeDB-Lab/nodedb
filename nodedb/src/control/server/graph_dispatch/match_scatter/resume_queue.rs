@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use crate::control::gateway::RouteDecision;
 use crate::control::gateway::live_leaders::resolve_live_decision;
 use crate::control::state::SharedState;
-use crate::engine::graph::pattern::executor::VarLenResume;
+use crate::engine::graph::pattern::executor::{VarLenResume, row_fingerprint};
 use crate::types::VShardId;
 
 /// Deterministic dedup key for a resume seed.
@@ -37,22 +37,18 @@ use crate::types::VShardId;
 /// `sources x nodes x hops`. Self-advancing cap-truncation resumes carry a
 /// distinct advanced frontier/depth each round, so they hash differently and are
 /// never wrongly collapsed.
-pub(super) fn resume_seed_key(resume: &VarLenResume) -> u64 {
+pub(super) fn resume_seed_key(resume: &VarLenResume) -> crate::Result<u64> {
     let mut frontier_nodes: Vec<&str> = resume.frontier.iter().map(|(n, _)| n.as_str()).collect();
     frontier_nodes.sort_unstable();
-    let mut source: Vec<(&str, &str)> = resume
-        .source_row
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    source.sort_unstable();
+    // The anchor bindings in a key-order-independent canonical image.
+    let source = row_fingerprint(&resume.source_row)?;
 
     let mut hasher = DefaultHasher::new();
     resume.triple_idx.hash(&mut hasher);
     resume.depth.hash(&mut hasher);
     frontier_nodes.hash(&mut hasher);
     source.hash(&mut hasher);
-    hasher.finish()
+    Ok(hasher.finish())
 }
 
 /// A resume cursor paired with the resolved route to the node that owns its

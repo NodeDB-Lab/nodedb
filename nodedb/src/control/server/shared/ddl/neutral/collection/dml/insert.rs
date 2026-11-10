@@ -218,7 +218,8 @@ fn insert_status(rows_affected: u64) -> DdlResult {
 /// collection's inferred projection, one pair per field, from the first row
 /// that names it. `id` is the document key, never a projected column. An
 /// integer infers `BIGINT`: the value is an `i64`, and `INT` declares the
-/// 32-bit width that range-checks every later write.
+/// 32-bit width that range-checks every later write. A fractional literal is
+/// an exact decimal and infers a plain `DECIMAL`, which keeps every digit.
 fn inferred_field_types(rows: &[HashMap<String, nodedb_types::Value>]) -> Vec<(String, String)> {
     let mut seen = std::collections::HashSet::new();
     let mut inferred = Vec::new();
@@ -229,6 +230,7 @@ fn inferred_field_types(rows: &[HashMap<String, nodedb_types::Value>]) -> Vec<(S
             }
             let sql_type = match value {
                 nodedb_types::Value::Float(_) => "FLOAT",
+                nodedb_types::Value::Decimal(_) => "DECIMAL",
                 nodedb_types::Value::Integer(_) => "BIGINT",
                 nodedb_types::Value::Bool(_) => "BOOL",
                 _ => "TEXT",
@@ -252,7 +254,7 @@ mod tests {
                 nodedb_types::Value::Array(vec![
                     nodedb_types::Value::Float(1.0),
                     nodedb_types::Value::Integer(2),
-                    nodedb_types::Value::Float(3.5),
+                    nodedb_types::Value::Decimal("3.5".parse().expect("decimal")),
                 ]),
             ),
             (

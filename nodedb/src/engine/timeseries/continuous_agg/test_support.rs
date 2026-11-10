@@ -102,9 +102,7 @@ pub fn ad_hoc(rows: &[(i64, i64)], bucket_ms: i64) -> Vec<(i64, Vec<Value>)> {
                 a.sum_value().expect("ad-hoc sum"),
                 cell(a.min()),
                 cell(a.max()),
-                a.avg_f64()
-                    .expect("ad-hoc avg")
-                    .map_or(Value::Null, Value::Float),
+                a.avg_value().expect("ad-hoc avg"),
                 cell(a.first()),
                 cell(a.last()),
             ];

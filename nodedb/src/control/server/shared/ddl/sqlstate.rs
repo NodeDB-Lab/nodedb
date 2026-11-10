@@ -242,6 +242,16 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             format!("function {name}() does not exist"),
         ),
         ErrorCode::DataException { detail } => ("ERROR", sqlstate::DATA_EXCEPTION, detail.clone()),
+        ErrorCode::InvalidArgumentForLogarithm { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM,
+            detail.clone(),
+        ),
+        ErrorCode::InvalidArgumentForPowerFunction { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+            detail.clone(),
+        ),
         ErrorCode::NumericValueOutOfRange { detail } => (
             "ERROR",
             sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,

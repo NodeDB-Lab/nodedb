@@ -73,6 +73,18 @@ pub enum RlsPredicate {
         right: PredicateValue,
     },
 
+    /// Comparison of two values that name no document field:
+    /// `$auth.status = 'active'`, or a bare `$auth.x` (`IS NOT NULL`).
+    ///
+    /// Plan-time only. Substitution resolves both sides against the session
+    /// and lowers the result to a verdict, never to a row filter, so no row
+    /// field can stand in for a session value.
+    CompareValues {
+        left: PredicateValue,
+        op: CompareOp,
+        right: PredicateValue,
+    },
+
     /// Conjunction: all children must pass.
     And(Vec<RlsPredicate>),
     /// Disjunction: at least one child must pass.

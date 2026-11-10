@@ -30,8 +30,10 @@ pub(super) fn fx_hash_key(key: &[u64]) -> u64 {
 /// Pack one group column's cell at `row_idx` into a `u64` key part.
 ///
 /// Symbols and integers pack as their value, floats as their bit pattern,
-/// and a time column as its millisecond count. A column whose data is absent
-/// or of the wrong shape packs as `u64::MAX`.
+/// and a time column as its millisecond count. A DECIMAL or UUID column packs
+/// as its interned code ([`super::super::exact_keys`]), a BOOLEAN as `0`
+/// false, `1` true, `2` NULL. A column whose data is absent or of the wrong
+/// shape packs as `u64::MAX`.
 #[inline]
 pub(super) fn key_part(ty: ColumnType, data: Option<&ColumnData>, row_idx: usize) -> u64 {
     data.map(|data| match ty {
@@ -59,6 +61,25 @@ pub(super) fn key_part(ty: ColumnType, data: Option<&ColumnData>, row_idx: usize
         ColumnType::Timestamp(_) => {
             if let ColumnData::Timestamp(vals) = data {
                 vals[row_idx] as u64
+            } else {
+                u64::MAX
+            }
+        }
+        // The interned codes of the column, `-1` (`u64::MAX`) for NULL.
+        ColumnType::Decimal(_) | ColumnType::Uuid => {
+            if let ColumnData::Int64(codes) = data {
+                codes[row_idx] as u64
+            } else {
+                u64::MAX
+            }
+        }
+        ColumnType::Bool => {
+            if let ColumnData::Bool(vals) = data {
+                match vals[row_idx] {
+                    Some(false) => 0,
+                    Some(true) => 1,
+                    None => 2,
+                }
             } else {
                 u64::MAX
             }
@@ -93,9 +114,16 @@ pub(super) fn key_cells<'a>(
         .group_cols
         .iter()
         .zip(parts)
-        .map(|(&(col_idx, ty), &part)| {
+        .enumerate()
+        .map(|(position, (&(col_idx, ty), &part))| {
             let present = columns.get(col_idx).is_some_and(Option::is_some);
-            key_cell(ty, part, present, sym_lookup(col_idx))
+            key_cell(
+                ty,
+                part,
+                present,
+                sym_lookup(col_idx),
+                resolved.group_reps.get(&position),
+            )
         })
         .collect()
 }

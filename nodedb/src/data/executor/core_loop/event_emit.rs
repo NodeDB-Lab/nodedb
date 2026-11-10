@@ -87,6 +87,32 @@ impl CoreLoop {
         );
     }
 
+    /// Emit the captured row pair without parsing or rendering after commit.
+    pub(in crate::data::executor) fn emit_prepared_put_event(
+        &mut self,
+        task: &super::super::task::ExecutionTask,
+        collection: &str,
+        identity: crate::engine::document::store::RowIdentity,
+        event: &crate::types::document_event::DocumentPutEvent,
+    ) {
+        self.emit_event_with_row_id_as(
+            task,
+            task.request.event_source,
+            RowWriteEvent {
+                collection,
+                op: if event.old_value.is_some() {
+                    crate::event::WriteOp::Update
+                } else {
+                    crate::event::WriteOp::Insert
+                },
+                row_id: crate::event::types::RowId::row(identity),
+                new_value: Some(&event.new_value),
+                old_value: event.old_value.as_deref(),
+                image_fault: None,
+            },
+        );
+    }
+
     /// Emit a document-row DELETE event to the Event Plane.
     ///
     /// `identity` is the client-visible identity of the deleted row.

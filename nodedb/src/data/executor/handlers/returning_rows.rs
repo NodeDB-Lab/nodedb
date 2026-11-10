@@ -25,6 +25,27 @@ use nodedb_types::{NativeCell, Value};
 pub(in crate::data::executor) type StoredRow<'a> = (&'a RowIdentity, &'a [u8]);
 
 impl CoreLoop {
+    /// Prepare fallible projection before the row transaction commits.
+    pub(in crate::data::executor) fn prepare_stored_returning_response(
+        &self,
+        task: &ExecutionTask,
+        spec: &ReturningSpec,
+        rls_filters: &[u8],
+        strict_schema: Option<&StrictSchema>,
+        identity_column: &str,
+        rows: &[StoredRow<'_>],
+    ) -> crate::Result<Response> {
+        let payload = build_stored_rows_payload(
+            spec,
+            rls_filters,
+            strict_schema,
+            identity_column,
+            rows,
+            &self.crs_context(),
+        )?;
+        Ok(self.response_with_payload(task, payload))
+    }
+
     /// Build this task's `RETURNING` response from the rows it just stored.
     /// The single exit every insert-family handler uses, so the read gate and
     /// decode can never be applied on one path and skipped on another.
@@ -94,7 +115,7 @@ pub(in crate::data::executor) fn kv_stored_rows_payload(
     let docs: Vec<Value> = rows
         .iter()
         .map(|(key, value)| {
-            let (_key_str, body) = kv_row_to_doc(key, value);
+            let (_key_str, body) = kv_row_to_doc(key, value)?;
             doc_format::decode_document_value(&body)
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -220,7 +241,7 @@ pub(in crate::data::executor) fn vector_stored_rows_payload(
                 sidecar,
                 SparseBodyFormatRef::VectorSidecar,
                 columns.identity,
-            );
+            )?;
             let mut doc = doc_format::decode_document_value(&mp)?;
             if let Value::Object(map) = &mut doc {
                 map.insert(
@@ -283,7 +304,7 @@ pub(super) fn build_rejecting_rows_payload(
     rejection: Option<IngestRejection>,
     crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
-    let RowsPayload { columns, rows } = rows_payload(spec, rls_filters, docs, crs);
+    let RowsPayload { columns, rows } = rows_payload(spec, rls_filters, docs, crs)?;
     let encoded = match rejection {
         None => zerompk::to_msgpack_vec(&RowsPayload { columns, rows }),
         Some(rejected) => zerompk::to_msgpack_vec(&RejectingRowsPayload {
@@ -303,67 +324,73 @@ fn rows_payload(
     rls_filters: &[u8],
     docs: &[Value],
     crs: &nodedb_crs::CrsContext<'_>,
-) -> RowsPayload {
+) -> crate::Result<RowsPayload> {
+    use nodedb_physical::physical_plan::ReturningItem;
     let visible: Vec<&Value> = docs
         .iter()
         .filter(|doc| rls_eval::rls_check_value(rls_filters, doc, crs))
         .collect();
-
-    let (columns, source_names) = match &spec.columns {
-        ReturningColumns::Star => {
-            if visible.is_empty() {
-                return RowsPayload {
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                };
-            }
-            // Derive column names from the first doc's keys, sorted so the
-            // shape is deterministic; both output and source names are
-            // identical for `RETURNING *`.
-            let mut cols: Vec<String> = match visible.first() {
-                Some(Value::Object(obj)) => obj.keys().cloned().collect(),
-                Some(_) | None => Vec::new(),
-            };
-            cols.sort_unstable();
-            (cols.clone(), cols)
-        }
-        ReturningColumns::Named(items) => {
-            let output_names: Vec<String> = items
-                .iter()
-                .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
-                .collect();
-            let source_names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
-            (output_names, source_names)
-        }
-    };
-
-    let rows: Vec<Vec<NativeCell>> = visible
-        .iter()
-        .map(|doc| project_row(doc, &source_names))
-        .collect();
-
-    RowsPayload { columns, rows }
-}
-
-/// Project a single document into one typed cell per source name.
-///
-/// A missing field is `Value::Null`; a document that is not an object has
-/// every cell `Value::Null`.
-fn project_row(doc: &Value, source_names: &[String]) -> Vec<NativeCell> {
-    let fields = match doc {
-        Value::Object(obj) => Some(obj),
-        _ => None,
-    };
-    source_names
-        .iter()
-        .map(|name| {
-            let cell = match fields.and_then(|obj| obj.get(name)) {
-                Some(value) => value.clone(),
-                None => Value::Null,
-            };
-            NativeCell(cell)
+    let mut star_names: Vec<String> = visible
+        .first()
+        .and_then(|row| match row {
+            Value::Object(fields) => Some(fields.keys().cloned().collect()),
+            _ => None,
         })
-        .collect()
+        .unwrap_or_default();
+    star_names.sort_unstable();
+    let items = match &spec.columns {
+        ReturningColumns::Star => vec![ReturningItem::Star],
+        ReturningColumns::Named(items) => items.clone(),
+    };
+    let mut columns = Vec::new();
+    let mut expressions = Vec::with_capacity(items.len());
+    for item in &items {
+        match item {
+            ReturningItem::Star => {
+                columns.extend(star_names.iter().cloned());
+                expressions.push(None);
+            }
+            ReturningItem::Column { .. } => {
+                columns.push(item.output_name().to_owned());
+                expressions.push(None);
+            }
+            ReturningItem::Computed { expression, name } => {
+                columns.push(name.clone());
+                let expr = zerompk::from_msgpack::<nodedb_query::expr::SqlExpr>(expression)
+                    .map_err(|error| crate::Error::Codec {
+                        detail: format!("decode RETURNING expression '{name}': {error}"),
+                    })?;
+                expressions.push(Some(expr));
+            }
+        }
+    }
+    let rows = visible
+        .into_iter()
+        .map(|doc| {
+            let mut row = Vec::with_capacity(columns.len());
+            for (item, expr) in items.iter().zip(&expressions) {
+                match item {
+                    ReturningItem::Star => row.extend(
+                        star_names
+                            .iter()
+                            .map(|name| NativeCell(doc.get(name).cloned().unwrap_or(Value::Null))),
+                    ),
+                    ReturningItem::Column { name, .. } => {
+                        row.push(NativeCell(doc.get(name).cloned().unwrap_or(Value::Null)))
+                    }
+                    ReturningItem::Computed { name, .. } => {
+                        let expression = expr.as_ref().ok_or_else(|| crate::Error::Internal {
+                            detail: format!("RETURNING expression '{name}' is not compiled"),
+                        })?;
+                        let value = expression.eval(doc, crs)?;
+                        row.push(NativeCell(value));
+                    }
+                }
+            }
+            Ok(row)
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    Ok(RowsPayload { columns, rows })
 }
 
 #[cfg(test)]
@@ -389,7 +416,7 @@ mod tests {
         ReturningSpec {
             columns: ReturningColumns::Named(
                 cols.iter()
-                    .map(|c| ReturningItem {
+                    .map(|c| ReturningItem::Column {
                         name: (*c).to_string(),
                         alias: None,
                     })
@@ -580,5 +607,38 @@ mod tests {
         )
         .expect("build");
         assert_eq!(cells(&decode(&payload).rows[0]), vec![Value::DateTime(at)]);
+    }
+    #[test]
+    fn native_expression_evaluates_after_read_policy() {
+        use nodedb_query::expr::{BinaryOp, SqlExpr};
+        let expression = zerompk::to_msgpack_vec(&SqlExpr::BinaryOp {
+            left: Box::new(SqlExpr::Literal(Value::Integer(8))),
+            op: BinaryOp::Div,
+            right: Box::new(SqlExpr::Column("divisor".into())),
+        })
+        .expect("expression");
+        let spec = ReturningSpec {
+            columns: ReturningColumns::Named(vec![ReturningItem::Computed {
+                expression,
+                name: "ratio".into(),
+            }]),
+        };
+        let rows = vec![
+            Value::from(json!({"owner":"alice", "divisor":0})),
+            Value::from(json!({"owner":"bob", "divisor":2})),
+        ];
+        let payload = build_rows_payload(
+            &spec,
+            &owner_policy("bob"),
+            &rows,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("visible expression");
+        let payload = decode(&payload);
+        assert_eq!(payload.columns, ["ratio"]);
+        assert_eq!(cells(&payload.rows[0]), [Value::Integer(4)]);
+        assert!(
+            build_rows_payload(&spec, &[], &rows, &nodedb_crs::CrsContext::builtin_only()).is_err()
+        );
     }
 }

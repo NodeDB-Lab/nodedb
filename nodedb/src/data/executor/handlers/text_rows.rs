@@ -14,7 +14,7 @@ use nodedb_types::{StorageKey, Surrogate, SurrogateBitmap};
 use crate::bridge::scan_filter::{ScanFilter, decode_scan_filters};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
-use crate::data::executor::row_shape::sparse_row_to_doc;
+use crate::data::executor::row_shape::sparse_row_to_native_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
@@ -68,8 +68,8 @@ pub(in crate::data::executor) fn text_row_image(
     body: &[u8],
     format: SparseBodyFormatRef<'_>,
     identity_column: &str,
-) -> Vec<u8> {
-    sparse_row_to_doc(key, body, format, identity_column).1
+) -> crate::Result<Vec<u8>> {
+    Ok(sparse_row_to_native_doc(key, body, format, identity_column)?.1)
 }
 
 impl CoreLoop {
@@ -99,7 +99,7 @@ impl CoreLoop {
                 bytes,
                 format.as_format_ref(),
                 &identity_column,
-            ))
+            )?)
         };
         let coll_key = (database_id, tenant, collection.to_string());
         let overlay = match task.request.txn_id.filter(|_| cut.merge_overlay) {
@@ -215,7 +215,7 @@ mod tests {
     fn row_image_carries_the_key_identity() {
         let key = StorageKey::for_surrogate(Surrogate::new(42));
         let body = msgpack(serde_json::json!({ "body": "rust" }));
-        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id");
+        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id").unwrap();
         let identity = key.to_identity();
         let gate = TextRowGate::new(
             &id_filter(identity.as_str()),
@@ -238,7 +238,7 @@ mod tests {
     fn rls_on_id_reads_the_key_identity() {
         let key = StorageKey::for_surrogate(Surrogate::new(7));
         let body = msgpack(serde_json::json!({ "body": "rust" }));
-        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id");
+        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id").unwrap();
         let identity = key.to_identity();
         let gate = TextRowGate::new(
             &[],
@@ -256,7 +256,7 @@ mod tests {
     fn a_declared_key_row_image_has_no_id() {
         let key = StorageKey::for_surrogate(Surrogate::new(9));
         let body = msgpack(serde_json::json!({ "sku": "p1", "body": "rust" }));
-        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "sku");
+        let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "sku").unwrap();
         let identity = key.to_identity();
         let on_id = TextRowGate::new(
             &id_filter(identity.as_str()),

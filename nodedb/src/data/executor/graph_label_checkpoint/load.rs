@@ -209,6 +209,8 @@ mod tests {
             tenant_id: TID,
             collection: Some(COLL),
             document_cut: Default::default(),
+            edge_cut: Default::default(),
+            staged_edges: None,
         };
         let parsed = compiler::parse(query).expect("parse MATCH");
         let mut sources: Vec<String> = execute(
@@ -226,7 +228,7 @@ mod tests {
         .expect("execute MATCH")
         .rows
         .into_iter()
-        .filter_map(|row| row.get("a").cloned())
+        .filter_map(|row| row.get("a").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
         sources.sort();
         sources

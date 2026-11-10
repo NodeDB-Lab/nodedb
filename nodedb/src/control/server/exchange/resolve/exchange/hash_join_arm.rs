@@ -105,18 +105,22 @@ pub(super) async fn resolve_hash_join(
     // across all vShards on the coordinator and inline it as a
     // `ProviderScan`. The HashJoin shipped to the probe node is then
     // self-contained. Only the RIGHT/build side is gathered; the
-    // LEFT/probe side stays local to the routed vShard.
+    // LEFT/probe side stays local to the routed vShard. A build collection
+    // the catalog does not hold fails the statement (`CollectionNotFound`):
+    // every core would otherwise scan only its own part of it.
     if right_input.is_none() && !right_collection.is_empty() {
-        right_input = gather_join_build_side(
-            state,
-            ctx,
-            // The side's own collection and its own injected policy,
-            // taken as one value: a planner that swaps build and probe
-            // swaps both together, never one without the other.
-            ScanSide::join_side(&right_collection, &right_rls_filters, &right_scan_filters),
-            captures,
-        )
-        .await?;
+        right_input = Some(
+            gather_join_build_side(
+                state,
+                ctx,
+                // The side's own collection and its own injected policy,
+                // taken as one value: a planner that swaps build and probe
+                // swaps both together, never one without the other.
+                ScanSide::join_side(&right_collection, &right_rls_filters, &right_scan_filters),
+                captures,
+            )
+            .await?,
+        );
     }
 
     Ok(Resolved::Plan(Box::new(PhysicalPlan::Query(

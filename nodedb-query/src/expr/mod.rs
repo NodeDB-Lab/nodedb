@@ -8,9 +8,15 @@
 //! plans, so the zerompk codec must stay in lockstep with the AST variants.
 
 pub mod binary;
+pub mod cast_type;
 pub mod codec;
 pub mod eval;
+pub mod math_domain;
+pub mod out_of_range;
 pub mod types;
+pub mod unary;
 
 pub use eval::EvalError;
+pub use math_domain::{MathDomain, MathDomainClass};
+pub use out_of_range::OutOfRange;
 pub use types::{BinaryOp, CastType, ComputedColumn, GroupKeySpec, SqlExpr, WHOLE_ROW_COLUMN};

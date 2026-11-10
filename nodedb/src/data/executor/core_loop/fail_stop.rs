@@ -46,6 +46,10 @@ pub(in crate::data::executor) enum FailStopCause {
     /// A journalled write's write set cannot be stored beside its
     /// effects, so a crash cannot settle its record group.
     WriteSetUnpersisted,
+    /// A CRDT write's row landed in the sparse store, and the write itself
+    /// then failed on the CRDT document or left another row than predicted.
+    /// The projection is ahead of the document.
+    CrdtWriteAfterProjection,
 }
 
 impl FailStopCause {
@@ -56,6 +60,7 @@ impl FailStopCause {
             Self::CommittedRowUnfit => "committed_row_unfit",
             Self::ReplayRecordUnapplied => "replay_record_unapplied",
             Self::WriteSetUnpersisted => "write_set_unpersisted",
+            Self::CrdtWriteAfterProjection => "crdt_write_after_projection",
         }
     }
 }

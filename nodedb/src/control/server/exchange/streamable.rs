@@ -22,10 +22,77 @@
 //!   must not be inside a `BEGIN..COMMIT` block. HTTP is stateless and has no
 //!   transaction to check.
 //!
+//! [`open_streamable_scan`] adds the routing half every sink shares: a scan
+//! that reads through an unmaterialized clone never streams. It takes the
+//! materialized path, whose clone read merges target and source rows.
+//!
 //! [`maybe_stream_select`]: crate::control::server::pgwire
 //!   ::handler::routing::streaming
 
 use nodedb_physical::physical_plan::{ExchangeMode, ExchangeOp, PhysicalPlan, QueryOp};
+use nodedb_physical::physical_task::PhysicalTask;
+
+use crate::control::clone::resolver::reads_live_clone;
+use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::clone_write::{
+    CloneCheckedOutcome, CloneCheckedTask, InterceptAndAuthorizeParams, intercept_and_authorize,
+};
+use crate::control::state::SharedState;
+
+/// A streamable scan cleared to dispatch as a lazy row stream.
+pub(crate) struct StreamableScan {
+    /// The gather child, clone-checked and authorized.
+    pub checked: CloneCheckedTask,
+    /// The gather child plan the stream reads.
+    pub child_plan: PhysicalPlan,
+    /// Global take-N across the whole stream.
+    pub limit: usize,
+}
+
+/// Clear `task` to stream, or return `None` so the caller takes the
+/// materialized path.
+///
+/// Applies the plan-shape check of [`streamable_gather_child`], then
+/// declines a scan that reads through an unmaterialized clone, then runs the
+/// dispatch gate on the gather child. A gate that answers the child itself
+/// also declines the stream. The caller still applies the
+/// single-task, no-set-op, and autocommit gates first.
+pub(crate) async fn open_streamable_scan(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    task: &PhysicalTask,
+) -> crate::Result<Option<StreamableScan>> {
+    let Some((child_plan, limit)) = streamable_gather_child(&task.plan) else {
+        return Ok(None);
+    };
+    let mut child_task = task.clone();
+    child_task.plan = child_plan.clone();
+    if reads_live_clone(state, &child_task)? {
+        return Ok(None);
+    }
+    let tenant_id = child_task.tenant_id;
+    let emitter = ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
+    let outcome = intercept_and_authorize(InterceptAndAuthorizeParams {
+        state,
+        task: child_task,
+        identity,
+        tenant_id,
+        permissions: &state.permissions,
+        roles: &state.roles,
+        emitter: &emitter,
+    })
+    .await?;
+    match outcome {
+        // A clone read is read-only, so the materialized path can run it again.
+        CloneCheckedOutcome::Handled(_) => Ok(None),
+        CloneCheckedOutcome::Proceed(checked) => Ok(Some(StreamableScan {
+            checked,
+            child_plan,
+            limit,
+        })),
+    }
+}
 
 /// If `plan` is a streamable `Exchange{Gather{as_aggregate:false}}` over an
 /// unordered scan, return a clone of the gather *child* plan together with the

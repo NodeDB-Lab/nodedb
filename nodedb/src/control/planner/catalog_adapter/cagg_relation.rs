@@ -118,9 +118,13 @@ fn relation_columns(
             AggFunction::Count | AggFunction::CountDistinct | AggFunction::TopK(_) => {
                 derived(&expr.output_column, SqlDataType::Int64)
             }
-            AggFunction::Avg | AggFunction::Percentile(_) => {
-                derived(&expr.output_column, SqlDataType::Float64)
-            }
+            AggFunction::Percentile(_) => derived(&expr.output_column, SqlDataType::Float64),
+            // PostgreSQL's `avg` is float8 over a float and numeric over
+            // integers and numerics.
+            AggFunction::Avg => match input.as_ref().map(|c| &c.data_type) {
+                Some(SqlDataType::Float64) => derived(&expr.output_column, SqlDataType::Float64),
+                Some(_) | None => derived(&expr.output_column, SqlDataType::Decimal(None)),
+            },
             // An integer total can pass the 64-bit range and turns exact
             // decimal there, as PostgreSQL's `sum(bigint)` returns numeric.
             AggFunction::Sum => match input.map(|c| c.data_type) {

@@ -9,13 +9,12 @@
 //! clauses already split off) and compiles it with the graph pattern
 //! compiler to build the physical plan.
 
-use serde_json::{Map, Value as JsonValue};
+use nodedb_types::Value;
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::graph_dispatch;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{ShapedRow, ShapedRows};
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec;
 use crate::types::{DatabaseId, TraceId};
 use nodedb_physical::physical_plan::GraphOp;
 
@@ -201,7 +200,7 @@ pub async fn match_query(
                 if outcome.partial {
                     Err(DdlError::new("54001", MATCH_INCOMPLETE_MESSAGE))
                 } else {
-                    match_payload_to_rows(&outcome.rows_payload, &column_names)
+                    match_payload_to_rows(&query, &outcome.rows_payload, &column_names)
                 }
             }
             Err(e) => Err(DdlError::from_error(&e)),
@@ -236,43 +235,47 @@ pub async fn match_query(
             if outcome.partial {
                 Err(DdlError::new("54001", MATCH_INCOMPLETE_MESSAGE))
             } else {
-                match_payload_to_rows(&outcome.rows_payload, &column_names)
+                match_payload_to_rows(&query, &outcome.rows_payload, &column_names)
             }
         }
         Err(e) => Err(DdlError::from_error(&e)),
     }
 }
 
-/// Convert MATCH result payload to a protocol-neutral multi-row result.
+/// Convert a MATCH result payload to a protocol-neutral multi-row result.
+///
+/// The payload is the native row transport: the rows every core and shard
+/// returned, each a tagged object. The merged rows take the query's DISTINCT,
+/// ORDER BY, OFFSET and LIMIT here (`finish_match_rows`), once. Each cell
+/// keeps its exact type, so a native client reads a Decimal as a Decimal, and
+/// pgwire and HTTP render it at their own boundary. A column a row lacks, and
+/// a variable bound to nothing, is SQL NULL.
 fn match_payload_to_rows(
+    query: &crate::engine::graph::pattern::ast::MatchQuery,
     payload: &crate::bridge::envelope::Payload,
     column_names: &[String],
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let columns = column_names.to_vec();
-
-    if payload.is_empty() {
-        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
-            columns,
-            Vec::new(),
-        ))]);
-    }
-
-    let json_text = response_codec::decode_payload_to_json(payload);
-    let rows: Vec<serde_json::Value> = sonic_rs::from_str(&json_text)
-        .map_err(|e| DdlError::internal(format!("invalid match result JSON: {e}")))?;
-
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut map = Map::new();
-        for col_name in column_names {
-            let val = row.get(col_name).and_then(|v| v.as_str()).unwrap_or("NULL");
-            map.insert(col_name.clone(), JsonValue::String(val.to_string()));
-        }
-        out_rows.push(map);
-    }
-
-    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
-        columns, out_rows,
+    let rows = graph_dispatch::decode_match_rows(payload.as_ref())
+        .and_then(|rows| crate::engine::graph::pattern::executor::finish_match_rows(query, rows))
+        .map_err(|e| DdlError::internal(format!("invalid match result rows: {e}")))?;
+    let out_rows: Vec<ShapedRow> = rows
+        .into_iter()
+        .map(|fields| {
+            column_names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        fields.get(name).cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    Ok(vec![DdlResult::Rows(ShapedRows::from_rows(
+        column_names.to_vec(),
+        ShapedRows::text_types(column_names.len()),
+        out_rows,
     ))])
 }
 

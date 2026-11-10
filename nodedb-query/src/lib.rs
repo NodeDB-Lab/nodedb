@@ -20,6 +20,7 @@ pub mod json_expr;
 pub mod json_ops;
 pub mod metadata_filter;
 pub mod msgpack_scan;
+pub mod numeric_div;
 pub mod numeric_sum;
 pub mod partition_hash;
 pub mod scan_filter;

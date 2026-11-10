@@ -21,7 +21,9 @@
 
 use core::ops::ControlFlow;
 
-use sqlparser::ast::{Statement, Value, ValueWithSpan, VisitMut, VisitorMut};
+use sqlparser::ast::{Expr, Statement, Value, ValueWithSpan, VisitMut, VisitorMut};
+
+use crate::params_typed::placeholder_to_typed;
 
 /// Parameter value for AST substitution.
 ///
@@ -39,6 +41,35 @@ pub enum ParamValue {
     Timestamp(nodedb_types::datetime::NdbDateTime),
     /// UTC (timezone-aware) timestamp from a TIMESTAMPTZ pgwire parameter.
     Timestamptz(nodedb_types::datetime::NdbDateTime),
+    /// UUID from a UUID pgwire parameter, as its canonical text: lowercase,
+    /// hyphenated.
+    Uuid(String),
+    /// Raw bytes from a BYTEA pgwire parameter.
+    Bytes(Vec<u8>),
+    /// A duration from an INTERVAL pgwire parameter.
+    Duration(nodedb_types::NdbDuration),
+    /// The elements of an array pgwire parameter, or of a JSON array.
+    Array(Vec<ParamValue>),
+    /// The fields of a JSON / JSONB object parameter, in written order.
+    Object(Vec<(String, ParamValue)>),
+}
+
+impl ParamValue {
+    /// The typed parameter a value of a type SQL text holds only as a
+    /// string binds as: a UUID, an instant, bytes, or a decimal. `None` for
+    /// every other value, whose plain SQL literal already resolves to it.
+    pub fn typed_from_value(value: &nodedb_types::Value) -> Option<Self> {
+        use nodedb_types::Value;
+        match value {
+            Value::Uuid(u) => nodedb_types::id_gen::canonical_uuid(u).map(Self::Uuid),
+            Value::DateTime(at) => Some(Self::Timestamptz(*at)),
+            Value::NaiveDateTime(at) => Some(Self::Timestamp(*at)),
+            Value::Bytes(b) => Some(Self::Bytes(b.clone())),
+            Value::Decimal(d) => Some(Self::Decimal(*d)),
+            Value::Duration(d) => Some(Self::Duration(*d)),
+            _ => None,
+        }
+    }
 }
 
 /// Substitute all `$N` placeholders in a parsed statement with concrete values.
@@ -62,6 +93,20 @@ struct ParamBinder<'a> {
 impl VisitorMut for ParamBinder<'_> {
     type Break = ();
 
+    /// A placeholder bound to a timestamp, UUID or bytes parameter becomes a
+    /// typed string (`UUID '...'`), so the resolver reads the typed value,
+    /// never its text. The visitor then descends into the typed string,
+    /// whose value holds no placeholder.
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Value(value) = expr
+            && let Value::Placeholder(p) = &value.value
+            && let Some(typed) = placeholder_to_typed(p, self.params, value.span)
+        {
+            *expr = typed;
+        }
+        ControlFlow::Continue(())
+    }
+
     fn pre_visit_value(&mut self, value: &mut ValueWithSpan) -> ControlFlow<Self::Break> {
         // Only the literal is rewritten; `value.span` keeps pointing at the
         // placeholder token, so a later diagnostic still names the source
@@ -84,25 +129,34 @@ fn placeholder_to_value(placeholder: &str, params: &[ParamValue]) -> Option<Valu
         ParamValue::Bool(true) => Value::Boolean(true),
         ParamValue::Bool(false) => Value::Boolean(false),
         ParamValue::Int64(n) => Value::Number(n.to_string(), false),
-        ParamValue::Float64(f) => Value::Number(float_literal_text(*f), false),
+        // An exponent keeps the number a float. A non-finite float is the
+        // number text `NaN`, `inf` or `-inf`, which `convert_value` reads as
+        // a float. An expression position takes the cast form instead, see
+        // `placeholder_to_typed`.
+        ParamValue::Float64(f) => Value::Number(format!("{f:e}"), false),
+        // A position that holds no expression takes the digits. An
+        // expression position takes the typed form, see
+        // `placeholder_to_typed`.
         ParamValue::Decimal(d) => Value::Number(d.to_string(), false),
         ParamValue::Text(s) => Value::SingleQuotedString(s.clone()),
-        // Timestamp/Timestamptz: emit as a typed SQL literal so the resolver
-        // can produce the correct SqlValue variant (Timestamp vs Timestamptz).
-        ParamValue::Timestamp(dt) => Value::SingleQuotedString(dt.to_iso8601()),
-        ParamValue::Timestamptz(dt) => Value::SingleQuotedString(dt.to_iso8601()),
+        // A typed parameter in an expression position is a typed string, see
+        // `placeholder_to_typed`. A position that holds no expression takes
+        // its PostgreSQL text.
+        ParamValue::Timestamp(dt) | ParamValue::Timestamptz(dt) => {
+            Value::SingleQuotedString(dt.to_iso8601())
+        }
+        ParamValue::Uuid(u) => Value::SingleQuotedString(u.clone()),
+        ParamValue::Bytes(b) => {
+            Value::SingleQuotedString(nodedb_types::bytea_text::format_bytea_hex(b))
+        }
+        ParamValue::Duration(d) => {
+            Value::SingleQuotedString(crate::params_composite::duration_text(d))
+        }
+        // A position that holds no expression takes the JSON text.
+        ParamValue::Array(_) | ParamValue::Object(_) => {
+            Value::SingleQuotedString(crate::params_composite::param_json_text(param))
+        }
     })
-}
-
-/// The number-literal text of a float parameter.
-///
-/// The text always carries an exponent: `1.5e0`, `2e0`. The literal
-/// resolver reads an exponent as a float, so the value stays a float. The
-/// plain form reads `1.5` as a decimal and `2` as an integer. The mantissa
-/// is the shortest text that round-trips the `f64`. A non-finite float is
-/// `NaN`, `inf` or `-inf`, which the resolver also reads as a float.
-pub(crate) fn float_literal_text(f: f64) -> String {
-    format!("{f:e}")
 }
 
 #[cfg(test)]

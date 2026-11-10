@@ -107,7 +107,8 @@ impl CoreLoop {
                     ),
                 });
             };
-            let (timestamp_ms, values) = ilp_ingest::line_row(&schema, line, now_ms, Some(stamp));
+            let (timestamp_ms, values) = ilp_ingest::line_row(&schema, line, now_ms, Some(stamp))
+                .map_err(crate::Error::from)?;
             let image = match images.get(position) {
                 Some(row) => {
                     let mut bytes = Vec::new();

@@ -6,41 +6,8 @@
 
 use nodedb_physical::physical_plan::DocumentOp;
 
-use crate::bridge::envelope::RowVersion;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
-
-/// Encode a stamped document PUT redo record: `(collection, document_id,
-/// value, Option<SyncProvenance>, surrogate, sys_from, valid_from_ms,
-/// valid_until_ms)`. `sys_from` is the version's system-time ordinal. Must
-/// match `wal_replay_redo_document`'s decode. Every row an apply stored
-/// journals in this form.
-///
-/// `document_id` is the row's client identity. The Event Plane replay reads
-/// it back verbatim as the event's row id.
-pub(crate) fn encode_document_put_record(
-    collection: &str,
-    document_id: &str,
-    value: &[u8],
-    surrogate: u32,
-    version: RowVersion,
-) -> crate::Result<Vec<u8>> {
-    let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
-    zerompk::to_msgpack_vec(&(
-        collection,
-        document_id,
-        value,
-        prov,
-        surrogate,
-        version.sys_from,
-        version.valid_from_ms,
-        version.valid_until_ms,
-    ))
-    .map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("wal document put: {e}"),
-    })
-}
 
 /// Encode the unstamped PUT record of a point write's pre-dispatch or
 /// opening forward record: `(collection, document_id, value,
@@ -178,6 +145,7 @@ pub(super) fn wal_append_document_op(
             // Projection is answered from the Data Plane's response, not the journal.
             returning: _,
             rls_filters: _,
+            rls_write_check: _,
             // Plan-time materialized-sum resolution is not part of the applied record.
             resolved_sum_targets: _,
         } => {
@@ -199,6 +167,7 @@ pub(super) fn wal_append_document_op(
             surrogate,
             returning: _,
             rls_filters: _,
+            rls_write_check: _,
             // See `PointPut`.
             resolved_sum_targets: _,
             deferred_sum_targets: _,
@@ -308,6 +277,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
         let outcome = super::super::wal_append_if_write(

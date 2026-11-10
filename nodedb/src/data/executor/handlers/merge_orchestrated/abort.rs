@@ -21,8 +21,7 @@ pub(super) struct MergeAbort<'a> {
     pub(super) task: &'a ExecutionTask,
     pub(super) database_id: u64,
     pub(super) tid: u64,
-    pub(super) collection: &'a str,
-    pub(super) applied_keys: &'a [String],
+    pub(super) applied_keys: &'a [(String, crate::engine::document::store::StorageKey)],
     pub(super) undo_log: Vec<UndoEntry>,
     pub(super) err: ErrorCode,
 }
@@ -39,18 +38,10 @@ impl CoreLoop {
         &mut self,
         database_id: u64,
         tid: u64,
-        collection: &str,
-        keys: &[String],
+        keys: &[(String, crate::engine::document::store::StorageKey)],
     ) {
-        for key in keys {
-            // `key` is a bare string accumulated several calls removed from
-            // any typed scan. Eviction is always safe to skip: a shape that
-            // fails to parse as a storage key can hold no live cache entry
-            // either way.
-            if let Some(key) = crate::engine::document::store::StorageKey::parse(key) {
-                self.doc_cache
-                    .invalidate(database_id, tid, collection, &key);
-            }
+        for (collection, key) in keys {
+            self.doc_cache.invalidate(database_id, tid, collection, key);
         }
     }
 
@@ -66,16 +57,127 @@ impl CoreLoop {
             task,
             database_id,
             tid,
-            collection,
             applied_keys,
             undo_log,
             err,
         } = p;
-        let final_err = match self.rollback_undo_log(database_id, tid, undo_log) {
+        // The caller's transaction owns durable heads. Restore only their cache
+        // before reversing memory indexes, without opening another sparse writer.
+        let mut memory_undo = Vec::with_capacity(undo_log.len());
+        for entry in undo_log.into_iter().rev() {
+            match entry {
+                UndoEntry::ChainHead { collection, prior } => {
+                    let key = (
+                        crate::types::DatabaseId::new(database_id),
+                        crate::types::TenantId::new(tid),
+                        collection,
+                    );
+                    match prior {
+                        Some(head) => {
+                            self.chain.heads.insert(key, head);
+                        }
+                        None => {
+                            self.chain.heads.remove(&key);
+                        }
+                    }
+                }
+                memory => memory_undo.push(memory),
+            }
+        }
+        memory_undo.reverse();
+        let final_err = match self.rollback_undo_log(database_id, tid, memory_undo) {
             Ok(()) => err,
             Err(undo_error) => ErrorCode::from(undo_error),
         };
-        self.rollback_merge_cache(database_id, tid, collection, applied_keys);
+        self.rollback_merge_cache(database_id, tid, applied_keys);
         self.response_error(task, final_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::engine::document::store::StorageKey;
+    use crate::types::hash_chain::ChainHead;
+    use crate::types::{DatabaseId, TenantId};
+    use nodedb_types::Surrogate;
+
+    #[test]
+    fn merge_abort_restores_chain_cache_inside_the_source_transaction() {
+        let directory = tempfile::tempdir().expect("directory");
+        let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
+        let prior = ChainHead {
+            seq: 1,
+            hash: "prior".into(),
+        };
+        let pending = ChainHead {
+            seq: 2,
+            hash: "pending".into(),
+        };
+        core.sparse
+            .put_chain_head(0, 1, "ledger", &prior)
+            .expect("prior head");
+        let txn = core.sparse.begin_write().expect("source transaction");
+        core.sparse
+            .put_chain_head_in_txn(&txn, 0, 1, "ledger", &pending)
+            .expect("pending head");
+        let key = (DatabaseId::DEFAULT, TenantId::new(1), "ledger".to_owned());
+        core.chain.heads.insert(key.clone(), pending.clone());
+        let task = make_default_task();
+        core.abort_merge_apply(MergeAbort {
+            task: &task,
+            database_id: 0,
+            tid: 1,
+            applied_keys: &[],
+            undo_log: vec![UndoEntry::ChainHead {
+                collection: "ledger".into(),
+                prior: Some(prior.clone()),
+            }],
+            err: ErrorCode::Internal {
+                detail: "declined statement".into(),
+            },
+        });
+        assert_eq!(core.chain.heads.get(&key), Some(&prior));
+        assert_eq!(
+            core.sparse
+                .get_chain_head_in_txn(&txn, 0, 1, "ledger")
+                .expect("pending read"),
+            Some(pending)
+        );
+        assert_eq!(
+            core.sparse
+                .get_chain_head(0, 1, "ledger")
+                .expect("committed read"),
+            Some(prior)
+        );
+        txn.abort().expect("abort source");
+    }
+
+    #[test]
+    fn merge_abort_invalidates_source_and_target_cache_identities() {
+        let directory = tempfile::tempdir().expect("directory");
+        let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        for collection in ["source", "target", "other"] {
+            core.doc_cache.put(0, 1, collection, &key, 1, b"body");
+        }
+        let task = make_default_task();
+        core.abort_merge_apply(MergeAbort {
+            task: &task,
+            database_id: 0,
+            tid: 1,
+            applied_keys: &[("source".into(), key), ("target".into(), key)],
+            undo_log: Vec::new(),
+            err: ErrorCode::Internal {
+                detail: "declined statement".into(),
+            },
+        });
+        assert!(core.doc_cache.get(0, 1, "source", &key).is_none());
+        assert!(core.doc_cache.get(0, 1, "target", &key).is_none());
+        assert_eq!(
+            core.doc_cache.get(0, 1, "other", &key),
+            Some(b"body".as_slice())
+        );
     }
 }

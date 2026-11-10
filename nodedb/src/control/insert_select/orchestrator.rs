@@ -156,6 +156,7 @@ async fn run_insert_select(
             // whose target is co-resident folds here; nothing is deferred to
             // a sibling task.
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         // Each batch lands on the target's owner and every replica.
         let resp = apply_orchestrated_write(

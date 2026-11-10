@@ -242,7 +242,7 @@ impl CoreLoop {
                         bytes,
                         format.as_format_ref(),
                         &identity_column,
-                    );
+                    )?;
                     decode_scanned_row(bytes, Some(image.as_slice()), format.as_format_ref())?
                 }
                 None => serde_json::Value::Object(serde_json::Map::new()),

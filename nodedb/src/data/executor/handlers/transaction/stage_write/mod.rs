@@ -42,12 +42,14 @@ mod stage_returning;
 mod stage_rls;
 mod stage_spatial;
 mod stage_timeseries;
+mod stage_timeseries_canonical;
 mod stage_timeseries_ilp;
 mod stage_timeseries_now;
 mod stage_truncate;
 mod stage_upsert;
 mod stage_vector;
 mod stage_vector_targets;
+mod staged_ts_body;
 
 pub(in crate::data::executor) use body::stored_row_identity;
 pub(in crate::data::executor) use constraint::StagedStatement;

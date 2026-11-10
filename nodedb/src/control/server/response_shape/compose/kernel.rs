@@ -13,6 +13,7 @@ use nodedb_types::Value;
 use nodedb_types::columnar::schema::is_reserved_bitemporal_column;
 
 use crate::control::sequence::SequenceAccess;
+use crate::data::executor::response_codec::RowContext;
 
 use super::super::project::push_flat_rows;
 use super::super::redaction::RedactionCtx;
@@ -31,11 +32,15 @@ use super::super::types::{DdlColType, ShapedRow, ShapedRows};
 /// or vector-translate but still needs the same envelope-unwrap + projection
 /// logic applied per batch, so streaming callers call this directly.
 ///
+/// `context` is the row shape of the payload's producer: only
+/// [`RowContext::ScanEnvelope`] rows are unwrapped.
+///
 /// `sequences` resolves the sequence accessors of the projection's
 /// Control-Plane computed columns (`cp_computed`). An accessor call with
 /// `None` is an error: the alias would otherwise project as NULL.
 pub fn shape_decoded_rows(
     decoded: Value,
+    context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
@@ -44,6 +49,7 @@ pub fn shape_decoded_rows(
     let mut rows = Vec::new();
     push_flat_rows(
         decoded,
+        context,
         OutputSchema::identity_column(projection),
         &mut rows,
     )?;
@@ -357,6 +363,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -383,6 +390,7 @@ mod tests {
 
         let baseline = shape_decoded_rows(
             decoded.clone(),
+            RowContext::Flat,
             None,
             None,
             None,
@@ -391,6 +399,7 @@ mod tests {
         .expect("shape rows");
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -418,6 +427,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -448,6 +458,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -475,6 +486,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -513,6 +525,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,
@@ -615,6 +628,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             Some(&access),
@@ -632,6 +646,7 @@ mod tests {
 
         let err = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,
@@ -662,6 +677,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,

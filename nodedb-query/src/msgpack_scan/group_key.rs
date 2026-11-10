@@ -1,185 +1,185 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Binary group key construction for GROUP BY on raw MessagePack documents.
-//!
-//! Builds a deterministic string key from field values extracted directly
-//! from msgpack bytes, avoiding full document decode.
+//! Canonical GROUP BY keys with lossless native value decoding.
+
+use std::borrow::Cow;
 
 use nodedb_crs::CrsContext;
-use nodedb_types::{NdbDateTime, read_instant};
+use nodedb_types::{ObjectView, Value};
 
-use crate::expr::{EvalError, GroupKeySpec, SqlExpr};
-use crate::msgpack_scan::field::extract_field;
+use crate::expr::{EvalError, GroupKeySpec};
 use crate::msgpack_scan::index::FieldIndex;
-use crate::msgpack_scan::reader::{read_f64, read_integer, read_null, read_str};
 
-/// Build a GROUP BY key string from raw msgpack bytes.
-///
-/// Format: `[val1,val2,...]` where values are formatted as JSON literals.
-/// The text matches `sonic_rs::to_string(&key_parts)`, so the
-/// result-construction code can parse it back with `sonic_rs::from_str`.
-///
-/// Each key contributes one positional slot: a bare-column key (`field: Some`)
-/// contributes the value extracted from that document field; a computed key
-/// (`field: None, expr: Some`) contributes the value of the expression
-/// evaluated against the whole document. Evaluation is deterministic on the
-/// document bytes, so the same spec on the same bytes yields a byte-identical
-/// slot on producer and consumer. A spec with neither `field` nor `expr`
-/// contributes no slot.
-///
-/// Returns `Err(EvalError::DivisionByZero)` when a computed key expression
-/// divides or takes a modulus by zero: `GROUP BY a/b` with
-/// `b = 0` fails the whole statement with SQLSTATE `22012`, exactly like a
-/// WHERE/projection expression, instead of silently grouping the row under a
-/// `null` key.
-///
-/// Geo functions in a computed key resolve SRIDs through `crs`.
+use super::aggregate_helpers::decode_error;
+use super::canonical_key::canonical_key_value;
+
+/// Build a storage-independent group key, retaining native types.
 pub fn build_group_key(
     doc: &[u8],
     group_keys: &[GroupKeySpec],
     crs: &CrsContext<'_>,
 ) -> Result<String, EvalError> {
-    if group_keys.is_empty() {
-        return Ok("__all__".to_string());
-    }
-
-    let mut key_buf = String::new();
-    key_buf.push('[');
-    let mut written = 0usize;
-    for spec in group_keys {
-        if let Some(field) = spec.field.as_deref() {
-            if written > 0 {
-                key_buf.push(',');
-            }
-            append_field_value(&mut key_buf, doc, field);
-            written += 1;
-        } else if let Some(expr) = spec.expr.as_ref() {
-            if written > 0 {
-                key_buf.push(',');
-            }
-            append_computed_value(&mut key_buf, doc, expr, crs)?;
-            written += 1;
-        }
-    }
-    key_buf.push(']');
-    Ok(key_buf)
+    build_group_key_values(doc, group_keys, crs).map(|(key, _)| key)
 }
 
-/// Build a GROUP BY key using a pre-built `FieldIndex` for O(1) lookups.
-///
-/// Shares [`build_group_key`]'s computed-key error contract.
+/// Build a group key using a field index when its ranges address a plain map.
 pub fn build_group_key_indexed(
     doc: &[u8],
     group_keys: &[GroupKeySpec],
     idx: &FieldIndex,
     crs: &CrsContext<'_>,
 ) -> Result<String, EvalError> {
-    if group_keys.is_empty() {
-        return Ok("__all__".to_string());
-    }
+    build_group_key_values_indexed(doc, group_keys, idx, crs).map(|(key, _)| key)
+}
 
-    let mut key_buf = String::new();
-    key_buf.push('[');
-    let mut written = 0usize;
+/// [`build_group_key`] with the row's typed key values, one per slot. The
+/// key is the canonical identity. The values are the row's own, for a
+/// group's representative output.
+pub fn build_group_key_values(
+    doc: &[u8],
+    group_keys: &[GroupKeySpec],
+    crs: &CrsContext<'_>,
+) -> Result<(String, Vec<Value>), EvalError> {
+    build_key(
+        ObjectView::new(doc).map_err(decode_error)?,
+        group_keys,
+        None,
+        crs,
+    )
+}
+
+/// [`build_group_key_indexed`] with the row's typed key values.
+pub fn build_group_key_values_indexed(
+    doc: &[u8],
+    group_keys: &[GroupKeySpec],
+    idx: &FieldIndex,
+    crs: &CrsContext<'_>,
+) -> Result<(String, Vec<Value>), EvalError> {
+    let view = ObjectView::new(doc).map_err(decode_error)?;
+    let index = (view.format() == nodedb_types::ObjectFormat::Plain).then_some(idx);
+    build_key(view, group_keys, index, crs)
+}
+
+fn build_key(
+    view: ObjectView<'_>,
+    group_keys: &[GroupKeySpec],
+    index: Option<&FieldIndex>,
+    crs: &CrsContext<'_>,
+) -> Result<(String, Vec<Value>), EvalError> {
+    if group_keys.is_empty() {
+        return Ok(("__all__".to_owned(), Vec::new()));
+    }
+    let document = if group_keys
+        .iter()
+        .any(|spec| spec.field.is_none() && spec.expr.is_some())
+    {
+        Some(view.decode().map_err(decode_error)?)
+    } else {
+        None
+    };
+    let mut values = Vec::with_capacity(group_keys.len());
     for spec in group_keys {
         if let Some(field) = spec.field.as_deref() {
-            if written > 0 {
-                key_buf.push(',');
-            }
-            let range = idx.get(field);
-            append_field_value_range(&mut key_buf, doc, range);
-            written += 1;
-        } else if let Some(expr) = spec.expr.as_ref() {
-            // A computed key evaluates against the whole document, not a single
-            // indexed field, so the field index cannot short-circuit it.
-            if written > 0 {
-                key_buf.push(',');
-            }
-            append_computed_value(&mut key_buf, doc, expr, crs)?;
-            written += 1;
+            let value = match index {
+                Some(index) => index
+                    .get(field)
+                    .map(|(start, end)| {
+                        let bytes = view
+                            .map_bytes()
+                            .get(start..end)
+                            .ok_or_else(|| decode_error("field index range exceeds object body"))?;
+                        view.decode_value(bytes).map_err(decode_error)
+                    })
+                    .transpose()?,
+                None => view.get(field).map_err(decode_error)?,
+            };
+            values.push(value.unwrap_or(Value::Null));
+        } else if let (Some(expr), Some(document)) = (spec.expr.as_ref(), document.as_ref()) {
+            values.push(expr.eval(document, crs)?);
         }
     }
-    key_buf.push(']');
-    Ok(key_buf)
+    let key = encode_group_values(&values)?;
+    Ok((key, values))
 }
 
-/// Append the msgpack value at `doc[start..end]` to the key buffer as a JSON
-/// literal (string quoted, numbers/null verbatim, an instant as its quoted
-/// ISO-8601 form, complex values hex-encoded).
-///
-/// An instant keys by its epoch microseconds rendered as ISO-8601: the same
-/// text the JSON transcoder gives the cell, so a group column parsed back
-/// from the key reads as the cell would.
-fn append_value_at(buf: &mut String, doc: &[u8], start: usize, end: usize) {
-    if read_null(doc, start) {
-        buf.push_str("null");
-    } else if let Some(s) = read_str(doc, start) {
-        buf.push('"');
-        buf.push_str(s);
-        buf.push('"');
-    } else if let Some((_, micros)) = read_instant(doc, start) {
-        buf.push('"');
-        buf.push_str(&NdbDateTime::from_micros(micros).to_iso8601());
-        buf.push('"');
-    } else if let Some(n) = read_integer(doc, start) {
-        use std::fmt::Write;
-        let _ = write!(buf, "{n}");
-    } else if let Some(n) = read_f64(doc, start) {
-        use std::fmt::Write;
-        let _ = write!(buf, "{n}");
+/// A value's canonical form, borrowed when it is already canonical.
+fn canonical_ref(value: &Value) -> Cow<'_, Value> {
+    match value {
+        Value::Float(_)
+        | Value::Decimal(_)
+        | Value::Array(_)
+        | Value::Set(_)
+        | Value::Object(_) => Cow::Owned(canonical_key_value(value.clone())),
+        other => Cow::Borrowed(other),
+    }
+}
+
+/// The canonical identity of a list of key values. Values equal by exact
+/// value give equal text, whatever their numeric type and whether they came
+/// from a plain or a native row: each value first reads as its
+/// [`canonical_key_value`]. A list of JSON-safe scalars encodes as a JSON
+/// array, and any other list as tagged `native:` hex. [`decode_group_key`]
+/// reads either form back.
+pub fn encode_group_values(values: &[Value]) -> Result<String, EvalError> {
+    let values: Vec<Cow<'_, Value>> = values.iter().map(canonical_ref).collect();
+    let mut plain = String::from("[");
+    for (position, value) in values.iter().enumerate() {
+        if position != 0 {
+            plain.push(',');
+        }
+        match value.as_ref() {
+            Value::Null => plain.push_str("null"),
+            Value::Bool(value) => plain.push_str(if *value { "true" } else { "false" }),
+            Value::Integer(value) => plain.push_str(&value.to_string()),
+            // A canonical finite float is non-integral, so its shortest
+            // text carries a `.` and never reads back as an integer.
+            Value::Float(value) if value.is_finite() => plain.push_str(&value.to_string()),
+            Value::String(value) => {
+                plain.push_str(&serde_json::to_string(value).map_err(decode_error)?)
+            }
+            // A canonical integer past `i64` that fits a `u64` stays JSON.
+            Value::Decimal(value)
+                if value.scale() == 0 && u64::try_from(value.mantissa()).is_ok() =>
+            {
+                plain.push_str(&value.mantissa().to_string())
+            }
+            _ => return encode_native_values(&values),
+        }
+    }
+    plain.push(']');
+    Ok(plain)
+}
+
+fn encode_native_values(values: &[Cow<'_, Value>]) -> Result<String, EvalError> {
+    let array = Value::Array(values.iter().map(|value| value.as_ref().clone()).collect());
+    let bytes = zerompk::to_msgpack_vec(&array).map_err(decode_error)?;
+    Ok(format!("native:{}", hex::encode(bytes)))
+}
+
+/// Decode a group key while retaining native value types.
+pub fn decode_group_key(key: &str) -> Result<Vec<Value>, EvalError> {
+    if key == "__all__" {
+        return Ok(Vec::new());
+    }
+    let value = if let Some(encoded) = key.strip_prefix("native:") {
+        let bytes = hex::decode(encoded).map_err(decode_error)?;
+        zerompk::from_msgpack::<Value>(&bytes).map_err(decode_error)?
     } else {
-        // Complex value (array/map/bin) — hex-encode raw bytes as key.
-        buf.push_str(&hex::encode(&doc[start..end]));
-    }
-}
-
-/// Append a single field's value to the key buffer as a JSON literal.
-fn append_field_value(buf: &mut String, doc: &[u8], field: &str) {
-    match extract_field(doc, 0, field) {
-        Some((start, end)) => append_value_at(buf, doc, start, end),
-        None => buf.push_str("null"),
-    }
-}
-
-/// Append a field value from a pre-resolved range.
-fn append_field_value_range(buf: &mut String, doc: &[u8], range: Option<(usize, usize)>) {
-    match range {
-        Some((start, end)) => append_value_at(buf, doc, start, end),
-        None => buf.push_str("null"),
-    }
-}
-
-/// Append a computed key's value: evaluate `expr` against the whole document
-/// and encode the result the same way a field value is encoded, so a computed
-/// slot is byte-identical wherever the same expression meets the same document.
-/// A document that cannot be decoded, or a value that cannot be re-encoded,
-/// contributes `null` — mirroring the missing-field handling above.
-///
-/// An expression that fails to evaluate (division/modulo by zero)
-/// returns `Err(EvalError::DivisionByZero)`: a computed GROUP BY
-/// key gets the same `22012` statement-failure treatment as a WHERE/projection
-/// expression rather than silently grouping the row under a `null` key.
-fn append_computed_value(
-    buf: &mut String,
-    doc: &[u8],
-    expr: &SqlExpr,
-    crs: &CrsContext<'_>,
-) -> Result<(), EvalError> {
-    let Ok(doc_val) = nodedb_types::json_msgpack::value_from_msgpack(doc) else {
-        buf.push_str("null");
-        return Ok(());
+        // sonic-rs parses float text exactly, so a decoded key re-encodes
+        // to the same text.
+        let value: serde_json::Value = sonic_rs::from_str(key).map_err(decode_error)?;
+        Value::from(value)
     };
-    let val = expr.eval(&doc_val, crs)?;
-    match nodedb_types::json_msgpack::value_to_msgpack(&val) {
-        Ok(vb) => append_value_at(buf, &vb, 0, vb.len()),
-        Err(_) => buf.push_str("null"),
+    match value {
+        Value::Array(values) => Ok(values),
+        _ => Err(decode_error("group key is not an array")),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::SqlExpr;
 
     fn crs() -> CrsContext<'static> {
         CrsContext::builtin_only()
@@ -258,10 +258,9 @@ mod tests {
         assert_eq!(key, "[36.6]");
     }
 
-    /// An instant cell keys by its ISO-8601 form, a scalar JSON string, and
-    /// the indexed builder produces the same key.
+    /// Instant group values retain their kind across indexed and direct keys.
     #[test]
-    fn instant_field_keys_as_iso8601() {
+    fn instant_field_keys_retain_kind() {
         use nodedb_types::InstantKind;
         let mut doc = Vec::new();
         crate::msgpack_scan::write_map_header(&mut doc, 2);
@@ -274,7 +273,15 @@ mod tests {
         crate::msgpack_scan::write_kv_i64(&mut doc, "n", 1);
 
         let key = build_group_key(&doc, &keys(&["ts", "n"]), &crs()).unwrap();
-        assert_eq!(key, r#"["2020-03-05T10:00:00.000000Z",1]"#);
+        assert_eq!(
+            decode_group_key(&key).unwrap(),
+            vec![
+                Value::NaiveDateTime(nodedb_types::NdbDateTime::from_micros(
+                    1_583_402_400_000_000
+                )),
+                Value::Integer(1),
+            ]
+        );
         let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
         assert_eq!(
             build_group_key_indexed(&doc, &keys(&["ts", "n"]), &idx, &crs()).unwrap(),
@@ -356,3 +363,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "group_native_tests.rs"]
+mod native_tests;

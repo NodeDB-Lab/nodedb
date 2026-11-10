@@ -13,6 +13,7 @@
 //! ├── value.col           # Codec-compressed f64 values
 //! ├── {tag}.sym           # Symbol dictionary for tag columns
 //! ├── {tag}.col           # u32 symbol IDs (raw LE or codec-compressed)
+//! ├── {field}.col         # DECIMAL/UUID/BOOLEAN fixed-width cells (see `fixed_cells`)
 //! ├── schema.json         # Column names, types, and codecs
 //! └── partition.meta      # PartitionMeta + per-column statistics (JSON)
 //! ```
@@ -22,6 +23,7 @@ pub mod mmap;
 
 mod codec;
 mod error;
+mod fixed_cells;
 mod reader;
 mod schema;
 #[cfg(test)]

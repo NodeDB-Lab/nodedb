@@ -95,6 +95,7 @@ impl TimeseriesAggOutput {
 /// Payload of [`SqlPlan::TimeseriesIngest`](crate::types::SqlPlan::TimeseriesIngest).
 #[derive(Debug, Clone)]
 pub struct TimeseriesIngestPlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     /// Defaults materialized and literals coerced, as in `Insert::rows`.
     /// A row that omits the `TIME_KEY` column carries its declared

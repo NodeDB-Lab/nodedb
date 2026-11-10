@@ -5,7 +5,7 @@
 use crate::types::{DatabaseId, TenantId};
 
 use super::txn_overlay::GraphTxnOverlay;
-use super::types::{EdgeValidTime, GraphCollKey};
+use super::types::{EdgeValidTime, GraphCollKey, StagedEdgePut};
 
 impl GraphTxnOverlay {
     /// Stage an edge put: adds to the pending add-set and clears any
@@ -250,6 +250,25 @@ impl GraphTxnOverlay {
                     .pending_edges
                     .keys()
                     .map(|(s, l, d)| (s.clone(), l.clone(), d.clone()))
+            })
+            .collect()
+    }
+
+    /// Every staged edge put for `(database_id, tenant)` with its collection
+    /// and property image: `(collection, (src, label, dst), properties)`.
+    pub fn staged_edge_puts(
+        &self,
+        database_id: DatabaseId,
+        tenant: TenantId,
+    ) -> Vec<StagedEdgePut> {
+        self.collections
+            .iter()
+            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
+            .flat_map(|((_, _, collection), overlay)| {
+                overlay
+                    .pending_edges
+                    .iter()
+                    .map(move |(edge, props)| (collection.clone(), edge.clone(), props.clone()))
             })
             .collect()
     }

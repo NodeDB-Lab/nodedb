@@ -3,9 +3,10 @@
 //! Shared msgpack-row sorting utilities used by scan handlers.
 
 use nodedb_physical::physical_plan::SortKeySpec;
-use nodedb_query::{EvalError, compare_json, eval_expr_on_json};
+use nodedb_query::EvalError;
+use nodedb_types::Value;
 
-/// Sort msgpack-map rows by the ORDER BY terms. Decodes each row to JSON,
+/// Sort msgpack-map rows by the ORDER BY terms. Decodes each row as an object,
 /// evaluates each sort expression against it, and reorders the original
 /// msgpack bytes.
 ///
@@ -26,10 +27,10 @@ pub(in crate::data::executor) fn sort_msgpack_rows(
         return Ok(());
     }
 
-    let decoded: Vec<serde_json::Value> = rows
+    let decoded: Vec<Value> = rows
         .iter()
         .map(|r| {
-            nodedb_types::json_from_msgpack(r).map_err(|e| crate::Error::Codec {
+            nodedb_types::object_msgpack::decode_object(r).map_err(|e| crate::Error::Codec {
                 detail: format!("ORDER BY row decode: {e}"),
             })
         })
@@ -52,15 +53,15 @@ pub(in crate::data::executor) fn sort_msgpack_rows(
 /// Sorting compares a pair at a time and `sort_by` cannot report an error, so
 /// the fallible work happens here where it can propagate.
 pub(in crate::data::executor) fn sort_key_values(
-    rows: &[serde_json::Value],
+    rows: &[Value],
     sort_keys: &[SortKeySpec],
     crs: &nodedb_crs::CrsContext<'_>,
-) -> Result<Vec<Vec<serde_json::Value>>, EvalError> {
+) -> Result<Vec<Vec<Value>>, EvalError> {
     rows.iter()
         .map(|row| {
             sort_keys
                 .iter()
-                .map(|k| eval_expr_on_json(&k.expr, row, crs))
+                .map(|k| k.expr.eval(row, crs))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect()
@@ -68,8 +69,8 @@ pub(in crate::data::executor) fn sort_key_values(
 
 /// Compare two rows' pre-evaluated sort values.
 pub(in crate::data::executor) fn compare_key_rows(
-    a: &[serde_json::Value],
-    b: &[serde_json::Value],
+    a: &[Value],
+    b: &[Value],
     sort_keys: &[SortKeySpec],
 ) -> std::cmp::Ordering {
     for (idx, key) in sort_keys.iter().enumerate() {
@@ -80,11 +81,75 @@ pub(in crate::data::executor) fn compare_key_rows(
         // sort direction never flips.
         let ord = match key.order_nulls(va.is_null(), vb.is_null()) {
             Some(ord) => ord,
-            None => key.direct(compare_json(va, vb)),
+            None => key.direct(
+                crate::data::executor::handlers::document::sort::compare::compare_expression_values(
+                    va, vb,
+                ),
+            ),
         };
         if ord != std::cmp::Ordering::Equal {
             return ord;
         }
     }
     std::cmp::Ordering::Equal
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    fn row(value: Value) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&Value::Object(
+            [("key".into(), value)].into_iter().collect(),
+        ))
+        .expect("native row")
+    }
+
+    #[test]
+    fn provider_sort_keeps_exact_native_keys_and_null_direction() {
+        let low = Value::Decimal("123456789.123456789".parse().expect("decimal"));
+        let high = Value::Decimal("123456789.123456790".parse().expect("decimal"));
+        let keys = [SortKeySpec::column("key", true)];
+        let mut rows = vec![row(high.clone()), row(low.clone())];
+        sort_msgpack_rows(&mut rows, &keys, &nodedb_crs::CrsContext::builtin_only()).expect("sort");
+        assert_eq!(
+            nodedb_types::object_msgpack::decode_object(&rows[0])
+                .expect("object")
+                .get("key"),
+            Some(&low)
+        );
+        assert_eq!(
+            nodedb_types::object_msgpack::decode_object(&rows[1])
+                .expect("object")
+                .get("key"),
+            Some(&high)
+        );
+        for ascending in [true, false] {
+            let key = SortKeySpec::column("key", ascending);
+            let expected = key.order_nulls(true, false).expect("null order");
+            assert_eq!(
+                compare_key_rows(&[Value::Null], std::slice::from_ref(&low), &[key]),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_provider_comparison_keeps_expression_ordering() {
+        let values = [
+            Value::String("text".into()),
+            Value::Integer(3),
+            Value::Array(vec![]),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Object(Default::default()),
+        ];
+        let key = [SortKeySpec::column("key", true)];
+        for pair in values.windows(2) {
+            assert_eq!(
+                compare_key_rows(&pair[..1], &pair[1..], &key),
+                std::cmp::Ordering::Less
+            );
+        }
+    }
 }

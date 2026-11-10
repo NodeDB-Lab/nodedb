@@ -45,8 +45,9 @@ pub(super) fn left_join_rows(
 
         if matches.is_empty() {
             let mut row = input_row.clone();
+            // An unmatched variable binds SQL NULL.
             for var in &new_vars {
-                row.entry(var.clone()).or_insert_with(|| "NULL".to_string());
+                row.entry(var.clone()).or_insert(nodedb_types::Value::Null);
             }
             result.push(row);
         } else {

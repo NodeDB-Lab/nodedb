@@ -4,15 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_msgpack::JsonValue;
+use crate::value::Value;
 
 /// A single vector in a batch insert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchVector {
     pub id: String,
     pub embedding: Vec<f32>,
+    /// The row's metadata: a `Value::Object`, each value tagged with its
+    /// exact type.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    pub metadata: Option<Value>,
 }
 
 impl zerompk::ToMessagePack for BatchVector {
@@ -20,10 +22,7 @@ impl zerompk::ToMessagePack for BatchVector {
         writer.write_array_len(3)?;
         writer.write_string(&self.id)?;
         self.embedding.write(writer)?;
-        self.metadata
-            .as_ref()
-            .map(|v| JsonValue(v.clone()))
-            .write(writer)
+        self.metadata.write(writer)
     }
 }
 
@@ -38,7 +37,7 @@ impl<'a> zerompk::FromMessagePack<'a> for BatchVector {
         }
         let id = reader.read_string()?.into_owned();
         let embedding = Vec::<f32>::read(reader)?;
-        let metadata = Option::<JsonValue>::read(reader)?.map(|v| v.0);
+        let metadata = Option::<Value>::read(reader)?;
         Ok(Self {
             id,
             embedding,
@@ -51,14 +50,16 @@ impl<'a> zerompk::FromMessagePack<'a> for BatchVector {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchDocument {
     pub id: String,
-    pub fields: serde_json::Value,
+    /// The document's fields: a `Value::Object`, each value tagged with its
+    /// exact type.
+    pub fields: Value,
 }
 
 impl zerompk::ToMessagePack for BatchDocument {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         writer.write_array_len(2)?;
         writer.write_string(&self.id)?;
-        JsonValue(self.fields.clone()).write(writer)
+        self.fields.write(writer)
     }
 }
 
@@ -72,7 +73,72 @@ impl<'a> zerompk::FromMessagePack<'a> for BatchDocument {
             });
         }
         let id = reader.read_string()?.into_owned();
-        let fields = JsonValue::read(reader)?.0;
+        let fields = Value::read(reader)?;
         Ok(Self { id, fields })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_vector_metadata_keeps_exact_types() {
+        let metadata = Value::Object(
+            [
+                (
+                    "price".to_string(),
+                    Value::Decimal("12.50".parse().expect("decimal literal")),
+                ),
+                (
+                    "uid".to_string(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                ("blob".to_string(), Value::Bytes(vec![0x01, 0xff])),
+            ]
+            .into(),
+        );
+        let vector = BatchVector {
+            id: "v1".into(),
+            embedding: vec![0.5, 1.0],
+            metadata: Some(metadata.clone()),
+        };
+        let bytes = zerompk::to_msgpack_vec(&vector).expect("encode");
+        let decoded: BatchVector = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded.id, "v1");
+        assert_eq!(decoded.embedding, vec![0.5, 1.0]);
+        assert_eq!(decoded.metadata, Some(metadata));
+        let Some(Value::Object(fields)) = decoded.metadata else {
+            panic!("metadata decodes as an object");
+        };
+        let Some(Value::Decimal(price)) = fields.get("price") else {
+            panic!("price stays a Decimal");
+        };
+        assert_eq!(price.to_string(), "12.50");
+    }
+
+    #[test]
+    fn batch_document_fields_keep_exact_types() {
+        let fields = Value::Object(
+            [
+                (
+                    "price".to_string(),
+                    Value::Decimal("12.50".parse().expect("decimal literal")),
+                ),
+                (
+                    "at".to_string(),
+                    Value::DateTime(crate::datetime::NdbDateTime::from_micros(1_700_000_000)),
+                ),
+            ]
+            .into(),
+        );
+        let doc = BatchDocument {
+            id: "d1".into(),
+            fields: fields.clone(),
+        };
+        let bytes = zerompk::to_msgpack_vec(&doc).expect("encode");
+        let decoded: BatchDocument = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded.id, "d1");
+        assert_eq!(decoded.fields, fields);
     }
 }

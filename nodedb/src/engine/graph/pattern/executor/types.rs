@@ -4,8 +4,14 @@
 
 use std::collections::HashMap;
 
-/// A single result row: variable bindings.
-pub type BindingRow = HashMap<String, String>;
+/// A single result row: variable bindings, each a typed value.
+///
+/// A node variable binds `Value::String(node name)`. A fixed-length edge
+/// variable binds `Value::String("src|label|dst")` and a variable-length one
+/// its path text. A variable an `OPTIONAL MATCH` left unmatched binds
+/// `Value::Null`. A projected column holds the exact stored value. See
+/// [`super::row`] for the reads and the hidden edge-property keys.
+pub type BindingRow = HashMap<String, nodedb_types::Value>;
 
 /// An expansion source that has zero local adjacency in the queried
 /// direction — its out-edges (or in-edges) are homed on another shard.
@@ -186,6 +192,10 @@ pub(super) struct ExecutionState<'a> {
     /// Defaults to [`CollectionFilter::Unscoped`] (tenant-wide) until the
     /// executor entry point resolves it.
     pub collection_filter: super::expansion::CollectionFilter,
+    /// The edge variables whose properties the query reads, captured onto
+    /// each row where the edge is bound. `None` captures nothing: a query
+    /// that reads no relationship property, and a `NOT EXISTS` sub-pattern.
+    pub edge_capture: Option<super::edge_props::EdgeCapture<'a>>,
 }
 
 impl<'a> ExecutionState<'a> {
@@ -199,6 +209,21 @@ impl<'a> ExecutionState<'a> {
             is_remote_node,
             varlen_caps,
             collection_filter: super::expansion::CollectionFilter::Unscoped,
+            edge_capture: None,
+        }
+    }
+
+    /// Capture the crossed `edge`'s properties on `row` for edge variable
+    /// `var`, when this execution captures that variable.
+    pub(super) fn capture_edge(
+        &self,
+        row: &mut BindingRow,
+        var: &str,
+        edge: super::edge_props::CrossedEdge<'_>,
+    ) -> crate::Result<()> {
+        match &self.edge_capture {
+            Some(capture) => capture.capture(row, var, edge),
+            None => Ok(()),
         }
     }
 

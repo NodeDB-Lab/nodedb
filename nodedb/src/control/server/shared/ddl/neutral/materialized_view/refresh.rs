@@ -22,14 +22,16 @@
 //! synthesis run here. The result is the protocol-neutral [`DdlResult`] /
 //! [`DdlError`].
 
-use nodedb_types::DatabaseId;
 use nodedb_types::error::sqlstate;
+use nodedb_types::{DatabaseId, Value};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::pgwire::types::error_to_sqlstate;
+use crate::control::server::response_shape::project::push_row_bodies;
+use crate::control::server::response_shape::types::ShapedRow;
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::decode_row_payload_value;
 use crate::types::TraceId;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -92,10 +94,7 @@ pub async fn refresh_materialized_view(
     for (idx, row) in rows.iter().enumerate() {
         let mut row = row.clone();
         if !row.contains_key("id") {
-            row.insert(
-                "id".to_string(),
-                serde_json::Value::String(format!("mv_{idx}")),
-            );
+            row.insert("id".to_string(), Value::String(format!("mv_{idx}")));
         }
         let insert_sql = build_insert_sql(&view.name, &row)?;
         dispatch_sql(state, identity, database_id, &insert_sql).await?;
@@ -114,15 +113,16 @@ pub async fn refresh_materialized_view(
 }
 
 /// Plan and execute a `SELECT` via the standard SQL pipeline, collect
-/// the result rows as `serde_json::Map` objects. Response payloads can
-/// come back as wrapped scan rows (`{id, data: {...}}`) or as flat
-/// aggregate/join rows — both are normalised to the logical row map.
+/// the result rows as typed row maps. Each task's payload decodes under the
+/// row shape its plan produces: wrapped scan rows (`{id, data: {...}}`)
+/// unwrap to the logical row map, and flat aggregate/join rows stay as
+/// they are. Plain and native rows decode alike.
 async fn execute_select(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     sql: &str,
-) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, DdlError> {
+) -> Result<Vec<ShapedRow>, DdlError> {
     let (tasks, _output_schema, _lease_scope) =
         crate::control::server::shared::ddl::neutral::planning::plan_authorized_sql(
             state,
@@ -135,8 +135,9 @@ async fn execute_select(
             DdlError::new(error.sqlstate, format!("plan '{sql}': {}", error.message))
         })?;
 
-    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+    let mut rows: Vec<ShapedRow> = Vec::new();
     for task in tasks {
+        let row_context = crate::bridge::envelope::describe_row_context(&task.plan);
         let emitter =
             crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
         let response =
@@ -163,60 +164,21 @@ async fn execute_select(
         if payload.is_empty() {
             continue;
         }
-        let json = decode_payload_to_json(payload);
-        if json.is_empty() {
-            continue;
-        }
-        let parsed: serde_json::Value = sonic_rs::from_str(&json).map_err(|e| {
+        let decoded = decode_row_payload_value(payload, row_context).map_err(|e| {
             err(
                 sqlstate::INTERNAL_ERROR,
                 format!("decode scan payload: {e}"),
             )
         })?;
 
-        collect_rows(parsed, &mut rows);
+        push_row_bodies(decoded, row_context, &mut rows);
     }
     Ok(rows)
 }
 
-/// Normalise a decoded response into row maps. Handles arrays of rows,
-/// scan wrappers, and single-object responses uniformly.
-fn collect_rows(
-    value: serde_json::Value,
-    out: &mut Vec<serde_json::Map<String, serde_json::Value>>,
-) {
-    match value {
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_rows(v, out);
-            }
-        }
-        serde_json::Value::Object(mut obj) => {
-            // Scan-path rows are wrapped `{id, data: {...}}`; we want the
-            // `data` payload as the logical row. If `data` is itself an
-            // object, unwrap; otherwise keep the outer map (aggregates,
-            // joins emit flat row objects directly).
-            if obj.len() == 2
-                && obj.contains_key("id")
-                && matches!(obj.get("data"), Some(serde_json::Value::Object(_)))
-            {
-                if let Some(serde_json::Value::Object(inner)) = obj.remove("data") {
-                    out.push(inner);
-                }
-            } else {
-                out.push(obj);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Build `INSERT INTO <target> (col1, col2, ...) VALUES (lit1, lit2, ...)`
 /// from a row map. Preserves insertion order of JSON map keys.
-fn build_insert_sql(
-    target: &str,
-    row: &serde_json::Map<String, serde_json::Value>,
-) -> Result<String, DdlError> {
+fn build_insert_sql(target: &str, row: &ShapedRow) -> Result<String, DdlError> {
     if row.is_empty() {
         return Err(err(
             sqlstate::INTERNAL_ERROR,
@@ -231,13 +193,23 @@ fn build_insert_sql(
         .join(", ");
     let vals = row
         .values()
-        .map(json_value_to_sql_literal)
+        .map(value_to_sql_literal)
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     Ok(format!(
         "INSERT INTO {} ({cols}) VALUES ({vals})",
         ::nodedb_types::quote_ident(target)
     ))
+}
+
+/// The SQL literal of one typed cell. A Decimal is its exact text, so a
+/// native Decimal copies without a float round trip. Every other cell is
+/// the literal of the JSON a client sees for it.
+fn value_to_sql_literal(v: &Value) -> Result<String, DdlError> {
+    match v {
+        Value::Decimal(d) => Ok(d.to_string()),
+        other => json_value_to_sql_literal(&crate::util::wire_json::value_to_wire_json(other)),
+    }
 }
 
 fn json_value_to_sql_literal(v: &serde_json::Value) -> Result<String, DdlError> {
@@ -440,14 +412,14 @@ mod tests {
 
     #[test]
     fn generated_insert_quotes_target_columns_and_literals() {
-        let mut row = serde_json::Map::new();
+        let mut row = ShapedRow::new();
         row.insert(
             "column\"; DELETE FROM audit_log; --".to_string(),
-            serde_json::Value::String("value'; DELETE FROM audit_log; --".to_string()),
+            Value::String("value'; DELETE FROM audit_log; --".to_string()),
         );
         row.insert(
             "nested".to_string(),
-            serde_json::json!({"name": "O'Reilly"}),
+            Value::Object([("name".to_string(), Value::String("O'Reilly".into()))].into()),
         );
 
         let sql = build_insert_sql("view\"; DROP TABLE audit_log; --", &row)
@@ -472,6 +444,29 @@ mod tests {
         assert_eq!(
             json_value_to_sql_literal(&serde_json::json!(42)).expect("number literal"),
             "42"
+        );
+    }
+
+    /// A native Decimal copies as its exact text; a UUID and an instant copy
+    /// as the text a client sees for them.
+    #[test]
+    fn typed_cells_copy_as_exact_literals() {
+        assert_eq!(
+            value_to_sql_literal(&Value::Decimal("123456789.123456789".parse().unwrap()))
+                .expect("decimal literal"),
+            "123456789.123456789"
+        );
+        assert_eq!(
+            value_to_sql_literal(&Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()))
+                .expect("uuid literal"),
+            "'550e8400-e29b-41d4-a716-446655440000'"
+        );
+        assert_eq!(
+            value_to_sql_literal(&Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                1_583_402_400_000_000
+            )))
+            .expect("instant literal"),
+            "'2020-03-05T10:00:00.000000Z'"
         );
     }
 

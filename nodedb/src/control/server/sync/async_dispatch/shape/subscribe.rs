@@ -113,7 +113,9 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
     // Get current WAL LSN — this is the watermark for the snapshot.
     let current_lsn = shared.wal.next_lsn().as_u64().saturating_sub(1);
 
-    let snapshot_data = take_shape_snapshot(SnapshotRequest {
+    // A failed snapshot registers no subscription, and the subscriber is told
+    // with a `ShapeSnapshotReject` frame.
+    let snapshot_data = match take_shape_snapshot(SnapshotRequest {
         shared,
         session_id: &session.session_id,
         shape: &msg.shape,
@@ -122,7 +124,11 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
         database_id,
         peer_addr: &session.device_metadata.remote_addr,
     })
-    .await?;
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(failure) => return failure.reject_frame(&msg.shape.shape_id),
+    };
 
     // Register the shape subscription in the persistent registry.
     let response = super::super::super::shape::handler::handle_subscribe(
@@ -248,7 +254,7 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
 
     let current_lsn = shared.wal.next_lsn().as_u64().saturating_sub(1);
 
-    let snapshot_data = take_shape_snapshot(SnapshotRequest {
+    let snapshot_data = match take_shape_snapshot(SnapshotRequest {
         shared,
         session_id: &session.session_id,
         shape: &shape,
@@ -257,7 +263,11 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
         database_id,
         peer_addr: &session.device_metadata.remote_addr,
     })
-    .await?;
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(failure) => return failure.reject_frame(&msg.shape_id),
+    };
 
     let snapshot = super::super::super::shape::handler::ShapeSnapshotMsg {
         shape_id: msg.shape_id.clone(),

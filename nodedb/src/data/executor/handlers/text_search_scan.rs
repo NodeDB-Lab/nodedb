@@ -233,7 +233,7 @@ impl CoreLoop {
             {
                 return Ok(ControlFlow::Continue(()));
             }
-            let image = text_row_image(key, bytes, format.as_format_ref(), &identity_column);
+            let image = text_row_image(key, bytes, format.as_format_ref(), &identity_column)?;
             let value = decode_scanned_row(bytes, Some(image.as_slice()), format.as_format_ref())?;
             sink.push(
                 key.surrogate(),

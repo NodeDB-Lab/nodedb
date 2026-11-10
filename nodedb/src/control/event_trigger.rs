@@ -361,13 +361,7 @@ pub async fn run_event_action_sql(
     );
 
     let (tasks, _output_schema, versions, _) = query_ctx
-        .plan_sql_with_rls_and_versions(
-            sql,
-            tenant_id,
-            database_id,
-            &security.context(&shared),
-            None,
-        )
+        .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security.context(&shared))
         .await
         .map_err(|source| TriggerActionError::Plan { source })?;
 

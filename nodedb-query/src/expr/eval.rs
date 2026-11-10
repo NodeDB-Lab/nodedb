@@ -10,7 +10,7 @@
 use nodedb_crs::{CrsContext, CrsError, UnknownSrid};
 use nodedb_types::Value;
 
-use crate::value_ops::{coerced_eq, is_truthy, to_value_number, value_to_f64};
+use crate::value_ops::{coerced_eq, is_truthy};
 
 use super::binary::eval_binary_op;
 use super::types::{SqlExpr, WHOLE_ROW_COLUMN};
@@ -19,9 +19,13 @@ use super::types::{SqlExpr, WHOLE_ROW_COLUMN};
 ///
 /// Mirrors the [`WindowError`](crate::window::WindowError) idiom: a small,
 /// `thiserror`-derived enum living next to the evaluator it describes.
-/// Bad casts, wrong argument counts and unknown-value coercions fold to
-/// `Value::Null`. These faults fail the statement instead:
+/// Wrong argument counts and unknown-value coercions fold to `Value::Null`.
+/// These faults fail the statement instead:
 /// - division or modulo by a zero divisor, SQLSTATE `22012`;
+/// - a result outside its type's range: `bigint` or numeric arithmetic, a
+///   cast to `bigint`, SQLSTATE `22003`;
+/// - a `CAST` of text that spells no value of the type, SQLSTATE `22P02`,
+///   and a `CAST` of NaN or an infinity to `NUMERIC`, SQLSTATE `22003`;
 /// - a call to a function no evaluator implements. It never evaluates to a
 ///   silent `NULL`;
 /// - a function argument it cannot compute on: vectors of different
@@ -33,7 +37,9 @@ use super::types::{SqlExpr, WHOLE_ROW_COLUMN};
 /// - a geometry argument that does not parse (WKT, WKB, GeoJSON), or a
 ///   geometry operation that cannot run on its input. SQLSTATE `22000`;
 /// - an argument whose value is out of range for the function. SQLSTATE
-///   `22000`.
+///   `22000`;
+/// - a `sqrt`, logarithm or `power` argument outside the function's domain.
+///   SQLSTATE `2201E` for a logarithm, `2201F` for the others.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EvalError {
     #[error("division by zero")]
@@ -113,6 +119,40 @@ pub enum EvalError {
         position: usize,
         reason: String,
     },
+    /// A `CAST` of text that spells no value of the target type. SQLSTATE
+    /// `22P02` (invalid_text_representation).
+    #[error("invalid input syntax for type {type_name}: \"{text}\"")]
+    InvalidTextRepresentation {
+        type_name: &'static str,
+        text: String,
+    },
+    /// A `CAST` to a timestamp type of text that spells no instant.
+    /// SQLSTATE `22007` (invalid_datetime_format).
+    #[error("invalid input syntax for type {type_name}: \"{text}\"")]
+    InvalidDatetimeFormat {
+        type_name: &'static str,
+        text: String,
+    },
+    /// A `CAST` to `DECIMAL(p,s)` of a value whose integer part the typmod
+    /// cannot hold. SQLSTATE `22003` (numeric_value_out_of_range).
+    #[error("numeric field overflow: {detail}")]
+    NumericFieldOverflow { detail: String },
+    /// A value outside the range of its result type. SQLSTATE `22003`
+    /// (numeric_value_out_of_range).
+    #[error("{0}")]
+    OutOfRange(super::OutOfRange),
+    /// A `CAST` to `NUMERIC` of NaN or an infinity, which `Decimal` cannot
+    /// hold. SQLSTATE `22003` (numeric_value_out_of_range).
+    #[error("cannot convert {value} to numeric")]
+    NumericSpecialValue {
+        /// `NaN`, `Infinity` or `-Infinity`.
+        value: &'static str,
+    },
+    /// An argument outside the domain of `sqrt`, a logarithm or `power`.
+    /// SQLSTATE `2201E` for a logarithm, `2201F` otherwise; see
+    /// [`super::MathDomain::class`].
+    #[error("{0}")]
+    MathDomain(super::MathDomain),
 }
 
 impl EvalError {
@@ -255,17 +295,7 @@ impl SqlExpr {
                 eval_binary_op(&l, *op, &r)
             }
 
-            SqlExpr::Negate(inner) => {
-                let v = inner.eval_scope(scope)?;
-                if let Some(b) = v.as_bool() {
-                    Ok(Value::Bool(!b))
-                } else {
-                    match value_to_f64(&v, false) {
-                        Some(n) => Ok(to_value_number(-n)),
-                        None => Ok(Value::Null),
-                    }
-                }
-            }
+            SqlExpr::Negate(inner) => super::unary::eval_negate(inner.eval_scope(scope)?),
 
             SqlExpr::Function { name, args } => {
                 let evaluated: Vec<Value> = args
@@ -277,7 +307,7 @@ impl SqlExpr {
 
             SqlExpr::Cast { expr, to_type } => {
                 let v = expr.eval_scope(scope)?;
-                Ok(crate::cast::eval_cast(&v, to_type))
+                crate::cast::eval_cast(&v, to_type)
             }
 
             SqlExpr::Case {
@@ -404,7 +434,8 @@ mod tests {
             op: BinaryOp::Add,
             right: Box::new(SqlExpr::Literal(Value::Float(1.5))),
         };
-        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(12));
+        // float8 10.5 + 1.5 is float8 12.
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Float(12.0));
     }
 
     #[test]
@@ -414,7 +445,8 @@ mod tests {
             op: BinaryOp::Mul,
             right: Box::new(SqlExpr::Column("qty".into())),
         };
-        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(42));
+        // float8 10.5 * 4 is float8 42.
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Float(42.0));
     }
 
     #[test]

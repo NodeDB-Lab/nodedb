@@ -1,108 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Hash join core data structures and algorithm — index build and probe.
+//! Hash join probe: emit join rows by probing a [`HashIndex`].
 
-use nodedb_query::msgpack_scan;
-
+pub(super) use super::hash_index::HashIndex;
 use super::{binary_row_matches_filters, merge_join_docs_binary};
 
-/// Hash a join key from raw msgpack bytes — zero String allocation.
-///
-/// For single-field keys: hashes the raw value bytes directly.
-/// For composite keys: hashes each field's raw bytes sequentially.
-/// Returns `(hash, key_ranges)` — the ranges are kept for collision resolution via memcmp.
-pub(super) fn hash_join_key(
-    doc: &[u8],
-    keys: &[&str],
-    state: &std::collections::hash_map::RandomState,
-) -> (u64, Vec<(usize, usize)>) {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = state.build_hasher();
-    let mut ranges = Vec::with_capacity(keys.len());
-    for key in keys {
-        if let Some((start, end)) = extract_join_key_range(doc, key) {
-            hasher.write(&doc[start..end]);
-            ranges.push((start, end));
-        } else {
-            // Missing field — hash a sentinel.
-            hasher.write_u8(0xc0); // NIL tag
-            ranges.push((0, 0));
-        }
-    }
-    (hasher.finish(), ranges)
-}
-
-pub(super) fn extract_join_key_range(doc: &[u8], key: &str) -> Option<(usize, usize)> {
-    msgpack_scan::extract_field(doc, 0, key).or_else(|| {
-        key.rsplit_once('.')
-            .and_then(|(_, field)| msgpack_scan::extract_field(doc, 0, field))
-    })
-}
-
-/// (doc_index, key_ranges) for a single hash bucket entry.
-type BucketEntry = (usize, Vec<(usize, usize)>);
-
-/// Build side of hash join: hash index keys, store (hash → doc indices + key ranges).
-pub(super) struct HashIndex {
-    pub(super) buckets: std::collections::HashMap<u64, Vec<BucketEntry>>,
-    pub(super) state: std::collections::hash_map::RandomState,
-}
-
-impl HashIndex {
-    pub(super) fn build(docs: &[(String, Vec<u8>)], keys: &[&str]) -> Self {
-        let state = std::collections::hash_map::RandomState::new();
-        let mut buckets: std::collections::HashMap<u64, Vec<BucketEntry>> =
-            std::collections::HashMap::with_capacity(docs.len());
-        for (i, (_, value)) in docs.iter().enumerate() {
-            let (hash, ranges) = hash_join_key(value, keys, &state);
-            buckets.entry(hash).or_default().push((i, ranges));
-        }
-        Self { buckets, state }
-    }
-
-    /// Find all doc indices whose key bytes match the probe key.
-    ///
-    /// A join with no equi-key at all (`ON a.x > b.y`, or a cross join) has
-    /// nothing to hash on: every build row is a candidate, and the residual ON
-    /// predicate decides which pairs survive. Treating "no keys requested" as
-    /// "no key bytes matched" would drop every pair and answer such a join with
-    /// zero rows.
-    pub(super) fn probe(
-        &self,
-        probe_doc: &[u8],
-        probe_keys: &[&str],
-        build_docs: &[(String, Vec<u8>)],
-    ) -> (u64, Vec<(usize, usize)>, Vec<usize>) {
-        if probe_keys.is_empty() {
-            return (0, Vec::new(), (0..build_docs.len()).collect());
-        }
-
-        let (hash, probe_ranges) = hash_join_key(probe_doc, probe_keys, &self.state);
-        let mut matched = Vec::new();
-        if let Some(bucket) = self.buckets.get(&hash) {
-            for (doc_idx, idx_ranges) in bucket {
-                // Verify actual byte ranges match — hash collisions are possible.
-                let mut all_match = !probe_ranges.is_empty();
-                for (i, &(ps, pe)) in probe_ranges.iter().enumerate() {
-                    if let Some(&(bs, be)) = idx_ranges.get(i) {
-                        let build_doc = &build_docs[*doc_idx].1;
-                        if pe - ps != be - bs || probe_doc[ps..pe] != build_doc[bs..be] {
-                            all_match = false;
-                            break;
-                        }
-                    } else {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if all_match {
-                    matched.push(*doc_idx);
-                }
-            }
-        }
-        (hash, probe_ranges, matched)
-    }
-}
+/// The physical join type of a null-aware anti join: SQL `NOT IN
+/// (subquery)`. A NULL in the non-empty subquery rejects every outer row,
+/// and an outer NULL key is rejected unless the subquery is empty. Plain
+/// `"anti"` is `NOT EXISTS`, where NULL keys only fail to match.
+pub(super) const NULL_AWARE_ANTI: &str = "anti_null_aware";
 
 /// The residual ON predicates of a join and the CRS context they evaluate in.
 #[derive(Clone, Copy)]
@@ -149,7 +56,7 @@ pub(super) struct ProbeParams<'a> {
 /// Probe a hash index with probe-side documents and produce join results.
 ///
 /// Returns binary msgpack rows — no JSON decode.
-/// Uses u64 hash keys — zero String allocation for key matching.
+/// Matches keys by their canonical identity.
 ///
 /// This is the single-shot (fully-materialized probe side) entry point. It is
 /// composed from the streaming-friendly pieces [`probe_rows_into`] and
@@ -181,7 +88,7 @@ pub(super) fn probe_hash_index(
                     Some(right_val),
                     p.probe_collection,
                     p.index_collection,
-                );
+                )?;
                 // A division/modulo-by-zero in a join's residual ON
                 // predicate PROPAGATES here (SQLSTATE 22012) rather than
                 // folding to "no match".
@@ -208,7 +115,7 @@ pub(super) fn probe_hash_index(
 
     // RIGHT/FULL: emit unmatched index-side rows.
     if is_right && p.emit_unmatched_right {
-        emit_unmatched_right_into(p, &mut results, &index_matched);
+        emit_unmatched_right_into(p, &mut results, &index_matched)?;
     }
 
     Ok(results)
@@ -242,7 +149,13 @@ pub(super) fn probe_rows_into(
     let is_left = p.join_type == "left" || p.join_type == "full";
     let is_right = p.join_type == "right" || p.join_type == "full";
     let is_semi = p.join_type == "semi";
-    let is_anti = p.join_type == "anti";
+    let null_aware = p.join_type == NULL_AWARE_ANTI;
+    let is_anti = p.join_type == "anti" || null_aware;
+
+    // `x NOT IN (s)` with a NULL in a non-empty `s` is never true.
+    if null_aware && p.index.rejects_every_null_aware_probe() {
+        return Ok(());
+    }
 
     for (_, value) in p.probe_docs {
         // For RIGHT/FULL joins, we must complete the full probe to populate
@@ -250,7 +163,24 @@ pub(super) fn probe_rows_into(
         if !is_right && results.len() >= p.limit {
             break;
         }
-        let (_, _, candidate_indices) = p.index.probe(value, p.probe_keys, p.index_docs);
+        // A composite `NOT IN` compares row-wise: the row is dropped when
+        // some build tuple possibly equals it, else emitted as unmatched.
+        if null_aware && p.probe_keys.len() > 1 {
+            if !p
+                .index
+                .composite_not_in_rejects(value, p.probe_keys, p.index_docs)?
+                && results.len() < p.limit
+            {
+                results.push(merge_join_docs_binary(value, None, p.probe_collection, "")?);
+            }
+            continue;
+        }
+        let (null_key, candidate_indices) = p.index.probe_row(value, p.probe_keys, p.index_docs)?;
+        // `NULL NOT IN (s)` is unknown for a non-empty `s`: the row is
+        // excluded. Over an empty `s` it is true, and the row is kept below.
+        if null_aware && null_key && p.index.rows > 0 {
+            continue;
+        }
         // A closure can't use `?`, so filter with an explicit loop: a div-by-zero
         // in the residual ON predicate returns `Err` from this fn (SQLSTATE
         // 22012) instead of folding to "no match".
@@ -265,7 +195,7 @@ pub(super) fn probe_rows_into(
                 Some(&p.index_docs[index].1),
                 p.probe_collection,
                 p.index_collection,
-            );
+            )?;
             if residual.admits(&merged)? {
                 matched_indices.push(index);
             }
@@ -274,7 +204,7 @@ pub(super) fn probe_rows_into(
         if !matched_indices.is_empty() {
             if is_semi {
                 if results.len() < p.limit {
-                    results.push(merge_join_docs_binary(value, None, p.probe_collection, ""));
+                    results.push(merge_join_docs_binary(value, None, p.probe_collection, "")?);
                 }
             } else if is_anti {
                 // Skip — has match.
@@ -289,19 +219,19 @@ pub(super) fn probe_rows_into(
                             Some(&p.index_docs[mi].1),
                             p.probe_collection,
                             p.index_collection,
-                        ));
+                        )?);
                     }
                 }
             }
         } else if is_anti && results.len() < p.limit {
-            results.push(merge_join_docs_binary(value, None, p.probe_collection, ""));
+            results.push(merge_join_docs_binary(value, None, p.probe_collection, "")?);
         } else if is_left && results.len() < p.limit {
             results.push(merge_join_docs_binary(
                 value,
                 None,
                 p.probe_collection,
                 p.index_collection,
-            ));
+            )?);
         }
     }
     Ok(())
@@ -318,7 +248,7 @@ pub(super) fn emit_unmatched_right_into(
     p: &ProbeParams<'_>,
     results: &mut Vec<Vec<u8>>,
     index_matched: &[bool],
-) {
+) -> Result<(), nodedb_query::EvalError> {
     for (i, (_, bytes)) in p.index_docs.iter().enumerate() {
         if results.len() >= p.limit {
             break;
@@ -329,7 +259,181 @@ pub(super) fn emit_unmatched_right_into(
                 Some(bytes),
                 "",
                 p.index_collection,
-            ));
+            )?);
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::Value;
+
+    use super::*;
+
+    fn row(fields: &[(&str, Value)]) -> Value {
+        Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        )
+    }
+
+    fn native(fields: &[(&str, Value)]) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&row(fields)).expect("native row")
+    }
+
+    fn plain(fields: &[(&str, Value)]) -> Vec<u8> {
+        nodedb_types::value_to_msgpack(&row(fields)).expect("plain row")
+    }
+
+    /// Output row count of a hash join of `probe` against `build` on `k`.
+    fn join_rows(
+        probe: &[(String, Vec<u8>)],
+        build: &[(String, Vec<u8>)],
+        join_type: &str,
+    ) -> usize {
+        let index = HashIndex::build(build, &["k"]).expect("build");
+        probe_hash_index(&ProbeParams {
+            probe_docs: probe,
+            index: &index,
+            index_docs: build,
+            probe_keys: &["k"],
+            join_type,
+            limit: usize::MAX,
+            probe_collection: "l",
+            index_collection: "r",
+            join_filters: None,
+            emit_unmatched_right: true,
+        })
+        .expect("probe")
+        .len()
+    }
+
+    /// NULL and missing keys match nothing: inner and semi drop them, anti
+    /// keeps the probe row, and outer joins null-extend them.
+    #[test]
+    fn null_keys_never_match() {
+        let empty = zerompk::to_msgpack_vec(&Value::Object(Default::default())).expect("empty");
+        let probe = vec![
+            (String::new(), native(&[("k", Value::Null)])),
+            (String::new(), empty.clone()),
+            (String::new(), native(&[("k", Value::Integer(1))])),
+        ];
+        let build = vec![
+            (String::new(), plain(&[("k", Value::Null)])),
+            (String::new(), empty),
+            (String::new(), plain(&[("k", Value::Integer(1))])),
+        ];
+        assert_eq!(join_rows(&probe, &build, "inner"), 1);
+        assert_eq!(join_rows(&probe, &build, "semi"), 1);
+        assert_eq!(join_rows(&probe, &build, "anti"), 2);
+        assert_eq!(join_rows(&probe, &build, "left"), 3);
+        assert_eq!(join_rows(&probe, &build, "right"), 3);
+        assert_eq!(join_rows(&probe, &build, "full"), 5);
+    }
+
+    fn keyed(value: Value) -> (String, Vec<u8>) {
+        (String::new(), native(&[("k", value)]))
+    }
+
+    /// `NOT IN`: a NULL in the non-empty subquery rejects every outer row,
+    /// an outer NULL is rejected unless the subquery is empty, and other
+    /// rows follow anti semantics. `NOT EXISTS` (`"anti"`) keeps NULL rows.
+    #[test]
+    fn null_aware_anti_follows_not_in_semantics() {
+        let outer = vec![
+            keyed(Value::Integer(1)),
+            keyed(Value::Integer(2)),
+            keyed(Value::Null),
+        ];
+        let plain_sub = vec![keyed(Value::Integer(1))];
+        assert_eq!(join_rows(&outer, &plain_sub, NULL_AWARE_ANTI), 1);
+        assert_eq!(join_rows(&outer, &plain_sub, "anti"), 2);
+
+        let null_sub = vec![keyed(Value::Integer(1)), keyed(Value::Null)];
+        assert_eq!(join_rows(&outer, &null_sub, NULL_AWARE_ANTI), 0);
+        assert_eq!(join_rows(&outer, &null_sub, "anti"), 2);
+
+        let missing_sub = vec![(
+            String::new(),
+            zerompk::to_msgpack_vec(&Value::Object(Default::default())).expect("empty"),
+        )];
+        assert_eq!(join_rows(&outer, &missing_sub, NULL_AWARE_ANTI), 0);
+
+        assert_eq!(join_rows(&outer, &[], NULL_AWARE_ANTI), 3);
+        assert_eq!(join_rows(&outer, &[], "anti"), 3);
+    }
+
+    /// A composite NOT IN key follows SQL row comparison: a NULL component
+    /// is unknown, so it rejects only when the other components agree.
+    #[test]
+    fn null_aware_anti_compares_composite_keys_row_wise() {
+        let row = |a: Value, b: Value| {
+            (
+                String::new(),
+                zerompk::to_msgpack_vec(&Value::Object(
+                    [("a".to_owned(), a), ("b".to_owned(), b)]
+                        .into_iter()
+                        .collect(),
+                ))
+                .expect("row"),
+            )
+        };
+        let count = |outer: &[(String, Vec<u8>)], sub: &[(String, Vec<u8>)]| {
+            let index = HashIndex::build(sub, &["a", "b"]).expect("build");
+            probe_hash_index(&ProbeParams {
+                probe_docs: outer,
+                index: &index,
+                index_docs: sub,
+                probe_keys: &["a", "b"],
+                join_type: NULL_AWARE_ANTI,
+                limit: usize::MAX,
+                probe_collection: "l",
+                index_collection: "r",
+                join_filters: None,
+                emit_unmatched_right: true,
+            })
+            .expect("probe")
+            .len()
+        };
+        use Value::{Integer as I, Null};
+        let one = |a: Value, b: Value| vec![row(a, b)];
+        // SQL row comparison: NULL components are unknown, not "always equal".
+        assert_eq!(
+            count(&one(I(1), I(1)), &one(I(2), Null)),
+            1,
+            "(1,1) NOT IN ((2,NULL))"
+        );
+        assert_eq!(
+            count(&one(I(1), I(1)), &one(I(1), Null)),
+            0,
+            "(1,1) NOT IN ((1,NULL))"
+        );
+        assert_eq!(
+            count(&one(I(1), Null), &one(I(2), I(2))),
+            1,
+            "(1,NULL) NOT IN ((2,2))"
+        );
+        assert_eq!(
+            count(&one(I(1), Null), &one(I(1), I(2))),
+            0,
+            "(1,NULL) NOT IN ((1,2))"
+        );
+        assert_eq!(
+            count(&one(I(1), Null), &[]),
+            1,
+            "empty subquery keeps every row"
+        );
+        assert_eq!(count(&one(I(1), I(1)), &one(I(1), I(1))), 0, "exact match");
+    }
+
+    #[test]
+    fn null_aware_anti_name_matches_the_planner() {
+        assert_eq!(
+            nodedb_sql::types::JoinType::AntiNullAware.as_str(),
+            NULL_AWARE_ANTI
+        );
     }
 }

@@ -234,7 +234,7 @@ async fn columnar_declared_non_id_primary_key_upsert_updates_in_place() {
         "the upsert must resolve against the declared key, got: {rows:?}"
     );
     assert_eq!(
-        rows[0][0], "7.0",
+        rows[0][0], "7",
         "expected the EXCLUDED value, got: {:?}",
         rows[0]
     );

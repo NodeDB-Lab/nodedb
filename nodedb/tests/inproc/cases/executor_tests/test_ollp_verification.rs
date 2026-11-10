@@ -82,6 +82,7 @@ fn insert_active(ctx: &mut TestCtx, id: &str) {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 }
@@ -114,6 +115,7 @@ fn insert_active_edge(ctx: &mut TestCtx, id: &str, from: &str, to: &str, etype: 
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 }

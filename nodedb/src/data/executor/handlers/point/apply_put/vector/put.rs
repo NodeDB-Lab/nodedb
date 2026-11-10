@@ -75,7 +75,7 @@ impl CoreLoop {
 
         if !vector_fields.is_empty() {
             // Decode from MessagePack (internal format) — not JSON.
-            if let Ok(ndb_val) = nodedb_types::value_from_msgpack(value)
+            if let Ok(ndb_val) = crate::data::executor::doc_format::decode_document_value(value)
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (field_name, dim) in &vector_fields {
@@ -164,7 +164,7 @@ impl CoreLoop {
                 .collect();
 
             if !schemaless_keys.is_empty()
-                && let Ok(ndb_val) = nodedb_types::value_from_msgpack(value)
+                && let Ok(ndb_val) = crate::data::executor::doc_format::decode_document_value(value)
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (params_key, field_name) in &schemaless_keys {

@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use nodedb::bridge::envelope::{Priority, Request, Status};
 use nodedb::data::executor::core_loop::CoreLoop;
-use nodedb::data::executor::response_codec::decode_payload_to_json;
 use nodedb::types::*;
 use nodedb_array::schema::ArraySchemaBuilder;
 use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
@@ -110,7 +109,13 @@ pub(super) fn send_batch_ok(
 }
 
 pub(super) fn parse_json(payload: &[u8]) -> serde_json::Value {
-    let s = decode_payload_to_json(payload);
+    // Search and scan payloads decode as rows; a native row renders as its
+    // typed values.
+    let s = nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("payload rows decode");
     serde_json::from_str(&s).unwrap_or(serde_json::Value::Array(vec![]))
 }
 

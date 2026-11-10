@@ -252,8 +252,10 @@ impl StringColumn {
 /// Extract edge properties from an EdgeStore into a PropertyColumns aligned
 /// with node IDs.
 ///
-/// For each edge, extracts specified property names from MessagePack-encoded
-/// properties. Properties are associated with the **source** node of each edge.
+/// For each edge, extracts specified property names from its stored property
+/// object. Properties are associated with the **source** node of each edge.
+/// A Decimal fills a Float64 column, and a UUID or ULID a string column.
+/// Properties that do not decode are a `Codec` error.
 ///
 /// This is a bulk extraction — O(E) — intended for pre-computation before
 /// running algorithms, not for hot-path queries.
@@ -275,7 +277,7 @@ pub fn extract_edge_properties(
         .filter(|(rec_db, rec_tid, _, _, _, _, _)| *rec_db == db && *rec_tid == tid)
         .collect();
 
-    for (_db, _tid, _coll, src_name, _label, _dst, properties) in &tenant_edges {
+    for (_db, _tid, _coll, src_name, label, dst, properties) in &tenant_edges {
         if properties.is_empty() {
             continue;
         }
@@ -283,41 +285,23 @@ pub fn extract_edge_properties(
         let Some(src_id) = csr.node_id_raw(src_name) else {
             continue;
         };
-        let edge_properties = properties;
-
-        // Parse MessagePack properties.
-        let Ok(val) = crate::util::bounded_msgpack::read_value(edge_properties) else {
-            continue;
-        };
-
-        if let rmpv::Value::Map(entries) = val {
-            for (k, v) in entries {
-                if let rmpv::Value::String(ref key_str) = k {
-                    let key = key_str.as_str().unwrap_or("");
-                    if !property_names.contains(&key) {
-                        continue;
-                    }
-
-                    match v {
-                        rmpv::Value::F64(f) => {
-                            columns.f64_column(key).set(src_id, f);
-                        }
-                        rmpv::Value::F32(f) => {
-                            columns.f64_column(key).set(src_id, f as f64);
-                        }
-                        rmpv::Value::Integer(i) => {
-                            if let Some(val) = i.as_i64() {
-                                columns.i64_column(key).set(src_id, val);
-                            }
-                        }
-                        rmpv::Value::String(ref s) => {
-                            if let Some(s) = s.as_str() {
-                                columns.string_column(key).set(src_id, s);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+        let fields =
+            nodedb_graph::decode_edge_properties(properties).map_err(|e| crate::Error::Codec {
+                detail: format!("edge ({src_name})-[{label}]->({dst}) properties: {e}"),
+            })?;
+        for name in property_names {
+            match fields.get(*name) {
+                Some(nodedb_types::Value::Float(f)) => columns.f64_column(name).set(src_id, *f),
+                Some(nodedb_types::Value::Decimal(d)) => columns
+                    .f64_column(name)
+                    .set(src_id, nodedb_types::decimal_float::decimal_to_f64(*d)),
+                Some(nodedb_types::Value::Integer(i)) => columns.i64_column(name).set(src_id, *i),
+                Some(
+                    nodedb_types::Value::String(s)
+                    | nodedb_types::Value::Uuid(s)
+                    | nodedb_types::Value::Ulid(s),
+                ) => columns.string_column(name).set(src_id, s),
+                _ => {}
             }
         }
     }
@@ -401,16 +385,21 @@ mod tests {
             crate::engine::graph::edge_store::EdgeStore::open(&dir.path().join("graph.redb"))
                 .unwrap();
 
-        // Edge with properties.
-        let props = rmpv::Value::Map(vec![
-            (rmpv::Value::String("weight".into()), rmpv::Value::F64(0.75)),
+        // Edge with typed properties, stored as an edge write stores them.
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let buf = nodedb_graph::encode_edge_properties(HashMap::from([
+            ("weight".to_string(), nodedb_types::Value::Float(0.75)),
             (
-                rmpv::Value::String("label".into()),
-                rmpv::Value::String("important".into()),
+                "label".to_string(),
+                nodedb_types::Value::String("important".into()),
             ),
-        ]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
+            (
+                "price".to_string(),
+                nodedb_types::Value::Decimal("12.50".parse().unwrap()),
+            ),
+            ("id".to_string(), nodedb_types::Value::Uuid(uuid.into())),
+        ]))
+        .unwrap();
         use crate::engine::graph::edge_store::EdgeRef;
         store
             .put_edge_versioned(
@@ -436,12 +425,14 @@ mod tests {
             &csr,
             nodedb_types::DatabaseId::DEFAULT,
             nodedb_types::TenantId::new(1),
-            &["weight", "label"],
+            &["weight", "label", "price", "id"],
         )
         .unwrap();
 
         let alice_id = csr.node_id_raw("alice").unwrap();
         assert_eq!(columns.f64_columns["weight"].get(alice_id), Some(0.75));
+        assert_eq!(columns.f64_columns["price"].get(alice_id), Some(12.5));
+        assert_eq!(columns.string_columns["id"].get(alice_id), Some(uuid));
         assert_eq!(
             columns.string_columns["label"].get(alice_id),
             Some("important")

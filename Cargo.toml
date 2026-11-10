@@ -269,7 +269,7 @@ nanoid = "0.5"
 web-time = "1"
 
 # Arbitrary-precision decimal
-rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
 
 # QUIC transport
 quinn = "0.11"

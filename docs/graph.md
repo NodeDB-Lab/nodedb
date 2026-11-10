@@ -11,12 +11,14 @@ Edges are persisted in a redb B-Tree with forward and reverse indexes, both keye
 ```
 Forward Index (EDGES table):
   Key:   (tenant_id: u32, "src\x00edge_label\x00dst")
-  Value: edge properties (MessagePack)
+  Value: edge properties (native tagged MessagePack object)
 
 Reverse Index (REVERSE_EDGES table):
   Key:   (tenant_id: u32, "dst\x00edge_label\x00src")
   Value: [] (existence check only)
 ```
+
+Edge properties keep every value's exact type. A Decimal stays a Decimal, and a UUID, an instant or bytes keep their kinds. A `weight` property weighs the edge in the CSR: an integer, a float, or a Decimal rounded to the nearest `f64`. Any other `weight`, or none, weighs `1.0`.
 
 Tenant isolation is structural: the tenant id is a first-class key component, not a lexical prefix on node names. Node names in the composite portion are user-visible strings. Both tables update atomically in a single write transaction, and the null-byte separator enables prefix scans for outbound traversal within a tenant.
 
@@ -111,8 +113,10 @@ Native clients send the same writes without SQL text:
 
 | Opcode | Payload (`payload` field, MessagePack) | Answer |
 |---|---|---|
-| `EdgePutBatch` (`0x9D`) | `EdgePutBatch { edges: [EdgeWrite] }`. Each edge carries `src`, `dst`, `label`, `properties`, `valid_from_ms`, `valid_until_ms`. | `rows_affected`: edges written |
+| `EdgePutBatch` (`0x9D`) | `EdgePutBatch { edges: [EdgeWrite] }`. Each edge carries `src`, `dst`, `label`, `properties` (typed values), `valid_from_ms`, `valid_until_ms`. | `rows_affected`: edges written |
 | `EdgeDeleteBatch` (`0x9E`) | `EdgeDeleteBatch { edges: [EdgeKey] }`. Each edge carries `src`, `dst`, `label`. | `rows_affected`: edges deleted |
+
+`EdgePut` carries one edge's typed `properties` object in its `properties` field. The native client keeps every property's type on both opcodes. The pgwire client sends `PROPERTIES` as JSON text, so it refuses a Decimal, UUID, instant or bytes property.
 
 The request's `collection` field names the collection. A request runs the same handler as the SQL statement: one unit, the same edge cap, write grant and per-edge write policy. In `nodedb-client`, `NodeDbGraph::graph_insert_edges` and `NodeDbGraph::graph_delete_edges` send one request (native) or one statement (pgwire).
 
@@ -127,7 +131,7 @@ GRAPH TRAVERSE FROM 'users:alice' DEPTH 3;
 GRAPH TRAVERSE FROM 'users:alice' DEPTH 2 LABEL 'follows' DIRECTION out;
 ```
 
-Breadth-first search from a start node. Returns the discovered nodes with their depth, and the crossed edges with their properties: `{"nodes": [{"id", "depth"}], "edges": [{"from", "to", "label", "properties"}]}`. Nodes at the last depth are not expanded. Their edges to nodes already in the result are included.
+Breadth-first search from a start node. Returns the discovered nodes with their depth, and the crossed edges with their properties: `{"nodes": [{"id", "depth"}], "edges": [{"from", "to", "label", "properties"}]}`. The native protocol returns this result as one typed object, so each property keeps its type. pgwire and HTTP return it as JSON. Nodes at the last depth are not expanded. Their edges to nodes already in the result are included.
 
 | Parameter    | Default | Description                                   |
 | ------------ | ------- | --------------------------------------------- |
@@ -211,10 +215,23 @@ NodeDB embeds a Cypher-subset pattern engine. MATCH queries arrive through any p
 | `WHERE`                          | Filter on bound variables. Supports `=`, `!=`, `<`, `<=`, `>`, `>=`.     |
 | `WHERE NOT EXISTS { MATCH ... }` | Anti-join — exclude rows matching a sub-pattern.                         |
 | `RETURN`                         | Project bindings. Supports aliases (`AS`). Default: all bound variables. |
-| `ORDER BY`                       | Sort results. `ASC` or `DESC`.                                           |
-| `LIMIT`                          | Cap result count.                                                        |
+| `ORDER BY`                       | Sort the merged results. `ASC` or `DESC`. NULLs last for `ASC`, first for `DESC`. |
+| `LIMIT`                          | Cap the merged result count, after `ORDER BY` and `OFFSET`.              |
+| `OFFSET`                         | Skip rows of the ordered, merged result. Follows `LIMIT`.                |
 
 Multiple comma-separated patterns in one `MATCH` clause act as self-joins.
+
+`a.field` reads node `a`'s document. `r.field` reads relationship `r`'s edge properties, in `WHERE`, `RETURN` and `ORDER BY`. A relationship property needs a fixed-length relationship, because a variable-length one binds a path. It needs no `IN '<collection>'`: the crossed edge names its own collection. Every projected cell keeps its stored type. A native client reads a Decimal as a Decimal. pgwire and HTTP render it as text or JSON. A missing property, and a variable `OPTIONAL MATCH` left unmatched, is SQL NULL.
+
+`ORDER BY` and `LIMIT` apply to the whole result, merged from every core and shard. An `ORDER BY` key need not be a `RETURN` column. It can also name a `RETURN` alias. `ORDER BY` compares typed values: numbers by value across integer, float and Decimal, text by its bytes.
+
+```sql
+MATCH (a)-[r:transfers_to]->(b) IN 'accounts'
+WHERE r.amount > 1000
+RETURN a, b, r.at
+ORDER BY r.amount DESC
+LIMIT 10 OFFSET 20
+```
 
 ### Examples
 

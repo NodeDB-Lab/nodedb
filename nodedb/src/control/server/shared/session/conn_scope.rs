@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::audit_context::AuditCtx;
 use super::ddl_buffer::DdlBuffer;
@@ -28,9 +28,10 @@ pub(super) struct ConnScope {
     /// `ephemeral_sequence` and `control::sequence::ddl_overlay`.
     pub(super) ephemeral_sequences: RefCell<EphemeralSequences>,
     /// Absolute instant the statement now running on this connection must stop
-    /// at. `None` between statements, and on a connection future that has not
-    /// entered a statement scope. See [`super::deadline`].
-    pub(super) statement_deadline: Cell<Option<Instant>>,
+    /// at, and the budget it was given. `None` between statements, and on a
+    /// connection future that has not entered a statement scope. See
+    /// [`super::deadline`].
+    pub(super) statement_deadline: Cell<Option<(Instant, Duration)>>,
     /// Client-facing notices raised while the current statement ran, below
     /// the response shaper (see [`super::statement_notice`]).
     pub(super) statement_notices: RefCell<Vec<String>>,

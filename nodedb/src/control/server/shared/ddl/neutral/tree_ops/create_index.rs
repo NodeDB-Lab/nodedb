@@ -170,14 +170,22 @@ pub async fn create_graph_index(
     crate::control::local_dispatch::reject_data_plane_error(&scan_resp)
         .map_err(|e| DdlError::from_error_in_context("scan failed", &e))?;
 
-    let payload_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&scan_resp.payload);
-    // An empty payload is a scan that found no rows.
-    let docs: Vec<serde_json::Value> = if payload_json.is_empty() {
-        Vec::new()
-    } else {
-        sonic_rs::from_str(&payload_json)
-            .map_err(|e| ddl_err("22P02", format!("invalid JSON in scan response: {e}")))?
+    // The scan answers `{id, data}` envelopes, plain or native; each field
+    // decodes typed. An empty payload is a scan that found no rows.
+    let docs = match crate::data::executor::response_codec::decode_row_payload_value(
+        &scan_resp.payload,
+        crate::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .map_err(|e| DdlError::from_error_in_context("scan response does not decode", &e))?
+    {
+        nodedb_types::Value::Null => Vec::new(),
+        nodedb_types::Value::Array(rows) => rows,
+        other => {
+            return Err(DdlError::internal(format!(
+                "CREATE GRAPH INDEX: document scan answered a {} instead of a row array",
+                other.type_name()
+            )));
+        }
     };
 
     // ── Build edge list partitioned by destination vshard ────────────
@@ -185,34 +193,39 @@ pub async fn create_graph_index(
     // Edges to the same vshard are batched into one `EdgePutBatch`. A
     // mixed-type `parent` field (e.g. an integer) surfaces SQLSTATE
     // `22P02` loudly; the earlier `.and_then(as_str).drop` behaviour
-    // silently omitted the edge, leaving the index incomplete.
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    // silently omitted the edge, leaving the index incomplete. A key is
+    // read as the text a plain row stores it as, so plain and native rows
+    // build the same edges.
+    let text = |v: &nodedb_types::Value| match v {
+        nodedb_types::Value::String(s)
+        | nodedb_types::Value::Uuid(s)
+        | nodedb_types::Value::Ulid(s) => Some(s.clone()),
+        _ => None,
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for doc in &docs {
         // `DocumentOp::Scan` emits `{id, data: {...}}` per
         // `encode_raw_document_rows`. Anything else is a protocol bug,
         // not a shape to silently accommodate.
-        let Some(obj_outer) = doc.as_object() else {
-            continue;
-        };
-        let Some(obj) = obj_outer.get("data").and_then(|v| v.as_object()) else {
+        let Some(obj) = doc.get("data").and_then(|v| v.as_object()) else {
             return Err(DdlError::internal(format!(
-                "CREATE GRAPH INDEX: document scan returned a row without a `data` field: {doc}"
+                "CREATE GRAPH INDEX: document scan returned a row without a `data` field: {doc:?}"
             )));
         };
 
         let doc_id = obj
             .get("id")
             .or_else(|| obj.get("_id"))
-            .and_then(|v| v.as_str())
-            .or_else(|| obj.get(&id_col).and_then(|v| v.as_str()));
+            .and_then(text)
+            .or_else(|| obj.get(&id_col).and_then(text));
 
         let parent_raw = obj.get(&parent_col);
 
         match (doc_id, parent_raw) {
             // Missing parent — legitimate root; skip.
-            (Some(_), None) | (Some(_), Some(serde_json::Value::Null)) => {}
+            (Some(_), None) | (Some(_), Some(nodedb_types::Value::Null)) => {}
             (Some(child), Some(parent_v)) => {
-                let parent = match parent_v.as_str() {
+                let parent = match text(parent_v) {
                     Some(s) => s,
                     None => {
                         return Err(ddl_err(

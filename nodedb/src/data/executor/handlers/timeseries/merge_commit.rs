@@ -141,9 +141,11 @@ pub(in crate::data::executor) fn read_merge_manifest(
     ts_dir: &Path,
 ) -> crate::Result<Option<MergeManifest>> {
     let path = ts_dir.join(MERGE_MANIFEST_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
         Err(e) => return Err(storage(&path, "read", &e)),
     };
     let Some((&version, body)) = bytes.split_first() else {
@@ -197,9 +199,11 @@ pub(in crate::data::executor) fn rename_in_image_file(
     manifest: &MergeManifest,
 ) -> crate::Result<()> {
     let path = ts_dir.join(CAGG_IMAGE_FILE);
-    let bytes = match std::fs::read(&path) {
+    let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
         Err(e) => return Err(storage(&path, "read", &e)),
     };
     let mut image = match decode_image(&bytes) {

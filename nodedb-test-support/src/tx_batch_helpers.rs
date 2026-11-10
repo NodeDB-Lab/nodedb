@@ -98,8 +98,14 @@ pub fn send_raw(
     rx.try_pop().unwrap().inner
 }
 
+/// Render a row payload as JSON text. Each row is a flat body, a plain map
+/// or a native object, and renders as its typed values.
 pub fn payload_json(payload: &[u8]) -> String {
-    nodedb::data::executor::response_codec::decode_payload_to_json(payload)
+    nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::Flat,
+    )
+    .expect("payload rows decode")
 }
 
 // ── Plan builders ────────────────────────────────────────────────────────────
@@ -110,16 +116,40 @@ fn qualify(collection: &str) -> nodedb_types::QualifiedCollection {
     nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection)
 }
 
-pub fn doc_put(collection: &str, doc_id: &str, val: &[u8]) -> PhysicalPlan {
+/// A schemaless document body `{"v": text}`. A document body is always an
+/// object, so a fixture's marker text rides in one field.
+pub fn doc_body(text: &str) -> Vec<u8> {
+    nodedb_types::json_to_msgpack(&serde_json::json!({ "v": text }))
+        .expect("a one-field object encodes")
+}
+
+/// The `v` text of a document a point read returns, as [`doc_body`] wrote it.
+/// `None` for an empty payload, a non-object body, or a missing text `v`.
+pub fn doc_text(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    match nodedb_types::decode_object(payload).ok()? {
+        nodedb_types::Value::Object(fields) => match fields.get("v")? {
+            nodedb_types::Value::String(text) => Some(text.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A PointPut of `{"v": text}` for `doc_id` in `collection`.
+pub fn doc_put(collection: &str, doc_id: &str, text: &str) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointPut {
         collection: qualify(collection),
         document_id: doc_id.into(),
-        value: val.to_vec(),
+        value: doc_body(text),
         surrogate: crate::kv_rows::kv_row_surrogate(doc_id.as_bytes()),
         pk_bytes: Vec::new(),
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -140,13 +170,14 @@ pub fn doc_conflict(collection: &str, doc_id: &str) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointInsert {
         collection: qualify(collection),
         document_id: doc_id.into(),
-        value: b"conflict".to_vec(),
+        value: doc_body("conflict"),
         surrogate: crate::kv_rows::kv_row_surrogate(doc_id.as_bytes()),
         if_absent: false,
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -321,7 +352,13 @@ pub fn crdt_upsert(collection: &str, doc_id: &str, surrogate: u32) -> PhysicalPl
     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
         collection: qualify(collection),
         document_id: doc_id.into(),
-        fields_json: r#"{"title":"staged"}"#.into(),
+        fields: nodedb_physical::physical_plan::encode_fields_body(
+            &std::collections::HashMap::from([(
+                "title".to_string(),
+                nodedb_types::Value::String("staged".into()),
+            )]),
+        )
+        .expect("fields body encodes"),
         surrogate: nodedb_types::Surrogate::new(surrogate),
         partial: false,
         verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
@@ -344,6 +381,7 @@ pub fn with_unique_refusal(mut plans: Vec<PhysicalPlan>) -> Vec<PhysicalPlan> {
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     plans.push(insert.clone());
     plans.push(insert);

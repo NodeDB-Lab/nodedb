@@ -28,35 +28,23 @@ pub fn rls_check_document(
     if rls_filters.is_empty() {
         return true;
     }
-    check_encoded(
-        rls_filters,
-        &nodedb_types::json_to_msgpack_or_empty(doc),
-        crs,
-    )
+    check_value(rls_filters, &Value::from(doc.clone()), crs)
 }
 
 /// Evaluate RLS filters against a typed `Value` document.
 ///
-/// Same contract as [`rls_check_document`]. A document that does not encode
-/// is denied: a row the policy could not be evaluated against is not a row
-/// the policy admitted.
+/// Same contract as [`rls_check_document`]. The policy reads native fields directly.
 pub fn rls_check_value(rls_filters: &[u8], doc: &Value, crs: &nodedb_crs::CrsContext<'_>) -> bool {
     if rls_filters.is_empty() {
         return true;
     }
-    match nodedb_types::value_to_msgpack(doc) {
-        Ok(msgpack) => check_encoded(rls_filters, &msgpack, crs),
-        Err(e) => {
-            tracing::warn!(error = %e, "RLS document encode failed — denying access");
-            false
-        }
-    }
+    check_value(rls_filters, doc, crs)
 }
 
 /// Evaluate RLS filters against raw MessagePack document bytes.
 ///
-/// Evaluates filters directly on msgpack bytes — no decode to serde_json::Value.
-/// Returns `true` if passes. Returns `false` if any filter rejects.
+/// Decode the native document once, then evaluate its filters.
+/// Return `false` when decoding or evaluation fails.
 pub fn rls_check_msgpack_bytes(
     rls_filters: &[u8],
     doc_bytes: &[u8],
@@ -65,17 +53,21 @@ pub fn rls_check_msgpack_bytes(
     if rls_filters.is_empty() {
         return true;
     }
-    // Ensure bytes are standard msgpack for matches_binary.
-    let mp = super::super::doc_format::json_to_msgpack(doc_bytes);
-    check_encoded(rls_filters, &mp, crs)
+    match crate::data::executor::doc_format::decode_document_value(doc_bytes) {
+        Ok(doc) => check_value(rls_filters, &doc, crs),
+        Err(error) => {
+            tracing::warn!(%error, "RLS document decode failed — denying access");
+            false
+        }
+    }
 }
 
-/// Decode the compiled filters and match them against one standard msgpack
+/// Decode the compiled filters and match them against one native
 /// document. RLS is a security boundary, so it fails closed: an undecodable
 /// filter payload or a division/modulo-by-zero inside a filter denies rather
 /// than propagating a query error, so a malformed or adversarial predicate
 /// can never distinguish "row exists but errors" from "row doesn't exist".
-fn check_encoded(rls_filters: &[u8], msgpack: &[u8], crs: &nodedb_crs::CrsContext<'_>) -> bool {
+fn check_value(rls_filters: &[u8], doc: &Value, crs: &nodedb_crs::CrsContext<'_>) -> bool {
     let filters: Vec<ScanFilter> = match zerompk::from_msgpack(rls_filters) {
         Ok(f) => f,
         Err(_) => {
@@ -83,7 +75,7 @@ fn check_encoded(rls_filters: &[u8], msgpack: &[u8], crs: &nodedb_crs::CrsContex
             return false;
         }
     };
-    match ScanFilter::all_match_binary(&filters, msgpack, crs) {
+    match ScanFilter::all_match_value(&filters, doc, crs) {
         Ok(pass) => pass,
         Err(e) => {
             tracing::warn!(error = %e, "RLS filter evaluation failed — denying access");
@@ -234,5 +226,26 @@ mod tests {
             &doc_bad,
             &nodedb_crs::CrsContext::builtin_only()
         ));
+    }
+    #[test]
+    fn native_read_policy_keeps_exact_decimal_fields() {
+        let amount = Value::Decimal("9007199254740993.0001".parse().expect("decimal"));
+        let filters = make_rls_bytes("amount", FilterOp::Eq, amount.clone());
+        let doc = Value::Object([("amount".into(), amount)].into_iter().collect());
+        let bytes = zerompk::to_msgpack_vec(&doc).expect("native body");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        assert!(rls_check_value(&filters, &doc, &crs));
+        assert!(rls_check_msgpack_bytes(&filters, &bytes, &crs));
+        let different = Value::Object(
+            [(
+                "amount".into(),
+                Value::Decimal("9007199254740993.0002".parse().expect("decimal")),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(!rls_check_value(&filters, &different, &crs));
+        assert!(!rls_check_msgpack_bytes(&filters, &[0x92, 0x01], &crs));
+        assert!(!rls_check_value(&[0xff], &doc, &crs));
     }
 }

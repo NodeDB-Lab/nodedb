@@ -2,8 +2,9 @@
 
 //! `$auth.*` substitution over a predicate tree and policy combination.
 
-use super::filters::{compare_filter, deny_filter, match_all_filter};
+use super::filters::{compare_filter, deny_filter, match_all_filter, verdict_filter};
 use super::sets::{substitute_contains, substitute_intersects};
+use super::verdict::compare_values;
 use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::predicate::{CompareOp, PolicyMode, PredicateValue, RlsPredicate};
@@ -39,6 +40,10 @@ pub fn substitute_to_scan_filters(
         RlsPredicate::Contains { set, element } => substitute_contains(set, element, auth),
 
         RlsPredicate::Intersects { left, right } => substitute_intersects(left, right, auth),
+
+        RlsPredicate::CompareValues { left, op, right } => {
+            compare_values(left, *op, right, auth).map(|passes| vec![verdict_filter(passes)])
+        }
 
         RlsPredicate::And(children) => {
             let mut combined = Vec::new();
@@ -157,6 +162,10 @@ fn substitute_not(inner: &RlsPredicate, auth: &AuthContext) -> Option<Vec<ScanFi
                 },
                 auth,
             )
+        }
+        // A verdict negates whole, so `NOT LIKE` holds here too.
+        RlsPredicate::CompareValues { left, op, right } => {
+            compare_values(left, *op, right, auth).map(|passes| vec![verdict_filter(!passes)])
         }
         RlsPredicate::Contains { .. }
         | RlsPredicate::Intersects { .. }

@@ -21,19 +21,18 @@ use bytes::Bytes;
 use futures::StreamExt;
 
 use crate::control::gateway::core::QueryContext;
-use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::sessions::{
     SessionBindRequest, SessionBinding, bind_session, stream_until_ended,
 };
-use crate::control::server::exchange::streamable::streamable_gather_child;
+use crate::control::server::exchange::streamable::{StreamableScan, open_streamable_scan};
 use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::compose::shape_decoded_rows;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::server::shared::metering::DetachedMeterGuard;
-use crate::data::executor::response_codec::decode_payload_value;
+use crate::data::executor::response_codec::decode_row_payload_value;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::auth::AppState;
@@ -42,8 +41,8 @@ use super::ndjson_error::{error_line, error_line_in_context};
 /// Decide whether the single-task list is an eligible streamable SELECT and,
 /// if so, open the row stream.
 ///
-/// Mirrors the pgwire `maybe_stream_select` plan-shape predicate via
-/// [`streamable_gather_child`] plus the single-task and no-set-op gates. HTTP
+/// Mirrors the pgwire `maybe_stream_select` predicate via
+/// [`open_streamable_scan`] plus the single-task and no-set-op gates. HTTP
 /// is stateless, so there is no autocommit / transaction-block check. A
 /// projection with Control-Plane computed columns (`cp_computed`) is not
 /// eligible either: those columns need per-row sequence access the per-batch
@@ -66,38 +65,13 @@ pub(super) async fn try_open_stream(
     if task.post_set_op != PostSetOp::None || !output_schema.cp_computed.is_empty() {
         return Ok(None);
     }
-    let Some((child_plan, limit)) = streamable_gather_child(&task.plan) else {
+    let Some(StreamableScan {
+        checked: checked_child,
+        limit,
+        ..
+    }) = open_streamable_scan(&state.shared, identity, task).await?
+    else {
         return Ok(None);
-    };
-    let mut child_task = task.clone();
-    child_task.plan = child_plan.clone();
-    let tenant_id = child_task.tenant_id;
-    let emitter = ArcAuditEmitter(std::sync::Arc::clone(&state.shared.audit));
-    let checked_child = match crate::control::server::shared::clone_write::intercept_and_authorize(
-        crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
-            state: &state.shared,
-            task: child_task,
-            identity,
-            tenant_id,
-            permissions: &state.shared.permissions,
-            roles: &state.shared.roles,
-            emitter: &emitter,
-        },
-    )
-    .await?
-    {
-        // A streamable child is always a plain unordered scan (see
-        // `streamable_gather_child`), never a clone-write plan shape, so this
-        // is unreachable in practice — surfaced as a typed error rather than
-        // silently accommodated as either a stream or a materialized response.
-        crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(_) => {
-            return Err(crate::Error::Internal {
-                detail: "clone-write hook unexpectedly intercepted a streamable scan".into(),
-            });
-        }
-        crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(checked) => {
-            checked
-        }
     };
 
     let gateway = state.shared.installed_gateway()?;
@@ -130,6 +104,8 @@ pub(super) struct NdjsonBody {
     /// The database charged for a mid-stream error.
     pub database_id: nodedb_types::DatabaseId,
     pub meter_guard: Option<DetachedMeterGuard>,
+    /// The row shape of the streamed plan's batches.
+    pub row_context: crate::data::executor::response_codec::RowContext,
 }
 
 /// Register a streamed response in the session registry, ahead of its body.
@@ -175,6 +151,7 @@ pub(super) fn ndjson_body_stream(
         lease_scope,
         database_id,
         meter_guard,
+        row_context,
     } = body;
     async_stream::stream! {
         // The body owns this scope for its complete polling lifetime. Dropping
@@ -206,7 +183,7 @@ pub(super) fn ndjson_body_stream(
                 }
             };
 
-            let value = match decode_payload_value(&batch.payload) {
+            let value = match decode_row_payload_value(&batch.payload, row_context) {
                 Ok(v) => v,
                 Err(e) => {
                     // A malformed batch payload is surfaced as an in-band error
@@ -225,6 +202,7 @@ pub(super) fn ndjson_body_stream(
             // batch is redacted under the same policy as the last.
             let shaped = match shape_decoded_rows(
                 value,
+                row_context,
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
                 None,
@@ -328,6 +306,7 @@ mod tests {
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
             database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
+            row_context: crate::data::executor::response_codec::RowContext::Flat,
         }))
         .await;
         assert_eq!(lines.len(), 2500, "all rows must stream as NDJSON lines");
@@ -346,6 +325,7 @@ mod tests {
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
             database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
+            row_context: crate::data::executor::response_codec::RowContext::Flat,
         }))
         .await;
         assert_eq!(lines.len(), 1500, "global take-N must cap the line count");
@@ -369,6 +349,7 @@ mod tests {
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
             database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
+            row_context: crate::data::executor::response_codec::RowContext::Flat,
         }))
         .await;
         assert_eq!(lines.len(), 11, "10 rows + 1 in-band error line");
@@ -459,6 +440,7 @@ mod tests {
                 lease_scope: crate::control::lease::QueryLeaseScope::empty(),
                 database_id: nodedb_types::DatabaseId::DEFAULT,
                 meter_guard: Some(guard),
+                row_context: crate::data::executor::response_codec::RowContext::Flat,
             });
             futures::pin_mut!(body);
             for _ in 0..3 {

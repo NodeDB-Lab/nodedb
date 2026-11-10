@@ -109,6 +109,7 @@ impl CoreLoop {
         let write = match self.apply_balance_delta(
             &txn,
             &BalanceRmw {
+                target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                 database_id,
                 tid,
                 target_collection: collection,

@@ -9,7 +9,7 @@
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
-use crate::data::executor::handlers::identity_guard::{IdentitySnapshot, assigns_identity};
+use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
 use crate::data::executor::strict_format;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::UpdateValue;
@@ -19,11 +19,8 @@ use nodedb_physical::physical_plan::UpdateValue;
 /// must come from ONE computation — recomputing per encoding is how resolve
 /// and apply disagree.
 pub(in crate::data::executor) enum PointUpdateBody {
-    /// Schemaless fast path: fields merged at the binary level, already the
-    /// MessagePack the collection stores.
+    /// Native tagged document with assignments and generated fields materialized.
     Msgpack(Vec<u8>),
-    /// Decoded, mutated, generated-columns-recomputed document.
-    Document(serde_json::Value),
 }
 
 /// Inputs to [`CoreLoop::build_point_update_image`].
@@ -35,8 +32,6 @@ pub(in crate::data::executor) struct PointUpdateImage<'a> {
     pub(in crate::data::executor) current_bytes: &'a [u8],
     pub(in crate::data::executor) updates: &'a [(String, UpdateValue)],
     pub(in crate::data::executor) is_strict: bool,
-    pub(in crate::data::executor) has_generated: bool,
-    pub(in crate::data::executor) has_expr: bool,
     pub(in crate::data::executor) bitemporal: bool,
     /// System time stamped into a bitemporal strict tuple; `0` otherwise.
     pub(in crate::data::executor) sys_from: i64,
@@ -71,13 +66,11 @@ impl CoreLoop {
             sys_from,
             ..
         } = params;
-        let doc = match body {
-            PointUpdateBody::Msgpack(bytes) => return Ok(bytes.clone()),
-            PointUpdateBody::Document(doc) => doc,
-        };
+        let PointUpdateBody::Msgpack(bytes) = body;
         if !is_strict {
-            return Ok(doc_format::encode_to_msgpack(doc));
+            return Ok(bytes.clone());
         }
+        let ndb_val = doc_format::decode_document_value(bytes).map_err(ErrorCode::from)?;
         let Some(config) = self.doc_configs.get(config_key) else {
             return Err(ErrorCode::Internal {
                 detail: "strict config missing during re-encode".into(),
@@ -90,7 +83,6 @@ impl CoreLoop {
                 detail: "strict config missing during re-encode".into(),
             });
         };
-        let ndb_val: nodedb_types::Value = doc.clone().into();
         let collection = &config_key.2;
         let result = if bitemporal && schema.bitemporal {
             strict_format::value_to_binary_tuple_bitemporal(
@@ -118,15 +110,12 @@ impl CoreLoop {
             current_bytes,
             updates,
             is_strict,
-            has_generated,
-            has_expr,
             bitemporal: _,
             sys_from: _,
             declared_primary_key,
         } = params;
 
-        // A literal assignment is decided before any path builds an image, so
-        // the binary-merge fast path below is covered too.
+        // A literal NULL key receives the same constraint error as a computed NULL.
         if let Some(pk) = declared_primary_key {
             for (field, value) in updates {
                 if field == pk
@@ -141,38 +130,7 @@ impl CoreLoop {
             }
         }
 
-        // A collection with typeguards rewrites and validates the post-image,
-        // so it takes the decode path.
-        let has_guards = self
-            .doc_configs
-            .get(config_key)
-            .is_some_and(|c| !c.crdt_enabled && !c.type_guards.is_empty());
-
-        // Fast path: non-strict, no generated columns, no typeguards, all
-        // literal, identity untouched — merge at binary level.
-        if !is_strict
-            && !has_generated
-            && !has_guards
-            && !has_expr
-            && !assigns_identity(None, declared_primary_key, updates)
-        {
-            let base_mp = doc_format::json_to_msgpack(current_bytes);
-            let update_pairs: Vec<(&str, &[u8])> = updates
-                .iter()
-                .filter_map(|(field, v)| match v {
-                    UpdateValue::Literal(bytes) => Some((field.as_str(), bytes.as_slice())),
-                    UpdateValue::Expr(_) => None,
-                })
-                .collect();
-            let merged = nodedb_query::msgpack_scan::merge_fields(&base_mp, &update_pairs);
-            let merged =
-                strict_format::coerce_declared_body(merged, self.declared_columns(config_key))
-                    .map_err(ErrorCode::from)?;
-            return Ok(PointUpdateBody::Msgpack(merged));
-        }
-
-        // Strict, generated, expression RHS, or identity assignment:
-        // decode → mutate → re-encode.
+        // Decode native fields before assignments, preserving values unrelated to the update.
         let strict_schema = if is_strict {
             match self.doc_configs.get(config_key).map(|c| &c.storage_mode) {
                 Some(nodedb_physical::physical_plan::StorageMode::Strict { schema }) => {
@@ -188,7 +146,7 @@ impl CoreLoop {
             None
         };
         let mut doc = if let Some(schema) = strict_schema {
-            match strict_format::binary_tuple_to_json(current_bytes, schema) {
+            match strict_format::binary_tuple_to_row_value(current_bytes, schema) {
                 Some(v) => v,
                 None => {
                     return Err(ErrorCode::Internal {
@@ -197,7 +155,7 @@ impl CoreLoop {
                 }
             }
         } else {
-            match doc_format::decode_document(current_bytes) {
+            match doc_format::decode_document_value(current_bytes) {
                 Ok(v) => v,
                 Err(e) => {
                     return Err(ErrorCode::Internal {
@@ -207,17 +165,21 @@ impl CoreLoop {
             }
         };
 
-        let identity =
-            IdentitySnapshot::capture(strict_schema, declared_primary_key, updates, &doc);
+        let identity = IdentitySnapshot::capture(
+            strict_schema,
+            declared_primary_key,
+            updates,
+            &serde_json::Value::from(doc.clone()),
+        );
 
         // Expressions evaluate against the pre-update snapshot, so later
         // assignments don't observe earlier ones — matches PostgreSQL.
-        let eval_doc: nodedb_types::Value = doc.clone().into();
+        let eval_doc = doc.clone();
         let crs = self.crs_context();
-        if let Some(obj) = doc.as_object_mut() {
+        if let nodedb_types::Value::Object(obj) = &mut doc {
             for (field, update_val) in updates {
                 let val = match update_val {
-                    UpdateValue::Literal(bytes) => match nodedb_types::json_from_msgpack(bytes) {
+                    UpdateValue::Literal(bytes) => match nodedb_types::value_from_msgpack(bytes) {
                         Ok(v) => v,
                         Err(e) => {
                             return Err(ErrorCode::Internal {
@@ -231,8 +193,7 @@ impl CoreLoop {
                             // An evaluation error fails the statement.
                             Err(e) => return Err(ErrorCode::from(e)),
                         };
-                        let json: serde_json::Value = result.into();
-                        json
+                        result
                     }
                 };
                 obj.insert(field.clone(), val);
@@ -242,7 +203,7 @@ impl CoreLoop {
         // A declared PRIMARY KEY implies NOT NULL. The plan-time check only
         // catches a literal NULL; a computed RHS is only known here.
         if let Some(pk) = declared_primary_key
-            && matches!(doc.get(pk), None | Some(serde_json::Value::Null))
+            && matches!(doc.get(pk), None | Some(nodedb_types::Value::Null))
         {
             return Err(ErrorCode::RejectedConstraint {
                 constraint: "not_null".into(),
@@ -250,37 +211,26 @@ impl CoreLoop {
             });
         }
         identity
-            .check_unchanged(&config_key.2, &doc)
+            .check_unchanged(&config_key.2, &serde_json::Value::from(doc.clone()))
             .map_err(ErrorCode::from)?;
 
-        // Apply typeguards to the post-image: VALUE recomputes, DEFAULT
-        // refills an absent or null field, and the assigned and injected
-        // fields are validated. Then recompute generated columns.
         if let Some(config) = self.doc_configs.get(config_key) {
-            if has_guards {
-                let assigned = crate::data::executor::handlers::write_body::assigned_names(updates);
-                crate::data::executor::enforcement::typeguard::enforce_type_guards(
-                    &config.type_guards,
-                    &mut doc,
-                    crate::data::executor::enforcement::typeguard::GuardScope::Assigned(&assigned),
-                    &crs,
-                )?;
-            }
-            if has_generated {
-                crate::data::executor::handlers::generated::evaluate_generated_columns(
-                    &mut doc,
-                    &config.enforcement.generated_columns,
-                    &crs,
-                )?;
-            }
+            let assigned = crate::data::executor::handlers::write_body::assigned_names(updates);
+            crate::data::executor::handlers::point::apply_put::materialize_native_write_body(
+                config,
+                &mut doc,
+                crate::data::executor::enforcement::typeguard::GuardScope::Assigned(&assigned),
+                &crs,
+            )?;
         }
-
-        // A declared numeric column holds the value its type stores, whether
-        // the assignment was a literal or computed.
-        strict_format::coerce_declared_doc(&mut doc, self.declared_columns(config_key))
-            .map_err(ErrorCode::from)?;
-
-        Ok(PointUpdateBody::Document(doc))
+        if let nodedb_types::Value::Object(fields) = &mut doc {
+            strict_format::coerce_declared_row(fields, self.declared_columns(config_key))
+                .map_err(ErrorCode::from)?;
+        }
+        let bytes = zerompk::to_msgpack_vec(&doc).map_err(|error| ErrorCode::Internal {
+            detail: format!("post-update document cannot encode: {error}"),
+        })?;
+        Ok(PointUpdateBody::Msgpack(bytes))
     }
 }
 
@@ -290,6 +240,5 @@ impl CoreLoop {
 pub(in crate::data::executor) fn point_update_body_to_msgpack(body: &PointUpdateBody) -> Vec<u8> {
     match body {
         PointUpdateBody::Msgpack(bytes) => bytes.clone(),
-        PointUpdateBody::Document(doc) => doc_format::encode_to_msgpack(doc),
     }
 }

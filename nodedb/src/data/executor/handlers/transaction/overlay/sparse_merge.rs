@@ -112,7 +112,7 @@ impl CoreLoop {
                         let body = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                             body,
                             format.as_format_ref(),
-                        )
+                        )?
                         .into_owned();
                         match seen.get(&key).copied() {
                             Some(idx) => {

@@ -226,11 +226,20 @@ impl CoreLoop {
                                 );
                                 continue;
                             };
-                            Some((
-                                document_id.as_str(),
-                                surrogate,
-                                Self::encode_crdt_row(engine, collection, document_id),
-                            ))
+                            // A projected row that does not decode is a fault
+                            // the replay records, never a skipped projection.
+                            match Self::encode_crdt_row(engine, collection, document_id) {
+                                Ok(body) => Some((document_id.as_str(), surrogate, body)),
+                                Err(error) => {
+                                    self.replay_record_unapplied(
+                                        "crdt",
+                                        "row_decode",
+                                        record.header.lsn,
+                                        &error.to_string(),
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Rejected(
                             reason,
@@ -273,6 +282,16 @@ impl CoreLoop {
                                 self.sync_commit(provenance);
                             }
                             debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT delta its live apply refused as malformed");
+                            continue;
+                        }
+                        // The live apply refused the delta on the same rows and
+                        // advanced the sender's mark past it, as for malformed
+                        // bytes. Replay skips it the same way.
+                        crate::engine::crdt::tenant_state::ValidatedApplyOutcome::UndecodableValue { error } => {
+                            if let Some(provenance) = payload.provenance.as_ref() {
+                                self.sync_commit(provenance);
+                            }
+                            debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, %error, "replay skips a CRDT delta its live apply refused for an undecodable value");
                             continue;
                         }
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::PendingDependencies => {
@@ -354,6 +373,10 @@ impl CoreLoop {
                                 debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT snapshot import its live apply refused as malformed");
                                 continue;
                             }
+                            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::UndecodableValue { error } => {
+                                debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, %error, "replay skips a CRDT snapshot import its live apply refused for an undecodable value");
+                                continue;
+                            }
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::PendingDependencies => {
                                 debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT snapshot import its live apply refused for missing predecessors");
                                 continue;
@@ -403,14 +426,25 @@ impl CoreLoop {
                     ),
                     Some(crate::types::Lsn::new(record.header.lsn)),
                 );
-                self.materialize_synced_document(
+                // The delta is durable and installed, so a projection that
+                // does not land would leave the CRDT state ahead of the sparse
+                // store. Replay records the fault and stops instead.
+                if let Err(error) = self.materialize_synced_document(
                     &task,
                     tid.as_u64(),
                     collection,
                     document_id,
                     surrogate,
                     &bytes,
-                );
+                ) {
+                    self.replay_record_unapplied(
+                        "crdt",
+                        "projection",
+                        record.header.lsn,
+                        &error.to_string(),
+                    );
+                    continue;
+                }
             }
             if let Some(provenance) = payload.provenance.as_ref() {
                 self.sync_commit(provenance);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Read path (1100s), query (1200s), auth (2000s) constructors.
+//! Read path (1100s), query (1200s), auth (2000s) constructors. Data
+//! exceptions live in `data_exception`.
 
 use std::fmt;
 
@@ -184,74 +185,6 @@ impl NodeDbError {
             code: ErrorCode::AMBIGUOUS_COLUMN,
             message: format!("column reference \"{column}\" is ambiguous"),
             details: ErrorDetails::AmbiguousColumn { column },
-            cause: None,
-        }
-    }
-
-    /// Expression evaluation divided or took a modulus by zero. Distinct
-    /// from `plan_error` so clients can match on the specific code
-    /// (SQLSTATE `22012`, `division_by_zero`) rather than parsing the
-    /// message.
-    pub fn division_by_zero() -> Self {
-        Self {
-            code: ErrorCode::DIVISION_BY_ZERO,
-            message: "division by zero".to_string(),
-            details: ErrorDetails::DivisionByZero,
-            cause: None,
-        }
-    }
-
-    /// A function received a value it cannot compute on: a vector of the
-    /// wrong dimension, an argument of the wrong shape, a malformed path.
-    /// SQLSTATE `22000` (`data_exception`). `detail` is the full message.
-    pub fn data_exception(detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        Self {
-            code: ErrorCode::DATA_EXCEPTION,
-            message: detail.clone(),
-            details: ErrorDetails::DataException { detail },
-            cause: None,
-        }
-    }
-
-    /// A value does not fit its numeric type: an integer past a column's
-    /// declared width, or arithmetic that overflows. SQLSTATE `22003`
-    /// (`numeric_value_out_of_range`). The error names no collection.
-    /// `detail` is the full message.
-    pub fn numeric_value_out_of_range(detail: impl Into<String>) -> Self {
-        Self {
-            code: ErrorCode::OVERFLOW,
-            message: detail.into(),
-            details: ErrorDetails::Overflow {
-                collection: String::new(),
-            },
-            cause: None,
-        }
-    }
-
-    /// A statement exceeded a server limit on its own size or depth: a
-    /// recursion depth, a per-transaction staging budget. SQLSTATE `54000`
-    /// (`program_limit_exceeded`). `detail` is the full message.
-    pub fn program_limit_exceeded(detail: impl Into<String>) -> Self {
-        let detail = detail.into();
-        Self {
-            code: ErrorCode::PROGRAM_LIMIT_EXCEEDED,
-            message: detail.clone(),
-            details: ErrorDetails::ProgramLimitExceeded { detail },
-            cause: None,
-        }
-    }
-
-    /// A LIMIT/OFFSET/FETCH bound did not resolve to `[0, usize::MAX]`.
-    /// Distinct from `plan_error` so clients match the code, SQLSTATE
-    /// `2201W`, instead of parsing the message.
-    pub fn invalid_limit_value(clause: impl Into<String>, value: impl Into<String>) -> Self {
-        let clause = clause.into();
-        let value = value.into();
-        Self {
-            code: ErrorCode::INVALID_LIMIT_VALUE,
-            message: format!("invalid {clause} value: {value}"),
-            details: ErrorDetails::InvalidLimitValue { clause, value },
             cause: None,
         }
     }

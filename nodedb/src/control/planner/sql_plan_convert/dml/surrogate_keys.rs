@@ -349,6 +349,7 @@ mod tests {
 
     fn insert(collection: &str, primary_key: &str, rows: Vec<Vec<(String, SqlValue)>>) -> SqlPlan {
         SqlPlan::Insert(InsertPlan {
+            returning: None,
             collection: collection.to_string(),
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -395,6 +396,7 @@ mod tests {
         let ctx = ctx();
         let plans = vec![
             SqlPlan::Delete {
+                returning: None,
                 collection: "users".to_string(),
                 engine: EngineType::DocumentSchemaless,
                 filters: Vec::new(),
@@ -406,9 +408,10 @@ mod tests {
                 assignments: Vec::new(),
                 filters: Vec::new(),
                 target_keys: vec![SqlValue::String("k".to_string())],
-                returning: false,
+                returning: None,
             },
             SqlPlan::Delete {
+                returning: None,
                 collection: "cache".to_string(),
                 engine: EngineType::KeyValue,
                 filters: Vec::new(),
@@ -470,6 +473,7 @@ mod tests {
     fn timeseries_ingest_draws_one_fresh_identity_per_row() {
         let ctx = ctx();
         let plans = vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
+            returning: None,
             collection: "metrics".to_string(),
             rows: vec![Vec::new(), Vec::new(), Vec::new()],
             volatile_defaults: false,

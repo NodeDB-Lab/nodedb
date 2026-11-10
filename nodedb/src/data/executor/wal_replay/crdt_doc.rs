@@ -87,7 +87,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 surrogate,
-                fields_json,
+                fields,
                 partial,
             } => {
                 let document_id = RowIdentity::from_user_key(document_id);
@@ -100,7 +100,7 @@ impl CoreLoop {
                 let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                     collection: qualified,
                     document_id: document_id.clone().into_string(),
-                    fields_json: fields_json.clone(),
+                    fields: fields.clone(),
                     surrogate,
                     partial,
                     // Replay answers no client, so the verb only has to match
@@ -121,7 +121,7 @@ impl CoreLoop {
                     crate::data::executor::handlers::control::crdt_doc::CrdtDocUpsert {
                         collection: &collection,
                         document_id: document_id.as_str(),
-                        fields_json: &fields_json,
+                        fields: &fields,
                         surrogate,
                         partial,
                         returning: None,
@@ -262,11 +262,18 @@ mod tests {
         }
     }
 
+    /// A row write of the JSON object `fields_json`, as a typed fields body.
     fn upsert_plan(fields_json: &str, partial: bool) -> PhysicalPlan {
+        let json: serde_json::Value = sonic_rs::from_str(fields_json).expect("fields JSON");
+        let nodedb_types::Value::Object(fields) = nodedb_types::conversion::json_to_value(json)
+        else {
+            panic!("fields JSON is an object");
+        };
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             document_id: DOCUMENT_ID.to_string(),
-            fields_json: fields_json.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(&fields)
+                .expect("fields body encodes"),
             surrogate: Surrogate::new(SURROGATE),
             partial,
             verb: if partial {

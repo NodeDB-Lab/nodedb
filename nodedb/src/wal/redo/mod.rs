@@ -7,6 +7,7 @@ pub mod columnar_restore;
 pub mod continuation;
 pub mod document;
 pub mod group;
+pub mod installed_document;
 pub mod kv_restore;
 pub mod node_label;
 pub mod record;

@@ -39,6 +39,7 @@ impl From<&CrdtError> for ErrorCode {
             | CrdtError::PreviewPostImageTooLarge { .. }
             | CrdtError::NonMapRootContainer { .. }
             | CrdtError::NonMapRowValue { .. }
+            | CrdtError::TypedValueMalformed { .. }
             | CrdtError::BlockListPathUnresolved { .. }
             | CrdtError::BlockListIndexOutOfBounds { .. }) => Self::DataException {
                 detail: client.to_string(),

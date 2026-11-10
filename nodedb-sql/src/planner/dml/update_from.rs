@@ -184,7 +184,7 @@ pub(super) fn plan_update_from(
         source_join_col: split.source_col,
         assignments: assigns,
         target_filters: split.target_filters,
-        returning: update.returning.is_some(),
+        returning: None,
     })
 }
 

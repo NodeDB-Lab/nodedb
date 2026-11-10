@@ -41,7 +41,8 @@ pub fn cell_text(v: &Value) -> Option<String> {
         Value::Null => None,
         Value::Bool(b) => Some(if *b { "t" } else { "f" }.to_owned()),
         Value::Integer(i) => Some(i.to_string()),
-        Value::Float(f) => wire_json_text(&nodedb_types::value::float_to_json(*f)),
+        // PostgreSQL's `float8out` text: `7`, not `7.0`.
+        Value::Float(f) => Some(nodedb_types::value::float8_text(*f)),
         Value::String(s) => Some(s.clone()),
         Value::Bytes(bytes) => Some(bytea_hex(bytes)),
         // Every digit and the scale, as PostgreSQL renders `numeric`. The
@@ -155,10 +156,11 @@ mod tests {
     /// The one instant these tests use: 2020-03-05T10:00:00Z.
     const EARLY_MICROS: i64 = 1_583_402_400_000_000;
 
-    /// Every scalar except bytes and decimals renders the same text its wire
-    /// JSON renders to, so the direct arms and the JSON edge cannot drift
-    /// apart. Bytes are base64 in JSON and `\x` hex in PostgreSQL text. A
-    /// decimal is an `f64` JSON number and exact digits in PostgreSQL text.
+    /// Every scalar except bytes and finite floats renders the same text its
+    /// wire JSON renders to, so the direct arms and the JSON edge cannot
+    /// drift apart. Bytes are base64 in JSON and `\x` hex in PostgreSQL text.
+    /// A finite float is a JSON number in JSON and `float8out` text here. A decimal is its exact
+    /// digits and scale in both: a JSON string, never an `f64` number.
     #[test]
     fn scalar_text_matches_the_wire_json_text() {
         let at = NdbDateTime::from_micros(EARLY_MICROS);
@@ -168,9 +170,6 @@ mod tests {
             Value::Bool(false),
             Value::Integer(42),
             Value::Integer(-7),
-            Value::Float(0.0),
-            Value::Float(1.5),
-            Value::Float(1e20),
             Value::Float(f64::NAN),
             Value::Float(f64::INFINITY),
             Value::String("hello".into()),
@@ -178,6 +177,8 @@ mod tests {
             Value::NaiveDateTime(at),
             Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
             Value::Duration(nodedb_types::NdbDuration::from_micros(1_500_000)),
+            Value::Decimal("1.50".parse().unwrap()),
+            Value::Decimal("12345678901234567.89".parse().unwrap()),
             Value::Array(vec![Value::Integer(1), Value::Bool(true)]),
             Value::Range {
                 start: None,
@@ -202,7 +203,12 @@ mod tests {
         assert_eq!(cell_text(&Value::Bool(true)).as_deref(), Some("t"));
         assert_eq!(cell_text(&Value::Bool(false)).as_deref(), Some("f"));
         assert_eq!(cell_text(&Value::Integer(42)).as_deref(), Some("42"));
-        assert_eq!(cell_text(&Value::Float(0.0)).as_deref(), Some("0.0"));
+        // `float8out`: shortest digits, no trailing `.0`, an exponent past
+        // 15 digits.
+        assert_eq!(cell_text(&Value::Float(0.0)).as_deref(), Some("0"));
+        assert_eq!(cell_text(&Value::Float(7.0)).as_deref(), Some("7"));
+        assert_eq!(cell_text(&Value::Float(1.5)).as_deref(), Some("1.5"));
+        assert_eq!(cell_text(&Value::Float(1e20)).as_deref(), Some("1e+20"));
         assert_eq!(cell_text(&Value::Float(f64::NAN)).as_deref(), Some("NaN"));
         assert_eq!(
             cell_text(&Value::Float(f64::INFINITY)).as_deref(),

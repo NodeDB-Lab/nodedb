@@ -43,7 +43,13 @@ impl CoreLoop {
             self.observe_bitemporal_ordinal(ordinal);
         }
         let previous = std::mem::replace(&mut self.apply_scope.replicated_ordinal, carried);
+        // A task that carries a WAL LSN applies a journaled record.
+        let journaled = self.apply_scope.journaled || task.wal_lsn.is_some();
+        let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, journaled);
+        let previous_schemas = std::mem::take(self.apply_scope.storage_schemas.get_mut());
         let response = self.execute_plan_with_journal(task, task.plan(), permit);
+        *self.apply_scope.storage_schemas.get_mut() = previous_schemas;
+        self.apply_scope.journaled = previous_journaled;
         self.apply_scope.replicated_ordinal = previous;
         if !task.request.admission.is_exempt_as_read() {
             self.recharge_tenant_indexes(task.request.database_id, task.request.tenant_id);

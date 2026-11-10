@@ -4,14 +4,19 @@
 
 mod budget_guard;
 mod grace_drive;
+mod grace_null_aware;
 pub(super) mod grace_partitioner;
 mod grace_probe;
 mod grace_repartition;
 mod grace_spill;
 pub mod hash;
 mod hash_handlers;
+mod hash_index;
 pub mod lateral;
+mod merge_left_only;
+mod merge_pairs;
 pub mod nested_loop;
+mod null_aware_tuple;
 pub mod params;
 mod row_source;
 mod shuffle_join;
@@ -34,4 +39,4 @@ pub(in crate::data::executor) use grace_repartition::FrameStreamReader;
 // stays crate-public. The rest are join-internal helpers (private re-export,
 // visible to the join submodules via `super::`).
 pub use support::merge_join_docs_binary;
-use support::{binary_row_matches_filters, binary_row_project, compare_preextracted};
+use support::{binary_row_matches_filters, binary_row_project, compare_join_keys};

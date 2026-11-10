@@ -18,7 +18,7 @@
 use nodedb::bridge::envelope::{ErrorCode, Status};
 use nodedb_physical::physical_plan::{CrdtOp, DocumentOp, PhysicalPlan};
 use nodedb_test_support::tx_batch_helpers::{
-    commit_plans, vector_direct_insert, with_unique_refusal,
+    commit_plans, doc_body, doc_text, vector_direct_insert, with_unique_refusal,
 };
 use nodedb_types::{DatabaseId, QualifiedCollection};
 
@@ -34,14 +34,14 @@ fn rollback_matrix_doc_on_refusal() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-condition: "doc1" = "original".
-    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", b"original"));
+    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", "original"));
 
     // Transaction: overwrite doc1, then a refused insert.
     let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        with_unique_refusal(vec![doc_put("docs", b"modified")]),
+        with_unique_refusal(vec![doc_put("docs", "modified")]),
         10,
     );
     assert_eq!(
@@ -53,7 +53,7 @@ fn rollback_matrix_doc_on_refusal() {
     // doc1 must be rolled back to "original".
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs"));
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original"));
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ fn rollback_matrix_vector_then_doc_fail() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-condition for doc conflict: doc1 already exists.
-    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", b"preexisting"));
+    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", "preexisting"));
 
     // Transaction: a vector-primary insert + a PointInsert that conflicts.
     let v_plan = vector_direct_insert("vp", 101);
@@ -97,7 +97,7 @@ fn rollback_matrix_vector_then_doc_fail() {
     // doc1 is still "preexisting" (the transaction committed nothing).
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs"));
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"preexisting");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("preexisting"));
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ fn rollback_matrix_doc_then_graph_fail() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-condition: doc1 = "original".
-    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", b"original"));
+    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", "original"));
 
     // Transaction: doc_put (overwrites) + doc_insert_conflict (same key, refused).
     let resp = commit_plans(
@@ -117,7 +117,7 @@ fn rollback_matrix_doc_then_graph_fail() {
         &mut tx,
         &mut rx,
         vec![
-            doc_put("docs", b"modified"),
+            doc_put("docs", "modified"),
             doc_insert_conflict("docs"), // same key → constraint fail
         ],
         30,
@@ -127,7 +127,7 @@ fn rollback_matrix_doc_then_graph_fail() {
     // doc1 should be rolled back to "original".
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs"));
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original"));
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ fn rollback_matrix_raw_crdt_apply_is_refused() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-condition: doc1 = "original".
-    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", b"original"));
+    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", "original"));
 
     // Transaction: forbidden CRDT Apply + a write that must never land.
     let crdt_delta: Vec<u8> = vec![0u8; 8]; // minimal placeholder delta
@@ -224,7 +224,7 @@ fn rollback_matrix_raw_crdt_apply_is_refused() {
                 constraint_version_required: 0,
                 expected_frontier_digest: None,
             }),
-            doc_put("docs", b"modified"),
+            doc_put("docs", "modified"),
         ]),
         60,
     );
@@ -246,7 +246,7 @@ fn rollback_matrix_raw_crdt_apply_is_refused() {
     // doc1 must be rolled back to "original".
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs"));
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original"));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,18 +258,19 @@ fn rollback_matrix_doc_doc_second_fails() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-condition: "doc1" already exists so PointInsert(if_absent=false) fails.
-    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", b"preexisting"));
+    send_ok(&mut core, &mut tx, &mut rx, doc_put("docs", "preexisting"));
 
     // Transaction: write "other_doc" (new insert) + PointInsert on existing "doc1" (refused).
     let other_put = PhysicalPlan::Document(DocumentOp::PointPut {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
         document_id: "other_doc".into(),
-        value: b"should_not_persist".to_vec(),
+        value: doc_body("should_not_persist"),
         surrogate: nodedb_types::Surrogate::new(99),
         pk_bytes: Vec::new(),
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     let resp = commit_plans(
         &mut core,

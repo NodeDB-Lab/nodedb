@@ -2,8 +2,9 @@
 
 //! CRDT-routing gate for document-collection DML.
 //!
-//! Detects `crdt = true` document collections and builds the `fields_json`
-//! payload that `CrdtOp::DocUpsert` consumes. Lives at the `dml` module level
+//! Detects `crdt = true` document collections and builds the `fields` body
+//! that `CrdtOp::DocUpsert` consumes: a native object, so every value keeps
+//! its exact type. Lives at the `dml` module level
 //! so INSERT / UPSERT (in `insert.rs`) and UPDATE / DELETE (in
 //! `update_delete/`) all reach the same detection + payload builders.
 //!
@@ -18,7 +19,7 @@
 use nodedb_sql::types::{SqlExpr, SqlValue};
 
 use crate::control::planner::sql_plan_convert::convert::ConvertContext;
-use crate::control::planner::sql_plan_convert::value::row_to_msgpack;
+use crate::control::planner::sql_plan_convert::value::sql_value_to_nodedb_value;
 
 /// `true` when `key` names a CRDT document collection.
 ///
@@ -43,35 +44,35 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn document_collection_is
         .unwrap_or(false))
 }
 
-/// Full-row fields → JSON object string for `DocUpsert.fields_json`.
+/// Full-row fields → the native object body `DocUpsert.fields` carries.
 ///
-/// Reuses the DML msgpack writer + `json_from_msgpack` so the stored payload is
-/// byte-identical to what the non-CRDT `PointInsert` path would produce for the
-/// same row, then serializes to JSON text (the shape `DocUpsert` consumes).
-pub(in crate::control::planner::sql_plan_convert::dml) fn row_to_fields_json(
+/// Each value converts to its typed `Value`, so a Decimal keeps its scale and
+/// a UUID or an instant keeps its kind through the CRDT write.
+pub(in crate::control::planner::sql_plan_convert::dml) fn row_to_fields_body(
     row: &[(String, SqlValue)],
-) -> crate::Result<String> {
-    let mpk = row_to_msgpack(row)?;
-    let json = nodedb_types::json_from_msgpack(&mpk).map_err(|e| crate::Error::Serialization {
-        format: "json".into(),
-        detail: format!("crdt fields_json encode: {e}"),
-    })?;
-    sonic_rs::to_string(&json).map_err(|e| crate::Error::Serialization {
-        format: "json".into(),
-        detail: format!("crdt fields_json encode: {e}"),
+) -> crate::Result<Vec<u8>> {
+    let fields: std::collections::HashMap<String, nodedb_types::Value> = row
+        .iter()
+        .map(|(name, value)| (name.clone(), sql_value_to_nodedb_value(value)))
+        .collect();
+    nodedb_physical::physical_plan::encode_fields_body(&fields).map_err(|detail| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail,
+        }
     })
 }
 
-/// UPDATE SET (partial) `fields_json` from LITERAL assignments only.
+/// UPDATE SET (partial) `fields` body from LITERAL assignments only.
 ///
 /// An expression RHS is rejected: the Control Plane planner cannot evaluate a
 /// per-row expression here (same restriction the KV and columnar/spatial UPDATE
 /// paths enforce). Only the provided fields go into the object — `DocUpsert`
 /// with `partial = true` writes exactly these (LWW-per-field), leaving untouched
 /// keys intact.
-pub(in crate::control::planner::sql_plan_convert::dml) fn literal_assignments_to_fields_json(
+pub(in crate::control::planner::sql_plan_convert::dml) fn literal_assignments_to_fields_body(
     assignments: &[(String, SqlExpr)],
-) -> crate::Result<String> {
+) -> crate::Result<Vec<u8>> {
     let mut row: Vec<(String, SqlValue)> = Vec::with_capacity(assignments.len());
     for (field, expr) in assignments {
         match expr {
@@ -86,5 +87,5 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn literal_assignments_to
             }
         }
     }
-    row_to_fields_json(&row)
+    row_to_fields_body(&row)
 }

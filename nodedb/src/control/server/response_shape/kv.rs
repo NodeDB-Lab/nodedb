@@ -32,16 +32,21 @@ use nodedb_types::Value;
 /// `execute_kv_batch_get` already encodes a miss).
 ///
 /// For every other plan, return the payload unchanged.
-pub fn apply_kv_wrap(plan: &PhysicalPlan, payload: &[u8]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// A native point-get body whose row does not encode.
+pub fn apply_kv_wrap(plan: &PhysicalPlan, payload: &[u8]) -> crate::Result<Vec<u8>> {
     if payload.is_empty() {
-        return payload.to_vec();
+        return Ok(payload.to_vec());
     }
     match plan {
-        PhysicalPlan::Kv(KvOp::Get { key, .. }) => {
-            msgpack_scan::kv_row_msgpack(&String::from_utf8_lossy(key), payload)
-        }
-        PhysicalPlan::Kv(KvOp::BatchGet { keys, .. }) => wrap_batch_get(keys, payload),
-        _ => payload.to_vec(),
+        PhysicalPlan::Kv(KvOp::Get { key, .. }) => Ok(msgpack_scan::kv_row_msgpack(
+            &String::from_utf8_lossy(key),
+            payload,
+        )?),
+        PhysicalPlan::Kv(KvOp::BatchGet { keys, .. }) => Ok(wrap_batch_get(keys, payload)),
+        _ => Ok(payload.to_vec()),
     }
 }
 

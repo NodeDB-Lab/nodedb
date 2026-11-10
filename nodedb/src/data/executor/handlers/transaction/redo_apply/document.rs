@@ -19,6 +19,7 @@ use nodedb_types::Surrogate;
 use redb::WriteTransaction;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::chain_guard::{
     AbandonedWrite, ChainGuard, abandon_write, abort_after_apply,
 };
@@ -100,6 +101,7 @@ impl CoreLoop {
         let storage_key = StorageKey::for_surrogate(surrogate);
         let wal_lsn = (row.record_lsn != 0).then(|| Lsn::new(row.record_lsn));
         let hook_ctx = HookCtx {
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
             database_id: row.database_id,
             tid: row.tenant_id,
             collection: row.collection,
@@ -109,11 +111,9 @@ impl CoreLoop {
             wal_lsn,
         };
 
-        // The pre-image decides whether the hash chain links the row or reuses
-        // its durable link, and is the image the materialized-sum fold
-        // subtracts. Read only when one of the two needs it.
+        // The pre-image decides whether the hash chain links the row or reuses its durable link.
         let mut chain = ChainGuard::begin(self, row.database_id, row.tenant_id, row.collection);
-        let prior_bytes = if chain.enabled() || write_hook::folds_images(self, &hook_ctx) {
+        let prior_bytes = if chain.enabled() {
             self.current_row(row.database_id, row.tenant_id, row.collection, &storage_key)?
         } else {
             None
@@ -164,7 +164,7 @@ impl CoreLoop {
             }
         };
         if let Err(error) = chain
-            .settle(self, surrogate, &outcome.stored_value)
+            .settle(self, surrogate, &outcome.installed.stored)
             .and_then(|()| chain.persist_head(self, &txn))
         {
             return Err(abort_after_apply(
@@ -175,15 +175,14 @@ impl CoreLoop {
             ));
         }
 
-        // The fold reads the SUBMITTED body: `_chain_hash` wraps the row and no
-        // binding is declared over it.
-        let images = match prior_bytes {
-            Some(ref old) => WriteImages::Update {
+        // Derived balances use the actual prior row and the installed postimage.
+        let images = match outcome.prior_value.as_deref() {
+            Some(old) => WriteImages::Update {
                 old: ImageBody::Stored(old),
-                new: ImageBody::Submitted(value),
+                new: ImageBody::Stored(&outcome.installed.stored),
             },
             None => WriteImages::Insert {
-                new: ImageBody::Submitted(value),
+                new: ImageBody::Stored(&outcome.installed.stored),
             },
         };
         // A version installed below the row's newest version folds nothing:
@@ -200,6 +199,28 @@ impl CoreLoop {
                     self,
                     &mut chain,
                     abandoned(row, &storage_key).undo(std::mem::take(&mut outcome.memory_undo)),
+                    error,
+                ));
+            }
+        };
+        let event = match self.prepare_installed_put_event(
+            &WriteSetRow {
+                database_id: row.database_id,
+                tid: row.tenant_id,
+                collection: row.collection,
+                identity: RowIdentity::from_user_key(row.document_id),
+            },
+            &outcome.installed,
+            outcome.prior_value.as_deref(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(abort_after_apply(
+                    self,
+                    &mut chain,
+                    abandoned(row, &storage_key)
+                        .undo(std::mem::take(&mut outcome.memory_undo))
+                        .targets(target_writes),
                     error,
                 ));
             }
@@ -224,10 +245,8 @@ impl CoreLoop {
             } else {
                 WriteOp::Insert
             },
-            old_value: outcome.prior_value.clone(),
-            // The submitted body, before any hash-chain wrapping: the image a
-            // client wrote, as the materialized-sum fold reads it too.
-            new_body: Some(value.to_vec()),
+            old_value: None,
+            event: Some(event),
             emits_event: !row.clone_copy,
         });
         if self.recording_redo_undo() {
@@ -253,6 +272,7 @@ impl CoreLoop {
         let surrogate = Surrogate::new(row.surrogate);
         let storage_key = StorageKey::for_surrogate(surrogate);
         let hook_ctx = HookCtx {
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
             database_id: row.database_id,
             tid: row.tenant_id,
             collection: row.collection,
@@ -338,7 +358,7 @@ impl CoreLoop {
             identity: RowIdentity::from_user_key(row.document_id),
             op: WriteOp::Delete,
             old_value: Some(old_value),
-            new_body: None,
+            event: None,
             emits_event: true,
         });
         self.record_committed_targets(target_writes);

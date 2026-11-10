@@ -6,12 +6,11 @@ use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::submitted_row_image;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::chain_guard::{
     AbandonedWrite, ChainGuard, abort_after_apply,
 };
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
-use crate::data::executor::enforcement::unique::SubmittedWrite;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
@@ -32,6 +31,8 @@ pub(in crate::data::executor) struct DocumentBatchInsertParams<'a> {
     pub returning: Option<&'a ReturningSpec>,
     /// Compiled read policy bounding which of those rows may be shown back.
     pub rls_filters: &'a [u8],
+    /// Compiled write policy judged on each exact prepared row.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     /// Join-key VALUE → target row surrogate for every materialized-sum target
     /// this page may credit — one entry per DISTINCT join value across the
     /// batch. Resolved on the Control Plane at plan time.
@@ -117,8 +118,8 @@ impl CoreLoop {
     /// Applies every row through [`CoreLoop::apply_point_put`] under ONE redb
     /// write transaction so the document store, FTS inverted index, HNSW vector
     /// index, spatial R-tree, and secondary indexes are all maintained and keyed
-    /// by each row's stable surrogate. UNIQUE is judged on the page's
-    /// post-state before the first row. Any per-row error drops the
+    /// by each row's stable surrogate. UNIQUE uses the actual final source
+    /// and target rows before commit. Any per-row error drops the
     /// transaction, leaving the whole page unchanged. On success the transaction commits once and one Insert write
     /// event is emitted per row.
     fn execute_document_batch_insert_indexed(
@@ -134,11 +135,14 @@ impl CoreLoop {
             if_absent,
             returning,
             rls_filters,
+            rls_write_check,
             resolved_sum_targets,
             deferred_sum_targets,
         } = params;
         let database_id = task.request.database_id.as_u64();
+        let identity_column = self.identity_column(database_id, tid, collection);
         let hook_ctx = HookCtx {
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
             database_id,
             tid,
             collection,
@@ -146,6 +150,13 @@ impl CoreLoop {
             deferred_sum_targets,
             wal_lsn: task.wal_lsn(),
         };
+        let mut prepared_notes = Vec::with_capacity(surrogates.len());
+        for surrogate in surrogates {
+            match self.prepare_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+                Ok(note) => prepared_notes.push(note),
+                Err(error) => return self.response_error(task, error),
+            }
+        }
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => return self.response_error(task, e),
@@ -168,33 +179,18 @@ impl CoreLoop {
             Ok(landing) => landing,
             Err(e) => return self.response_error(task, e),
         };
-        // The page lands as one unit, so UNIQUE is judged on its post-state:
-        // two rows of the page claiming one value are refused.
-        let page: Vec<SubmittedWrite<'_>> = landing
-            .iter()
-            .map(|&i| SubmittedWrite {
-                collection,
-                surrogate: surrogates[i].as_u32(),
-                body: Some(documents[i].1.as_slice()),
-                judged: true,
-            })
-            .collect();
-        if let Err(e) = self.check_submitted_unit_unique(database_id, tid, &page) {
-            return self.response_error(task, e);
-        }
         // One guard for the whole page: each row advances the head, and a
         // failure anywhere rolls the page back to the head it started from.
         let mut chain = ChainGuard::begin(self, database_id, tid, collection);
 
-        // Row identity + storage key for post-commit event emission and cache
-        // invalidation, captured as each row applies successfully; the value
-        // bytes are re-borrowed from `documents` after commit rather than
-        // cloned here. On any error we return early (dropping `txn`, which
-        // rolls back every row applied so far).
+        // Retain each accepted row's identity, version, and prepared event image.
+        // Dropping the transaction reverses every source row on an error.
         let mut applied: Vec<(
             usize,
             crate::engine::document::store::RowIdentity,
             nodedb_types::StorageKey,
+            i64,
+            crate::types::DocumentPutEvent,
         )> = Vec::with_capacity(landing.len());
         // One post-apply `Put` redo entry per stored row, in insert order:
         // `wal_append_document_op` mints no pre-dispatch record for
@@ -217,6 +213,7 @@ impl CoreLoop {
         // none of these.
         let mut page_undo: Vec<UndoEntry> = Vec::new();
         let mut page_targets: Vec<TargetWrite> = Vec::new();
+        let mut unit_writes = Vec::new();
         // The row that failed, plus why. Collected rather than returned inline
         // so the page's in-memory side effects — these, the advanced chain
         // head and the document-cache entries `apply_point_put` populated —
@@ -239,7 +236,7 @@ impl CoreLoop {
                 failure = Some((key, e));
                 break;
             }
-            let mut outcome = match self.apply_point_put(
+            let prepared = match self.prepare_point_put(
                 &txn,
                 PointPutParams {
                     database_id,
@@ -266,21 +263,51 @@ impl CoreLoop {
                     break;
                 }
             };
+            if let Err(error) = crate::data::executor::handlers::rls_write_gate::admit_installed_row(
+                rls_write_check,
+                prepared.installed(),
+                &row_identity,
+                &identity_column,
+                tid,
+                collection,
+                &self.crs_context(),
+            ) {
+                failure = Some((key, error));
+                break;
+            }
+            let mut outcome = match self.apply_prepared_point_put(&txn, prepared) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    failure = Some((key, error));
+                    break;
+                }
+            };
             page_undo.append(&mut outcome.memory_undo);
-            if let Err(e) = chain.settle(self, surrogate, &outcome.stored_value) {
+            unit_writes.push((collection.to_owned(), key));
+            // The head persists with each row, so the next row's link reads
+            // the head this transaction already holds.
+            if let Err(e) = chain
+                .settle_installed(self, surrogate, &mut outcome.installed)
+                .and_then(|()| chain.persist_head(self, &txn))
+            {
                 failure = Some((key, e));
                 break;
             }
             // Image-folding enforcement per row, in the SAME transaction the
             // page is being applied in, so a derived total lands or rolls back
-            // with every row that moved it. The post-image is the SUBMITTED
-            // body, never the chained one.
+            // with every actual stored mutation, including repeated-row updates.
             let enforcement = match write_hook::run(
                 self,
                 &txn,
                 &hook_ctx,
-                WriteImages::Insert {
-                    new: ImageBody::Submitted(value),
+                match outcome.prior_value.as_deref() {
+                    Some(old) => WriteImages::Update {
+                        old: ImageBody::Stored(old),
+                        new: ImageBody::Stored(&outcome.installed.stored),
+                    },
+                    None => WriteImages::Insert {
+                        new: ImageBody::Stored(&outcome.installed.stored),
+                    },
                 },
             ) {
                 Ok(enforcement) => enforcement,
@@ -290,31 +317,73 @@ impl CoreLoop {
                     break;
                 }
             };
+            unit_writes.extend(enforcement.target_writes.iter().map(|target| {
+                (
+                    target.collection.clone(),
+                    nodedb_types::StorageKey::for_surrogate(target.surrogate),
+                )
+            }));
             target_write_set.extend(write_hook::target_write_set(&enforcement.target_writes));
             page_targets.extend(enforcement.target_writes);
             balanced_entries.extend(enforcement.balanced_entries);
-            if returning.is_some() {
-                stored_bodies.push(outcome.stored_value);
-            }
-            write_set.push(submitted_row_image(
+            let event = match self.prepare_installed_put_event(
+                &WriteSetRow {
+                    database_id,
+                    tid,
+                    collection,
+                    identity: row_identity.clone(),
+                },
+                &outcome.installed,
+                outcome.prior_value.as_deref(),
+            ) {
+                Ok(event) => event,
+                Err(error) => {
+                    failure = Some((key, error));
+                    break;
+                }
+            };
+            write_set.push(crate::bridge::envelope::WriteSetEntry::installed_put(
                 surrogate.as_u32(),
                 row_identity.clone(),
-                value.clone(),
-                outcome.version_sys_from,
+                outcome.installed.clone(),
+                event.clone(),
             ));
-            applied.push((i, row_identity, key));
+            if returning.is_some() {
+                stored_bodies.push(outcome.installed.stored);
+            }
+
+            applied.push((
+                i,
+                row_identity,
+                key,
+                outcome.installed.version.sys_from,
+                event,
+            ));
         }
 
         // Every row the page called `apply_point_put` for. An abort below
         // drops their cache entries: a cached body for a row that never
         // committed is served to readers as though it had.
         let mut written_keys: Vec<nodedb_types::StorageKey> =
-            applied.iter().map(|(_, _, key)| *key).collect();
+            applied.iter().map(|(_, _, key, _, _)| *key).collect();
 
         if let Some((failed_key, error)) = failure {
             // The whole page rolls back: the chain head, the cache entries
             // and every in-memory index entry of the page go back.
             written_keys.push(failed_key);
+            let error = abort_after_apply(
+                self,
+                &mut chain,
+                AbandonedWrite::rows(database_id, tid, collection, &written_keys)
+                    .undo(page_undo)
+                    .targets(page_targets),
+                error,
+            );
+            return self.response_error(task, error);
+        }
+
+        if let Err(error) = self.check_written_unit_unique(&txn, database_id, tid, &unit_writes) {
+            drop(txn);
             let error = abort_after_apply(
                 self,
                 &mut chain,
@@ -342,56 +411,7 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        // The advanced head lands in the SAME transaction as the rows whose
-        // hashes it covers.
-        if let Err(e) = chain.persist_head(self, &txn) {
-            let e = abort_after_apply(
-                self,
-                &mut chain,
-                AbandonedWrite::rows(database_id, tid, collection, &written_keys)
-                    .undo(page_undo)
-                    .targets(page_targets),
-                e,
-            );
-            return self.response_error(task, e);
-        }
-
-        if let Err(e) = txn.commit() {
-            let e = abort_after_apply(
-                self,
-                &mut chain,
-                AbandonedWrite::rows(database_id, tid, collection, &written_keys)
-                    .undo(page_undo)
-                    .targets(page_targets),
-                crate::Error::Storage {
-                    engine: "sparse".into(),
-                    detail: format!("batch insert commit: {e}"),
-                },
-            );
-            return self.response_error(task, e);
-        }
-
-        // Record each committed row's version against its surrogate and
-        // collection.
-        for (_, _, key) in &applied {
-            if let Err(e) =
-                self.note_surrogate_write(task, tid, collection, key.surrogate().as_u32())
-            {
-                return self.response_error(task, e);
-            }
-        }
-
-        self.checkpoint_coordinator
-            .mark_dirty("sparse", landing.len());
-        if let Some(ref m) = self.metrics {
-            m.record_document_insert();
-        }
-
-        for (i, identity, _) in applied {
-            self.emit_put_event(task, tid, collection, identity, &documents[i].1, None);
-        }
-
-        let mut response = if let Some(spec) = returning {
+        let prepared_response = if let Some(spec) = returning {
             // One row per inserted document, in `documents` order — the order
             // the rows were applied in, which is the order PostgreSQL returns
             // them in for a multi-row INSERT. A skipped row returns nothing.
@@ -414,7 +434,7 @@ impl CoreLoop {
                 .map(|(identity, stored)| (identity, stored.as_slice()))
                 .collect();
             let identity_column = self.identity_column(database_id, tid, collection);
-            self.stored_returning_response(
+            self.prepare_stored_returning_response(
                 task,
                 spec,
                 rls_filters,
@@ -423,536 +443,79 @@ impl CoreLoop {
                 &rows,
             )
         } else {
-            match crate::data::executor::response_codec::encode_count("inserted", landing.len()) {
-                Ok(bytes) => self.response_with_payload(task, bytes),
-                Err(e) => {
-                    return self.response_error(task, ErrorCode::from(e));
-                }
+            crate::data::executor::response_codec::encode_count("inserted", landing.len())
+                .map(|bytes| self.response_with_payload(task, bytes))
+        };
+        let mut response = match prepared_response {
+            Ok(response) => response,
+            Err(error) => {
+                let error = abort_after_apply(
+                    self,
+                    &mut chain,
+                    AbandonedWrite::rows(database_id, tid, collection, &written_keys)
+                        .undo(page_undo)
+                        .targets(page_targets),
+                    error,
+                );
+                return self.response_error(task, error);
             }
         };
-        if !write_set.is_empty() {
-            response.write_set = write_set;
-        }
-        // Derived target rows live in a DIFFERENT collection than this page's,
-        // so each carries its own `Some(collection)` and homes to that
-        // collection's vShard.
+        response.write_set = write_set;
         response.write_set.extend(target_write_set);
+
+        // The advanced head lands in the SAME transaction as the rows whose
+        // hashes it covers.
+        if let Err(e) = chain.persist_head(self, &txn) {
+            let e = abort_after_apply(
+                self,
+                &mut chain,
+                AbandonedWrite::rows(database_id, tid, collection, &written_keys)
+                    .undo(page_undo)
+                    .targets(page_targets),
+                e,
+            );
+            return self.response_error(task, e);
+        }
+
+        if let Err(e) = txn.commit() {
+            self.seal_journalled();
+            self.fail_stop_core(
+                crate::data::executor::core_loop::fail_stop::FailStopCause::WriteSetUnpersisted,
+                &format!("document commit outcome is unknown: {e}"),
+            );
+            let e = abort_after_apply(
+                self,
+                &mut chain,
+                AbandonedWrite::rows(database_id, tid, collection, &written_keys)
+                    .undo(page_undo)
+                    .targets(page_targets),
+                crate::Error::Storage {
+                    engine: "sparse".into(),
+                    detail: format!("batch insert commit: {e}"),
+                },
+            );
+            return self.response_error(task, e);
+        }
+
+        for (i, _, _, ordinal, _) in &applied {
+            self.publish_surrogate_write(prepared_notes[*i].take(), *ordinal);
+        }
+
+        self.checkpoint_coordinator
+            .mark_dirty("sparse", landing.len());
+        if let Some(ref m) = self.metrics {
+            m.record_document_insert();
+        }
+
+        for (_, identity, _, _, event) in applied {
+            self.emit_prepared_put_event(task, collection, identity, &event);
+        }
+
+        response.watermark_lsn = self.watermark;
         response
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use redb::TableDefinition;
-
-    use super::DocumentBatchInsertParams;
-    use crate::bridge::envelope::{Priority, Request, Status};
-    use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::tests::make_core_with_dir;
-    use crate::data::executor::doc_format;
-    use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::CollectionConfig;
-    use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
-    use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
-    use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, ResolvedSumTarget};
-    use nodedb_types::{StorageKey, Surrogate};
-    use std::time::{Duration, Instant};
-
-    const TID: u64 = 1;
-    const COLL: &str = "articles";
-
-    /// Raw JSON bodies with real words in them, so each row has text the
-    /// inverted index actually has to accept for the write to be searchable.
-    fn bodies() -> Vec<(String, Vec<u8>)> {
-        vec![
-            ("d1".to_string(), br#"{"title":"alpha bravo"}"#.to_vec()),
-            ("d2".to_string(), br#"{"title":"charlie delta"}"#.to_vec()),
-        ]
-    }
-
-    /// A table sharing `DOC_LENGTHS`'s redb name but with incompatible
-    /// key/value types, so every inverted-index write fails structurally.
-    const POISONED_DOC_LENGTHS: TableDefinition<u64, u64> =
-        TableDefinition::new("text.doc_lengths");
-
-    fn poison_inverted_index(core: &CoreLoop) {
-        let db = core.sparse.db().clone();
-        let txn = db.begin_write().unwrap();
-        txn.delete_table(DOC_LENGTHS).unwrap();
-        txn.open_table(POISONED_DOC_LENGTHS).unwrap();
-        txn.commit().unwrap();
-    }
-
-    fn batch_task(documents: &[(String, Vec<u8>)], surrogates: &[Surrogate]) -> ExecutionTask {
-        ExecutionTask::new(Request {
-            request_id: RequestId::new(1),
-            tenant_id: TenantId::new(TID),
-            database_id: DatabaseId::DEFAULT,
-            vshard_id: VShardId::new(0),
-            plan: PhysicalPlan::Document(DocumentOp::BatchInsert {
-                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
-                documents: documents.to_vec(),
-                if_absent: false,
-                surrogates: surrogates.to_vec(),
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-                deferred_sum_targets: Vec::new(),
-            }),
-            deadline: Instant::now() + Duration::from_secs(5),
-            priority: Priority::Normal,
-            trace_id: TraceId::ZERO,
-            consistency: ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: crate::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            commit_hlc: None,
-            system_ordinal: None,
-            admission: crate::bridge::envelope::Admission::Admitted,
-        })
-    }
-
-    fn stored(core: &CoreLoop, surrogate: Surrogate) -> Option<Vec<u8>> {
-        core.sparse
-            .get(
-                DatabaseId::DEFAULT.as_u64(),
-                TID,
-                COLL,
-                &nodedb_types::StorageKey::for_surrogate(surrogate),
-            )
-            .unwrap()
-    }
-
-    fn corpus_size(core: &CoreLoop) -> u32 {
-        core.inverted
-            .corpus_stats(DatabaseId::DEFAULT.as_u64(), TenantId::new(TID), COLL)
-            .unwrap()
-            .0
-    }
-
-    /// Control: with a healthy index the batch lands AND both rows are counted
-    /// into the FTS corpus. Without this, a passing failure test could not tell
-    /// "the poison caused the rejection" from "this batch was never insertable".
-    #[test]
-    fn a_healthy_batch_commits_every_row_and_indexes_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let documents = bodies();
-        let surrogates = vec![Surrogate(11), Surrogate(12)];
-
-        let task = batch_task(&documents, &surrogates);
-        let resp = core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: COLL,
-                documents: &documents,
-                surrogates: &surrogates,
-                if_absent: false,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &[],
-                deferred_sum_targets: &[],
-            },
-        );
-
-        assert_eq!(resp.status, Status::Ok);
-        assert!(stored(&core, Surrogate(11)).is_some());
-        assert!(stored(&core, Surrogate(12)).is_some());
-        assert_eq!(
-            corpus_size(&core),
-            2,
-            "both committed rows must be in the FTS corpus"
-        );
-    }
-
-    fn insert_page(
-        core: &mut CoreLoop,
-        documents: &[(String, Vec<u8>)],
-        surrogates: &[Surrogate],
-        if_absent: bool,
-    ) -> crate::bridge::envelope::Response {
-        let task = batch_task(documents, surrogates);
-        core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: COLL,
-                documents,
-                surrogates,
-                if_absent,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &[],
-                deferred_sum_targets: &[],
-            },
-        )
-    }
-
-    fn inserted(resp: &crate::bridge::envelope::Response) -> u64 {
-        let value: serde_json::Value =
-            nodedb_types::json_from_msgpack(resp.payload.as_ref()).expect("count payload");
-        value
-            .get("inserted")
-            .and_then(serde_json::Value::as_u64)
-            .expect("inserted count")
-    }
-
-    /// A page row whose key is already stored is refused, and the page writes
-    /// nothing: the page once overwrote the stored row.
-    #[test]
-    fn a_page_row_with_a_stored_key_refuses_the_page() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let first = vec![("d1".to_string(), br#"{"title":"original"}"#.to_vec())];
-        assert_eq!(
-            insert_page(&mut core, &first, &[Surrogate(31)], false).status,
-            Status::Ok
-        );
-        let original = stored(&core, Surrogate(31));
-
-        let page = vec![
-            ("d9".to_string(), br#"{"title":"new"}"#.to_vec()),
-            ("d1".to_string(), br#"{"title":"overwrite"}"#.to_vec()),
-        ];
-        let resp = insert_page(&mut core, &page, &[Surrogate(39), Surrogate(31)], false);
-        assert_eq!(
-            resp.status,
-            Status::Error,
-            "a duplicate key refuses the page"
-        );
-        assert_eq!(
-            stored(&core, Surrogate(31)),
-            original,
-            "the stored row is untouched"
-        );
-        assert!(
-            stored(&core, Surrogate(39)).is_none(),
-            "no row of the page lands"
-        );
-    }
-
-    /// A key the page names twice is refused.
-    #[test]
-    fn a_key_the_page_names_twice_refuses_the_page() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let page = vec![
-            ("d1".to_string(), br#"{"title":"a"}"#.to_vec()),
-            ("d1".to_string(), br#"{"title":"b"}"#.to_vec()),
-        ];
-        let resp = insert_page(&mut core, &page, &[Surrogate(41), Surrogate(41)], false);
-        assert_eq!(resp.status, Status::Error);
-        assert!(stored(&core, Surrogate(41)).is_none());
-    }
-
-    /// `ON CONFLICT DO NOTHING` skips stored and repeated keys, lands the
-    /// rest, and counts only what landed.
-    #[test]
-    fn skip_mode_lands_only_new_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let first = vec![("d1".to_string(), br#"{"title":"original"}"#.to_vec())];
-        insert_page(&mut core, &first, &[Surrogate(51)], false);
-        let original = stored(&core, Surrogate(51));
-
-        let page = vec![
-            ("d1".to_string(), br#"{"title":"skipped"}"#.to_vec()),
-            ("d2".to_string(), br#"{"title":"lands"}"#.to_vec()),
-            ("d2".to_string(), br#"{"title":"repeat"}"#.to_vec()),
-        ];
-        let resp = insert_page(
-            &mut core,
-            &page,
-            &[Surrogate(51), Surrogate(52), Surrogate(52)],
-            true,
-        );
-        assert_eq!(resp.status, Status::Ok);
-        assert_eq!(inserted(&resp), 1);
-        assert_eq!(stored(&core, Surrogate(51)), original);
-        assert!(stored(&core, Surrogate(52)).is_some());
-        assert_eq!(
-            resp.write_set.len(),
-            1,
-            "the redo record carries only the row that landed"
-        );
-    }
-
-    /// The contract this guards: a row whose indexing fails must not be committed
-    /// and counted into `inserted` — that would tell the client the write
-    /// succeeded while full-text search could never return the row and nothing,
-    /// not replay, not the next write, would re-index it. The batch must
-    /// fail as a whole, leaving no row behind and no partial corpus.
-    #[test]
-    fn a_row_that_cannot_be_indexed_fails_the_whole_batch() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        poison_inverted_index(&core);
-        let documents = bodies();
-        let surrogates = vec![Surrogate(21), Surrogate(22)];
-
-        let task = batch_task(&documents, &surrogates);
-        let resp = core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: COLL,
-                documents: &documents,
-                surrogates: &surrogates,
-                if_absent: false,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &[],
-                deferred_sum_targets: &[],
-            },
-        );
-
-        assert_eq!(
-            resp.status,
-            Status::Error,
-            "the client must be told the batch failed, not receive a success count \
-             for rows full-text search will never return"
-        );
-        assert!(
-            stored(&core, Surrogate(21)).is_none() && stored(&core, Surrogate(22)).is_none(),
-            "an indexing failure on any row must roll the whole batch back — a stored \
-             row whose index update failed is invisible to search forever"
-        );
-    }
-
-    /// A geometry + vector row body, in the MessagePack every handler gets.
-    fn geo_vector_body(x: f64, embedding: &[f64]) -> Vec<u8> {
-        doc_format::encode_to_msgpack(&serde_json::json!({
-            "loc": format!(r#"{{"type":"Point","coordinates":[{x},1.0]}}"#),
-            "embedding": embedding,
-        }))
-    }
-
-    /// A batch whose last row is refused leaves no in-memory trace of the
-    /// rows before it. Dropping the transaction reverses the stored rows
-    /// only, so without the undo rows 1-2 keep answering spatial predicates
-    /// and vector search. Row 3 is refused in its vector step, after its own
-    /// R-tree entry landed, so it also checks the refused row's own undo.
-    #[test]
-    fn a_refused_last_row_leaves_no_spatial_or_vector_trace() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let db = DatabaseId::DEFAULT;
-        core.vector_params.insert(
-            (db, TenantId::new(TID), COLL.to_string()),
-            crate::engine::vector::hnsw::HnswParams::default(),
-        );
-        let documents = vec![
-            ("g1".to_string(), geo_vector_body(1.0, &[1.0, 0.0, 0.0])),
-            ("g2".to_string(), geo_vector_body(2.0, &[0.0, 1.0, 0.0])),
-            // The index is three wide, so this row is refused.
-            ("g3".to_string(), geo_vector_body(3.0, &[1.0, 1.0])),
-        ];
-        let surrogates = vec![Surrogate(31), Surrogate(32), Surrogate(33)];
-
-        let task = batch_task(&documents, &surrogates);
-        let resp = core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: COLL,
-                documents: &documents,
-                surrogates: &surrogates,
-                if_absent: false,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &[],
-                deferred_sum_targets: &[],
-            },
-        );
-
-        assert_eq!(resp.status, Status::Error, "row 3 must refuse the batch");
-        for surrogate in &surrogates {
-            assert!(stored(&core, *surrogate).is_none(), "no row may be stored");
-        }
-        let spatial_key = (db, TenantId::new(TID), COLL.to_string(), "loc".to_string());
-        assert!(
-            core.spatial_indexes
-                .get(&spatial_key)
-                .is_none_or(|rtree| rtree.entries().is_empty()),
-            "the R-tree must hold no entry of the abandoned rows"
-        );
-        assert!(
-            core.spatial_doc_map.is_empty(),
-            "the reverse spatial map must hold no entry of the abandoned rows"
-        );
-        let vector_key = CoreLoop::vector_index_key(db.as_u64(), TID, COLL, "embedding");
-        assert!(
-            !core.vector_collections.contains_key(&vector_key),
-            "row 1 created the vector index, so the abandoned page must remove it"
-        );
-        assert!(
-            core.vector_doc_map.is_empty(),
-            "the vector reverse map must hold no entry of the abandoned rows"
-        );
-    }
-
-    /// A batch carrying fewer surrogates than documents has no cross-engine
-    /// identity for its rows, so every index would silently omit them. It is
-    /// refused outright rather than stored-and-reported-successful.
-    #[test]
-    fn a_batch_without_a_surrogate_per_row_is_refused_and_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let documents = bodies();
-        let surrogates = vec![Surrogate(31)];
-
-        let task = batch_task(&documents, &surrogates);
-        let resp = core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: COLL,
-                documents: &documents,
-                surrogates: &surrogates,
-                if_absent: false,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &[],
-                deferred_sum_targets: &[],
-            },
-        );
-
-        assert_eq!(resp.status, Status::Error);
-        assert!(
-            stored(&core, Surrogate(31)).is_none(),
-            "a batch with no identity for every row must write no row at all"
-        );
-        assert_eq!(
-            corpus_size(&core),
-            0,
-            "and must leave nothing in the FTS corpus"
-        );
-    }
-
-    // ── The batch insert an `INSERT ... SELECT` page ships must credit its
-    // materialized-sum targets, exactly like every other write path ─────────
-
-    const SUM_SOURCE: &str = "point_txns";
-    const SUM_TARGET: &str = "point_holders";
-    const SUM_A1: &str = "a1";
-    const SUM_T1: Surrogate = Surrogate(4001);
-
-    fn sum_binding() -> nodedb_physical::physical_plan::MaterializedSumBinding {
-        nodedb_physical::physical_plan::MaterializedSumBinding {
-            target_collection: SUM_TARGET.to_string(),
-            target_column: "balance".to_string(),
-            join_column: "account_id".to_string(),
-            value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
-            declared_primary_key: None,
-        }
-    }
-
-    fn sum_config_key(collection: &str) -> (DatabaseId, TenantId, String) {
-        (
-            DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            collection.to_string(),
-        )
-    }
-
-    /// A source collection bound to the sum, and a target row starting at zero.
-    fn sum_seeded_core(dir: &std::path::Path) -> CoreLoop {
-        let (mut core, _req, _resp) = make_core_with_dir(dir);
-
-        let mut source = CollectionConfig::new(SUM_SOURCE);
-        source.enforcement.materialized_sum_sources = vec![sum_binding()];
-        core.doc_configs.insert(sum_config_key(SUM_SOURCE), source);
-        core.doc_configs.insert(
-            sum_config_key(SUM_TARGET),
-            CollectionConfig::new(SUM_TARGET),
-        );
-
-        let seed = serde_json::json!({"id": SUM_A1, "balance": "100"});
-        core.sparse
-            .put(
-                DatabaseId::DEFAULT.as_u64(),
-                TID,
-                SUM_TARGET,
-                &nodedb_types::StorageKey::for_surrogate(SUM_T1),
-                &doc_format::encode_to_msgpack(&seed),
-                core.bitemporal_ordinal(),
-            )
-            .expect("seed target row");
-        core
-    }
-
-    /// A source row body, in the MessagePack every handler receives.
-    fn sum_entry(account: &str, amount: i64) -> Vec<u8> {
-        doc_format::encode_to_msgpack(&serde_json::json!({
-            "account_id": account,
-            "amount": amount,
-        }))
-    }
-
-    /// The balance the target row currently holds.
-    fn sum_balance(core: &CoreLoop, surrogate: Surrogate) -> String {
-        let stored = core
-            .sparse
-            .get(
-                DatabaseId::DEFAULT.as_u64(),
-                TID,
-                SUM_TARGET,
-                &nodedb_types::StorageKey::for_surrogate(surrogate),
-            )
-            .expect("read target row")
-            .expect("target row must still exist");
-        doc_format::decode_document(&stored)
-            .expect("target row must decode")
-            .get("balance")
-            .and_then(|v| v.as_str())
-            .expect("target row must carry a balance")
-            .to_string()
-    }
-
-    /// The orchestrator re-issues the copy through `dispatch_local`, which
-    /// never passes through the statement-level resolution pass — so a page
-    /// shipping an empty resolution would leave the total short of the rows it
-    /// inserted.
-    #[test]
-    fn insert_select_page_credits_its_targets() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut core = sum_seeded_core(dir.path());
-
-        let documents = vec![
-            (
-                StorageKey::for_surrogate(Surrogate(1)).to_string(),
-                sum_entry(SUM_A1, 25),
-            ),
-            (
-                StorageKey::for_surrogate(Surrogate(2)).to_string(),
-                sum_entry(SUM_A1, 75),
-            ),
-        ];
-        let surrogates = vec![Surrogate(1), Surrogate(2)];
-        let resolved = vec![ResolvedSumTarget::new(SUM_TARGET, SUM_A1, SUM_T1)];
-        let task = batch_task(&documents, &surrogates);
-        let response = core.execute_document_batch_insert(
-            &task,
-            DocumentBatchInsertParams {
-                tid: TID,
-                collection: SUM_SOURCE,
-                documents: &documents,
-                surrogates: &surrogates,
-                if_absent: false,
-                returning: None,
-                rls_filters: &[],
-                resolved_sum_targets: &resolved,
-                deferred_sum_targets: &[],
-            },
-        );
-
-        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
-        assert_eq!(sum_balance(&core, SUM_T1), "200");
-    }
-}
+#[path = "batch_insert_tests.rs"]
+mod tests;

@@ -220,17 +220,17 @@ impl ColumnarSegmentReader {
             None => Self::stored_codec(partition_dir, col_name, kek)?,
         };
 
-        let is_fastlanes = matches!(codec, ResolvedColumnCodec::FastLanesLz4);
+        // Fixed-width decimal, UUID and boolean cells are not integer
+        // blocks under any codec: they always decode whole.
+        let is_fastlanes = matches!(codec, ResolvedColumnCodec::FastLanesLz4)
+            && !matches!(
+                col_type,
+                ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool
+            );
 
         if !is_fastlanes || block_indices.is_empty() {
             let data = decode_column(&raw, col_type, codec)?;
-            let total = match &data {
-                ColumnData::Timestamp(v) => v.len(),
-                ColumnData::Float64(v) => v.len(),
-                ColumnData::Int64(v) => v.len(),
-                ColumnData::Symbol(v) => v.len(),
-                ColumnData::DictEncoded { ids, .. } => ids.len(),
-            };
+            let total = data.len();
             return Ok((data, vec![(0, total)]));
         }
 
@@ -291,6 +291,11 @@ impl ColumnarSegmentReader {
             ColumnType::Symbol | ColumnType::Text => {
                 let u32_vals: Vec<u32> = all_values.iter().map(|&v| v as u32).collect();
                 ColumnData::Symbol(u32_vals)
+            }
+            ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => {
+                return Err(SegmentError::Corrupt(format!(
+                    "column '{col_name}' of type {col_type:?} has no integer blocks"
+                )));
             }
         };
 

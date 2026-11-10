@@ -43,6 +43,11 @@ pub enum SqlPlan {
     ConstantResult {
         columns: Vec<String>,
         values: Vec<SqlValue>,
+        /// Per column, the type name its expression casts to when that
+        /// expression is a `CAST`, as the cast spells it; `None` for any
+        /// other expression. A folded `CAST(5 AS SMALLINT)` is the integer
+        /// `5`, and this keeps the `smallint` the column is announced as.
+        cast_types: Vec<Option<String>>,
         /// Whether any projected expression called a `Volatile` function.
         /// The values were evaluated while this plan was built, so a cached
         /// plan would replay them; a volatile plan is never cached.
@@ -94,6 +99,7 @@ pub enum SqlPlan {
     /// UPSERT: insert or merge if document exists.
     Upsert(UpsertPlan),
     InsertSelect {
+        returning: Option<crate::types::ResolvedReturning>,
         target: String,
         /// The planned source SELECT. Its row count is bounded only by its
         /// own LIMIT.
@@ -118,7 +124,7 @@ pub enum SqlPlan {
         assignments: Vec<(String, SqlExpr)>,
         filters: Vec<Filter>,
         target_keys: Vec<SqlValue>,
-        returning: bool,
+        returning: Option<crate::types::ResolvedReturning>,
     },
     /// `UPDATE target SET col = src.col2 FROM src WHERE target.id = src.id`
     ///
@@ -148,9 +154,10 @@ pub enum SqlPlan {
         assignments: Vec<(String, SqlExpr)>,
         /// Filters that apply only to the target collection.
         target_filters: Vec<Filter>,
-        returning: bool,
+        returning: Option<crate::types::ResolvedReturning>,
     },
     Delete {
+        returning: Option<crate::types::ResolvedReturning>,
         collection: String,
         engine: EngineType,
         filters: Vec<Filter>,

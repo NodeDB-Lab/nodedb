@@ -152,7 +152,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             source_join_col,
             source_alias,
             clauses,
-            returning: *returning,
+            returning: returning.as_ref(),
         }),
         SqlPlan::LateralTopK(LateralTopKPlan {
             outer,
@@ -199,6 +199,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             left_join: *left_join,
         }),
         SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan {
+            returning,
             collection,
             field,
             quantization,
@@ -211,6 +212,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             on_conflict_updates,
             primary_key,
         }) => visitor.vector_primary_insert(VectorPrimaryInsertVisitArgs {
+            returning: returning.as_ref(),
             collection,
             field,
             quantization: *quantization,
@@ -222,12 +224,14 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             primary_key: primary_key.as_deref(),
         }),
         SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan {
+            returning,
             collection,
             field,
             filters,
             target_keys,
             primary_key,
         }) => visitor.vector_primary_delete(VectorPrimaryDeleteVisitArgs {
+            returning: returning.as_ref(),
             collection,
             field,
             filters,
@@ -261,7 +265,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             assignments,
             filters,
             target_keys,
-            returning: *returning,
+            returning: returning.as_ref(),
             primary_key: primary_key.as_deref(),
         }),
         SqlPlan::CreateIndex(CreateIndexPlan {

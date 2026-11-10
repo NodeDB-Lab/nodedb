@@ -13,6 +13,7 @@ use nodedb_query::simd_filter;
 use super::super::columnar_memtable::{ColumnData, ColumnarMemtable};
 use super::super::columnar_segment::ColumnarSegmentReader;
 use super::super::grouped_filter::{self, UnsupportedPredicate};
+use super::exact_keys::{intern_exact_group_columns, point_group_columns_at_codes};
 use super::strategies::dispatch_grouping;
 use super::types::{GroupedAggResult, resolve_schema};
 use crate::bridge::envelope::Priority;
@@ -52,7 +53,7 @@ pub fn aggregate_memtable(
         return Ok(None);
     };
 
-    let col_refs: Vec<Option<&ColumnData>> = (0..schema.columns.len())
+    let mut col_refs: Vec<Option<&ColumnData>> = (0..schema.columns.len())
         .map(|i| Some(mt.column(i)))
         .collect();
     let sym_lookup = |col_idx: usize| mt.symbol_dict(col_idx);
@@ -86,6 +87,10 @@ pub fn aggregate_memtable(
     } else {
         None
     };
+
+    let mut resolved = resolved;
+    let codes = intern_exact_group_columns(&mut resolved, &col_refs);
+    point_group_columns_at_codes(&mut resolved, &mut col_refs, &codes);
 
     Ok(Some(dispatch_grouping(
         super::strategies::GroupedScanInputs {
@@ -192,15 +197,7 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
     let effective_row_count = if use_block_read {
         col_data
             .iter()
-            .find_map(|c| {
-                c.as_ref().map(|d| match d {
-                    ColumnData::Timestamp(v) => v.len(),
-                    ColumnData::Float64(v) => v.len(),
-                    ColumnData::Int64(v) => v.len(),
-                    ColumnData::Symbol(v) => v.len(),
-                    ColumnData::DictEncoded { ids, .. } => ids.len(),
-                })
-            })
+            .find_map(|c| c.as_ref().map(ColumnData::len))
             .unwrap_or(0)
     } else {
         row_count
@@ -289,7 +286,10 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
         return Ok(Some(GroupedAggResult::new(num_aggs)));
     }
 
-    let col_refs: Vec<Option<&ColumnData>> = col_data.iter().map(|c| c.as_ref()).collect();
+    let mut resolved = resolved;
+    let mut col_refs: Vec<Option<&ColumnData>> = col_data.iter().map(|c| c.as_ref()).collect();
+    let codes = intern_exact_group_columns(&mut resolved, &col_refs);
+    point_group_columns_at_codes(&mut resolved, &mut col_refs, &codes);
     let sym_lookup = |col_idx: usize| -> Option<&nodedb_types::timeseries::SymbolDictionary> {
         sym_dicts.get(&col_idx)
     };

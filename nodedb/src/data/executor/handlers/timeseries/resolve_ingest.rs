@@ -134,6 +134,16 @@ impl CoreLoop {
         ) {
             return self.response_error(task, error);
         }
+        // A value a declared DECIMAL, UUID or BOOLEAN column does not take
+        // refuses the statement before any row is resolved.
+        if let Err(error) = self.admit_declared_ts_values(
+            task.request.database_id,
+            tid,
+            collection.as_str(),
+            parsed.lines(),
+        ) {
+            return self.response_error(task, error);
+        }
 
         // The rows the lines store. The writer's install stores exactly these
         // rows, or refuses when a concurrent write changed the schema.
@@ -205,7 +215,8 @@ impl CoreLoop {
             now_ms,
         } = ingest;
         let time_key = self.declared_ts_time_key(database_id, tid, collection);
-        let batch = Self::normalized_ilp_batch(collection, payload, format, time_key)?;
+        let exact = self.declared_ts_exact_columns(database_id, tid, collection);
+        let batch = Self::normalized_ilp_batch(collection, payload, format, time_key, &exact)?;
         let lines = normalize::stamp_timestamps(&batch, now_ms).map_err(|error| {
             ErrorCode::RejectedPrevalidation {
                 reason: format!("timeseries resolve: unparsable line protocol: {error}"),
@@ -219,6 +230,32 @@ impl CoreLoop {
         Ok(lines)
     }
 
+    /// Refuse `payload`, normalized as the ingest normalizes it, when a row
+    /// carries a value its declared DECIMAL, UUID or BOOLEAN column does not
+    /// take ([`Self::admit_declared_ts_values`]).
+    pub(in crate::data::executor) fn admit_declared_ts_payload(
+        &self,
+        database_id: crate::types::DatabaseId,
+        tid: crate::types::TenantId,
+        collection: &str,
+        payload: &[u8],
+        format: &str,
+    ) -> crate::Result<()> {
+        let exact = self.declared_ts_exact_columns(database_id, tid, collection);
+        if exact.is_empty() {
+            return Ok(());
+        }
+        let time_key = self.declared_ts_time_key(database_id, tid, collection);
+        let batch = Self::normalized_ilp_batch(collection, payload, format, time_key, &exact)
+            .map_err(crate::Error::DataPlane)?;
+        let parsed = crate::engine::timeseries::ilp::parse_batch(&batch).map_err(|error| {
+            crate::Error::DataPlane(ErrorCode::RejectedPrevalidation {
+                reason: format!("timeseries ingest: unparsable line protocol: {error}"),
+            })
+        })?;
+        self.admit_declared_ts_values(database_id, tid, collection, parsed.lines())
+    }
+
     /// Rewrite `payload` into line protocol, mirroring the ingest handler's
     /// format dispatch so the lines returned are what ingest would parse.
     fn normalized_ilp_batch(
@@ -226,6 +263,7 @@ impl CoreLoop {
         payload: &[u8],
         format: &str,
         time_key: Option<&str>,
+        exact: &normalize::ExactColumns,
     ) -> Result<String, ErrorCode> {
         let measurement = measurement_of(collection);
         match format {
@@ -251,11 +289,11 @@ impl CoreLoop {
                             reason: format!("timeseries resolve: msgpack decode error: {error}"),
                         }
                     })?;
-                normalize::msgpack_rows_to_ilp(&rows, measurement, time_key).map_err(|error| {
-                    ErrorCode::RejectedPrevalidation {
+                normalize::msgpack_rows_to_ilp(&rows, measurement, time_key, exact).map_err(
+                    |error| ErrorCode::RejectedPrevalidation {
                         reason: format!("timeseries resolve: {error}"),
-                    }
-                })
+                    },
+                )
             }
             "json" => {
                 let rows: sonic_rs::Array = sonic_rs::from_slice(payload).map_err(|error| {
@@ -263,7 +301,7 @@ impl CoreLoop {
                         reason: format!("timeseries resolve: JSON parse error: {error}"),
                     }
                 })?;
-                normalize::json_rows_to_ilp(&rows, measurement, time_key).map_err(|error| {
+                normalize::json_rows_to_ilp(&rows, measurement, time_key, exact).map_err(|error| {
                     ErrorCode::RejectedPrevalidation {
                         reason: format!("timeseries resolve: {error}"),
                     }

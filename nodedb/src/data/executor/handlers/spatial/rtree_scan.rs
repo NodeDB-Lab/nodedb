@@ -168,7 +168,7 @@ impl CoreLoop {
         let rtree = match self.spatial_indexes.get(&spatial_key) {
             Some(rt) => rt,
             None => {
-                return match response_codec::encode_value_vec(&[]) {
+                return match response_codec::encode_native_rows(&[]) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
                 };
@@ -306,7 +306,7 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        match response_codec::encode_value_vec(&hit_rows(results)) {
+        match response_codec::encode_native_rows(&hit_rows(results)) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),
         }

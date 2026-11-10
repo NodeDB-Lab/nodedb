@@ -105,7 +105,7 @@ pub(in crate::control::planner) async fn recon_scan_rows(
         execute_read(state, tenant_id, database_id, txn_id, collection, scan_plan).await?;
     let mut rows = Vec::new();
     for payload in &payloads {
-        rows.extend(decode_rows(payload.as_slice()));
+        rows.extend(decode_rows(payload.as_slice())?);
     }
     Ok(rows)
 }
@@ -161,7 +161,9 @@ pub(crate) async fn recon_point_row(
     Ok(payloads
         .iter()
         .find(|payload| !payload.is_empty())
-        .and_then(|payload| nodedb_types::json_from_msgpack(payload.as_slice()).ok()))
+        .and_then(|payload| {
+            crate::data::executor::response_codec::decode_body_plain_json(payload.as_slice()).ok()
+        }))
 }
 
 /// Run one read plan through the gateway, returning the raw payloads.
@@ -200,17 +202,22 @@ async fn execute_read(
     Ok(outcome.payloads)
 }
 
-/// Decode a document-scan payload into one document per row.
+/// Decode a `DocumentOp::Scan` payload into one document per row.
 ///
-/// `decode_raw_scan_to_docs` is the shared reader for BOTH shapes a document
-/// scan can come back in — the `{id, data}` raw-passthrough wrapper and the
-/// plain per-row map — so the shape is not re-guessed here. A row body that will
-/// not decode carries no readable column, so it contributes no join value; it is
-/// left to the write path, which fails on the same body rather than silently
-/// mis-accounting it.
-fn decode_rows(payload: &[u8]) -> Vec<serde_json::Value> {
-    crate::data::executor::response_codec::decode_raw_scan_to_docs(payload)
-        .into_iter()
-        .filter_map(|(_, body)| nodedb_types::json_from_msgpack(&body).ok())
-        .collect()
+/// The scan answers `{id, data}` envelopes, so each row's body is its `data`.
+/// A payload in no row shape is an error. A row body that will not decode
+/// carries no readable column, so it contributes no join value; it is left to
+/// the write path, which fails on the same body rather than silently
+/// mis-accounting it. A native body reads as the plain body of the same
+/// values.
+fn decode_rows(payload: &[u8]) -> crate::Result<Vec<serde_json::Value>> {
+    Ok(crate::data::executor::response_codec::scan_rows_in_context(
+        payload,
+        crate::data::executor::response_codec::RowContext::ScanEnvelope,
+    )?
+    .into_iter()
+    .filter_map(|(_, body)| {
+        crate::data::executor::response_codec::decode_body_plain_json(&body).ok()
+    })
+    .collect())
 }

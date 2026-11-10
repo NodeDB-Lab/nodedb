@@ -252,6 +252,15 @@ pub enum DataPlaneErrorCode {
         core_id: u64,
         detail: String,
     },
+    /// `ln` or `log` of zero or a negative number (SQLSTATE `2201E`).
+    InvalidArgumentForLogarithm {
+        detail: String,
+    },
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number (SQLSTATE `2201F`).
+    InvalidArgumentForPowerFunction {
+        detail: String,
+    },
 }
 
 /// Wire mirror of `nodedb_types::text_search::TextColumnFault`.

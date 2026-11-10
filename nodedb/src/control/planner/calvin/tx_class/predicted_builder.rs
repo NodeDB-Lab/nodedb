@@ -309,6 +309,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             post_set_op: nodedb_physical::physical_task::PostSetOp::None,
             txn_id: None,

@@ -117,6 +117,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -127,6 +128,7 @@ mod tests {
                 returning: spec(),
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::BatchInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -137,6 +139,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::Upsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -313,7 +316,7 @@ mod tests {
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
             document_id: "d1".into(),
-            fields_json: "{}".into(),
+            fields: Vec::new(),
             surrogate: nodedb_types::Surrogate::new(1),
             partial: matches!(verb, CrdtWriteVerb::Update),
             verb,

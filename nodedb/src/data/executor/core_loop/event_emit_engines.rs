@@ -60,8 +60,21 @@ impl CoreLoop {
             old_stored,
         } = event;
         let key_str = String::from_utf8_lossy(key);
-        let new_row = new_stored.map(|body| msgpack_scan::kv_row_msgpack(&key_str, body));
-        let old_row = old_stored.map(|body| msgpack_scan::kv_row_msgpack(&key_str, body));
+        // A stored body whose row image does not encode leaves its slot
+        // empty, and the event names the fault so delivery dead-letters it.
+        let image = |body: &[u8]| match msgpack_scan::kv_row_msgpack(&key_str, body) {
+            Ok(row) => Some(row),
+            Err(e) => {
+                tracing::warn!(collection, error = %e, "KV row image does not encode");
+                None
+            }
+        };
+        let new_row = new_stored.and_then(image);
+        let old_row = old_stored.and_then(image);
+        let image_fault = crate::event::image_fault::ImageFault::of(
+            new_stored.is_some() && new_row.is_none(),
+            old_stored.is_some() && old_row.is_none(),
+        );
         let identity = crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref());
         self.emit_event_with_row_id_as(
             task,
@@ -72,7 +85,7 @@ impl CoreLoop {
                 row_id: crate::event::types::RowId::row(identity),
                 new_value: new_row.as_deref(),
                 old_value: old_row.as_deref(),
-                image_fault: None,
+                image_fault,
             },
         );
     }

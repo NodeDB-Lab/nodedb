@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn number_cells_render_via_to_string() {
+    async fn number_cells_render_as_postgres_text() {
         let shaped = make_shaped(
             &["a"],
             vec![
@@ -244,7 +244,7 @@ mod tests {
         let (response, _notice) = shaped_query_response(shaped, &Format::UnifiedText);
         let rows = drain(query_of(response)).await;
         assert_eq!(field_text(&rows[0], 0).as_deref(), Some("42"));
-        assert_eq!(field_text(&rows[1], 0).as_deref(), Some("0.0"));
+        assert_eq!(field_text(&rows[1], 0).as_deref(), Some("0"));
     }
 
     #[tokio::test]
