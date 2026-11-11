@@ -150,7 +150,7 @@ async fn query_at_consistency(
         trace_id: crate::types::TraceId::ZERO,
     })
     .await
-    .map_err(ApiError::from)?;
+    .map_err(|error| ApiError::from_request(error, sql))?;
     let tasks = admission.tasks;
     let output_schema = admission.output_schema;
     let output_schemas = admission.output_schemas;
@@ -194,7 +194,7 @@ async fn query_at_consistency(
         },
     )
     .await
-    .map_err(ApiError::from)?;
+    .map_err(|error| ApiError::from_request(error, sql))?;
     let AtomicStatement {
         tasks,
         statement_map,
@@ -221,6 +221,7 @@ async fn query_at_consistency(
             output_schema,
             output_schemas: &output_schemas,
             statement_map,
+            sql,
             database_id,
             tenant_id,
             trace_id,

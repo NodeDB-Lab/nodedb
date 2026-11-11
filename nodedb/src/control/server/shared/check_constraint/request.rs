@@ -13,7 +13,9 @@ use nodedb_types::{DatabaseId, starts_with_ascii_case_insensitive};
 
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::ddl::DdlError;
 use crate::control::server::shared::sql_split::split_sql_statements;
+use crate::control::server::shared::statement_exec::RequestError;
 use crate::control::state::SharedState;
 use crate::types::{TenantId, TxnId};
 
@@ -35,9 +37,20 @@ pub struct RequestChecks<'a> {
 ///
 /// The first violation refuses the request. A statement that is neither an
 /// INSERT, an UPSERT nor an UPDATE passes.
-pub async fn enforce_request_checks(checks: &RequestChecks<'_>, sql: &str) -> crate::Result<()> {
-    for statement in split_sql_statements(sql) {
-        let text = preprocessed(&statement);
+///
+/// A CHECK or enum-label error of statement `k` in a request of several
+/// statements carries `k`.
+pub async fn enforce_request_checks(
+    checks: &RequestChecks<'_>,
+    sql: &str,
+) -> Result<(), RequestError> {
+    let statements = split_sql_statements(sql);
+    let count = statements.len();
+    for (index, statement) in statements.iter().enumerate() {
+        // Both checks answer a `DdlError`. It converts as it does alone.
+        let in_statement =
+            |error: DdlError| RequestError::in_statement(crate::Error::from(error), index, count);
+        let text = preprocessed(statement);
         enforce_statement_checks(
             checks.state,
             checks.identity,
@@ -47,8 +60,10 @@ pub async fn enforce_request_checks(checks: &RequestChecks<'_>, sql: &str) -> cr
             checks.txn_id,
             &text,
         )
-        .await?;
-        enforce_statement_enum_labels(checks.state, checks.tenant_id, checks.database_id, &text)?;
+        .await
+        .map_err(in_statement)?;
+        enforce_statement_enum_labels(checks.state, checks.tenant_id, checks.database_id, &text)
+            .map_err(in_statement)?;
     }
     Ok(())
 }

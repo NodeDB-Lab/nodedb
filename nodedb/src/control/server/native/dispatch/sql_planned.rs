@@ -107,7 +107,9 @@ pub(super) async fn execute_planned(
     .await
     {
         Ok(admission) => admission,
-        Err(error) => return resp(error_to_native(seq, &error)),
+        // A plan, CHECK or enum-label error of a request of several
+        // statements names its statement in the message prefix.
+        Err(error) => return resp(statement_error_to_native(seq, error.into())),
     };
 
     let several_statements = admission.holds_several_statements();

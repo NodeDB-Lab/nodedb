@@ -32,7 +32,7 @@ use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
 use crate::control::server::shared::plan_admission_request::{PlannedRequest, RequestText};
 use crate::control::server::shared::retry::retry_on_schema_change;
-use crate::control::server::shared::statement_exec::StatementMap;
+use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -98,9 +98,12 @@ pub struct PlanAdmissionRequest<'a> {
 /// For a transport with no transaction block: every derived read sees
 /// committed base only. A session transport uses
 /// [`plan_authorize_and_admit_in_txn`].
+///
+/// A plan, CHECK or enum-label error of statement `k` in a request of
+/// several statements carries `k`. Every other error carries no statement.
 pub async fn plan_authorize_and_admit(
     request: PlanAdmissionRequest<'_>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
     plan_authorize_and_admit_in_txn(request, None).await
 }
 
@@ -114,7 +117,7 @@ pub async fn plan_authorize_and_admit(
 pub async fn plan_authorize_and_admit_in_txn(
     request: PlanAdmissionRequest<'_>,
     read_txn: Option<crate::types::TxnId>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
     // CHECK constraints and enum labels of every statement, before planning.
     // pgwire checks per statement in its own route and does not come here.
     enforce_request_checks(
@@ -141,7 +144,7 @@ pub async fn plan_authorize_and_admit_in_txn(
 async fn plan_authorize_and_admit_once(
     request: &PlanAdmissionRequest<'_>,
     read_txn: Option<crate::types::TxnId>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
     let state = request.state;
     let query_ctx = request.query_ctx;
     let identity = request.scope.identity();
@@ -183,7 +186,8 @@ async fn plan_authorize_and_admit_once(
     // Implicit-edge extraction marks catalog state and allocates surrogates, so
     // the originally planned tasks must clear authorization before it runs.
     let _preauthorized_tasks =
-        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
+        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)
+            .map_err(crate::Error::from)?;
 
     let mut parents = Vec::new();
     let sum_target_reads = append_derived_tasks_traced(
@@ -203,7 +207,8 @@ async fn plan_authorize_and_admit_once(
     // descriptor lease is acquired. The caller re-derives the capability per
     // task through the clone-check gate, immediately before each dispatch.
     let _authorized_tasks =
-        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
+        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)
+            .map_err(crate::Error::from)?;
 
     // Admission follows authorization so a denied statement never consumes a
     // descriptor lease.

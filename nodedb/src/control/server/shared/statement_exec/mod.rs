@@ -21,6 +21,7 @@ pub(crate) use edge_recon::{
     EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 pub(crate) use error::StatementError;
+pub use error::{RequestError, StatementAt};
 pub(crate) use route_decision::{
     AutocommitRoute, ImplicitTxnRoute, autocommit_route, implicit_txn_route,
 };

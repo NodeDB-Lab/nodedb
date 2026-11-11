@@ -10,7 +10,7 @@ use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 use nodedb_types::{CollectionKey, DatabaseId, TenantId};
 
 use super::plan_admission::{PlanAdmission, PlanAdmissionRequest, plan_authorize_and_admit};
-use super::statement_exec::StatementMap;
+use super::statement_exec::{RequestError, StatementAt, StatementMap};
 use crate::control::cluster::test_one_node::{OneNodeCluster, boot};
 use crate::control::planner::context::QueryContext;
 use crate::control::security::catalog::MaterializedSumDef;
@@ -74,6 +74,13 @@ async fn strict_cluster() -> OneNodeCluster {
 }
 
 async fn admit(cluster: &OneNodeCluster, sql: &str) -> crate::Result<PlanAdmission> {
+    admit_located(cluster, sql)
+        .await
+        .map_err(RequestError::into_inner)
+}
+
+/// [`admit`] with the statement an error names.
+async fn admit_located(cluster: &OneNodeCluster, sql: &str) -> Result<PlanAdmission, RequestError> {
     let identity = identity();
     let scope = RequestAuthScope::for_database(&identity, cluster.state.auth_stores(), DB)?;
     let query_ctx = QueryContext::for_state(&cluster.state);
@@ -166,6 +173,31 @@ async fn ddl_beside_dml_is_refused_with_0a000() {
 
     let (_, sqlstate, message) = error_to_sqlstate(&error);
     assert_eq!(sqlstate, "0A000", "{message}");
+    cluster.shutdown().await;
+}
+
+/// A plan error of the second statement names it. The same error alone
+/// names no statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plan_error_of_the_second_statement_names_it() {
+    let cluster = strict_cluster().await;
+    let bad = "INSERT INTO adm_missing (id, val) VALUES ('m1', 1)";
+
+    let error = admit_located(
+        &cluster,
+        &format!("INSERT INTO adm_a (id, val) VALUES ('a1', 1); {bad}"),
+    )
+    .await
+    .err()
+    .expect("the second statement must not plan");
+    assert_eq!(error.at, StatementAt::of(1, 2), "{error}");
+
+    let alone = admit_located(&cluster, bad)
+        .await
+        .err()
+        .expect("the statement alone must not plan");
+    assert_eq!(alone.at, None, "{alone}");
+    assert_eq!(alone.to_string(), error.to_string());
     cluster.shutdown().await;
 }
 

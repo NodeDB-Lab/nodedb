@@ -5,10 +5,14 @@
 //! Every NDJSON error line is `{"error": "...", "code": "NDB-<n>"}` plus a
 //! newline. The code is the public error code an HTTP JSON error body
 //! carries, so a client tells error classes apart without parsing the text.
+//! The error of statement `k` of a request also carries `sqlstate`,
+//! `statement` and `position`.
 
 use nodedb_types::NodeDbError;
 
 use crate::control::gateway::GatewayErrorMap;
+use crate::control::server::pgwire::types::error_to_sqlstate;
+use crate::control::server::shared::statement_exec::StatementAt;
 
 /// The error object for `e`: the gateway message and the public code.
 pub(super) fn error_value(e: &crate::Error) -> serde_json::Value {
@@ -19,6 +23,35 @@ pub(super) fn error_value(e: &crate::Error) -> serde_json::Value {
 /// The NDJSON error line for `e`.
 pub(super) fn error_line(e: &crate::Error) -> String {
     line(error_value(e))
+}
+
+/// The error object for `e`, raised by statement `at` of the request text
+/// `sql`.
+///
+/// An error with no statement answers [`error_value`]. An error with a
+/// statement also answers `sqlstate`, `statement` (1-based) and `position`.
+/// `position` is the 1-based character offset where the statement starts.
+pub(super) fn statement_error_value(
+    e: &crate::Error,
+    at: Option<StatementAt>,
+    sql: &str,
+) -> serde_json::Value {
+    let mut value = error_value(e);
+    let Some(at) = at else {
+        return value;
+    };
+    if let Some(object) = value.as_object_mut() {
+        let (_severity, sqlstate, _message) = error_to_sqlstate(e);
+        object.insert("sqlstate".to_owned(), sqlstate.into());
+        object.insert("statement".to_owned(), at.number().into());
+        object.insert("position".to_owned(), at.position(sql).into());
+    }
+    value
+}
+
+/// [`statement_error_value`] as one NDJSON line.
+pub(super) fn statement_error_line(e: &crate::Error, at: Option<StatementAt>, sql: &str) -> String {
+    line(statement_error_value(e, at, sql))
 }
 
 /// The NDJSON error line for `e`, with `context` before its message. The
@@ -100,6 +133,29 @@ mod tests {
             "column \"ts\" holds an integer where a timestamp is required",
         )));
         assert_eq!(value["code"], "NDB-1208");
+    }
+
+    #[test]
+    fn an_error_of_the_second_statement_answers_its_sqlstate_and_statement() {
+        let value = parse(&statement_error_line(
+            &dispatch_error(),
+            StatementAt::of(1, 2),
+            "SELECT 1; SELECT 2",
+        ));
+        assert_eq!(value["code"], "NDB-9002", "{value}");
+        assert_eq!(
+            value["sqlstate"],
+            error_to_sqlstate(&dispatch_error()).1,
+            "{value}"
+        );
+        assert_eq!(value["statement"], 2, "{value}");
+        assert_eq!(value["position"], 11, "{value}");
+    }
+
+    #[test]
+    fn an_error_with_no_statement_answers_the_error_value() {
+        let value = statement_error_value(&dispatch_error(), None, "SELECT 1");
+        assert_eq!(value, error_value(&dispatch_error()));
     }
 
     #[test]

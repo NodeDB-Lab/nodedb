@@ -18,7 +18,7 @@ use crate::control::server::shared::plan_admission::{
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::statement_exec::{
-    AtomicStatement, StatementExec, authorize_one_task,
+    AtomicStatement, RequestError, StatementExec, authorize_one_task,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
@@ -31,6 +31,9 @@ use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 /// A Control-Plane orchestrated task (array DDL, a cluster array op,
 /// `INSERT ... SELECT`) runs here. Every other task routes through the
 /// gateway.
+///
+/// An error of a request of several statements carries the statement it
+/// stopped, when one statement raised it.
 pub async fn execute_sql(
     shared: &Arc<SharedState>,
     query_ctx: &crate::control::planner::context::QueryContext,
@@ -39,10 +42,10 @@ pub async fn execute_sql(
     sql: &str,
     trace_id: TraceId,
     peer_addr: &str,
-) -> crate::Result<serde_json::Value> {
+) -> Result<serde_json::Value, RequestError> {
     let tenant_id = identity.tenant_id;
     let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
-    authorize_database(identity, database_id, &emitter)?;
+    authorize_database(identity, database_id, &emitter).map_err(crate::Error::from)?;
     // The statement's DDL proposals carry its text. Array DDL is the DDL this route runs.
     let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
         identity,
@@ -110,7 +113,10 @@ pub async fn execute_sql(
         .await?
     };
     let AtomicStatement {
-        tasks, lease_scope, ..
+        tasks,
+        statement_map,
+        lease_scope,
+        ..
     } = match routed {
         RoutedStatement::Answered(rows) => return Ok(rows_result(rows)),
         RoutedStatement::PerTask(statement) => statement,
@@ -120,6 +126,8 @@ pub async fn execute_sql(
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
+    // The task the body runs. An error of the body names that task's statement.
+    let mut current = 0usize;
     let body = async {
         let _request = shared.tenant_request_guard(tenant_id);
 
@@ -135,7 +143,8 @@ pub async fn execute_sql(
         // Checked once, not per task: keeps per-task extraction a no-op when metering
         // is disabled (the default).
         let metering_enabled = shared.metering_config.enabled;
-        for task in tasks {
+        for (index, task) in tasks.into_iter().enumerate() {
+            current = index;
             // Extracted before `task.plan` is cloned/moved; `results.len()` gives this
             // task's row-count baseline for the delta metered below.
             let plan_metering_info =
@@ -372,17 +381,20 @@ pub async fn execute_sql(
             meter_task(shared, &scope, &plan_metering_info, rows_before, &results);
         }
 
-        Ok(rows_result(results))
+        Ok::<_, crate::Error>(rows_result(results))
     };
-    if read_only {
+    let ran = if read_only {
         lease_scope.guard(body).await?
     } else {
-        let answer = body.await?;
-        if let Some(database) = sync_database {
-            crate::control::mirror::source::sync::await_mirror_sync(shared, database).await?;
-        }
-        Ok(answer)
+        body.await
+    };
+    let answer = ran.map_err(|error| {
+        RequestError::in_task(error, &statement_map, current, output_schemas.len())
+    })?;
+    if !read_only && let Some(database) = sync_database {
+        crate::control::mirror::source::sync::await_mirror_sync(shared, database).await?;
     }
+    Ok(answer)
 }
 
 /// The RPC result for a statement's JSON rows: `null` for none, the row

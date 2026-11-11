@@ -18,13 +18,13 @@ use crate::control::server::shared::plan_admission::{
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::{read_consistency, read_scope};
-use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
+use crate::control::server::shared::statement_exec::{AtomicStatement, StatementAt, StatementExec};
 
 use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve_auth_parts};
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
-use super::super::ndjson_error::error_line;
+use super::super::ndjson_error::{error_line, statement_error_line};
 use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
 use super::ndjson_response::{
@@ -139,7 +139,7 @@ async fn ndjson_at_consistency(
     .await
     {
         Ok(admission) => admission,
-        Err(error) => return ApiError::from(error).into_response(),
+        Err(error) => return ApiError::from_request(error, &body.sql).into_response(),
     };
     let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
@@ -186,7 +186,8 @@ async fn ndjson_at_consistency(
         // stopped in the loop below does.
         Err(error) => {
             state.shared.database_metrics.record_error(database_id);
-            return ndjson_response(error_line(&error), rate_limit_headers);
+            let line = statement_error_line(&error.error, error.at, &body.sql);
+            return ndjson_response(line, rate_limit_headers);
         }
     };
     let mut lease_scope = Some(lease_scope);
@@ -355,7 +356,8 @@ async fn ndjson_at_consistency(
                 }
             }
             Err(e) => {
-                ndjson.push_str(&error_line(&e));
+                let at = StatementAt::of_task(&statement_map, index, output_schemas.len());
+                ndjson.push_str(&statement_error_line(&e, at, &body.sql));
                 failed = true;
             }
         }

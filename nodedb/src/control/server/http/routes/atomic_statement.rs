@@ -14,7 +14,7 @@ use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::types::FoldedTag;
 use crate::control::server::shared::session::DetachedTxnScope;
 use crate::control::server::shared::statement_exec::{
-    AtomicRoute, AtomicStatement, StatementAnswer, StatementExec, calvin_answer,
+    AtomicRoute, AtomicStatement, RequestError, StatementAnswer, StatementExec, calvin_answer,
     route_atomic_statement,
 };
 
@@ -30,11 +30,12 @@ pub(super) enum RoutedStatement {
 ///
 /// These routes carry no session: no transaction block is open, and the
 /// cross-shard mode is the default, `Strict`. An implicit transaction runs
-/// on a private session of its own.
+/// on a private session of its own. An error carries the statement it
+/// stopped.
 pub(super) async fn route_http_statement(
     exec: &StatementExec<'_>,
     statement: AtomicStatement,
-) -> crate::Result<RoutedStatement> {
+) -> Result<RoutedStatement, RequestError> {
     let detached = DetachedTxnScope::new();
     let session = detached.ctx();
     let sync_database = sync_database_of(exec.state, &statement.tasks);
@@ -44,7 +45,7 @@ pub(super) async fn route_http_statement(
         Ok(AtomicRoute::PerTask(statement)) => return Ok(RoutedStatement::PerTask(statement)),
         Err(error) => Err(error),
     };
-    let answer = answer.map_err(|error| error.into_error(exec.tenant_id()))?;
+    let answer = answer.map_err(|error| error.into_request_error(exec.tenant_id()))?;
     if let Some(database) = sync_database {
         await_mirror_sync(exec.state, database).await?;
     }

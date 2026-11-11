@@ -15,7 +15,7 @@ use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::returning::strip_returning;
 use crate::control::server::shared::sql_split::split_sql_statements;
-use crate::control::server::shared::statement_exec::StatementMap;
+use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 use crate::types::{DatabaseId, TenantId};
 
 /// The planned task set of one request, before authorization.
@@ -63,14 +63,15 @@ impl RequestText {
         })
     }
 
-    /// Plan the request against the committed catalog.
+    /// Plan the request against the committed catalog. A plan error of a
+    /// request of several statements carries its statement.
     pub(super) async fn plan(
         self,
         query_ctx: &QueryContext,
         tenant_id: TenantId,
         database_id: DatabaseId,
         security: &PlanSecurityContext<'_>,
-    ) -> crate::Result<PlannedRequest> {
+    ) -> Result<PlannedRequest, RequestError> {
         match self {
             Self::Whole {
                 sql,

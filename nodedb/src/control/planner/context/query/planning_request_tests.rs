@@ -23,7 +23,7 @@ use crate::control::server::response_shape::types::{PlanKind, describe_plan};
 use crate::control::server::shared::ddl::neutral::collection::create::handler::create_collection;
 use crate::control::server::shared::ddl::neutral::collection::create::request::CreateCollectionRequest;
 use crate::control::server::shared::returning::strip_returning;
-use crate::control::server::shared::statement_exec::StatementMap;
+use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 use crate::control::state::SharedState;
 
 fn request(statements: &[&str]) -> Vec<String> {
@@ -267,6 +267,7 @@ async fn plan_request(
         &security.context(state),
     )
     .await
+    .map_err(RequestError::into_inner)
 }
 
 /// The single-text path: strip the clause off the whole text, then plan it.

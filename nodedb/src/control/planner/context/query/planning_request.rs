@@ -16,7 +16,7 @@ use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::ddl::neutral::router;
 use crate::control::server::shared::returning::strip_returning;
-use crate::control::server::shared::statement_exec::StatementMap;
+use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 
 /// The joined plan of every statement of one request.
 #[derive(Debug)]
@@ -52,14 +52,18 @@ impl QueryContext {
     /// the same refusal: `plan_sql` skips the router's own steps. A request
     /// of one statement is never refused here. A request of no statement
     /// plans no task.
+    ///
+    /// A plan error of statement `k` in a request of several statements
+    /// carries `k`.
     pub async fn plan_request_with_rls_and_versions(
         &self,
         statements: &[String],
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-    ) -> crate::Result<RequestPlan> {
+    ) -> Result<RequestPlan, RequestError> {
         refuse_solo_statements(statements)?;
+        let count = statements.len();
         let mut tasks = Vec::new();
         let mut statement_map = StatementMap::default();
         let mut output_schemas = Vec::with_capacity(statements.len());
@@ -67,9 +71,11 @@ impl QueryContext {
         let mut cache_eligibility = PlanCacheEligibility::Cacheable;
         for (index, statement) in statements.iter().enumerate() {
             let map_index = statement_index(index)?;
+            let in_statement =
+                |error: crate::Error| RequestError::in_statement(error, index, count);
             // Split off this statement alone. A clause split off the joined
             // text swallows every later statement into its item list.
-            let (sql, returning_items) = strip_returning(statement)?;
+            let (sql, returning_items) = strip_returning(statement).map_err(in_statement)?;
             let (statement_tasks, output_schema, statement_versions, eligibility) = self
                 .plan_sql_with_rls_and_versions(
                     &sql,
@@ -78,7 +84,8 @@ impl QueryContext {
                     sec,
                     returning_items.as_deref(),
                 )
-                .await?;
+                .await
+                .map_err(in_statement)?;
             for _ in 0..statement_tasks.len() {
                 statement_map.push(map_index);
             }

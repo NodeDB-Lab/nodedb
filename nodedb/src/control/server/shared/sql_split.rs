@@ -14,8 +14,31 @@
 /// query message (e.g. heredoc input), ensuring `parts[2]` in DDL handlers
 /// never contains a trailing semicolon.
 pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
+    split_with_starts(sql)
+        .into_iter()
+        .map(|(_, statement)| statement)
+        .collect()
+}
+
+/// The 1-based character offset in `sql` where statement `statement` starts.
+///
+/// `statement` is 0-based, in [`split_sql_statements`] order. A statement
+/// starts at its first character that is not whitespace. A leading comment
+/// belongs to the statement. `None` when `sql` holds fewer statements.
+pub(crate) fn statement_position(sql: &str, statement: usize) -> Option<usize> {
+    let (start, _) = split_with_starts(sql).into_iter().nth(statement)?;
+    sql.get(..start).map(|prefix| prefix.chars().count() + 1)
+}
+
+/// [`split_sql_statements`] with the byte offset in `sql` where each
+/// trimmed statement starts.
+///
+/// `current` holds every byte of `sql` from `current_start` up to the
+/// splitting semicolon. So the next statement begins one byte past it.
+fn split_with_starts(sql: &str) -> Vec<(usize, String)> {
     let mut stmts = Vec::new();
     let mut current = String::new();
+    let mut current_start = 0usize;
     let mut chars = sql.chars().peekable();
     let mut in_single_quote = false;
     let mut in_escape_string = false;
@@ -203,10 +226,8 @@ pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
                 if in_procedural_body && !saw_outer_end {
                     current.push(ch);
                 } else {
-                    let trimmed = current.trim().to_string();
-                    if !trimmed.is_empty() {
-                        stmts.push(trimmed);
-                    }
+                    push_trimmed(&mut stmts, current_start, &current);
+                    current_start += current.len() + ch.len_utf8();
                     current.clear();
                     in_procedural_body = false;
                     saw_outer_end = false;
@@ -237,11 +258,20 @@ pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
         &mut saw_outer_end,
     );
     // Trailing statement without a semicolon.
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        stmts.push(trimmed);
-    }
+    push_trimmed(&mut stmts, current_start, &current);
     stmts
+}
+
+/// Push `current` trimmed, with the byte offset of its first character that
+/// is not whitespace. `start` is the offset of `current` in the request text.
+/// An empty statement is discarded.
+fn push_trimmed(stmts: &mut Vec<(usize, String)>, start: usize, current: &str) {
+    let trimmed = current.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let leading = current.len() - current.trim_start().len();
+    stmts.push((start + leading, trimmed.to_string()));
 }
 
 /// The tag of a dollar quote delimiter. `rest` starts just after a `$`.
@@ -269,7 +299,29 @@ pub(crate) fn holds_several_statements(sql: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{holds_several_statements, split_sql_statements};
+    use super::{holds_several_statements, split_sql_statements, statement_position};
+
+    #[test]
+    fn a_statement_position_counts_characters_from_one() {
+        let sql = "SELECT 1;  SELECT 2";
+        assert_eq!(statement_position(sql, 0), Some(1));
+        // Both spaces belong to the gap before the second statement, so its
+        // first character is the twelfth of the request, one-based.
+        assert_eq!(statement_position(sql, 1), Some(12));
+        assert_eq!(statement_position(sql, 2), None);
+    }
+
+    #[test]
+    fn a_statement_position_skips_whitespace_and_counts_multibyte_characters() {
+        let sql = "  SELECT 'é';\n SELECT 2";
+        assert_eq!(statement_position(sql, 0), Some(3));
+        assert_eq!(statement_position(sql, 1), Some(16));
+    }
+
+    #[test]
+    fn a_statement_position_skips_empty_statements() {
+        assert_eq!(statement_position(";; SELECT 1", 0), Some(4));
+    }
 
     #[test]
     fn one_statement_with_a_trailing_semicolon_is_not_several() {
