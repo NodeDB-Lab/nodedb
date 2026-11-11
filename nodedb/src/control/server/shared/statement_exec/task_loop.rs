@@ -335,12 +335,20 @@ async fn run_task(
 /// succeeds, and rolls back when one fails. `client` is the session the
 /// request arrived on. The transaction runs on a private session of its
 /// own, so a transport with no session passes a detached one.
+///
+/// A request that holds a read takes the transaction's snapshot before its
+/// first task. Its reads join the read set, and COMMIT checks each one at
+/// that snapshot. A request of writes alone takes no snapshot.
 pub(crate) async fn run_implicit_statement(
     exec: &StatementExec<'_>,
     statement: PlannedStatement,
     client: &DmlTxnCtx<'_>,
 ) -> Result<RequestAnswer, StatementError> {
     let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
+    let reads = statement
+        .tasks
+        .iter()
+        .any(|task| !plan_is_write(&task.plan));
     crate::control::trigger::statement_txn::with_statement_txn_lifted(
         exec.state,
         exec.identity,
@@ -350,6 +358,11 @@ pub(crate) async fn run_implicit_statement(
         async |txn: &DmlTxnCtx<'_>| {
             if cuts_at_commit {
                 txn.sessions.allow_tx_edge_truncate(txn.session_id);
+            }
+            if reads {
+                txn.txn_snapshot(exec.state)
+                    .await
+                    .map_err(StatementError::Error)?;
             }
             run_statement_loop(exec, statement, Some(txn)).await
         },
