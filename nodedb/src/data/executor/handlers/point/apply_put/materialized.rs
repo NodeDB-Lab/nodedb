@@ -282,7 +282,8 @@ impl CoreLoop {
     }
 
     /// Refuse `installed` when its accepted or stored body is over the row
-    /// image limit. The refusal names the row by the identity INSERT mints.
+    /// image limit, or its stored body has a map key that is not a string.
+    /// The refusal names the row by the identity INSERT mints.
     fn check_installed_image_size(
         &self,
         database_id: u64,
@@ -292,7 +293,8 @@ impl CoreLoop {
         installed: &SharedInstalledDocument,
     ) -> crate::Result<()> {
         let largest = installed.canonical.len().max(installed.stored.len());
-        if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES {
+        let key = nodedb_types::find_body_non_string_key(&installed.stored);
+        if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES && key.is_none() {
             return Ok(());
         }
         let column = self.identity_column(database_id, tid, collection);
@@ -301,12 +303,20 @@ impl CoreLoop {
             Some(column.as_str()),
             storage_key,
         );
-        Err(crate::Error::DataPlane(
-            crate::data::executor::row_image_limit::row_image_too_large(
+        let refusal = match key {
+            Some(key) if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES => {
+                crate::data::executor::row_field_names::non_string_key_refusal(
+                    collection,
+                    identity.as_str(),
+                    &key,
+                )
+            }
+            Some(_) | None => crate::data::executor::row_image_limit::row_image_too_large(
                 collection,
                 identity.as_str(),
                 largest,
             ),
-        ))
+        };
+        Err(crate::Error::DataPlane(refusal))
     }
 }

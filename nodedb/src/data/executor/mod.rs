@@ -28,6 +28,7 @@ pub(crate) mod replay_floors;
 mod replay_policy;
 mod replay_task;
 pub mod response_codec;
+pub(crate) mod row_field_names;
 pub(crate) mod row_image_limit;
 pub(crate) mod row_image_native;
 mod row_shape;

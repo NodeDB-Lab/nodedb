@@ -68,8 +68,9 @@ pub(crate) fn check_row_images(
 }
 
 /// Refuse an installed document row whose id, accepted body, stored body or
-/// new public event image is over [`MAX_ROW_IMAGE_BYTES`], or whose prior
-/// event image is over [`MAX_OLD_EVENT_IMAGE_BYTES`].
+/// new public event image is over [`MAX_ROW_IMAGE_BYTES`], whose prior
+/// event image is over [`MAX_OLD_EVENT_IMAGE_BYTES`], or whose stored body
+/// has a map key that is not a string.
 ///
 /// The prior image of a row stored before `ALTER ADD COLUMN` renders the
 /// added columns too. The catalog bounds what they add, so a row stored
@@ -86,6 +87,7 @@ pub(crate) fn check_installed_row(
         row_id,
         &[canonical, stored, event.new_value.as_slice()],
     )?;
+    super::row_field_names::check_field_names(collection, row_id, stored)?;
     if let Some(old_value) = &event.old_value
         && old_value.len() > MAX_OLD_EVENT_IMAGE_BYTES
     {
@@ -103,7 +105,8 @@ pub(crate) fn check_installed_row(
 }
 
 /// Refuse an edge whose properties, endpoints or label are over
-/// [`MAX_ROW_IMAGE_BYTES`]. The refusal names the first part over the limit.
+/// [`MAX_ROW_IMAGE_BYTES`], or whose properties have a map key that is not
+/// a string. The refusal names the first part over the limit.
 pub(crate) fn check_edge(
     collection: &str,
     src_id: &str,
@@ -121,7 +124,8 @@ pub(crate) fn check_edge(
         .into_iter()
         .find(|(_, bytes)| *bytes > MAX_ROW_IMAGE_BYTES)
     else {
-        return Ok(());
+        let edge = format!("({src_id})-[{label}]->({dst_id})");
+        return super::row_field_names::check_field_names(collection, &edge, properties);
     };
     Err(crate::Error::DataPlane(ErrorCode::ProgramLimitExceeded {
         detail: format!(

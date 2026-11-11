@@ -10,44 +10,49 @@
 //!
 //! Rendering the event image costs a decode and an encode, so the stage
 //! renders only a body that can render past the limit. A stored body
-//! renders to at most [`RENDER_GROWTH`] times its length, plus a constant
-//! per row:
+//! renders to at most `ceil(G·len)` bytes, plus a constant per row. G is
+//! the cell growth `NATIVE_CELL_GROWTH_NUM / NATIVE_CELL_GROWTH_DEN`:
 //!
-//! - A strict Binary Tuple column renders its value and its name. A fixed
-//!   value grows at most from 16 bytes to 38 (a UUID as text), from 8 to 18
-//!   (a duration as text) and from 4 to 9 per vector element. A variable
-//!   value keeps its bytes, or grows from tagged MessagePack to plain at
-//!   most from 4 bytes to 10 (an instant ext). Each column adds its name and
-//!   at most [`RENDER_HEADERS`] header bytes.
-//! - A schemaless body is plain or tagged MessagePack. Plain stays within
-//!   1.8 times (a `float 32` as `float 64`) and tagged within 2.5 times. The
-//!   identity column it gains adds its name, the identity and headers.
+//! - A strict Binary Tuple column renders its value and its name. Its value
+//!   renders within the cell bound, `G` times its bytes plus
+//!   `NATIVE_CELL_CONSTANT`. Each column adds its name and at most
+//!   [`RENDER_HEADERS`] bytes.
+//! - A schemaless body is plain or tagged MessagePack. Each value in it
+//!   grows at most G times, with no constant: a tagged array cell from 6
+//!   bytes to 28. The identity column it gains adds its name, the identity
+//!   and headers.
 
 use nodedb_physical::physical_plan::StorageMode;
 use nodedb_types::columnar::StrictSchema;
-use nodedb_types::{MAX_ROW_IMAGE_BYTES, RowIdentity};
+use nodedb_types::{
+    MAX_ROW_IMAGE_BYTES, NATIVE_CELL_CONSTANT, NATIVE_CELL_GROWTH_DEN, NATIVE_CELL_GROWTH_NUM,
+    RowIdentity,
+};
 
 use super::context::StageCtx;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::row_field_names::check_field_names;
 use crate::data::executor::row_image_limit::{check_row_image, check_row_images};
 use crate::data::executor::strict_format::strict_row_to_msgpack;
 use crate::types::{DatabaseId, TenantId};
 
-/// How many times its length a stored body renders to, at most.
-const RENDER_GROWTH: usize = 3;
+/// Bytes one rendered field or row adds beyond its name and `G` times its
+/// stored bytes: a `str 32` key header or a widened map header, and the
+/// cell constant.
+const RENDER_HEADERS: usize = 5 + NATIVE_CELL_CONSTANT;
 
-/// Header bytes one rendered field or row adds beyond its name and value:
-/// a `str 32` key header, a value header up to an ext's, a widened map
-/// header.
-const RENDER_HEADERS: usize = 16;
+/// The most bytes a stored body of `stored_len` bytes renders to beyond
+/// its row's constant: `ceil(G·stored_len)`. Saturates at `usize::MAX`.
+fn render_growth(stored_len: usize) -> usize {
+    stored_len
+        .checked_mul(NATIVE_CELL_GROWTH_NUM)
+        .map_or(usize::MAX, |scaled| scaled.div_ceil(NATIVE_CELL_GROWTH_DEN))
+}
 
 /// Whether a stored body of `stored_len` bytes renders within the row limit
 /// for certain, given the row's constant render cost.
 fn renders_within_limit(stored_len: usize, constant: usize) -> bool {
-    stored_len
-        .saturating_mul(RENDER_GROWTH)
-        .saturating_add(constant)
-        <= MAX_ROW_IMAGE_BYTES
+    render_growth(stored_len).saturating_add(constant) <= MAX_ROW_IMAGE_BYTES
 }
 
 /// The constant render cost of a row of `schema`: every column's name and
@@ -85,7 +90,8 @@ impl CoreLoop {
     }
 
     /// Refuse a staged row of `collection` whose id, stored body or public
-    /// event image is over the row image limit.
+    /// event image is over the row image limit, or whose stored body has a
+    /// map key that is not a string.
     ///
     /// The event image renders as the install renders it: a strict Binary
     /// Tuple as MessagePack, a schemaless body with its identity column. A
@@ -101,6 +107,7 @@ impl CoreLoop {
         stored: &[u8],
     ) -> crate::Result<()> {
         check_row_images(collection, identity.as_str(), &[stored])?;
+        check_field_names(collection, identity.as_str(), stored)?;
         let config_key = (
             DatabaseId::new(database_id),
             TenantId::new(tid),
@@ -147,7 +154,10 @@ mod tests {
     #[test]
     fn the_skip_holds_up_to_the_boundary_and_renders_past_it() {
         let constant = 4_321;
-        let edge = (MAX_ROW_IMAGE_BYTES - constant) / RENDER_GROWTH;
+        // `ceil(G·edge) <= R - constant` holds exactly while
+        // `edge <= (R - constant)·DEN / NUM`.
+        let edge =
+            (MAX_ROW_IMAGE_BYTES - constant) * NATIVE_CELL_GROWTH_DEN / NATIVE_CELL_GROWTH_NUM;
         assert!(renders_within_limit(edge, constant));
         assert!(!renders_within_limit(edge + 1, constant));
         assert!(!renders_within_limit(usize::MAX, constant));
@@ -198,7 +208,7 @@ mod tests {
             .expect("tuple renders")
             .expect("a tuple converts");
         assert!(
-            image.len() <= tuple.len() * RENDER_GROWTH + strict_render_constant(&schema),
+            image.len() <= render_growth(tuple.len()) + strict_render_constant(&schema),
             "{} bytes from a tuple of {}",
             image.len(),
             tuple.len()
@@ -207,14 +217,22 @@ mod tests {
 
     #[test]
     fn a_tagged_schemaless_body_renders_within_the_growth_bound() {
-        let body = zerompk::to_msgpack_vec(&row(&growing_fields())).expect("tagged body");
+        // Tagged array cells with a system time grow at G itself.
+        let cell = Value::ArrayCell(nodedb_types::ArrayCell {
+            coords: Vec::new(),
+            attrs: Vec::new(),
+            system_time: Some(0),
+        });
+        let mut fields = growing_fields();
+        fields.push(("c", Value::Array(vec![cell; 4_096])));
+        let body = zerompk::to_msgpack_vec(&row(&fields)).expect("tagged body");
         let mut value = decode_document_value(&body).expect("body decodes");
         if let Value::Object(fields) = &mut value {
             fields.insert("id".into(), Value::String("row-1".into()));
         }
         let image = nodedb_types::value_to_msgpack(&value).expect("image");
         assert!(
-            image.len() <= body.len() * RENDER_GROWTH + identity_render_constant("id", "row-1"),
+            image.len() <= render_growth(body.len()) + identity_render_constant("id", "row-1"),
             "{} bytes from a body of {}",
             image.len(),
             body.len()

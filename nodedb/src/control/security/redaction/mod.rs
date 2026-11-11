@@ -22,4 +22,7 @@ pub mod store;
 pub mod types;
 
 pub use store::RedactionStore;
-pub use types::{RedactionMode, RedactionPolicy, RedactionRule};
+pub use types::{
+    HASH_REDACTION_TEXT_BYTES, MAX_REDACTION_MASK_BYTES, RedactionMode, RedactionPolicy,
+    RedactionRule,
+};

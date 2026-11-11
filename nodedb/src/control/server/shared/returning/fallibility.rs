@@ -12,25 +12,33 @@
 //!   cast or sequence accessor can raise an error.
 //! - The write changes at most one row by construction: a point insert,
 //!   put, upsert, update or delete by primary key.
-//! - One row of the list fits the configured row, column, cell and payload
-//!   byte limits.
+//! - One row of the list fits the configured row, column and cell limits,
+//!   and its payload bound fits `network.max_query_result_bytes`.
 //!
-//! The payload byte limit is `network.max_query_result_bytes`. No write caps
-//! the size of a stored row, and a literal's size is the statement's. So one
-//! row can exceed any finite byte limit, and only a node with no byte limit
-//! proves the bytes fit. A `*` expands to the row's fields, and a schemaless
-//! row has no field cap. So a `*` fits only with no column or cell limit.
+//! Every stored row image is at most `MAX_ROW_IMAGE_BYTES`, so a column
+//! cell renders to a bounded size (see `payload_bound`). A literal's cell is
+//! exact. A `*` expands to the row's fields: a strict collection declares
+//! how many, and a schemaless row has no field cap. So a `*` on a schemaless
+//! collection fits only with no column, cell or byte limit.
 
+use nodedb_cluster::calvin::types::AnnouncedColumn;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
-use nodedb_query::expr::SqlExpr;
+use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::config::tuning::NetworkTuning;
-use nodedb_types::{ReturningColumns, ReturningItem};
 
+use super::list_shape::{ListShape, RowFields};
 use super::precommit::ReturningLimits;
 
 /// Whether `plan`'s `RETURNING` contract can fail under the limits `network`
-/// sets. A plan with no contract has nothing to fail.
-pub fn returning_can_fail(plan: &PhysicalPlan, network: &NetworkTuning) -> bool {
+/// sets. `fields` is what a `*` expands to on the plan's collection.
+/// `announced` is the columns the statement announced, or `None` when it
+/// announced none. A plan with no contract has nothing to fail.
+pub fn returning_can_fail(
+    plan: &PhysicalPlan,
+    network: &NetworkTuning,
+    fields: RowFields,
+    announced: Option<&[AnnouncedColumn]>,
+) -> bool {
     let Some(list) = plan
         .returning_target()
         .and_then(|(_, spec)| spec.precommit.as_ref())
@@ -40,10 +48,26 @@ pub fn returning_can_fail(plan: &PhysicalPlan, network: &NetworkTuning) -> bool 
     if !writes_at_most_one_row(plan) {
         return true;
     }
-    match ListWidth::of(list) {
-        Some(width) => !width.fits_one_row(&ReturningLimits::from_tuning(network)),
+    match ListShape::of(list) {
+        Some(shape) => {
+            !shape.fits_one_row(&ReturningLimits::from_tuning(network), fields, announced)
+        }
         None => true,
     }
+}
+
+/// Whether any task of one statement's `tasks` carries a contract that can
+/// fail. `fields_of` gives what a `*` expands to on a task plan's
+/// collection.
+pub fn tasks_returning_can_fail(
+    tasks: &[PhysicalTask],
+    network: &NetworkTuning,
+    announced: Option<&[AnnouncedColumn]>,
+    fields_of: impl Fn(&PhysicalPlan) -> RowFields,
+) -> bool {
+    tasks
+        .iter()
+        .any(|task| returning_can_fail(&task.plan, network, fields_of(&task.plan), announced))
 }
 
 /// Whether `plan` changes at most one row by construction. A variant not
@@ -68,67 +92,26 @@ fn writes_at_most_one_row(plan: &PhysicalPlan) -> bool {
     ) || matches!(plan, PhysicalPlan::Kv(KvOp::Delete { keys, .. }) if keys.len() <= 1)
 }
 
-/// The item count of a list whose items cannot fail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListWidth {
-    /// Columns and literals only: one cell each.
-    Fixed(usize),
-    /// A `*`: as many cells as the row has fields.
-    Star,
-}
-
-impl ListWidth {
-    /// The width of `list`. `None` when an item can fail.
-    fn of(list: &ReturningColumns) -> Option<Self> {
-        let items = match list {
-            ReturningColumns::Star => return Some(Self::Star),
-            ReturningColumns::Named(items) => items,
-        };
-        let mut star = false;
-        for item in items {
-            match item {
-                ReturningItem::Star => star = true,
-                ReturningItem::Column { .. } => {}
-                // Any other expression can raise an error. An item that does
-                // not decode fails its evaluation.
-                ReturningItem::Computed { expression, .. } => {
-                    if !matches!(
-                        zerompk::from_msgpack::<SqlExpr>(expression),
-                        Ok(SqlExpr::Literal(_))
-                    ) {
-                        return None;
-                    }
-                }
-            }
-        }
-        Some(if star {
-            Self::Star
-        } else {
-            Self::Fixed(items.len())
-        })
-    }
-
-    /// Whether one row of this width fits `limits`.
-    fn fits_one_row(self, limits: &ReturningLimits) -> bool {
-        if limits.rows < 1 || limits.payload_bytes != usize::MAX {
-            return false;
-        }
-        match self {
-            Self::Fixed(width) => width <= limits.columns && width <= limits.cells,
-            Self::Star => limits.columns == usize::MAX && limits.cells == usize::MAX,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use nodedb_physical::physical_plan::UpdateValue;
-    use nodedb_query::expr::{BinaryOp, CastType};
+    use nodedb_physical::physical_task::PostSetOp;
+    use nodedb_query::expr::{BinaryOp, CastType, SqlExpr};
     use nodedb_types::{
-        DatabaseId, QualifiedCollection, ReturningSpec, RlsWriteCheck, Surrogate, Value,
+        DatabaseId, QualifiedCollection, ReturningColumns, ReturningItem, ReturningSpec,
+        RlsWriteCheck, Surrogate, Value,
     };
 
+    use super::super::payload_bound::{
+        column_cell_bytes, envelope_bytes, literal_cell_bytes, string_bytes,
+    };
     use super::*;
+    use crate::types::{TenantId, VShardId};
+
+    /// [`returning_can_fail`] on a schemaless collection, nothing announced.
+    fn can_fail(plan: &PhysicalPlan, network: &NetworkTuning) -> bool {
+        returning_can_fail(plan, network, RowFields::Unbounded, None)
+    }
 
     fn collection() -> QualifiedCollection {
         QualifiedCollection::new(DatabaseId::DEFAULT, "items")
@@ -243,7 +226,7 @@ mod tests {
     #[test]
     fn a_column_list_on_a_point_insert_cannot_fail() {
         let plan = point_insert(spec(vec![column("id"), column("n")]));
-        assert!(!returning_can_fail(&plan, &unbounded()));
+        assert!(!can_fail(&plan, &unbounded()));
     }
 
     #[test]
@@ -253,26 +236,164 @@ mod tests {
             ReturningItem::Star,
             computed("one", SqlExpr::Literal(Value::Integer(1))),
         ];
-        assert!(!returning_can_fail(
-            &point_insert(spec(items.clone())),
-            &unbounded()
+        assert!(!can_fail(&point_insert(spec(items.clone())), &unbounded()));
+        assert!(!can_fail(&point_update(spec(items)), &unbounded()));
+    }
+
+    /// The payload bound of `id` and the literal `1`, named `one`, in one
+    /// row.
+    fn id_and_one_bound() -> usize {
+        envelope_bytes(2)
+            + string_bytes("id".len())
+            + string_bytes("one".len())
+            + column_cell_bytes()
+            + literal_cell_bytes(&Value::Integer(1)).expect("literal")
+    }
+
+    #[test]
+    fn a_fixed_list_fits_at_exactly_its_bound() {
+        let plan = point_insert(spec(vec![
+            column("id"),
+            computed("one", SqlExpr::Literal(Value::Integer(1))),
+        ]));
+        let at = |bytes: usize| NetworkTuning {
+            max_query_result_bytes: bytes as u64,
+            ..unbounded()
+        };
+        let bound = id_and_one_bound();
+        assert!(!can_fail(&plan, &at(bound)));
+        assert!(can_fail(&plan, &at(bound - 1)));
+    }
+
+    #[test]
+    fn returning_id_on_a_point_write_cannot_fail_by_default() {
+        let network = NetworkTuning::default();
+        for plan in [
+            point_insert(spec(vec![column("id")])),
+            point_update(spec(vec![column("id")])),
+        ] {
+            assert!(!can_fail(&plan, &network));
+        }
+    }
+
+    #[test]
+    fn a_star_on_a_strict_collection_with_few_columns_cannot_fail_by_default() {
+        let plan = point_insert(spec(vec![ReturningItem::Star]));
+        let fields = RowFields::declared(["id", "name", "email", "balance"]);
+        let network = NetworkTuning::default();
+        assert!(!returning_can_fail(&plan, &network, fields, None));
+        let star_only = point_insert(Some(ReturningSpec {
+            columns: ReturningColumns::Star,
+            precommit: Some(ReturningColumns::Star),
+        }));
+        assert!(!returning_can_fail(&star_only, &network, fields, None));
+    }
+
+    #[test]
+    fn a_star_past_the_byte_or_column_limit_can_fail() {
+        let plan = point_insert(spec(vec![ReturningItem::Star]));
+        let network = NetworkTuning::default();
+        let wide = |count: usize| RowFields::Declared {
+            count,
+            name_bytes: count,
+        };
+        // Each column cell can render a whole stored row, so a default
+        // byte limit holds far fewer columns than the column limit.
+        let cells_per_payload = network.max_query_result_bytes as usize / column_cell_bytes();
+        assert!(returning_can_fail(
+            &plan,
+            &network,
+            wide(cells_per_payload + 1),
+            None
         ));
-        assert!(!returning_can_fail(
-            &point_update(spec(items)),
-            &unbounded()
+        let no_bytes = NetworkTuning {
+            max_query_result_bytes: u64::MAX,
+            ..NetworkTuning::default()
+        };
+        let columns = network.max_returning_columns as usize;
+        assert!(!returning_can_fail(&plan, &no_bytes, wide(columns), None));
+        assert!(returning_can_fail(
+            &plan,
+            &no_bytes,
+            wide(columns + 1),
+            None
         ));
     }
 
-    /// No write caps a stored row, so one row can exceed a byte limit.
     #[test]
-    fn a_byte_limit_makes_a_column_list_fallible() {
-        let plan = point_insert(spec(vec![column("id")]));
-        let network = NetworkTuning {
-            max_query_result_bytes: 1 << 30,
+    fn a_star_on_a_schemaless_collection_can_fail() {
+        let plan = point_insert(spec(vec![ReturningItem::Star]));
+        assert!(can_fail(&plan, &NetworkTuning::default()));
+        let capped_bytes = NetworkTuning {
+            max_query_result_bytes: 1 << 40,
             ..unbounded()
         };
-        assert!(returning_can_fail(&plan, &network));
-        assert!(returning_can_fail(&plan, &NetworkTuning::default()));
+        assert!(can_fail(&plan, &capped_bytes));
+    }
+
+    #[test]
+    fn announced_names_count_toward_the_bound() {
+        let plan = point_insert(spec(vec![
+            column("id"),
+            computed("one", SqlExpr::Literal(Value::Integer(1))),
+        ]));
+        let named = |name: &str| AnnouncedColumn {
+            name: name.into(),
+            ty: "text".into(),
+        };
+        let network = NetworkTuning {
+            max_query_result_bytes: id_and_one_bound() as u64,
+            ..unbounded()
+        };
+        let same = [named("id"), named("one")];
+        assert!(!returning_can_fail(
+            &plan,
+            &network,
+            RowFields::Unbounded,
+            Some(&same)
+        ));
+        let longer = [named("id"), named("one_longer")];
+        assert!(returning_can_fail(
+            &plan,
+            &network,
+            RowFields::Unbounded,
+            Some(&longer)
+        ));
+        let fewer = [named("id")];
+        assert!(returning_can_fail(
+            &plan,
+            &network,
+            RowFields::Unbounded,
+            Some(&fewer)
+        ));
+    }
+
+    #[test]
+    fn a_statement_can_fail_when_any_task_can() {
+        let task = |plan| PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan,
+            post_set_op: PostSetOp::None,
+            txn_id: None,
+        };
+        let network = NetworkTuning::default();
+        let point = task(point_insert(spec(vec![column("id")])));
+        let batch = task(batch_insert(spec(vec![column("id")])));
+        let unbounded_fields = |_: &PhysicalPlan| RowFields::Unbounded;
+        assert!(!tasks_returning_can_fail(
+            std::slice::from_ref(&point),
+            &network,
+            None,
+            unbounded_fields
+        ));
+        assert!(tasks_returning_can_fail(
+            &[point, batch],
+            &network,
+            None,
+            unbounded_fields
+        ));
     }
 
     #[test]
@@ -292,17 +413,14 @@ mod tests {
                 ..unbounded()
             },
         ] {
-            assert!(returning_can_fail(&plan, &network));
+            assert!(can_fail(&plan, &network));
         }
         let star = point_insert(spec(vec![ReturningItem::Star]));
         let capped = NetworkTuning {
             max_returning_columns: 1_024,
             ..unbounded()
         };
-        assert!(
-            returning_can_fail(&star, &capped),
-            "a star has no width cap"
-        );
+        assert!(can_fail(&star, &capped), "a star has no width cap");
     }
 
     #[test]
@@ -313,14 +431,14 @@ mod tests {
             right: Box::new(SqlExpr::Column("x".into())),
         };
         let plan = point_insert(spec(vec![column("id"), computed("q", divide)]));
-        assert!(returning_can_fail(&plan, &unbounded()));
+        assert!(can_fail(&plan, &unbounded()));
     }
 
     #[test]
     fn a_sequence_accessor_can_fail() {
         for name in ["nextval", "currval", "setval"] {
             let plan = point_insert(spec(vec![computed("n", sequence_call(name))]));
-            assert!(returning_can_fail(&plan, &unbounded()), "{name}");
+            assert!(can_fail(&plan, &unbounded()), "{name}");
         }
     }
 
@@ -331,19 +449,19 @@ mod tests {
             to_type: CastType::Int,
         };
         let plan = point_insert(spec(vec![computed("n", cast)]));
-        assert!(returning_can_fail(&plan, &unbounded()));
+        assert!(can_fail(&plan, &unbounded()));
     }
 
     #[test]
     fn an_update_by_predicate_can_fail() {
         let plan = bulk_update(spec(vec![column("id")]));
-        assert!(returning_can_fail(&plan, &unbounded()));
+        assert!(can_fail(&plan, &unbounded()));
     }
 
     #[test]
     fn a_multi_row_insert_can_fail() {
         let plan = batch_insert(spec(vec![column("id")]));
-        assert!(returning_can_fail(&plan, &unbounded()));
+        assert!(can_fail(&plan, &unbounded()));
     }
 
     #[test]
@@ -352,23 +470,17 @@ mod tests {
             expression: vec![0xc1],
             name: "bad".into(),
         };
-        assert!(returning_can_fail(
-            &point_insert(spec(vec![item])),
-            &unbounded()
-        ));
+        assert!(can_fail(&point_insert(spec(vec![item])), &unbounded()));
     }
 
     #[test]
     fn a_write_with_no_contract_has_nothing_to_fail() {
-        assert!(!returning_can_fail(
-            &bulk_update(None),
-            &NetworkTuning::default()
-        ));
+        assert!(!can_fail(&bulk_update(None), &NetworkTuning::default()));
         let stored_only = Some(ReturningSpec {
             columns: ReturningColumns::Named(vec![column("id")]),
             precommit: None,
         });
-        assert!(!returning_can_fail(
+        assert!(!can_fail(
             &batch_insert(stored_only),
             &NetworkTuning::default()
         ));

@@ -99,4 +99,13 @@ mod tests {
             KvWriteRefusal::check("cache", b"k", &over, Surrogate::ZERO).expect_err("refused");
         assert!(matches!(refusal, KvWriteRefusal::Unbound(_)), "{refusal:?}");
     }
+
+    /// A KV value is opaque bytes: one that parses as a map with an integer
+    /// key stores like any other.
+    #[test]
+    fn an_opaque_value_that_looks_like_a_map_is_stored() {
+        // {1: "a"}
+        let value = [0x81, 0x01, 0xa1, b'a'];
+        KvWriteRefusal::check("cache", b"k", &value, Surrogate::new(1)).expect("stored");
+    }
 }
