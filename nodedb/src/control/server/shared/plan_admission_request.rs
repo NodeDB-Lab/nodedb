@@ -120,13 +120,17 @@ impl RequestText {
 /// A schema announces columns when it names a column or projects `*`. An
 /// empty list gives the default schema.
 pub(super) fn folded_output_schema(schemas: &[OutputSchema]) -> OutputSchema {
+    folded_schema(schemas).cloned().unwrap_or_default()
+}
+
+/// The schema [`folded_output_schema`] picks, by reference. `None` for an
+/// empty list.
+pub(super) fn folded_schema(schemas: &[OutputSchema]) -> Option<&OutputSchema> {
     schemas
         .iter()
         .rev()
         .find(|schema| !schema.columns.is_empty() || schema.is_star)
         .or_else(|| schemas.first())
-        .cloned()
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

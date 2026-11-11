@@ -112,6 +112,7 @@ pub(super) async fn execute_planned(
 
     let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
     if admission.tasks.is_empty() {
         return resp(NativeResponse::status_row(seq, "OK"));
     }
@@ -137,7 +138,7 @@ pub(super) async fn execute_planned(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -163,7 +164,10 @@ pub(super) async fn execute_planned(
         sum_target_reads,
     } = match routed {
         Ok(AtomicRoute::Implicit(answer)) => {
-            let response = answer_to_native(seq, answer);
+            let response = match answer.summed() {
+                Ok(answer) => answer_to_native(seq, answer),
+                Err(error) => statement_error_to_native(seq, error),
+            };
             return resp(mirror_confirmed(ctx, seq, sync_database, response).await);
         }
         // A RETURNING write surfaces its rows from the applied response. A
@@ -238,7 +242,7 @@ pub(super) async fn execute_planned(
         PlannedStatement {
             tasks,
             statement_map,
-            output_schema: Some(&output_schema),
+            schemas: &output_schemas,
             database_id,
             plan_lease_scope: lease_scope,
             sum_target_reads,

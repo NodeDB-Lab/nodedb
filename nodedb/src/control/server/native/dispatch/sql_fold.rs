@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Rendering one native SQL statement's answer: its columns and rows, its
+//! Rendering one native SQL request's answer: its columns and rows, its
 //! warnings, and its one command tag, or the error frame it stopped with.
 
 use nodedb_types::protocol::NativeResponse;
 
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::response_shape::types::FoldedTag;
-use crate::control::server::shared::statement_exec::{StatementAnswer, StatementError};
+use crate::control::server::shared::statement_exec::{
+    RequestAnswer, StatementAnswer, StatementError,
+};
 
 use super::{
     apply_dml_outcome, dml_fold_error_to_native, error_code_to_native, error_response_to_native,
     error_to_native, error_to_native_with_sqlstate, shape_error_to_native, to_native_columns_rows,
 };
 
-/// The native frame for a statement's answer or error.
+/// The native frame for a request's answer or error. The answer sums its
+/// statements into one frame.
 pub(super) fn statement_result_to_native(
     seq: u64,
-    result: Result<StatementAnswer, StatementError>,
+    result: Result<RequestAnswer, StatementError>,
 ) -> NativeResponse {
-    match result {
+    match result.and_then(RequestAnswer::summed) {
         Ok(answer) => answer_to_native(seq, answer),
         Err(error) => statement_error_to_native(seq, error),
     }
@@ -63,5 +66,22 @@ pub(super) fn statement_error_to_native(seq: u64, error: StatementError) -> Nati
         StatementError::Response(response) => error_response_to_native(seq, &response),
         StatementError::DmlFold(error) => dml_fold_error_to_native(seq, &error),
         StatementError::Shape(error) => shape_error_to_native(seq, &error),
+        // The frame carries the inner error's SQLSTATE and code. The message
+        // names the statement.
+        StatementError::InStatement {
+            statement,
+            statements,
+            error,
+        } => {
+            let mut frame = statement_error_to_native(seq, *error);
+            if let Some(payload) = frame.error.as_mut() {
+                payload.message = format!(
+                    "{}{}",
+                    StatementError::statement_prefix(statement, statements),
+                    payload.message
+                );
+            }
+            frame
+        }
     }
 }

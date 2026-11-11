@@ -39,7 +39,7 @@ pub(super) async fn route_http_statement(
     let session = detached.ctx();
     let sync_database = sync_database_of(exec.state, &statement.tasks);
     let answer = match route_atomic_statement(exec, statement, &session).await {
-        Ok(AtomicRoute::Implicit(answer)) => Ok(answer),
+        Ok(AtomicRoute::Implicit(answer)) => answer.summed(),
         Ok(AtomicRoute::Calvin(applied)) => calvin_answer(exec, applied),
         Ok(AtomicRoute::PerTask(statement)) => return Ok(RoutedStatement::PerTask(statement)),
         Err(error) => Err(error),

@@ -22,9 +22,28 @@ pub(crate) enum StatementError {
     DmlFold(DmlFoldError),
     /// A task's answer cannot be shaped.
     Shape(nodedb_types::NodeDbError),
+    /// `error` stopped statement `statement` of a request of `statements`
+    /// statements. Only a request of several statements wraps its errors.
+    InStatement {
+        /// The statement's 0-based index in its request.
+        statement: usize,
+        /// How many statements the request holds.
+        statements: usize,
+        error: Box<StatementError>,
+    },
 }
 
 impl StatementError {
+    /// The prefix a protocol puts before the message of an error that
+    /// stopped statement `statement` of `statements`. The prefix counts
+    /// statements from 1: `statement 2 of 2: `.
+    pub(crate) fn statement_prefix(statement: usize, statements: usize) -> String {
+        format!(
+            "statement {} of {statements}: ",
+            statement.saturating_add(1)
+        )
+    }
+
     /// The Control-Plane error a protocol with no finer error shape renders.
     /// `tenant_id` is the statement's tenant.
     pub(crate) fn into_error(self, tenant_id: TenantId) -> crate::Error {
@@ -48,6 +67,8 @@ impl StatementError {
                 detail: error.to_string(),
             },
             Self::Shape(error) => crate::Error::from(error),
+            // `crate::Error` has no slot for the statement.
+            Self::InStatement { error, .. } => error.into_error(tenant_id),
         }
     }
 }

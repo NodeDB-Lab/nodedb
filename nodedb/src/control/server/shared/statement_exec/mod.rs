@@ -14,7 +14,7 @@ pub mod route_decision;
 pub mod statement_map;
 pub mod task_loop;
 
-pub(crate) use answer::StatementAnswer;
+pub(crate) use answer::{RequestAnswer, StatementAnswer};
 pub(crate) use atomic::{AtomicRoute, AtomicStatement, calvin_answer, route_atomic_statement};
 pub(crate) use dispatch::authorize_one_task;
 pub(crate) use edge_recon::{

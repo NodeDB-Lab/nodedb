@@ -42,11 +42,12 @@ use crate::control::server::response_shape::calvin_fold::{
 };
 use crate::control::server::shared::authorization::{AuthorizedTaskSet, authorize_task_set};
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
+use crate::control::server::shared::plan_admission_request::folded_schema;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::trigger::statement_txn::in_block;
 
-use super::answer::StatementAnswer;
+use super::answer::{RequestAnswer, StatementAnswer};
 use super::edge_recon::{
     CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
@@ -72,8 +73,9 @@ pub(crate) struct AtomicStatement {
 
 /// The route a statement took.
 pub(crate) enum AtomicRoute {
-    /// The statement ran in its implicit transaction.
-    Implicit(StatementAnswer),
+    /// The request ran in its implicit transaction. Its answer holds one
+    /// part per statement.
+    Implicit(RequestAnswer),
     /// Calvin applied the statement's tasks as one transaction.
     Calvin(CalvinApplied),
     /// No atomic route applies. The caller runs its per-task loop.
@@ -246,6 +248,8 @@ async fn calvin_apply(
 
 /// Fold a statement Calvin applied into its answer: the RETURNING rows, when
 /// a task carried them, and its one tag. The fold is the one pgwire renders.
+/// The batch carries no statement of a plan, so the rows shape against the
+/// request's folded schema.
 pub(crate) fn calvin_answer(
     exec: &StatementExec<'_>,
     applied: CalvinApplied,
@@ -260,7 +264,7 @@ pub(crate) fn calvin_answer(
         &plan_refs,
         apply_result.as_ref(),
         &CalvinFoldCtx {
-            projection: exec.output_schema,
+            projection: folded_schema(exec.schemas),
             state: exec.state,
             tenant_id: exec.tenant_id(),
             database_id,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The per-task dispatch loop: runs each admitted task, then shapes each
-//! response into the JSON row set.
+//! response into the JSON row set. A request of several statements shapes
+//! each task against its own statement's schema.
 //!
 //! A Control-Plane orchestrated plan runs in `orchestrated`. Every other
 //! task takes the clone-write gate, then the gateway route to its owner.
@@ -19,6 +20,7 @@ use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::metering::PlanMeteringInfo;
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::statement_exec::StatementMap;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
 use super::super::super::super::auth::{ApiError, AppState};
@@ -31,7 +33,13 @@ pub(super) struct TaskLoopParams<'a> {
     pub(super) state: &'a AppState,
     pub(super) identity: &'a AuthenticatedIdentity,
     pub(super) scope: RequestAuthScope<'a>,
+    /// The schema a task with no statement schema shapes against.
     pub(super) output_schema: OutputSchema,
+    /// One schema per statement. Each task shapes against its own
+    /// statement's schema.
+    pub(super) output_schemas: &'a [OutputSchema],
+    /// The statement of each task, one entry per task.
+    pub(super) statement_map: StatementMap,
     pub(super) database_id: DatabaseId,
     pub(super) tenant_id: TenantId,
     pub(super) trace_id: TraceId,
@@ -47,6 +55,8 @@ pub(super) async fn run_task_loop(
         identity,
         scope,
         output_schema,
+        output_schemas,
+        statement_map,
         database_id,
         tenant_id,
         trace_id,
@@ -57,7 +67,11 @@ pub(super) async fn run_task_loop(
     // no-op when metering is disabled (the default).
     let metering_enabled = state.shared.metering_config.enabled;
 
-    for task in tasks {
+    for (index, task) in tasks.into_iter().enumerate() {
+        let schema = statement_map
+            .statement_of(index)
+            .and_then(|statement| output_schemas.get(statement as usize))
+            .unwrap_or(&output_schema);
         // Extracted before `task.plan` is cloned/moved into any branch below.
         let plan_metering_info = metering_enabled.then(|| PlanMeteringInfo::extract(&task.plan));
         // A spent hard quota refuses the task before it runs; charging below is
@@ -75,7 +89,7 @@ pub(super) async fn run_task_loop(
         let append = ShapedAppend {
             plan: &plan_for_shape,
             plan_kind: describe_plan(&plan_for_shape),
-            output_schema: &output_schema,
+            output_schema: schema,
             state,
             database_id,
             tenant_id,

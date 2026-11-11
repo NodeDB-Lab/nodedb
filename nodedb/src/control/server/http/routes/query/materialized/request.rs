@@ -153,6 +153,7 @@ async fn query_at_consistency(
     .map_err(ApiError::from)?;
     let tasks = admission.tasks;
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
     let lease_scope = admission.lease_scope;
 
     if tasks.is_empty() {
@@ -179,7 +180,7 @@ async fn query_at_consistency(
         state: &state.shared,
         identity: &identity,
         scope: &scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -195,7 +196,10 @@ async fn query_at_consistency(
     .await
     .map_err(ApiError::from)?;
     let AtomicStatement {
-        tasks, lease_scope, ..
+        tasks,
+        statement_map,
+        lease_scope,
+        ..
     } = match routed {
         RoutedStatement::Answered(rows) => {
             return Ok((rate_limit_headers, axum::Json(HttpQueryResponse::ok(rows))));
@@ -215,6 +219,8 @@ async fn query_at_consistency(
             identity: &identity,
             scope,
             output_schema,
+            output_schemas: &output_schemas,
+            statement_map,
             database_id,
             tenant_id,
             trace_id,

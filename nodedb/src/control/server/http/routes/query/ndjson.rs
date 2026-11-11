@@ -143,6 +143,7 @@ async fn ndjson_at_consistency(
     };
     let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
 
     let trace_id = crate::control::trace_context::generate_trace_id();
 
@@ -158,7 +159,7 @@ async fn ndjson_at_consistency(
         state: &state.shared,
         identity: &identity,
         scope: &scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -172,8 +173,12 @@ async fn ndjson_at_consistency(
         },
     )
     .await;
-    let (tasks, lease_scope) = match routed {
-        Ok(RoutedStatement::PerTask(statement)) => (statement.tasks, statement.lease_scope),
+    let (tasks, statement_map, lease_scope) = match routed {
+        Ok(RoutedStatement::PerTask(statement)) => (
+            statement.tasks,
+            statement.statement_map,
+            statement.lease_scope,
+        ),
         Ok(RoutedStatement::Answered(rows)) => {
             return ndjson_response(rows_to_ndjson(rows), rate_limit_headers);
         }
@@ -263,7 +268,12 @@ async fn ndjson_at_consistency(
     // Checked once, not per task: keeps per-task extraction a no-op when metering is
     // disabled. This fallback fully materializes the body, so it meters like `/v1/query`.
     let metering_enabled = state.shared.metering_config.enabled;
-    for task in tasks {
+    for (index, task) in tasks.into_iter().enumerate() {
+        // Each task shapes against its own statement's schema.
+        let projection = statement_map
+            .statement_of(index)
+            .and_then(|statement| output_schemas.get(statement as usize))
+            .unwrap_or(&output_schema);
         // A lease this node lost ends the body with a retryable error line
         // before the next task dispatches.
         if let Err(revoked) = lease_scope.check_not_revoked() {
@@ -330,7 +340,7 @@ async fn ndjson_at_consistency(
                             payload,
                             plan: &plan_for_shape,
                             plan_kind,
-                            projection: Some(&output_schema),
+                            projection: Some(projection),
                             state: &state.shared,
                             database_id,
                             tenant_id,

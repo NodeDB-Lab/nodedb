@@ -50,7 +50,8 @@ pub(super) async fn dispatch_direct_in_txn(
     let statement = PlannedStatement {
         statement_map: StatementMap::single(tasks.len()),
         tasks,
-        output_schema: None,
+        // A direct write announces no output columns.
+        schemas: &[],
         database_id: ctx.database_id(),
         plan_lease_scope: lease,
         sum_target_reads,

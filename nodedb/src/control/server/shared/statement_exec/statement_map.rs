@@ -76,6 +76,51 @@ impl StatementMap {
             "the statement map must hold one entry per task"
         );
     }
+
+    /// Group `items`, one per task in task order, by statement.
+    ///
+    /// The result holds one list per statement: at least `statement_count`
+    /// lists, and one more than the highest statement the map names. A task
+    /// with no entry in the map returns an internal error.
+    pub fn group<T>(
+        &self,
+        items: impl IntoIterator<Item = T>,
+        statement_count: usize,
+    ) -> crate::Result<StatementGroups<T>> {
+        let count = statement_count.max(self.statement_count());
+        let mut by_statement: Vec<Vec<T>> = (0..count).map(|_| Vec::new()).collect();
+        let mut task_statements = Vec::with_capacity(self.len());
+        for (task, item) in items.into_iter().enumerate() {
+            let statement = self.statement_of(task).map(|statement| statement as usize);
+            // Every entry is below `count`, so a mapped task finds its list.
+            let Some((statement, list)) = statement
+                .and_then(|statement| by_statement.get_mut(statement).map(|l| (statement, l)))
+            else {
+                return Err(crate::Error::Internal {
+                    detail: format!(
+                        "task {task} has no statement: the statement map holds {} entries",
+                        self.len()
+                    ),
+                });
+            };
+            list.push(item);
+            task_statements.push(statement);
+        }
+        Ok(StatementGroups {
+            by_statement,
+            task_statements,
+        })
+    }
+}
+
+/// Per-task items grouped by statement. See [`StatementMap::group`].
+#[derive(Debug)]
+pub struct StatementGroups<T> {
+    /// One list per statement, in statement order. A statement that planned
+    /// no task has an empty list.
+    pub by_statement: Vec<Vec<T>>,
+    /// The statement of each task, in task order.
+    pub task_statements: Vec<usize>,
 }
 
 #[cfg(test)]
@@ -105,6 +150,27 @@ mod tests {
         assert_eq!(map.statement_of(2), Some(1));
         assert_eq!(map.statement_of(5), None);
         assert_eq!(map.statement_count(), 2);
+    }
+
+    #[test]
+    fn group_gives_each_statement_its_own_tasks() {
+        let map = StatementMap(vec![0, 1, 0]);
+        let groups = map
+            .group(["a", "b", "c"], 3)
+            .expect("every task has a statement");
+        assert_eq!(groups.by_statement, [vec!["a", "c"], vec!["b"], vec![]]);
+        assert_eq!(groups.task_statements, [0, 1, 0]);
+    }
+
+    #[test]
+    fn group_refuses_a_task_with_no_statement() {
+        let error = StatementMap::single(1)
+            .group(["a", "b"], 1)
+            .expect_err("task 1 has no entry");
+        assert!(
+            matches!(error, crate::Error::Internal { .. }),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

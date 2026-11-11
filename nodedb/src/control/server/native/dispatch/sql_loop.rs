@@ -27,7 +27,9 @@ pub(super) struct PlannedStatement<'a> {
     pub tasks: Vec<PhysicalTask>,
     /// The statement of each task in `tasks`, one entry per task.
     pub statement_map: StatementMap,
-    pub output_schema: Option<&'a OutputSchema>,
+    /// Each statement's announced output columns. Index `k` is statement
+    /// `k`. A statement with no entry announced none.
+    pub schemas: &'a [OutputSchema],
     pub database_id: DatabaseId,
     pub plan_lease_scope: Arc<crate::control::lease::QueryLeaseScope>,
     /// The row images the statement's cross-shard balances were settled
@@ -61,7 +63,7 @@ pub(super) async fn run_dispatch_loop(
     let PlannedStatement {
         tasks,
         statement_map,
-        output_schema,
+        schemas,
         database_id,
         plan_lease_scope,
         sum_target_reads,
@@ -71,7 +73,7 @@ pub(super) async fn run_dispatch_loop(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema,
+        schemas,
         database_id,
         sequences: &sequences,
     };
@@ -99,7 +101,7 @@ pub(super) async fn run_implicit_statement(
     let PlannedStatement {
         tasks,
         statement_map,
-        output_schema,
+        schemas,
         database_id,
         plan_lease_scope,
         sum_target_reads,
@@ -109,7 +111,7 @@ pub(super) async fn run_implicit_statement(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema,
+        schemas,
         database_id,
         sequences: &sequences,
     };

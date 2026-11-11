@@ -76,7 +76,7 @@ pub async fn execute_sql(
         trace_id,
     })
     .await?;
-    let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
 
     // A statement admitted under a lease this node then loses ends with a
     // retryable error: a read mid-flight, a write only before dispatch.
@@ -92,7 +92,7 @@ pub async fn execute_sql(
         state: shared,
         identity,
         scope: &scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
