@@ -54,6 +54,22 @@ pub(crate) fn admit_quota_for_dispatch(
     Ok(())
 }
 
+/// [`admit_quota_for_dispatch`] for every task of one statement. A route that
+/// commits the tasks together, such as a Calvin transaction, takes no
+/// per-task dispatch step, so it admits the whole set before it submits.
+pub(crate) fn admit_quota_for_tasks(
+    state: &SharedState,
+    scope: &RequestAuthScope<'_>,
+    tasks: &[nodedb_physical::physical_task::PhysicalTask],
+) -> crate::Result<()> {
+    if !state.metering_config.enabled {
+        return Ok(());
+    }
+    tasks.iter().try_for_each(|task| {
+        admit_quota_for_dispatch(state, scope, &PlanMeteringInfo::extract(&task.plan))
+    })
+}
+
 /// Build the refusal for an exhausted hard quota, naming the scope, cap, and
 /// consumption so the operator knows which entitlement ran out.
 fn quota_exceeded(status: &QuotaStatus) -> crate::Error {

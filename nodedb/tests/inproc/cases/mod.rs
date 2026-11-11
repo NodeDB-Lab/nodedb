@@ -180,6 +180,7 @@ mod restore_database_quota;
 mod retention_policy_replication_apply;
 mod rls_fuzz;
 mod role_assignment_rules;
+mod scope_quota_calvin_refusal;
 mod scope_quota_hard_refusal;
 mod scope_quota_replication_apply;
 mod security;

@@ -16,6 +16,7 @@ use crate::control::server::shared::clone_write::{
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
+use crate::control::server::shared::quota_admission::admit_quota_for_tasks;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::txn_route::{
     StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task,
@@ -203,6 +204,12 @@ async fn dispatch_planned(
         return Err(ddl_err(sqlstate, message));
     }
 
+    // A spent hard quota refuses the statement before any task runs, on the
+    // Calvin route and the per-task route alike.
+    let auth_scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id)?;
+    admit_quota_for_tasks(state, &auth_scope, &tasks)
+        .map_err(|error| ddl_err("53400", error.to_string()))?;
+
     let sum_read_vshards = crate::control::planner::calvin::read_vshards_of(&sum_target_reads)
         .map_err(|error| DdlError::from_error(&error))?;
     // A statement with settlement reads commits through Calvin on any vShard
@@ -249,7 +256,6 @@ async fn dispatch_planned(
             .record_read_entries(txn_ctx.session_id, sum_target_reads);
     }
 
-    let auth_scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id)?;
     let route_ctx = in_txn_block.then(|| TxnTaskContext {
         state,
         identity,
