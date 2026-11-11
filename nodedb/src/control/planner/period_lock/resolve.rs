@@ -46,12 +46,14 @@
 
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, ResolvedSumTarget};
 use nodedb_physical::physical_task::PhysicalTask;
+use nodedb_types::Surrogate;
 
 use super::gate::{period_lock_gated_collection, push_resolved};
 use super::lookup::{PeriodLockScope, lookup_period_surrogate};
 use super::point_update::resolve_update_period_values;
 use super::predicate::{PeriodLockEffect, resolve_predicate_period_values};
 use super::singular::{resolve_batch_period_values, singular_period_value};
+use crate::control::security::catalog::PeriodLockDef;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 
@@ -211,12 +213,67 @@ pub async fn resolve_period_lock_targets(
             continue;
         };
 
+        // The Data-Plane check reads the reference row from the committed
+        // store, on the participant that homes the gated write. A close that
+        // an earlier statement of the same transaction staged lives on the
+        // reference row's own participant, so that check cannot see it.
+        // This read runs through the open transaction and sees the staged row.
+        refuse_a_row_an_earlier_statement_locked(&scope, &collection, &def, &period_key, surrogate)
+            .await?;
+
         push_resolved(
             op,
             ResolvedSumTarget::new(&def.ref_table, period_key, surrogate),
         );
     }
     Ok(())
+}
+
+/// Refuse the gated write when the reference row, read through the open
+/// transaction, is not in an allowed status.
+///
+/// Silent when the row is absent: `check_period_lock` owns the unknown-period
+/// refusal. Silent too when the row carries no status column: the Data Plane
+/// reports that misconfiguration by name.
+async fn refuse_a_row_an_earlier_statement_locked(
+    scope: &PeriodLockScope<'_>,
+    collection: &str,
+    def: &PeriodLockDef,
+    period_key: &str,
+    surrogate: Surrogate,
+) -> crate::Result<()> {
+    let Some(row) = crate::control::planner::materialized_sum::recon::recon_point_row(
+        scope.state,
+        scope.tenant_id,
+        scope.database_id,
+        scope.read_txn,
+        &def.ref_table,
+        period_key,
+        surrogate,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let Some(status) = row
+        .get(def.status_column.as_str())
+        .and_then(|value| value.as_str())
+    else {
+        return Ok(());
+    };
+    if def.allowed_statuses.iter().any(|allowed| allowed == status) {
+        return Ok(());
+    }
+    Err(crate::Error::PeriodLocked {
+        collection: collection.to_string(),
+        detail: format!(
+            "reference row '{period_key}' of '{}' is '{status}', and a write is allowed only \
+             while it is one of [{}]. The row reads that way through this request's own \
+             transaction",
+            def.ref_table,
+            def.allowed_statuses.join(", ")
+        ),
+    })
 }
 
 /// Resolve the period-lock targets a page of row BODIES addresses, for a
