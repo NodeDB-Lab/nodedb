@@ -81,9 +81,13 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &DocumentOp) -> crate::Result<(
                 keys.row_id(collection.as_str(), document_id);
             }
         }
-        DocumentOp::InsertSelect {
-            target_collection, ..
-        } => keys.whole_collection(target_collection.as_str()),
+        // The Control Plane resolves an `INSERT ... SELECT` into point writes
+        // before any Calvin dispatch, and a Calvin stage refuses one.
+        DocumentOp::InsertSelect { .. } => {
+            return Err(unsequenced(
+                "an INSERT ... SELECT is resolved into point writes before it is sequenced",
+            ));
+        }
         DocumentOp::BulkUpdate { collection, .. }
         | DocumentOp::BulkDelete { collection, .. }
         | DocumentOp::Truncate { collection, .. } => keys.whole_collection(collection.as_str()),

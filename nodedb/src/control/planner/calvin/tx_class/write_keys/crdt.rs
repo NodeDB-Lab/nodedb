@@ -13,34 +13,31 @@
 //! exclusion from row writers, and it takes its collection `Intent` like one.
 //! It still orders against a writer of the whole collection.
 //!
-//! A sync delta (`Apply`, `ApplyAuthenticated`) passes the write-admission
-//! gate with these same keys. A Calvin CRDT write holds its row key
-//! `Exclusive` from its grant to its install, so no delta merges into the
-//! row between the stage that predicts the merged row and the install that
-//! stores it. The `RETURNING` image the stage predicts is the row the
-//! install stores.
+//! A sync delta (`Apply`, `ApplyAuthenticated`) is never sequenced: a Calvin
+//! resolve refuses it. At the write-admission gate it takes its document's
+//! id key (`unsequenced_keys`) and waits while a Calvin CRDT write holds it.
+//! A Calvin CRDT write holds its row key `Exclusive` from its grant to its
+//! install, so no delta merges into the row between the stage that predicts
+//! the merged row and the install that stores it. The `RETURNING` image the
+//! stage predicts is the row the install stores.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use nodedb_physical::physical_plan::CrdtOp;
 
-use super::plan::not_a_write;
+use super::plan::{not_a_write, unsequenced};
 use super::set::WriteKeys;
 
 /// Add the write keys of CRDT op `op` to `keys`.
 pub(super) fn add_keys(keys: &mut WriteKeys, op: &CrdtOp) -> crate::Result<()> {
     match op {
-        CrdtOp::Apply {
-            collection,
-            document_id,
-            ..
+        CrdtOp::Apply { .. } | CrdtOp::ApplyAuthenticated { .. } => {
+            return Err(unsequenced(
+                "a CRDT sync delta applies through its own admission and answers its own \
+                 verdict, outside any transaction",
+            ));
         }
-        | CrdtOp::ApplyAuthenticated {
-            collection,
-            document_id,
-            ..
-        }
-        | CrdtOp::RestoreToVersion {
+        CrdtOp::RestoreToVersion {
             collection,
             document_id,
             ..
@@ -105,25 +102,13 @@ mod tests {
             .collect()
     }
 
-    /// A sync delta and a Calvin CRDT upsert of one document lock the same
-    /// row key `Exclusive`. While the upsert holds its keys, the delta
-    /// cannot take them.
+    /// A sync delta is never sequenced: a Calvin resolve refuses it. The
+    /// extraction refuses it by name, so no builder sequences one and a
+    /// contended delta waits at the write gate instead of routing.
     #[test]
-    fn a_sync_delta_waits_for_a_calvin_write_of_its_row() {
-        use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
-        let collection = QualifiedCollection::new(DatabaseId::DEFAULT, "docs");
-        let upsert = CrdtOp::DocUpsert {
-            collection: collection.clone(),
-            document_id: "t1".into(),
-            fields: Vec::new(),
-            surrogate: nodedb_types::Surrogate::new(7),
-            partial: true,
-            verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
-            returning: None,
-            rls_filters: Vec::new(),
-        };
+    fn a_sync_delta_is_refused_as_unsequenced() {
         let delta = CrdtOp::Apply {
-            collection,
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             document_id: "t1".into(),
             delta: Vec::new(),
             peer_id: 1,
@@ -133,22 +118,12 @@ mod tests {
             constraint_version_required: 0,
             expected_frontier_digest: None,
         };
-        let held: std::collections::BTreeMap<_, _> = locks(&upsert).into_iter().collect();
-        let requested: std::collections::BTreeMap<_, _> = locks(&delta).into_iter().collect();
-        let row = held
-            .iter()
-            .find(|(key, _)| **key != collection_key())
-            .map(|(key, mode)| (key.clone(), *mode))
-            .expect("a row key");
-        assert_eq!(row.1, LockMode::Exclusive);
-        assert_eq!(requested.get(&row.0), Some(&LockMode::Exclusive));
-
-        let mut table = LockManager::new();
-        assert!(table.try_acquire(TxnId::new(1, 0), held));
-        assert!(
-            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
-            "the delta must not merge into the row while the upsert holds it"
-        );
+        let mut keys = WriteKeys::default();
+        assert!(matches!(
+            add_keys(&mut keys, &delta),
+            Err(crate::Error::BadRequest { .. })
+        ));
+        assert!(keys.into_key_sets().is_empty());
     }
 
     fn collection_key() -> LockKey {

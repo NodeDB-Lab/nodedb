@@ -36,6 +36,11 @@ impl Scheduler {
     /// committed txn. A non-`Ok` response or a record that cannot be read
     /// halts the scheduler: the txn keeps its `pending` entry and locks, and
     /// its position stays unapplied.
+    ///
+    /// No client input reaches either halt. A plan the resolve refuses never
+    /// commits: it is refused before it is sequenced, or its stage votes
+    /// abort. The messages and applied key `owed_redo` decodes were decoded
+    /// before the class was sequenced.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_redo_resolve(
         &mut self,
         txn_id: TxnId,

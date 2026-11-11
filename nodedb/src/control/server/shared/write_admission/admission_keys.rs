@@ -31,6 +31,7 @@
 //! A write no Calvin transaction sequences still takes keys:
 //!
 //! - A resolved write locks the rows it names, as a row write does.
+//! - A CRDT sync delta locks its document's id key, as a CRDT row write does.
 //! - A text or spatial index write locks its collection `Intent`.
 //! - A transaction batch takes the keys of every plan it carries.
 //! - Any other write locks every collection it writes `Exclusive`.
@@ -45,7 +46,7 @@ use std::collections::BTreeMap;
 
 use nodedb_cluster::calvin::types::EngineKeySet;
 use nodedb_physical::physical_plan::{
-    ColumnarOp, DocumentOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp, VectorOp,
+    ColumnarOp, CrdtOp, DocumentOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp, VectorOp,
 };
 
 use crate::control::cluster::calvin::scheduler::driver::helpers::{
@@ -222,6 +223,20 @@ fn unsequenced_keys(keys: &mut WriteKeys, plan: &PhysicalPlan) {
                 .iter()
                 .map(|mutation| mutation.surrogate().as_u32()),
         ),
+        // A sync delta locks its document's id key, the key every Calvin
+        // writer of the document holds from its grant to its install.
+        PhysicalPlan::Crdt(
+            CrdtOp::Apply {
+                collection,
+                document_id,
+                ..
+            }
+            | CrdtOp::ApplyAuthenticated {
+                collection,
+                document_id,
+                ..
+            },
+        ) => keys.row_id(collection.as_str(), document_id),
         PhysicalPlan::Document(_)
         | PhysicalPlan::Kv(_)
         | PhysicalPlan::Vector(_)
@@ -450,6 +465,53 @@ mod tests {
         assert!(!sequenced);
         assert_eq!(keys.get(&kv_key("kv", b"k")), Some(&LockMode::Exclusive));
         assert_eq!(keys.get(&coll("kv")), Some(&LockMode::Intent));
+    }
+
+    /// A sync delta never routes to the scheduler, whose resolve refuses it.
+    /// It locks its document's id key, which a Calvin CRDT write of the same
+    /// document holds, so a contended delta waits for that write's install.
+    #[test]
+    fn a_sync_delta_waits_for_a_calvin_write_of_its_row() {
+        let upsert = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+            collection: qualified("docs"),
+            document_id: "t1".into(),
+            fields: Vec::new(),
+            surrogate: Surrogate::new(7),
+            partial: true,
+            verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let delta = PhysicalPlan::Crdt(CrdtOp::Apply {
+            collection: qualified("docs"),
+            document_id: "t1".into(),
+            delta: Vec::new(),
+            peer_id: 1,
+            mutation_id: 1,
+            surrogate: Surrogate::new(7),
+            provenance: None,
+            constraint_version_required: 0,
+            expected_frontier_digest: None,
+        });
+        let (held, upsert_sequenced) = keys_of(&upsert);
+        let (requested, delta_sequenced) = keys_of(&delta);
+        assert!(upsert_sequenced);
+        assert!(!delta_sequenced, "a sync delta must wait, never route");
+        let row = kv_key("docs", b"t1");
+        assert_eq!(held.get(&row), Some(&LockMode::Exclusive));
+        assert_eq!(requested.get(&row), Some(&LockMode::Exclusive));
+        assert_ne!(
+            requested.get(&coll("docs")),
+            Some(&LockMode::Exclusive),
+            "a sync delta must not lock its whole collection"
+        );
+
+        let mut table = LockManager::new();
+        assert!(table.try_acquire(TxnId::new(1, 0), held));
+        assert!(
+            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
+            "the delta must not merge into the row while the upsert holds it"
+        );
     }
 
     /// A transaction batch takes the keys of every write it carries.

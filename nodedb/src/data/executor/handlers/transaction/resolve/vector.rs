@@ -163,20 +163,8 @@ pub(super) fn serialize_vector_op(
         // compact / rebuild are reconstructed without a redo sub-record.
         VectorOp::Seal { .. } | VectorOp::CompactIndex { .. } | VectorOp::Rebuild { .. } => Ok(()),
 
-        // Vector-index configuration DDL: rejected like the KV / document
-        // index-DDL ops. No row-level post-image; a CREATE VECTOR INDEX rides
-        // its own autocommit `VectorParams` record, not a transaction redo.
-        VectorOp::SetParams { .. } => Err(crate::Error::PlanError {
-            detail: "vector SetParams (index DDL) is not supported in transaction resolve"
-                .to_string(),
-        }),
-
-        // Same contract on the teardown side: a DROP INDEX rides its own
-        // autocommit `VectorIndexDrop` record, never a transaction redo.
-        VectorOp::DropIndex { .. } => Err(crate::Error::PlanError {
-            detail: "vector DropIndex (index DDL) is not supported in transaction resolve"
-                .to_string(),
-        }),
+        // Vector-index DDL: refused (see `refuse_vector_op`).
+        VectorOp::SetParams { .. } | VectorOp::DropIndex { .. } => refuse_vector_op(op),
 
         // Vector-primary direct writes: the overlay holds each staged row, so
         // the op only registers its collection (`vector_primary`).
@@ -379,6 +367,48 @@ pub(super) fn serialize_vector_op(
             });
             Ok(())
         }
+    }
+}
+
+/// Refuse a vector op that no transaction resolves: vector-index DDL. It is
+/// rejected like the KV and document index DDL. A CREATE VECTOR INDEX rides
+/// its own autocommit `VectorParams` record, and a DROP INDEX its own
+/// `VectorIndexDrop` record, never a transaction redo. Every other op passes.
+pub(super) fn refuse_vector_op(op: &VectorOp) -> crate::Result<()> {
+    match op {
+        VectorOp::SetParams { .. } => Err(crate::Error::PlanError {
+            detail: "vector SetParams (index DDL) is not supported in transaction resolve"
+                .to_string(),
+        }),
+        VectorOp::DropIndex { .. } => Err(crate::Error::PlanError {
+            detail: "vector DropIndex (index DDL) is not supported in transaction resolve"
+                .to_string(),
+        }),
+        VectorOp::Insert { .. }
+        | VectorOp::BatchInsert { .. }
+        | VectorOp::Delete { .. }
+        | VectorOp::DeleteBySurrogate { .. }
+        | VectorOp::Search { .. }
+        | VectorOp::MultiSearch { .. }
+        | VectorOp::MultiVectorScoreSearch { .. }
+        | VectorOp::SparseSearch { .. }
+        | VectorOp::QueryStats { .. }
+        | VectorOp::Seal { .. }
+        | VectorOp::CompactIndex { .. }
+        | VectorOp::Rebuild { .. }
+        | VectorOp::DirectUpsert { .. }
+        | VectorOp::DirectInsert { .. }
+        | VectorOp::DirectInsertIfAbsent { .. }
+        | VectorOp::DirectBatchWrite { .. }
+        | VectorOp::DirectUpdate { .. }
+        | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectTruncate { .. }
+        | VectorOp::ResolvedDirectWrite { .. }
+        | VectorOp::ResolveDirectWrite(_)
+        | VectorOp::MultiVectorInsert { .. }
+        | VectorOp::MultiVectorDelete { .. }
+        | VectorOp::SparseInsert { .. }
+        | VectorOp::SparseDelete { .. } => Ok(()),
     }
 }
 

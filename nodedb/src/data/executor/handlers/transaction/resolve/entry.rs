@@ -225,10 +225,7 @@ impl CoreLoop {
 
                 // Coordinator-only op; never legal on the Data Plane.
                 PhysicalPlan::ClusterArray(_) | PhysicalPlan::ClusterEvent(_) => {
-                    return Err(crate::Error::Internal {
-                        detail: "Control-Plane-only op reached Data Plane transaction resolve"
-                            .to_string(),
-                    });
+                    return Err(super::admit::control_plane_only_op());
                 }
             }
         }

@@ -16,6 +16,7 @@ use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::resolve::check_calvin_resolvable;
 use crate::data::executor::handlers::transaction::stage_write::{
     StageBalanceDeltaParams, StageBatchInsertParams, StageCtx, StageTimeseriesInsertParams,
 };
@@ -57,6 +58,11 @@ impl CoreLoop {
         tenant_id: TenantId,
         plan: &PhysicalPlan,
     ) -> Result<Vec<u8>, ErrorCode> {
+        // A plan the resolve refuses is refused here. Resolve runs after the
+        // COMMIT verdict, where a refusal halts the vShard. This refusal is
+        // an abort vote instead, and every replica reaches it from the same
+        // plan bytes.
+        check_calvin_resolvable(plan).map_err(ErrorCode::from)?;
         let tid = tenant_id.as_u64();
         match plan {
             PhysicalPlan::Document(DocumentOp::PointInsert {

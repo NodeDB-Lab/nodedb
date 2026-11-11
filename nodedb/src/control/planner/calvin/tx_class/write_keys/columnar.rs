@@ -12,11 +12,22 @@ use super::set::WriteKeys;
 /// Add the write keys of columnar op `op` to `keys`.
 pub(super) fn add_columnar_keys(keys: &mut WriteKeys, op: &ColumnarOp) -> crate::Result<()> {
     match op {
+        // A sync insert carries its peer's provenance. The sync ingest path
+        // applies it outside any transaction, and a Calvin resolve refuses it.
+        ColumnarOp::Insert {
+            provenance: Some(_),
+            ..
+        } => {
+            return Err(unsequenced(
+                "a columnar insert with sync provenance is applied by the sync ingest path",
+            ));
+        }
         // Every row it inserts, and the whole collection, so inserts append
         // to the collection in sequencer order.
         ColumnarOp::Insert {
             collection,
             surrogates,
+            provenance: None,
             ..
         } => {
             keys.rows(collection.as_str(), surrogates.iter().map(|s| s.as_u32()));
@@ -45,12 +56,15 @@ pub(super) fn add_timeseries_keys(keys: &mut WriteKeys, op: &TimeseriesOp) -> cr
         // between the stage that previews the rows the install lands and
         // the install. The `RETURNING` rows and rejected lines the stage
         // decides are what the install stores.
-        TimeseriesOp::Ingest { collection, .. }
-        | TimeseriesOp::Truncate { collection, .. }
-        | TimeseriesOp::RefreshAggregate { collection, .. } => {
+        TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. } => {
             keys.whole_collection(collection.as_str());
             Ok(())
         }
+        // A refresh cut applies from its own data-group entry, and a Calvin
+        // resolve refuses it. A contended cut waits at the write gate.
+        TimeseriesOp::RefreshAggregate { .. } => Err(unsequenced(
+            "a continuous-aggregate refresh cut applies from its own log entry",
+        )),
         TimeseriesOp::ResolveIngest(_)
         | TimeseriesOp::Scan { .. }
         | TimeseriesOp::ReadAggregate { .. } => Err(not_a_write("a timeseries read")),

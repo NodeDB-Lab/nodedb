@@ -19,13 +19,21 @@ use nodedb_physical::physical_plan::CrdtOp;
 use crate::control::server::wal_dispatch::encode_crdt_op_record;
 use crate::wal::RedoSubRecord;
 
-/// Append the redo sub-record for a single CRDT plan op to `ops`.
-pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+/// Refuse a CRDT op that no transaction resolves: a raw `Apply` /
+/// `ApplyAuthenticated` delta. It applies through its own admission, outside
+/// any transaction. Every other op passes.
+pub(super) fn refuse_crdt_op(op: &CrdtOp) -> crate::Result<()> {
     if matches!(op, CrdtOp::Apply { .. } | CrdtOp::ApplyAuthenticated { .. }) {
         return Err(crate::Error::PlanError {
             detail: "CRDT Apply is not supported inside a transaction".to_string(),
         });
     }
+    Ok(())
+}
+
+/// Append the redo sub-record for a single CRDT plan op to `ops`.
+pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+    refuse_crdt_op(op)?;
     if let Some((kind, payload)) = encode_crdt_op_record(op)? {
         ops.push(RedoSubRecord {
             record_type: kind.record_type() as u32,

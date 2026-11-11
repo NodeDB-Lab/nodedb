@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod admit;
 mod array;
 mod classify;
 mod columnar_image;
@@ -28,4 +29,5 @@ mod timeseries;
 mod vector;
 mod vector_primary;
 
+pub(in crate::data::executor) use admit::check_calvin_resolvable;
 pub(in crate::data::executor) use document::redo_put_value;

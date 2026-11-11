@@ -50,6 +50,12 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// The executor response channel closed before a response arrived.
     ResponseDisconnected,
     /// The resolve of a committed txn failed or returned an undecodable record.
+    ///
+    /// No client input reaches it. A plan the resolve refuses is refused
+    /// before it is sequenced (`add_plan_write_keys`), or at its stage, which
+    /// votes abort (`check_calvin_resolvable`). The class's carried messages
+    /// and applied key are decoded before it is sequenced (`prepare_submit`).
+    /// What remains is a staged overlay that breaks its own invariant.
     ResolveFailed,
     /// This leader cannot stage a txn whose verdict is COMMIT: its
     /// restages ran out, or a collection it names was superseded.

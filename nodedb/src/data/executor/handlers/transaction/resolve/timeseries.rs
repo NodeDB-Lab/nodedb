@@ -194,16 +194,30 @@ impl CoreLoop {
             | TimeseriesOp::ResolveIngest(_)
             | TimeseriesOp::ReadAggregate { .. } => Ok(()),
 
-            // Staging refuses a refresh cut, so none reaches a redo.
-            TimeseriesOp::RefreshAggregate { .. } => Err(crate::Error::FeatureNotSupported {
-                detail: "REFRESH CONTINUOUS AGGREGATE runs outside a transaction".into(),
-            }),
-
-            // Staging refuses partition maintenance, so none reaches a redo.
-            TimeseriesOp::Partitions { .. } => Err(crate::Error::FeatureNotSupported {
-                detail: "SHOW PARTITIONS and REWRITE PARTITIONS run outside a transaction".into(),
-            }),
+            // No transaction carries these. A Calvin stage refuses them
+            // through `check_calvin_resolvable`, so none reaches a redo.
+            TimeseriesOp::RefreshAggregate { .. } | TimeseriesOp::Partitions { .. } => {
+                refuse_timeseries_op(op)
+            }
         }
+    }
+}
+
+/// Refuse a timeseries op that no transaction carries: a refresh cut and
+/// partition maintenance. Every other op passes.
+pub(super) fn refuse_timeseries_op(op: &TimeseriesOp) -> crate::Result<()> {
+    match op {
+        TimeseriesOp::RefreshAggregate { .. } => Err(crate::Error::FeatureNotSupported {
+            detail: "REFRESH CONTINUOUS AGGREGATE runs outside a transaction".into(),
+        }),
+        TimeseriesOp::Partitions { .. } => Err(crate::Error::FeatureNotSupported {
+            detail: "SHOW PARTITIONS and REWRITE PARTITIONS run outside a transaction".into(),
+        }),
+        TimeseriesOp::Ingest { .. }
+        | TimeseriesOp::Truncate { .. }
+        | TimeseriesOp::Scan { .. }
+        | TimeseriesOp::ResolveIngest(_)
+        | TimeseriesOp::ReadAggregate { .. } => Ok(()),
     }
 }
 

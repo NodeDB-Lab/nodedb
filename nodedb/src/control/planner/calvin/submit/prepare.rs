@@ -42,6 +42,7 @@ pub(crate) fn prepare_submit(
     state: &SharedState,
     tx_class: &mut TxClass,
 ) -> crate::Result<Prepared> {
+    check_carried_bytes(tx_class)?;
     super::local::raise_metadata_floor(state, tx_class);
     if tx_class.is_multi_part() {
         return Ok(Prepared {
@@ -68,6 +69,24 @@ pub(crate) fn prepare_submit(
     let stream = super::parts::split_into_parts(state, tx_class, &sliced)?;
     let fold = ReplyFold::of_prepared(tx_class, &sliced.plans);
     Ok(Prepared { stream, fold })
+}
+
+/// Refuse a class whose published messages or applied key do not decode.
+///
+/// A participant decodes both when it builds its redo, after the COMMIT
+/// verdict. A decode error there halts its vShard. Here it refuses the
+/// submit before the class is sequenced.
+fn check_carried_bytes(tx_class: &TxClass) -> crate::Result<()> {
+    crate::wal::RedoPublish::decode_all(&tx_class.publishes)?;
+    if !tx_class.applied_key.is_empty() {
+        zerompk::from_msgpack::<crate::wal::CrossShardAppliedKey>(&tx_class.applied_key).map_err(
+            |e| Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("Calvin transaction applied key: {e}"),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// `plans` with every volatile DEFAULT their bodies leave unset bound once,
@@ -217,6 +236,28 @@ mod tests {
             "every slice of a body task is a body task"
         );
         assert!(!class.incarnations.is_empty(), "the plans name collections");
+    }
+
+    /// A class whose messages or applied key do not decode is refused before
+    /// it is sequenced. A participant decodes both after the COMMIT verdict,
+    /// where an error halts its vShard.
+    #[tokio::test]
+    async fn undecodable_carried_bytes_are_refused_before_sequencing() {
+        let (state, _directory) = test_state();
+        // 0xc1 is never a valid MessagePack byte.
+        let mut class = edge_class(&[truncate("a")], Vec::new());
+        class.publishes = vec![0xc1];
+        assert!(matches!(
+            prepare_submit(&state, &mut class),
+            Err(Error::Serialization { .. })
+        ));
+
+        let mut class = edge_class(&[truncate("a")], Vec::new());
+        class.applied_key = vec![0xc1];
+        assert!(matches!(
+            prepare_submit(&state, &mut class),
+            Err(Error::Serialization { .. })
+        ));
     }
 
     /// A class split into parts by its coordinator decodes nothing.

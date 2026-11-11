@@ -439,4 +439,74 @@ mod tests {
         let plan = ts_ingest(&["cpu value=7i 1000000000"]);
         assert_eq!(returned(&commit(&[plan], |_| {})), vec![Value::Integer(7)]);
     }
+
+    /// Plans a Calvin resolve refuses from the plan alone.
+    fn unresolvable_plans() -> Vec<PhysicalPlan> {
+        use nodedb_physical::physical_plan::{KvOp, RefreshCut, TimeseriesOp, VectorOp};
+        vec![
+            PhysicalPlan::Crdt(CrdtOp::Apply {
+                collection: coll("tasks"),
+                document_id: "t1".to_string(),
+                delta: vec![1],
+                peer_id: 1,
+                mutation_id: 1,
+                surrogate: Surrogate::new(71),
+                provenance: None,
+                constraint_version_required: 0,
+                expected_frontier_digest: None,
+            }),
+            PhysicalPlan::Timeseries(TimeseriesOp::RefreshAggregate {
+                collection: coll("metrics"),
+                cut: RefreshCut {
+                    aggregate: "metrics_1m".to_owned(),
+                    incarnation: nodedb_types::Hlc::new(7, 1),
+                    refresh_id: 1,
+                    periodic: false,
+                },
+            }),
+            PhysicalPlan::Kv(KvOp::DropIndex {
+                collection: coll("cache"),
+                field: "v".to_owned(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DropIndex {
+                collection: coll("vecs"),
+                field_name: "emb".to_owned(),
+            }),
+        ]
+    }
+
+    /// A slice holding a plan the resolve refuses aborts at its stage, with
+    /// an abort vote, on every replica: the refusal reads only the plan. It
+    /// stages nothing and leaves no pending entry, and the core commits the
+    /// next transaction.
+    #[test]
+    fn a_plan_the_resolve_refuses_aborts_at_its_stage_and_the_core_serves_on() {
+        use crate::bridge::envelope::StageVote;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        for (epoch, refused) in (1u64..).zip(unresolvable_plans()) {
+            let (staged, installed) = core.calvin_commit_staged_for_test(
+                &task,
+                TID,
+                &[kv_put("staged first"), refused.clone()],
+                (epoch, 0),
+                epoch * 10,
+            );
+            assert_eq!(staged.status, Status::Error, "{refused:?} staged");
+            assert_eq!(
+                staged.stage_vote,
+                Some(StageVote::ParticipantError),
+                "{refused:?} voted other than abort"
+            );
+            assert!(installed.is_none(), "{refused:?} reached its install");
+            assert!(
+                core.calvin.commit_pending.is_empty(),
+                "{refused:?} left a pending entry"
+            );
+        }
+
+        let next = core.calvin_commit_for_test(&task, TID, &[kv_put("next")], 100, 1_000);
+        assert_eq!(returned(&next), vec![text("next")]);
+    }
 }
