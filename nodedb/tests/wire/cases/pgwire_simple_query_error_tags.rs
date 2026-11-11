@@ -2,7 +2,7 @@
 
 //! A simple query of several statements stops at the first error, as in PostgreSQL.
 //! The client reads the responses of the earlier statements, then the ErrorResponse.
-//! Statements after the failed one do not run. Earlier writes stay applied.
+//! Statements after the failed one do not run. The implicit transaction rolls back earlier writes.
 //!
 //! `Client::simple_query_raw` yields each backend message in wire order.
 //! A `CommandComplete` arrives as `Ok`, and the ErrorResponse arrives as `Err`.
@@ -85,10 +85,9 @@ async fn error_at_second_statement_follows_first_tag() {
         vec![Reply::Tag(1), Reply::Error("42P01".to_owned())],
         "the client must read `INSERT 0 1`, then the error of the second statement"
     );
-    assert_eq!(
-        ids(&server, "err_tags_second").await,
-        vec!["a".to_owned()],
-        "the first statement runs in autocommit and stays applied"
+    assert!(
+        ids(&server, "err_tags_second").await.is_empty(),
+        "the error rolls back the implicit transaction and its first write"
     );
 }
 

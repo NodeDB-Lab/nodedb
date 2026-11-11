@@ -408,3 +408,65 @@ async fn a_block_that_closes_a_period_then_writes_into_it_is_refused() {
         "a refused block applies no entry: {rows:?}"
     );
 }
+
+/// A simple query of several statements runs as one implicit transaction. A
+/// write that closes a period, then a write into it: the second reads the
+/// reference row as the first staged it, so the request applies nothing.
+/// Red on base: the close autocommits, so the period stays closed.
+/// Lever: `execute_simple_query` passes `implicit_block: false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_that_closes_a_period_then_writes_into_it_is_refused() {
+    let server = TestServer::start().await;
+    setup(&server, "pl_req_periods", "pl_req_entries").await;
+    seed_period(&server, "pl_req_periods", "2026-01", "OPEN").await;
+
+    let result = server
+        .exec(
+            "UPDATE pl_req_periods SET status = 'CLOSED' WHERE period_key = '2026-01'; \
+             INSERT INTO pl_req_entries (id, fiscal_period, amount) VALUES ('e1', '2026-01', 5)",
+        )
+        .await;
+    assert_period_locked(&result);
+
+    let status = server
+        .query_text("SELECT status FROM pl_req_periods WHERE period_key = '2026-01'")
+        .await
+        .unwrap();
+    assert_eq!(status, ["OPEN"], "a refused request leaves the period open");
+    let rows = server
+        .query_text("SELECT id FROM pl_req_entries WHERE id = 'e1'")
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "a refused request applies no entry: {rows:?}"
+    );
+}
+
+/// The write comes first, then the close. The entry is in an open period when
+/// it is written, so both statements apply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_that_writes_into_a_period_then_closes_it_applies() {
+    let server = TestServer::start().await;
+    setup(&server, "pl_ord_periods", "pl_ord_entries").await;
+    seed_period(&server, "pl_ord_periods", "2026-01", "OPEN").await;
+
+    server
+        .exec(
+            "INSERT INTO pl_ord_entries (id, fiscal_period, amount) VALUES ('e1', '2026-01', 5); \
+             UPDATE pl_ord_periods SET status = 'CLOSED' WHERE period_key = '2026-01'",
+        )
+        .await
+        .unwrap();
+
+    let status = server
+        .query_text("SELECT status FROM pl_ord_periods WHERE period_key = '2026-01'")
+        .await
+        .unwrap();
+    assert_eq!(status, ["CLOSED"]);
+    let rows = server
+        .query_text("SELECT id FROM pl_ord_entries WHERE id = 'e1'")
+        .await
+        .unwrap();
+    assert_eq!(rows, ["e1"]);
+}

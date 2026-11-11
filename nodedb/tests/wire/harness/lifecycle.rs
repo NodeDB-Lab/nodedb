@@ -220,6 +220,19 @@ impl TestServer {
         (server, dir)
     }
 
+    /// Spawn a single-core NodeDB server with `[server.sql]
+    /// txn_wrapper_stateless = false`.
+    pub async fn start_with_txn_wrapper_off() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::txn_wrapper_off(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Spawn a single-core NodeDB server that pushes OTLP metrics every
     /// second to a collector at `http://localhost:<port>`.
     pub async fn start_with_otlp_collector(port: u16) -> Self {

@@ -64,6 +64,9 @@ pub(super) struct TuningOverrides {
     /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
     /// so a superseded version leaves about 12 s after its successor.
     pub(super) fast_version_cleanup: bool,
+    /// Writes `[server.sql]` with `txn_wrapper_stateless = false`, so a test
+    /// reads the refusal HTTP, NDJSON and WebSocket answer then.
+    pub(super) txn_wrapper_off: bool,
 }
 
 impl TuningOverrides {
@@ -132,6 +135,14 @@ impl TuningOverrides {
     pub(super) fn fast_version_cleanup() -> Self {
         Self {
             fast_version_cleanup: true,
+            ..Self::default()
+        }
+    }
+
+    /// Boot with the stateless transaction wrapper switched off.
+    pub(super) fn txn_wrapper_off() -> Self {
+        Self {
+            txn_wrapper_off: true,
             ..Self::default()
         }
     }
@@ -218,6 +229,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
             toml_quote(&token_path),
             toml_quote(&blob_path)
         ));
+    }
+    if tuning.txn_wrapper_off {
+        toml.push_str("\n[server.sql]\ntxn_wrapper_stateless = false\n");
     }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",
