@@ -49,12 +49,18 @@ fn a_solo_kind_is_read_from_the_first_word() {
         ("-- a note\nDROP COLLECTION docs", SoloKind::Ddl),
         ("ALTER COLLECTION docs ADD COLUMN note TEXT", SoloKind::Ddl),
         ("GRANT READ ON docs TO someone", SoloKind::Ddl),
+        (
+            "UPSERT INTO docs (id, val) VALUES ('a', 1)",
+            SoloKind::Routed,
+        ),
+        ("INSERT INTO docs { id: 'a' }", SoloKind::Routed),
+        ("SELECT KV_INCR('counter', 1)", SoloKind::Routed),
+        ("  SELECT TOPK('scores', 3)", SoloKind::Routed),
     ] {
         assert_eq!(solo_kind(statement), Some(kind), "{statement}");
     }
     for statement in [
         "INSERT INTO docs (id, val) VALUES ('a', 1)",
-        "UPSERT INTO docs (id, val) VALUES ('a', 1)",
         "UPDATE docs SET val = 2 WHERE id = 'a'",
         "DELETE FROM docs WHERE val > 5",
         "SELECT id FROM docs",
@@ -361,28 +367,29 @@ async fn returning_stays_with_its_own_statement() {
     cluster.shutdown().await;
 }
 
-/// `UPSERT ..; INSERT ..` plans the INSERT as an insert. `INSERT ..;
-/// UPSERT ..` plans the UPSERT as an upsert.
+/// `UPSERT .. VALUES` runs through the DDL router. Beside an INSERT, in
+/// either position, the request answers 0A000 and names the UPSERT.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn upsert_and_insert_each_plan_as_their_own_verb() {
+async fn an_upsert_beside_an_insert_is_refused_in_either_position() {
     let cluster = planner_cluster().await;
     let ctx = QueryContext::for_state(&cluster.state);
     let upsert = "UPSERT INTO kv_docs (id, val) VALUES ('u1', 1)";
     let insert = "INSERT INTO docs (id, val) VALUES ('i1', 2)";
-    let is_upsert = |kind: PlanKind| matches!(kind, PlanKind::DmlResult("UPSERT"));
-    let is_insert = |kind: PlanKind| matches!(kind, PlanKind::DmlResult("INSERT"));
 
-    let plan = plan_request(&ctx, &cluster.state, &[upsert, insert])
-        .await
-        .expect("UPSERT then INSERT plans");
-    assert_statement_kind(&plan, 0, is_upsert, "an upsert");
-    assert_statement_kind(&plan, 1, is_insert, "an insert");
-
-    let plan = plan_request(&ctx, &cluster.state, &[insert, upsert])
-        .await
-        .expect("INSERT then UPSERT plans");
-    assert_statement_kind(&plan, 0, is_insert, "an insert");
-    assert_statement_kind(&plan, 1, is_upsert, "an upsert");
+    for (statements, needle) in [
+        ([upsert, insert], "statement 1 of 2 (UPSERT)"),
+        ([insert, upsert], "statement 2 of 2 (UPSERT)"),
+    ] {
+        let error = plan_request(&ctx, &cluster.state, &statements)
+            .await
+            .expect_err("an UPSERT beside an INSERT must be refused");
+        let (_, sqlstate, message) = error_to_sqlstate(&error);
+        assert_eq!(sqlstate, "0A000", "{message}");
+        assert!(
+            message.contains(needle) && message.contains("as its own request"),
+            "the message names the statement and the next action: {message}"
+        );
+    }
     cluster.shutdown().await;
 }
 

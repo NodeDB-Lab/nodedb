@@ -6,6 +6,7 @@
 //! other statement returns `None` so the transitional pgwire delegation in the
 //! parent `super::super::dispatch` handles it.
 
+mod claims;
 mod dispatch;
 mod helpers;
 mod route_tokens;
@@ -24,4 +25,5 @@ mod typed_misc;
 mod typed_policy;
 mod typed_streamview;
 
+pub use claims::claims;
 pub use dispatch::try_dispatch;

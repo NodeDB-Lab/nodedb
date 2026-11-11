@@ -201,6 +201,12 @@ pub(super) async fn try_string(
     None
 }
 
+/// Whether an arm of this cluster that reads tokens, not a prefix, takes
+/// `sql`. The router gate in `claims` reads it.
+pub(super) fn shape_claims(sql: &str) -> bool {
+    is_consumer_group_read(sql, "STREAM") || is_consumer_group_read(sql, "TOPIC")
+}
+
 /// `SELECT * FROM <kind> <name> CONSUMER GROUP <group> ...`, where `kind` is
 /// `STREAM` or `TOPIC`. The consumer-group clause follows the name.
 fn is_consumer_group_read(sql: &str, kind: &str) -> bool {

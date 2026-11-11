@@ -14,6 +14,7 @@ use super::QueryContext;
 use crate::control::planner::context::security::PlanSecurityContext;
 use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::shared::ddl::neutral::router;
 use crate::control::server::shared::returning::strip_returning;
 use crate::control::server::shared::statement_exec::StatementMap;
 
@@ -46,9 +47,11 @@ impl QueryContext {
     /// Each statement plans against the committed catalog. A later statement
     /// never sees what an earlier one changes. So a request of several
     /// statements that holds DDL, transaction control or a session command
-    /// returns `FeatureNotSupported` (SQLSTATE `0A000`). A request of one
-    /// statement is never refused here. A request of no statement plans no
-    /// task.
+    /// returns `FeatureNotSupported` (SQLSTATE `0A000`). A statement the DDL
+    /// router runs, such as `UPSERT .. VALUES` or `SELECT KV_INCR(..)`, takes
+    /// the same refusal: `plan_sql` skips the router's own steps. A request
+    /// of one statement is never refused here. A request of no statement
+    /// plans no task.
     pub async fn plan_request_with_rls_and_versions(
         &self,
         statements: &[String],
@@ -132,6 +135,9 @@ pub(super) enum SoloKind {
     TransactionControl,
     /// `SET`, `SHOW` or `RESET`.
     SessionCommand,
+    /// A statement the DDL router runs itself, by `router::claims`. Its
+    /// router steps, such as field inference, never run in `plan_sql`.
+    Routed,
 }
 
 impl SoloKind {
@@ -140,6 +146,20 @@ impl SoloKind {
             Self::Ddl => "DDL or an engine command",
             Self::TransactionControl => "transaction control",
             Self::SessionCommand => "a session command",
+            Self::Routed => "a statement the DDL router runs",
+        }
+    }
+
+    /// The rule a request of several statements breaks with this kind.
+    fn rule(self) -> &'static str {
+        match self {
+            Self::Routed => {
+                "A request of several statements plans each statement without the DDL \
+                 router, so it skips the router's own steps."
+            }
+            Self::Ddl | Self::TransactionControl | Self::SessionCommand => {
+                "A request of several statements can hold only DML and queries."
+            }
         }
     }
 }
@@ -170,7 +190,8 @@ const DDL_HEADS: &[&str] = &["CREATE", "ALTER", "DROP", "GRANT", "REVOKE"];
 /// The solo kind of `statement`, or `None` for DML and queries.
 ///
 /// The first word is read after whitespace and comments. A statement the
-/// typed DDL parser claims is DDL, whatever its first word.
+/// typed DDL parser claims is DDL, whatever its first word. Any other
+/// statement `router::claims` takes is [`SoloKind::Routed`].
 pub(super) fn solo_kind(statement: &str) -> Option<SoloKind> {
     let head = first_sql_word(statement)
         .map(str::to_ascii_uppercase)
@@ -184,6 +205,9 @@ pub(super) fn solo_kind(statement: &str) -> Option<SoloKind> {
     }
     if DDL_HEADS.contains(&head) || nodedb_sql::ddl_ast::parse(statement).is_some() {
         return Some(SoloKind::Ddl);
+    }
+    if router::claims(statement) {
+        return Some(SoloKind::Routed);
     }
     None
 }
@@ -203,11 +227,11 @@ pub(super) fn refuse_solo_statements(statements: &[String]) -> crate::Result<()>
         let head = first_sql_word(statement).unwrap_or_default();
         return Err(crate::Error::FeatureNotSupported {
             detail: format!(
-                "statement {} of {} ({head}) is {}. A request of several statements \
-                 can hold only DML and queries. Send this statement as its own request.",
+                "statement {} of {} ({head}) is {}. {} Send this statement as its own request.",
                 index + 1,
                 statements.len(),
                 kind.describe(),
+                kind.rule(),
             ),
         });
     }
