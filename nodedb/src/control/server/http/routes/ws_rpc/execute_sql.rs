@@ -169,17 +169,7 @@ pub async fn execute_sql(
             if is_cluster_array(&task.plan) {
                 let authorized_task = authorize_one_task(shared, identity, &task)?;
                 let payload = run_cluster_array(shared, authorized_task).await?;
-                if !payload.is_empty() {
-                    let json =
-                        crate::data::executor::response_codec::decode_payload_to_json(&payload);
-                    match sonic_rs::from_str::<serde_json::Value>(&json) {
-                        Ok(mut v) => {
-                            redact_decoded_value(Some(&redaction), &shared.redaction, &mut v);
-                            results.push(v);
-                        }
-                        Err(_) => results.push(serde_json::Value::String(json)),
-                    }
-                }
+                push_decoded_payload(&mut results, &redaction, &shared.redaction, &payload);
                 meter_task(shared, &scope, &plan_metering_info, rows_before, &results);
                 continue;
             }
@@ -198,24 +188,12 @@ pub async fn execute_sql(
                 .await
                 {
                     Ok(resp) => {
-                        let payload = resp.payload.to_vec();
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(
-                                    &payload,
-                                );
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(
-                                        Some(&redaction),
-                                        &shared.redaction,
-                                        &mut v,
-                                    );
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(
+                            &mut results,
+                            &redaction,
+                            &shared.redaction,
+                            &resp.payload,
+                        );
                     }
                     Err(e) => return Err(e),
                 }
@@ -253,24 +231,12 @@ pub async fn execute_sql(
                 .await
                 {
                     Ok(resp) => {
-                        let payload = resp.payload.to_vec();
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(
-                                    &payload,
-                                );
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(
-                                        Some(&redaction),
-                                        &shared.redaction,
-                                        &mut v,
-                                    );
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(
+                            &mut results,
+                            &redaction,
+                            &shared.redaction,
+                            &resp.payload,
+                        );
                     }
                     Err(e) => return Err(e),
                 }
@@ -307,18 +273,7 @@ pub async fn execute_sql(
                 .await
                 {
                     Ok(resp) => {
-                        let payload = resp.payload.to_vec();
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(&payload);
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(Some(&redaction), &shared.redaction, &mut v);
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(&mut results, &redaction, &shared.redaction, &resp.payload);
                     }
                     Err(e) => return Err(e),
                 }
@@ -338,24 +293,12 @@ pub async fn execute_sql(
                 .await
                 {
                     Ok(resp) => {
-                        let payload = resp.payload.to_vec();
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(
-                                    &payload,
-                                );
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(
-                                        Some(&redaction),
-                                        &shared.redaction,
-                                        &mut v,
-                                    );
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(
+                            &mut results,
+                            &redaction,
+                            &shared.redaction,
+                            &resp.payload,
+                        );
                     }
                     Err(e) => return Err(e),
                 }
@@ -390,24 +333,12 @@ pub async fn execute_sql(
                     crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(
                         resp,
                     ) => {
-                        let payload = resp.payload.to_vec();
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(
-                                    &payload,
-                                );
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(
-                                        Some(&redaction),
-                                        &shared.redaction,
-                                        &mut v,
-                                    );
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(
+                            &mut results,
+                            &redaction,
+                            &shared.redaction,
+                            &resp.payload,
+                        );
                         meter_task(shared, &scope, &plan_metering_info, rows_before, &results);
                         continue;
                     }
@@ -433,23 +364,7 @@ pub async fn execute_sql(
             match payloads {
                 Ok(vecs) => {
                     for payload in vecs {
-                        if !payload.is_empty() {
-                            let json =
-                                crate::data::executor::response_codec::decode_payload_to_json(
-                                    &payload,
-                                );
-                            match sonic_rs::from_str::<serde_json::Value>(&json) {
-                                Ok(mut v) => {
-                                    redact_decoded_value(
-                                        Some(&redaction),
-                                        &shared.redaction,
-                                        &mut v,
-                                    );
-                                    results.push(v);
-                                }
-                                Err(_) => results.push(serde_json::Value::String(json)),
-                            }
-                        }
+                        push_decoded_payload(&mut results, &redaction, &shared.redaction, &payload);
                     }
                 }
                 Err(e) => return Err(e),
@@ -477,6 +392,27 @@ fn rows_result(mut rows: Vec<serde_json::Value>) -> serde_json::Value {
         0 => serde_json::Value::Null,
         1 => rows.pop().unwrap_or(serde_json::Value::Null),
         _ => serde_json::Value::Array(rows),
+    }
+}
+
+/// Decode one dispatched payload and push it as this task's answer, redacted
+/// by the policy the request resolved. An empty payload pushes nothing.
+fn push_decoded_payload(
+    results: &mut Vec<serde_json::Value>,
+    redaction: &QueryRedaction,
+    store: &crate::control::security::redaction::RedactionStore,
+    payload: &[u8],
+) {
+    if payload.is_empty() {
+        return;
+    }
+    let json = crate::data::executor::response_codec::decode_payload_to_json(payload);
+    match sonic_rs::from_str::<serde_json::Value>(&json) {
+        Ok(mut value) => {
+            redact_decoded_value(Some(redaction), store, &mut value);
+            results.push(value);
+        }
+        Err(_) => results.push(serde_json::Value::String(json)),
     }
 }
 
