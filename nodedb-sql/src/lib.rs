@@ -90,6 +90,7 @@ pub fn plan_sql(sql: &str, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
         .unwrap_or_default();
 
     let statements = parse_sql(effective_sql)?;
+    refuse_rewritten_batch(preprocessed.is_some(), statements.len())?;
     plan_statements(&statements, is_upsert, temporal, catalog)
 }
 
@@ -120,10 +121,28 @@ pub fn plan_sql_with_params(
         .unwrap_or_default();
 
     let mut statements = parse_sql(effective_sql)?;
+    refuse_rewritten_batch(preprocessed.is_some(), statements.len())?;
     for stmt in &mut statements {
         params::bind_params(stmt, params);
     }
     plan_statements(&statements, is_upsert, temporal, catalog)
+}
+
+/// Refuse a text of several statements that the preprocess rewrote.
+///
+/// The rewrite flags (`is_upsert`, `temporal`) describe one statement but
+/// apply to every statement of the text. A caller plans each statement of a
+/// request alone, so a rewritten batch here is a caller error.
+fn refuse_rewritten_batch(rewritten: bool, statements: usize) -> Result<()> {
+    if rewritten && statements > 1 {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "a text of {statements} statements holds an UPSERT, an object literal or a \
+                 temporal clause. Plan each statement alone"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Plan a list of parsed statements.
