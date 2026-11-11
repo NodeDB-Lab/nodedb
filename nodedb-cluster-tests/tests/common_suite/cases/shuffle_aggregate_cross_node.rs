@@ -251,13 +251,16 @@ async fn aggregate_part(
 }
 
 /// Decode a `ShuffleAggregateConsumeResponse.rows` payload (a msgpack array of
-/// result-row maps) into `(group_key_k, fields)` pairs. An empty payload is zero
-/// rows.
+/// native tagged rows) into each row's fields. An empty payload is zero rows.
 fn decode_rows(bytes: &[u8]) -> Vec<HashMap<String, Value>> {
     if bytes.is_empty() {
         return Vec::new();
     }
-    let val = nodedb_types::value_from_msgpack(bytes).expect("decode result rows");
+    let val = nodedb::data::executor::response_codec::decode_row_payload_value(
+        bytes,
+        nodedb::data::executor::response_codec::RowContext::Flat,
+    )
+    .expect("decode result rows");
     let arr = match val {
         Value::Array(a) => a,
         other => panic!("expected result rows array, got {other:?}"),
