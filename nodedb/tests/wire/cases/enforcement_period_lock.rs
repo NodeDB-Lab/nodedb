@@ -366,3 +366,45 @@ async fn a_reference_row_missing_the_status_column_is_a_config_error() {
         "a write refused as misconfigured must leave no row behind"
     );
 }
+
+/// A block that closes a period, then writes into it. The write reads the
+/// reference row through the block's own transaction, so it is refused, and
+/// the block applies nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_block_that_closes_a_period_then_writes_into_it_is_refused() {
+    let server = TestServer::start().await;
+    setup(&server, "plk_blk_periods", "plk_blk_entries").await;
+    seed_period(&server, "plk_blk_periods", "2026-01", "OPEN").await;
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .exec("UPDATE plk_blk_periods SET status = 'CLOSED' WHERE period_key = '2026-01'")
+        .await
+        .unwrap();
+    let result = server
+        .exec(
+            "INSERT INTO plk_blk_entries (id, fiscal_period, amount) \
+             VALUES ('e1', '2026-01', 5)",
+        )
+        .await;
+    assert_period_locked(&result);
+    server.exec("ROLLBACK").await.unwrap();
+
+    let status = server
+        .query_text("SELECT status FROM plk_blk_periods WHERE period_key = '2026-01'")
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        ["OPEN"],
+        "a rolled-back block leaves the period open"
+    );
+    let rows = server
+        .query_text("SELECT id FROM plk_blk_entries")
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "a refused block applies no entry: {rows:?}"
+    );
+}
