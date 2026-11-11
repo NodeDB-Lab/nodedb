@@ -7,9 +7,10 @@
 //! client must see that error's SQLSTATE, the one a direct write renders,
 //! never a bare transaction rollback.
 //!
-//! A routed write keeps its `RETURNING` contract: its participant evaluates
-//! the list before it votes, so the client gets the frozen rows, and an
-//! error in the list refuses the write.
+//! A routed write keeps its `RETURNING` contract: its participant answers
+//! the frozen rows. Only a list that cannot fail reaches the gate. A list
+//! that can fail commits through Calvin ahead of it, and an error in it
+//! refuses the write.
 //!
 //! Each test holds the collection key in the vShard's real lock table, runs
 //! the UPDATE over pgwire, waits until the write gate routed it, then frees
@@ -230,43 +231,70 @@ async fn values(server: &TestServer, name: &str) -> Vec<String> {
         .expect("scan values")
 }
 
-/// A routed `RETURNING` write answers the rows its participant froze. The
-/// list's `nextval` draws once per row, at the participant, and the session
-/// takes the value it drew.
+/// The `id`, `v` and `s` of every row a `RETURNING` answer holds.
+fn returned_rows(
+    messages: &[tokio_postgres::SimpleQueryMessage],
+) -> Vec<(Option<&str>, Option<&str>, Option<&str>)> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some((row.get("id"), row.get("v"), row.try_get("s").ok().flatten()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A routed `RETURNING` write answers the rows its participant froze. Only a
+/// list that cannot fail reaches the gate: a list that can fail commits
+/// through Calvin ahead of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_routed_returning_write_answers_its_frozen_rows() {
     let server = TestServer::start().await;
     let name = "routed_returning";
     seeded_with_n(&server, name).await;
-    server
-        .exec("CREATE SEQUENCE routed_returning_seq")
-        .await
-        .expect("create sequence");
 
     let messages = routed(
         &server,
         name,
-        &format!(
-            "UPDATE {name} SET v = 'uno' WHERE n = 0 \
-             RETURNING id, v, nextval('routed_returning_seq') AS s"
-        ),
+        &format!("UPDATE {name} SET v = 'uno' WHERE id = 'k1' RETURNING id, v"),
     )
     .await
     .expect("the routed RETURNING write runs");
-    let rows: Vec<(Option<&str>, Option<&str>, Option<&str>)> = messages
-        .iter()
-        .filter_map(|message| match message {
-            tokio_postgres::SimpleQueryMessage::Row(row) => {
-                Some((row.get("id"), row.get("v"), row.get("s")))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(rows, [(Some("k1"), Some("uno"), Some("1"))]);
+    assert_eq!(returned_rows(&messages), [(Some("k1"), Some("uno"), None)]);
+    assert_eq!(values(&server, name).await, ["uno", "two"]);
+}
+
+/// A `RETURNING` list that can fail commits through Calvin, so the client
+/// gets the rows its participant froze. The list's `nextval` draws once per
+/// row, at the participant, and the session takes the value it drew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_write_with_an_accessor_answers_its_frozen_rows() {
+    let server = TestServer::start().await;
+    let name = "frozen_returning";
+    seeded_with_n(&server, name).await;
+    server
+        .exec("CREATE SEQUENCE frozen_returning_seq")
+        .await
+        .expect("create sequence");
+
+    let messages = server
+        .client
+        .simple_query(&format!(
+            "UPDATE {name} SET v = 'uno' WHERE n = 0 \
+             RETURNING id, v, nextval('frozen_returning_seq') AS s"
+        ))
+        .await
+        .expect("the RETURNING write runs");
+    assert_eq!(
+        returned_rows(&messages),
+        [(Some("k1"), Some("uno"), Some("1"))]
+    );
     assert_eq!(values(&server, name).await, ["uno", "two"]);
     assert_eq!(
         server
-            .query_text("SELECT currval('routed_returning_seq')")
+            .query_text("SELECT currval('frozen_returning_seq')")
             .await
             .expect("currval"),
         ["1"],
@@ -274,7 +302,7 @@ async fn a_routed_returning_write_answers_its_frozen_rows() {
     );
     assert_eq!(
         server
-            .query_text("SELECT nextval('routed_returning_seq')")
+            .query_text("SELECT nextval('frozen_returning_seq')")
             .await
             .expect("nextval"),
         ["2"],
@@ -282,20 +310,30 @@ async fn a_routed_returning_write_answers_its_frozen_rows() {
     );
 }
 
-/// An error in a routed write's `RETURNING` list refuses the write before
-/// it commits: the client gets the error's SQLSTATE and the row is unchanged.
+/// An error in a `RETURNING` list refuses the write before it commits: the
+/// list can fail, so the write commits through Calvin, whose participant
+/// evaluates it before it votes. The client gets the error's SQLSTATE and
+/// the row is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_routed_returning_error_refuses_the_write() {
+async fn a_returning_error_refuses_the_write() {
     let server = TestServer::start().await;
-    let name = "routed_returning_error";
+    let name = "returning_error";
     seeded_with_n(&server, name).await;
 
-    let state = routed_sqlstate(
-        &server,
-        name,
-        &format!("UPDATE {name} SET v = 'uno' WHERE n = 0 RETURNING id, 10 / n AS q"),
-    )
-    .await;
+    let error = server
+        .client
+        .simple_query(&format!(
+            "UPDATE {name} SET v = 'uno' WHERE n = 0 RETURNING id, 10 / n AS q"
+        ))
+        .await
+        .map(|_| ())
+        .expect_err("the list divides by zero");
+    let state = error
+        .as_db_error()
+        .unwrap_or_else(|| panic!("a DbError, got: {error}"))
+        .code()
+        .code()
+        .to_string();
     assert_eq!(state, "22012", "division_by_zero");
     assert_eq!(values(&server, name).await, ["one", "two"]);
 }

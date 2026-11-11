@@ -15,9 +15,11 @@ use nodedb_types::{
     CollectionType, DocumentMode, QualifiedCollection, ReturningColumns, ReturningItem,
 };
 
+use crate::control::planner::calvin::is_write_plan;
 use crate::control::planner::calvin::tx_class::write_keys::task_write_keys;
 use crate::control::server::shared::returning::{
-    RowFields, tasks_carry_returning_contract, tasks_returning_can_fail,
+    RowFields, plan_carries_returning_contract, tasks_carry_returning_contract,
+    tasks_returning_can_fail,
 };
 use crate::control::server::shared::session::announced_returning::announced_returning;
 use crate::control::state::SharedState;
@@ -89,15 +91,30 @@ fn lists_a_star(list: &ReturningColumns) -> bool {
     }
 }
 
-/// Whether Calvin sequences `tasks` as one static transaction. An
-/// `INSERT ... SELECT` runs its own orchestrator on the direct path.
+/// Whether Calvin sequences `tasks` as one transaction. A write the direct
+/// path orchestrates on the Control Plane keeps it: Calvin takes no write
+/// key for one, so its transaction will write nothing. A task carrying a
+/// contract must also be a write Calvin keys, and the set must key.
 fn calvin_sequences(tasks: &[PhysicalTask]) -> bool {
-    !tasks.iter().any(|task| {
-        matches!(
-            task.plan,
-            PhysicalPlan::Document(DocumentOp::InsertSelect { .. })
-        )
+    tasks.iter().all(|task| {
+        !orchestrated_on_control_plane(&task.plan)
+            && (!plan_carries_returning_contract(&task.plan) || is_write_plan(&task.plan))
     }) && task_write_keys(tasks).is_ok()
+}
+
+/// Whether the direct path runs `plan` through a Control-Plane
+/// orchestrator, which resolves it into the writes it applies.
+fn orchestrated_on_control_plane(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Document(
+            DocumentOp::InsertSelect { .. }
+                | DocumentOp::Merge { .. }
+                | DocumentOp::UpdateFromJoin { .. }
+                | DocumentOp::ResolveWrite(_)
+                | DocumentOp::ResolvedWrite { .. }
+        )
+    )
 }
 
 #[cfg(test)]
@@ -174,6 +191,14 @@ mod tests {
             deferred_sum_targets: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
         });
-        assert!(calvin_sequences(&[task(insert)]));
+        assert!(calvin_sequences(&[task(insert.clone())]));
+        let PhysicalPlan::Document(op) = insert else {
+            panic!("a document insert");
+        };
+        let resolving = PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(op)));
+        assert!(
+            !calvin_sequences(&[task(resolving)]),
+            "a write the direct path resolves stays there"
+        );
     }
 }

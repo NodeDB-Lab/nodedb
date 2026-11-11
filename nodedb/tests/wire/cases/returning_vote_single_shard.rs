@@ -61,7 +61,7 @@ pub(super) async fn rows_of(server: &TestServer, sql: &str) -> Vec<String> {
     rows
 }
 
-async fn create(server: &TestServer, ddl: &str) {
+pub(super) async fn create(server: &TestServer, ddl: &str) {
     server
         .exec(ddl)
         .await
@@ -177,7 +177,7 @@ async fn returning_past_the_row_limit_changes_no_row() {
 
 /// Each collection with rows `r1` and `r2`, both `n = 0`. One document
 /// collection and one KV collection, each on one vShard.
-const PREDICATE_COLLECTIONS: [(&str, &str); 2] = [
+pub(super) const PREDICATE_COLLECTIONS: [(&str, &str); 2] = [
     (
         "rv_pred_doc",
         "CREATE COLLECTION rv_pred_doc (id TEXT PRIMARY KEY, n INT) \

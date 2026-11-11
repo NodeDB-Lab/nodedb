@@ -16,14 +16,14 @@ use crate::harness::TestServer;
 /// One engine's collection, a failing insert into it, and a read of it.
 /// Each SQL holds a `{c}` for the collection and the insert a `{k}` for a
 /// fresh key.
-struct Engine {
-    engine: &'static str,
-    ddl: &'static str,
-    insert: &'static str,
-    read: &'static str,
+pub(super) struct Engine {
+    pub(super) engine: &'static str,
+    pub(super) ddl: &'static str,
+    pub(super) insert: &'static str,
+    pub(super) read: &'static str,
 }
 
-const ENGINES: &[Engine] = &[
+pub(super) const ENGINES: &[Engine] = &[
     Engine {
         engine: "document_schemaless",
         ddl: "CREATE COLLECTION {c} (id TEXT PRIMARY KEY, n INT)",
@@ -92,7 +92,7 @@ async fn a_failing_list_stores_nothing_on_every_engine() {
 
 /// The `admitted` count of Calvin transactions the sequencer reports on
 /// `/metrics`.
-async fn admitted_txns(server: &TestServer) -> u64 {
+pub(super) async fn admitted_txns(server: &TestServer) -> u64 {
     let body = reqwest::Client::new()
         .get(format!("http://127.0.0.1:{}/metrics", server.http_port))
         .send()

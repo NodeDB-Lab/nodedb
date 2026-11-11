@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use super::returning_vote_single_shard::rows_of;
 use crate::harness::TestServer;
 
-const PASSWORD: &str = "rv-rls-secret-42";
+pub(super) const PASSWORD: &str = "rv-rls-secret-42";
 
 fn vshard_of(name: &str) -> u32 {
     nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, name)
@@ -32,7 +32,7 @@ fn other(first: &str) -> String {
 }
 
 /// Create `user` with the `readwrite` role.
-async fn create_user(server: &TestServer, user: &str) {
+pub(super) async fn create_user(server: &TestServer, user: &str) {
     for sql in [
         format!("CREATE USER {user} PASSWORD '{PASSWORD}'"),
         format!("GRANT ROLE readwrite TO {user}"),
@@ -47,7 +47,7 @@ async fn create_user(server: &TestServer, user: &str) {
 /// A strict collection with rows `r_mine` (owned by `user`) and `r_theirs`
 /// (owned by `alice`), both `n = 0`, under a write policy that admits only
 /// rows `user` owns.
-async fn policed(server: &TestServer, collection: &str, user: &str) {
+pub(super) async fn policed(server: &TestServer, collection: &str, user: &str) {
     for sql in [
         format!(
             "CREATE COLLECTION {collection} (id TEXT PRIMARY KEY, owner TEXT, n INT) \

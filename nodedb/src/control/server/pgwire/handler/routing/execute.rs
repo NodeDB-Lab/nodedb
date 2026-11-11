@@ -14,7 +14,9 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
 use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
+use crate::control::server::shared::statement_exec::fallible_returning::returning_commits_through_calvin;
 use crate::control::server::shared::write_admission::{all_writes_bufferable, plan_is_write};
 use crate::types::TenantId;
 
@@ -242,6 +244,32 @@ impl NodeDbPgHandler {
                 .await?
             {
                 return Ok(responses);
+            }
+
+            // The direct path evaluates `RETURNING` after its write is stored.
+            // An autocommit list that can fail commits as one Calvin
+            // transaction on any vShard count, ahead of the gateway gate: its
+            // participant evaluates the list before it votes, so an error
+            // stores nothing. A predicate write takes the recon coordinator.
+            if tx_state != TransactionState::InBlock
+                && with_announced_returning(effective_schema, async {
+                    returning_commits_through_calvin(&self.state, tenant_id, &tasks)
+                })
+                .await
+            {
+                return self
+                    .dispatch_calvin_multishard(
+                        tasks,
+                        tenant_id,
+                        super::calvin_dispatch::CalvinDispatchSession {
+                            identity,
+                            session_id,
+                            result_formats: shaping.formats,
+                            projection: effective_schema,
+                        },
+                        &sum_target_reads,
+                    )
+                    .await;
             }
 
             #[cfg(feature = "failpoints")]

@@ -10,7 +10,7 @@ use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::planner::calvin::{
-    TxnDispatchPosition, dispatch_authorized_dependent_edge_recon,
+    CrossShardTxnMode, TxnDispatchPosition, dispatch_authorized_dependent_edge_recon,
     dispatch_authorized_tasks_to_calvin, is_edge_recon_plan,
 };
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -100,7 +100,9 @@ pub(super) struct CalvinDispatchSession<'a> {
 }
 
 impl NodeDbPgHandler {
-    /// Drive Calvin strict multi-shard dispatch for the given task set.
+    /// Drive Calvin strict multi-shard dispatch for the given task set. It
+    /// also commits a statement on one vShard that holds settlement reads, an
+    /// implicit-edge predicate, or a `RETURNING` list that can fail.
     ///
     /// Returns the response vec on success: the statement's RETURNING rows
     /// (if any) and its one command tag. The caller returns this immediately
@@ -118,7 +120,11 @@ impl NodeDbPgHandler {
             result_formats,
             projection,
         } = session;
-        let cross_shard_mode = self.sessions.cross_shard_txn_mode(session_id);
+        // Every caller commits the statement atomically. A best-effort
+        // session reaches here only with a `RETURNING` list that can fail,
+        // which needs the vote, or with one vShard, where the mode decides
+        // nothing.
+        let cross_shard_mode = CrossShardTxnMode::Strict;
         let tx_state = self.sessions.transaction_state(session_id);
         let database_id = self
             .sessions
