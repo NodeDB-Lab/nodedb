@@ -135,7 +135,7 @@ async fn ndjson_at_consistency(
         scope: &scope,
         sql,
         trace_id: crate::types::TraceId::ZERO,
-        txn_wrapper: true,
+        txn_wrapper: state.shared.sql_policy.txn_wrapper_stateless,
     })
     .await
     {

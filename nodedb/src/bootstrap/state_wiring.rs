@@ -55,6 +55,9 @@ pub async fn wire_state(
     })?;
     state.startup = Arc::clone(startup_gate);
     state.data_dir = config.server.data_dir.clone();
+    // The `[server.sql]` switches install here, while the state is not
+    // shared yet. A switch set off must never fall back to on.
+    state.sql_policy = config.server.sql;
 
     // Replay surrogate WAL records.
     // Note: wal_records are not passed here — caller must handle surrogate replay

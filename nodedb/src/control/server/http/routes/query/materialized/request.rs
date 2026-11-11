@@ -148,7 +148,7 @@ async fn query_at_consistency(
         scope: &scope,
         sql: &clean_sql,
         trace_id: crate::types::TraceId::ZERO,
-        txn_wrapper: true,
+        txn_wrapper: state.shared.sql_policy.txn_wrapper_stateless,
     })
     .await
     .map_err(|error| ApiError::from_request(error, sql))?;

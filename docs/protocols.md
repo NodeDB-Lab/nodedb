@@ -31,6 +31,8 @@ psql -h localhost -p 6432 -U nodedb -d default
 
 **SQL coverage:** Everything in the [query language reference](query-language.md).
 
+**Simple query of several statements:** The statements run as one implicit transaction, as in PostgreSQL. The block opens at the first statement that is not a read (`SELECT`, `SHOW`) or transaction control, and commits at the end of the string. An error rolls back every earlier write of the block. The client reads the tags of the earlier statements, then the error. A `COMMIT` or `ROLLBACK` inside the string ends the block, and the next write opens a new one. A `BEGIN` inside the string turns the block into an explicit block, which the client ends. A write the block cannot stage answers an error, where the same write sent alone autocommits. The extended query protocol runs one statement per Execute in autocommit.
+
 **Driver compatibility:** NodeDB advertises a libpq-parseable `server_version` (`15.0 (NodeDB <version>)`) and the matching PostgreSQL-compatible `server_version_num` in the startup parameter burst. It also supports the probes drivers issue on connect: `version()` returns a PostgreSQL-compatible string, `current_setting(name [, missing_ok])` resolves the same settings as `SHOW`, `current_schemas(...)` returns PostgreSQL `TEXT[]` syntax, and `::regclass`/`::regtype` casts, `ANY(...)`, and ActiveRecord-style cross-catalog-table JOINs and projections evaluate PostgreSQL-identically. Binary result formats requested at Bind are honored per column; types the encoder cannot yet emit in binary (timestamp, numeric, json/jsonb, arrays) downgrade to text, with the Describe-phase RowDescription kept in sync.
 
 **Introspection:** NodeDB exposes PostgreSQL-compatible `pg_catalog` virtual tables (including `pg_class`, `pg_namespace`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_range`, and `pg_collation`) so that standard Postgres clients, ORMs, and business intelligence tools can introspect the database schema without modification (`psql \d`, driver type caches, ORM bootstraps). Column defaults and nullability are reflected, and the metadata functions used by PostgreSQL clients (`format_type`, `pg_get_expr`, and `col_description`) are supported. Queries against `pg_catalog.*` tables are transparently rewritten to pull from NodeDB's internal catalog.
@@ -71,7 +73,7 @@ client.put("users", "u1", &doc).await?;
 
 Use SQL for complex queries, ad-hoc exploration, and rapid prototyping. Use native methods for hot-path CRUD, vector search, and high-throughput ingest where parsing overhead matters.
 
-**Transactions:** The native protocol supports full transaction blocks including savepoints (`BEGIN` / `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` / `COMMIT`), sharing the same protocol-neutral session state as pgwire. Native writes issued inside a transaction stage into the same per-transaction overlay, so read-your-own-writes semantics hold across SQL and native opcodes on one connection. HTTP is stateless and does not support transaction blocks.
+**Transactions:** The native protocol supports full transaction blocks including savepoints (`BEGIN` / `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` / `COMMIT`), sharing the same protocol-neutral session state as pgwire. Native writes issued inside a transaction stage into the same per-transaction overlay, so read-your-own-writes semantics hold across SQL and native opcodes on one connection. HTTP is stateless and holds no transaction block across requests. See [Transaction control inside one request](#transaction-control-inside-one-request).
 
 **Connection:**
 
@@ -112,7 +114,7 @@ curl http://localhost:6480/metrics
 
 All non-probe routes are under `/v1/`. JSON responses carry `Content-Type: application/vnd.nodedb.v1+json; charset=utf-8`. Probes are unversioned and always reachable.
 
-`/v1/query/stream` streams rows lazily as NDJSON — one line per row, produced as shards return batches. A mid-stream error surfaces in-band as a final `{"error": "..."}` line (the HTTP status stays `200` since headers are already sent). HTTP is stateless: transaction blocks (`BEGIN`/`COMMIT`) are not supported.
+`/v1/query/stream` streams rows lazily as NDJSON — one line per row, produced as shards return batches. A mid-stream error surfaces in-band as a final `{"error": "..."}` line (the HTTP status stays `200` since headers are already sent). HTTP is stateless: a transaction block cannot span two requests. One request can wrap itself in `BEGIN` and `COMMIT`. See [Transaction control inside one request](#transaction-control-inside-one-request).
 
 **Additional endpoints:**
 
@@ -140,6 +142,32 @@ All non-probe routes are under `/v1/`. JSON responses carry `Content-Type: appli
 | `/health/ready`                          | GET         | Readiness                        |
 | `/health/drain`                          | POST        | Cooperative drain                |
 | `/metrics`                               | GET         | Prometheus metrics               |
+
+## Transaction control inside one request
+
+`/v1/query`, `/v1/query/stream` and `/v1/ws` hold no session across requests. One request of several statements runs as one atomic transaction. A `BEGIN` and an end that wrap the whole request add nothing, so the server drops them.
+
+| Shape in one request | Answer |
+|---|---|
+| `BEGIN; A; B; COMMIT` | Runs `A` and `B` as one transaction. The answer is the answer of `A; B`. |
+| `BEGIN; A; B; ROLLBACK` | Plans and checks `A` and `B`, then applies nothing. The answer holds no row. |
+| `A; COMMIT; B` (an end in the middle) | Refused, SQLSTATE `0A000` (HTTP 501). |
+| `BEGIN; A` (no end), or a nested `BEGIN` | Refused, `0A000`. |
+| `SAVEPOINT`, `RELEASE`, `ROLLBACK TO` | Refused, `0A000`. |
+| `BEGIN` with any mode, such as `BEGIN ISOLATION LEVEL SERIALIZABLE` or `BEGIN READ ONLY` | Refused, `0A000`. |
+| `SET`, `RESET` or DDL beside another statement, inside the wrapper or not | Refused, `0A000`. |
+
+A refused request applies nothing. Send each refused statement as its own request.
+
+In a wrapped request, error statement numbers count the inner statements. The first statement after `BEGIN` is statement 1. The error `position` counts characters in the text the client sent, `BEGIN` included. A planning error in `BEGIN; A; ROLLBACK` answers that error.
+
+| Config field | Environment variable | Default | Off |
+|---|---|---|---|
+| `server.sql.txn_wrapper_stateless` | `NODEDB_SQL_TXN_WRAPPER_STATELESS` | `true` | HTTP, NDJSON and WebSocket refuse every request of several statements that holds transaction control with `0A000`. |
+
+A missing `[server.sql]` section or key leaves the policy on. A malformed environment value stops startup. The server reads the setting at startup only.
+
+pgwire follows PostgreSQL. The native protocol refuses transaction control beside another statement with `0A000`.
 
 ## RESP (Redis Protocol)
 

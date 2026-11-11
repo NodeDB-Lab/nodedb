@@ -8,7 +8,7 @@
 //! returning, so one bad value never hides the next.
 
 use super::rows::{
-    checkpoint, cluster, host_ports, maintenance, observability, sizing, timeseries, tls, wal,
+    checkpoint, cluster, host_ports, maintenance, observability, sizing, sql, timeseries, tls, wal,
 };
 use crate::config::server::ServerConfig;
 
@@ -37,6 +37,7 @@ const TABLE: &[&[EnvRow]] = &[
     timeseries::ROWS,
     maintenance::ROWS,
     observability::ROWS,
+    sql::ROWS,
 ];
 
 /// Applies every `NODEDB_*` override present in the environment to `config`.

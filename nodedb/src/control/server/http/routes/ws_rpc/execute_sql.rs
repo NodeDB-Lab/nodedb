@@ -77,7 +77,7 @@ pub async fn execute_sql(
         scope: &scope,
         sql: &clean_sql,
         trace_id,
-        txn_wrapper: true,
+        txn_wrapper: shared.sql_policy.txn_wrapper_stateless,
     })
     .await?;
     if admission.rolls_back {

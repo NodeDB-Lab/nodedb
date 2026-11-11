@@ -409,6 +409,8 @@ pub struct SharedState {
     pub tuning: TuningConfig,
     /// Scheduler configuration (cron timezone offset, etc.).
     pub scheduler_config: crate::config::server::SchedulerConfig,
+    /// `[server.sql]` switches. Startup sets them. A change needs a restart.
+    pub sql_policy: crate::config::server::SqlSection,
     /// On-disk data directory for host-side appliers (CA-trust, audit segments, etc.).
     pub data_dir: std::path::PathBuf,
     /// The Event Plane's trigger dead-letter queue, so operator statements can

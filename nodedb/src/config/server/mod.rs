@@ -20,6 +20,7 @@ mod retention;
 pub mod scheduler;
 mod section;
 mod snapshot_storage;
+mod sql;
 #[cfg(test)]
 mod test_support;
 mod tls;
@@ -44,4 +45,5 @@ pub use retention::RetentionSettings;
 pub use scheduler::{CronTimezone, SchedulerConfig};
 pub use section::ServerSection;
 pub use snapshot_storage::SnapshotStorageSettings;
+pub use sql::SqlSection;
 pub use tls::{BackupEncryptionSettings, EncryptionSettings, TlsSettings};
