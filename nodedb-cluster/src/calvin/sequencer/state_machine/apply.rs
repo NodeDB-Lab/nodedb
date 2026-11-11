@@ -123,7 +123,11 @@ impl SequencerStateMachine {
             } => self.completion_registry.note_vote(
                 TxnId::new(epoch, position),
                 vshard,
-                ParticipantVote::Abort(AbortCause { reason, refusal }),
+                ParticipantVote::Abort(AbortCause {
+                    reason,
+                    refusal,
+                    other_refusals: Vec::new(),
+                }),
             ),
             // Authoritative verdict for a staged cross-shard txn, proposed by
             // the leader once every participant voted. Applied on ALL replicas
@@ -138,9 +142,14 @@ impl SequencerStateMachine {
                 position,
                 reason,
                 refusal,
+                other_refusals,
             } => self.completion_registry.note_verdict(
                 TxnId::new(epoch, position),
-                VerdictOutcome::Abort(AbortCause { reason, refusal }),
+                VerdictOutcome::Abort(AbortCause {
+                    reason,
+                    refusal,
+                    other_refusals,
+                }),
             ),
             // The owning vShard's scheduler installs the SHARED lock.
             SequencerEntry::ReserveRead { owner, vshard, key } => self.forward_reservation(
@@ -914,6 +923,7 @@ mod tests {
             position: 5,
             reason: crate::calvin::AbortReason::ParticipantError,
             refusal: Some(vec![4, 2]),
+            other_refusals: Vec::new(),
         });
         sm.apply(1, &data);
 

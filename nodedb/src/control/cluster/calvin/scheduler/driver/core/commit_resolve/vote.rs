@@ -144,8 +144,11 @@ mod tests {
                     refusal: Some(refusal),
                     ..
                 },
-            ] => crate::control::cluster::calvin::refusal::decode_refusal(refusal)
-                .expect("the refusal decodes"),
+            ] => {
+                crate::control::cluster::calvin::refusal::decode_refusal(refusal)
+                    .expect("the refusal decodes")
+                    .code
+            }
             other => panic!("expected one refused abort vote, got {other:?}"),
         }
     }

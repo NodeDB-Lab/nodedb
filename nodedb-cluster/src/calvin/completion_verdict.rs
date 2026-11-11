@@ -274,6 +274,9 @@ impl CalvinCompletionRegistry {
 /// Among causes of equal rank the lowest vShard wins. The votes iterate in
 /// vShard order, so every replica picks the same cause, whatever the order
 /// the votes applied in.
+///
+/// The verdict also carries the refusal of every other participant that
+/// refused, in vShard order: the results their evaluations drew stand.
 fn tally_verdict(votes: &BTreeMap<u32, ParticipantVote>) -> VerdictOutcome {
     fn rank(cause: &AbortCause) -> u8 {
         match cause.reason {
@@ -286,18 +289,30 @@ fn tally_verdict(votes: &BTreeMap<u32, ParticipantVote>) -> VerdictOutcome {
             AbortReason::SerializationConflict => 0,
         }
     }
-    let mut held: Option<&AbortCause> = None;
-    for vote in votes.values() {
+    let mut held: Option<(u32, &AbortCause)> = None;
+    for (vshard, vote) in votes {
         if let ParticipantVote::Abort(cause) = vote
-            && held.is_none_or(|held| rank(cause) > rank(held))
+            && held.is_none_or(|(_, held)| rank(cause) > rank(held))
         {
-            held = Some(cause);
+            held = Some((*vshard, cause));
         }
     }
-    match held {
-        Some(cause) => VerdictOutcome::Abort(cause.clone()),
-        None => VerdictOutcome::Commit,
-    }
+    let Some((winner, cause)) = held else {
+        return VerdictOutcome::Commit;
+    };
+    let other_refusals = votes
+        .iter()
+        .filter(|(vshard, _)| **vshard != winner)
+        .filter_map(|(_, vote)| match vote {
+            ParticipantVote::Abort(cause) => cause.refusal.clone(),
+            ParticipantVote::Commit => None,
+        })
+        .collect();
+    VerdictOutcome::Abort(AbortCause {
+        reason: cause.reason,
+        refusal: cause.refusal.clone(),
+        other_refusals,
+    })
 }
 
 #[cfg(test)]
@@ -473,13 +488,14 @@ mod tests {
             AbortCause::from(AbortReason::ParticipantError),
             AbortCause::refused(vec![1, 2, 3]),
         ] {
+            // An outranked refusal still rides along, so its sequence
+            // results reach the writer.
+            let carried: Vec<Vec<u8>> = other.refusal.clone().into_iter().collect();
             let other = ParticipantVote::Abort(other);
             for votes in [[&rejected, &other], [&other, &rejected]] {
-                assert_eq!(
-                    tally(votes),
-                    aborted(AbortReason::PlanRejected),
-                    "{other:?}"
-                );
+                let mut expected = AbortCause::from(AbortReason::PlanRejected);
+                expected.other_refusals = carried.clone();
+                assert_eq!(tally(votes), VerdictOutcome::Abort(expected), "{other:?}");
             }
         }
         let lost = ParticipantVote::Abort(AbortReason::PartsLost.into());
@@ -510,8 +526,26 @@ mod tests {
         }
     }
 
+    /// A cause that outranks a refusal still carries the refusals, so the
+    /// results their evaluations drew reach the writer.
+    #[test]
+    fn an_outranking_cause_carries_every_refusal() {
+        let refused = ParticipantVote::Abort(AbortCause::refused(vec![7]));
+        let rejected = ParticipantVote::Abort(AbortReason::PlanRejected.into());
+        for votes in [[&refused, &rejected], [&rejected, &refused]] {
+            assert_eq!(
+                tally(votes),
+                VerdictOutcome::Abort(AbortCause {
+                    other_refusals: vec![vec![7]],
+                    ..AbortCause::from(AbortReason::PlanRejected)
+                })
+            );
+        }
+    }
+
     /// Two participants refuse with different refusals. Every replica picks
-    /// the lowest vShard's refusal, whatever order the votes applied in.
+    /// the lowest vShard's refusal, whatever order the votes applied in, and
+    /// carries the other refusal beside it.
     #[tokio::test]
     async fn two_refusals_choose_the_lowest_vshard_on_every_replica() {
         let txn = TxnId::new(32, 0);
@@ -528,7 +562,10 @@ mod tests {
             for (vshard, vote) in order {
                 replica.note_vote(txn, vshard, vote.clone());
             }
-            let expected = VerdictOutcome::Abort(AbortCause::refused(b"vshard 3".to_vec()));
+            let expected = VerdictOutcome::Abort(AbortCause {
+                other_refusals: vec![b"vshard 9".to_vec()],
+                ..AbortCause::refused(b"vshard 3".to_vec())
+            });
             assert_eq!(
                 rx.try_recv().expect("verdict emitted"),
                 (txn, expected.clone()),

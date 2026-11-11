@@ -58,10 +58,16 @@ pub struct SubmitCalvinTxnRequest {
 /// write had a RETURNING clause; it is `None` for plain writes with no rows to
 /// surface. These are a QUERY RESULT, not replicated state — they ride this
 /// non-Raft RPC response, never the sequencer Raft log.
+///
+/// `refused_sequences` carries, beside an error, the `nextval` and `setval`
+/// results a refused `RETURNING` evaluation drew. They stand, so the remote
+/// coordinator gives them to the writer's session. The host crate encodes
+/// them, and this crate does not read them.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct SubmitCalvinTxnResponse {
     pub error: Option<TypedClusterError>,
     pub payload_bytes: Option<Vec<u8>>,
+    pub refused_sequences: Option<Vec<u8>>,
 }
 
 /// Coordinator → sequencer-leader routed Calvin-INBOX request (Cv1).
@@ -247,9 +253,11 @@ mod tests {
         let decoded = roundtrip_resp(SubmitCalvinTxnResponse {
             error: None,
             payload_bytes: Some(vec![0xAA, 0xBB]),
+            refused_sequences: None,
         });
         assert!(decoded.error.is_none());
         assert_eq!(decoded.payload_bytes, Some(vec![0xAA, 0xBB]));
+        assert_eq!(decoded.refused_sequences, None);
     }
 
     #[test]
@@ -260,7 +268,9 @@ mod tests {
                 message: "calvin-submit not configured".into(),
             }),
             payload_bytes: None,
+            refused_sequences: Some(vec![0x01, 0x02]),
         });
+        assert_eq!(decoded.refused_sequences, Some(vec![0x01, 0x02]));
         match decoded.error {
             Some(TypedClusterError::Internal { code, message }) => {
                 assert_eq!(code, 0);

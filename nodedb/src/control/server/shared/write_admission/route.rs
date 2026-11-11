@@ -42,6 +42,7 @@ use crate::control::planner::calvin::{
     build_single_vshard_tx_class, dispatch_dependent_edge_recon, is_dependent_predicate,
     submit_calvin_routed,
 };
+use crate::control::server::shared::returning::plan_carries_returning_contract;
 use crate::control::state::SharedState;
 use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
@@ -110,9 +111,7 @@ pub fn route_write_to_calvin<'a>(
         // an error in it refuses the write. The participant answers the
         // frozen rows, framed so the caller's shaping answers them as they
         // are.
-        let contract = plan
-            .returning_target()
-            .is_some_and(|(_, spec)| spec.precommit.is_some());
+        let contract = plan_carries_returning_contract(&plan);
         let task = PhysicalTask {
             tenant_id,
             vshard_id,

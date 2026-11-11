@@ -26,15 +26,12 @@ use nodedb_raft::RaftError;
 
 use super::super::scheduler::Scheduler;
 use super::super::staged_vote::StagedVote;
-use super::evaluate::ReturningRefusal;
+use super::evaluate::{ReturningRefusal, frozen_effects};
 use crate::control::cluster::calvin::scheduler::driver::staged_returning::OwedFrozenEntry;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::frozen_replies;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::control::server::shared::returning::transcript::{AccessorInvocation, SequenceEffect};
-use crate::control::wal_replication::types::{
-    CalvinFrozenReply, FrozenPlanReply, FrozenSequenceEffect,
-};
+use crate::control::wal_replication::types::{CalvinFrozenReply, FrozenPlanReply};
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
 impl Scheduler {
@@ -85,11 +82,7 @@ impl Scheduler {
                     .iter()
                     .map(|ty| ty.wire_name().to_owned())
                     .collect(),
-                sequence_effects: reply
-                    .sequence_effects
-                    .iter()
-                    .filter_map(frozen_effect)
-                    .collect(),
+                sequence_effects: frozen_effects(&reply.sequence_effects),
                 rejected: pending.returning.rejections.get(plan_index).cloned(),
                 // The coordinator answers the items the contract deferred.
                 deferred_currval: tx_class
@@ -244,22 +237,6 @@ impl Scheduler {
                 return;
             }
         }
-    }
-}
-
-/// The wire form of `effect`. A `currval` changes no sequence.
-fn frozen_effect(effect: &SequenceEffect) -> Option<FrozenSequenceEffect> {
-    let (invocation, value) = effect;
-    match invocation {
-        AccessorInvocation::Nextval(name) => Some(FrozenSequenceEffect::Nextval {
-            name: name.clone(),
-            value: *value,
-        }),
-        AccessorInvocation::Setval(name, _) => Some(FrozenSequenceEffect::Setval {
-            name: name.clone(),
-            value: *value,
-        }),
-        AccessorInvocation::Currval(_) => None,
     }
 }
 

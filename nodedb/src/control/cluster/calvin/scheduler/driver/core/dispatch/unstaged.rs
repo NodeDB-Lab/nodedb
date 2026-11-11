@@ -178,7 +178,11 @@ mod tests {
                 registry.note_vote(
                     nodedb_cluster::calvin::TxnId::new(epoch, position),
                     vshard,
-                    ParticipantVote::Abort(AbortCause { reason, refusal }),
+                    ParticipantVote::Abort(AbortCause {
+                        reason,
+                        refusal,
+                        other_refusals: Vec::new(),
+                    }),
                 );
             }
         }

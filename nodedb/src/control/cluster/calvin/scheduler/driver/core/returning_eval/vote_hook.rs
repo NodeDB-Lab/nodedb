@@ -22,7 +22,7 @@ use super::super::scheduler::Scheduler;
 use super::super::staged_vote::StagedVote;
 use super::evals::Evaluated;
 use super::evaluate::{ReturningJob, ReturningRefusal, evaluate};
-use crate::control::cluster::calvin::refusal::encode_refusal;
+use crate::control::cluster::calvin::refusal::encode_refusal_with_sequences;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::frozen_replies;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -199,8 +199,9 @@ impl Scheduler {
         }
     }
 
-    /// Vote abort for `txn_id` with `refusal`. A code with no wire form
-    /// still votes abort, with no refusal.
+    /// Vote abort for `txn_id` with `refusal`, its code and the sequence
+    /// results it drew. A refusal with no wire form still votes abort, with
+    /// no refusal.
     pub(super) fn vote_refused(&mut self, txn_id: TxnId, refusal: ReturningRefusal) {
         tracing::warn!(
             vshard_id = self.vshard_id,
@@ -209,7 +210,8 @@ impl Scheduler {
             detail = %refusal.detail,
             "calvin: the RETURNING evaluation refuses the slice; voting abort"
         );
-        let encoded = match encode_refusal(&refusal.code) {
+        let encoded = match encode_refusal_with_sequences(&refusal.code, refusal.sequences.as_ref())
+        {
             Ok(bytes) => Some(bytes),
             Err(error) => {
                 tracing::warn!(

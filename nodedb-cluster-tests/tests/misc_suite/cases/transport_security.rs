@@ -160,6 +160,7 @@ impl RaftRpcHandler for EchoHandler {
         nodedb_cluster::rpc_codec::SubmitCalvinTxnResponse {
             error: None,
             payload_bytes: None,
+            refused_sequences: None,
         }
     }
 

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use nodedb_cluster::calvin::types::{AnnouncedColumn, TxClass};
 
 use crate::bridge::envelope::ErrorCode;
+use crate::control::cluster::calvin::refusal::RefusedSequences;
 use crate::control::cluster::calvin::scheduler::driver::returning_transcripts::TxnTranscripts;
 use crate::control::sequence::{SessionSequenceAccess, SessionSequenceValues};
 use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
@@ -21,7 +22,9 @@ use crate::control::server::shared::returning::precommit::{
     FrozenReturningReply, PrecommitReturning, PreparedReturningRow, ReturningLimits,
     finalize_returning,
 };
+use crate::control::server::shared::returning::transcript::{AccessorInvocation, SequenceEffect};
 use crate::control::state::SharedState;
+use crate::control::wal_replication::types::FrozenSequenceEffect;
 
 /// The inputs of one evaluation. Every field is owned, so the evaluation
 /// runs off the scheduler loop.
@@ -36,12 +39,16 @@ pub(super) struct ReturningJob {
 }
 
 /// Why an evaluation refuses its slice: the code the abort vote carries,
-/// and the text the leader keeps as the stage error. The code is boxed so
-/// the refusal stays small as the error of a `Result`.
+/// the text the leader keeps as the stage error, and the sequence results
+/// the evaluation drew before it failed. Those results stand, as in
+/// PostgreSQL, so the vote carries them to the writer's session. The code
+/// is boxed so the refusal stays small as the error of a `Result`.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ReturningRefusal {
     pub code: Box<ErrorCode>,
     pub detail: String,
+    /// `None` for a refusal raised before any plan evaluated.
+    pub sequences: Option<RefusedSequences>,
 }
 
 impl ReturningRefusal {
@@ -52,18 +59,40 @@ impl ReturningRefusal {
                 detail: detail.clone(),
             }),
             detail,
+            sequences: None,
         }
     }
 
-    /// The refusal of `error`, raised by the list of the plan at `index`.
-    /// The code keeps the error's SQLSTATE.
-    fn of_plan(index: u32, error: crate::Error) -> Self {
+    /// The refusal of `error`, raised by the list of the plan at `index`
+    /// after the evaluation drew `sequences`. The code keeps the error's
+    /// SQLSTATE.
+    fn of_plan(index: u32, error: crate::Error, sequences: RefusedSequences) -> Self {
         let detail = format!("RETURNING of plan {index}: {error}");
         Self {
             code: Box::new(ErrorCode::from(error)),
             detail,
+            sequences: Some(sequences),
         }
     }
+}
+
+/// The wire form of `effects`, in invocation order. A `currval` changes no
+/// sequence, so it has none.
+pub(super) fn frozen_effects(effects: &[SequenceEffect]) -> Vec<FrozenSequenceEffect> {
+    effects
+        .iter()
+        .filter_map(|(invocation, value)| match invocation {
+            AccessorInvocation::Nextval(name) => Some(FrozenSequenceEffect::Nextval {
+                name: name.clone(),
+                value: *value,
+            }),
+            AccessorInvocation::Setval(name, _) => Some(FrozenSequenceEffect::Setval {
+                name: name.clone(),
+                value: *value,
+            }),
+            AccessorInvocation::Currval(_) => None,
+        })
+        .collect()
 }
 
 /// The frozen reply of each evaluated plan, keyed by plan index, or the
@@ -114,6 +143,9 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
     );
     let crs_set = crate::control::crs_context::crs_set_for(&shared);
     let mut frozen = BTreeMap::new();
+    // The sequence results of the plans evaluated so far. A refusal carries
+    // them with the failed plan's own.
+    let mut drawn = Vec::new();
     for plan in &contract.plans {
         let Some(rows) = plans.remove(&plan.plan_index) else {
             continue;
@@ -137,8 +169,20 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
             limits: ReturningLimits::from_contract(&plan.limits),
         };
         let transcript = transcripts.plan(plan.plan_index);
-        let reply = finalize_returning(&request, rows, &transcript)
-            .map_err(|error| ReturningRefusal::of_plan(plan.plan_index, error))?;
+        let reply = match finalize_returning(&request, rows, &transcript) {
+            Ok(reply) => reply,
+            Err(error) => {
+                // The transcript keeps the calls the failed evaluation made.
+                drawn.extend(frozen_effects(&transcript.sequence_effects()));
+                let refused = RefusedSequences {
+                    database_id,
+                    tenant_id,
+                    effects: drawn,
+                };
+                return Err(ReturningRefusal::of_plan(plan.plan_index, error, refused));
+            }
+        };
+        drawn.extend(frozen_effects(&reply.sequence_effects));
         frozen.insert(plan.plan_index, reply);
     }
     Ok(frozen)
@@ -207,6 +251,42 @@ mod tests {
         let outcome = evaluate(job(&scheduler.shared, tx_class, 1, &Arc::default()));
         let refusal = outcome.expect_err("10/0 refuses");
         assert_eq!(*refusal.code, ErrorCode::DivisionByZero);
+    }
+
+    /// A refusal keeps the values its evaluation drew before the failing
+    /// item, in invocation order. A replay of the refused evaluation draws
+    /// none and refuses with the same values.
+    #[tokio::test]
+    async fn a_refusal_carries_the_values_drawn_before_it() {
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let tx_class = txn_class(contract(vec![nextval("s"), division_by_zero()], 10));
+        let transcripts = Arc::default();
+        let refusal = evaluate(job(
+            &scheduler.shared,
+            Arc::clone(&tx_class),
+            2,
+            &transcripts,
+        ))
+        .expect_err("the division refuses");
+        assert_eq!(*refusal.code, ErrorCode::DivisionByZero);
+        let sequences = refusal.sequences.as_ref().expect("the refusal drew");
+        assert_eq!(
+            (sequences.database_id, sequences.tenant_id),
+            (tx_class.database_id, tx_class.tenant_id)
+        );
+        assert_eq!(
+            sequences.effects,
+            vec![FrozenSequenceEffect::Nextval {
+                name: "s".into(),
+                value: 1,
+            }],
+            "the first row draws, then its division fails"
+        );
+        let replay = evaluate(job(&scheduler.shared, tx_class, 2, &transcripts))
+            .expect_err("the replay refuses");
+        assert_eq!(replay.sequences, refusal.sequences);
+        assert_eq!(sequence_next(&scheduler.shared, "s"), 2, "one call in all");
     }
 
     #[tokio::test]

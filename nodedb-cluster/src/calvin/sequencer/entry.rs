@@ -126,12 +126,14 @@ pub enum SequencerEntry {
         refusal: Option<Vec<u8>>,
     },
     /// The global ABORT verdict for a staged cross-shard txn, carrying the
-    /// winning participant cause. Participants drop their staged buffer.
+    /// winning participant cause and the refusals of the other participants
+    /// that refused. Participants drop their staged buffer.
     AbortVerdict {
         epoch: u64,
         position: u32,
         reason: AbortReason,
         refusal: Option<Vec<u8>>,
+        other_refusals: Vec<Vec<u8>>,
     },
     /// A backup's consistent-cut marker, carrying the backup's watermark
     /// `hlc`. Every replica fans it out to each of its vShard schedulers in
@@ -332,6 +334,7 @@ mod tests {
                 position: 2,
                 reason: AbortReason::SerializationConflict,
                 refusal,
+                other_refusals: vec![vec![0x01], vec![0x02, 0x03]],
             };
             let bytes = zerompk::to_msgpack_vec(&entry).expect("encode");
             let decoded: SequencerEntry = zerompk::from_msgpack(&bytes).expect("decode");

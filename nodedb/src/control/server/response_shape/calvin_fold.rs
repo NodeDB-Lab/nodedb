@@ -13,7 +13,7 @@
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use super::calvin_contract::{carries_contract, contract_rows};
+use super::calvin_contract::contract_rows;
 pub use super::calvin_tag::calvin_tag_for_plan;
 use super::types::{
     DmlFoldError, DmlOutcome, FoldedTag, PlanKind, ShapedRows, StatementTag, TaskTagRole,
@@ -21,6 +21,7 @@ use super::types::{
 };
 use crate::bridge::envelope::Response;
 use crate::control::sequence::SequenceRecorder;
+use crate::control::server::shared::returning::plan_carries_returning_contract;
 
 /// Shared inputs for shaping one completed Calvin batch.
 pub struct CalvinFoldCtx<'a> {
@@ -165,7 +166,7 @@ pub fn calvin_task_outcome(
         // Every participant froze its rows under the contract (see
         // `super::calvin_contract`). A plan with no contract has no frozen
         // rows, and evaluating its list here draws its sequences again.
-        if !carries_contract(plan) {
+        if !plan_carries_returning_contract(plan) {
             return Err(crate::Error::Internal {
                 detail: "calvin RETURNING: a plan carries no RETURNING contract, so no \
                          participant froze its rows"

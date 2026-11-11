@@ -13,7 +13,7 @@ use nodedb_cluster::calvin::{AbortReason, AttemptOutcome, CalvinCompletionRegist
 
 use crate::control::cluster::calvin::executor::ollp::error::OllpError;
 use crate::control::cluster::calvin::executor::ollp::orchestrator::OllpOrchestrator;
-use crate::control::planner::calvin::abort_error::calvin_abort_error;
+use crate::control::planner::calvin::abort_error::{calvin_abort_error, record_refused_sequences};
 use crate::control::planner::calvin::retry_budget::OllpRetryBudget;
 use crate::control::planner::calvin::submit::RoutedAssignment;
 use crate::control::planner::calvin::submit::budget::budget_ms_until;
@@ -171,7 +171,10 @@ where
             {
                 return Err(calvin_abort_error(cause));
             }
-            AttemptOutcome::Aborted(_) => {
+            AttemptOutcome::Aborted(cause) => {
+                // A refusal beside the retried cause drew sequence values
+                // that stand, though the attempt is retried.
+                record_refused_sequences(&cause);
                 // A participant found state other than the reconnaissance
                 // predicted and wrote nothing, or the parts were lost. Every
                 // participant released the attempt's locks before it acked,

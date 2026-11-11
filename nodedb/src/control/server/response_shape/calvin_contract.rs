@@ -26,13 +26,6 @@ use crate::control::server::shared::sql::staging_predicates::rejected_lines_noti
 use crate::control::wal_replication::types::{CalvinFrozenReply, FrozenPlanReply};
 use crate::data::executor::response_codec::ReturningRowsReply;
 
-/// Whether `plan` carries a `RETURNING` contract: the coordinator stamps one
-/// on every plan whose spec holds the full list.
-pub(super) fn carries_contract(plan: &PhysicalPlan) -> bool {
-    plan.returning_target()
-        .is_some_and(|(_, spec)| spec.precommit.is_some())
-}
-
 /// The shaped rows of the answer `payload` of a contract statement, an
 /// encoded `CalvinFrozenReply`: one result set per plan, in plan order, as
 /// the per-task path answers one per task. A plan that spans vShards folds

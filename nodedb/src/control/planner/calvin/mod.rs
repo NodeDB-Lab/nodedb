@@ -19,6 +19,7 @@ pub mod node_delete_txn;
 pub mod predicate;
 pub mod preexec;
 pub mod read_dependent;
+pub mod refused_sequences;
 pub mod reservation;
 pub mod retry_budget;
 pub mod retry_loop;

@@ -17,7 +17,9 @@ use nodedb_cluster::{
 
 use crate::Error;
 use crate::bridge::envelope::Response;
+use crate::control::cluster::calvin::refusal::decode_refused_sequences;
 use crate::control::cluster::warm_peers::register_peers_from_topology;
+use crate::control::planner::calvin::refused_sequences;
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 
@@ -179,6 +181,7 @@ pub async fn submit_calvin_routed(
         Ok(RaftRpc::SubmitCalvinTxnResponse(SubmitCalvinTxnResponse {
             error: None,
             payload_bytes,
+            ..
         })) => {
             // The leader drained ITS local sidecar and forwarded the RETURNING
             // payload bytes over this non-Raft RPC response. Reconstruct a
@@ -189,17 +192,30 @@ pub async fn submit_calvin_routed(
         // An error with no class keeps the leader in its message.
         Ok(RaftRpc::SubmitCalvinTxnResponse(SubmitCalvinTxnResponse {
             error: Some(TypedClusterError::Internal { code: 0, message }),
+            refused_sequences,
             ..
-        })) => Err(Error::Internal {
-            detail: format!("calvin-submit failed on sequencer leader node {leader}: {message}"),
-        }),
+        })) => {
+            record_refused_sequences(refused_sequences.as_deref());
+            Err(Error::Internal {
+                detail: format!(
+                    "calvin-submit failed on sequencer leader node {leader}: {message}"
+                ),
+            })
+        }
         // Every other error from the sequencer leader is rebuilt as the error
         // a local submit returns: a Calvin abort stays a serialization
         // conflict, a superseded collection stays retryable, and a Data-Plane
         // or constraint verdict keeps its SQLSTATE.
+        // A refused `RETURNING` evaluation's sequence results stand, so the
+        // writer's session takes them before the error returns.
         Ok(RaftRpc::SubmitCalvinTxnResponse(SubmitCalvinTxnResponse {
-            error: Some(e), ..
-        })) => Err(Error::from(e)),
+            error: Some(e),
+            refused_sequences,
+            ..
+        })) => {
+            record_refused_sequences(refused_sequences.as_deref());
+            Err(Error::from(e))
+        }
         Ok(other) => Err(Error::Internal {
             detail: format!("calvin-submit: unexpected reply from node {leader}: {other:?}"),
         }),
@@ -218,5 +234,21 @@ pub async fn submit_calvin_routed(
         Err(e) => Err(Error::Internal {
             detail: format!("calvin-submit RPC to sequencer leader node {leader} failed: {e}"),
         }),
+    }
+}
+
+/// Give the writer's session the sequence results a forwarded submit's
+/// reply carries. Results that do not decode are logged and dropped: the
+/// error still returns.
+fn record_refused_sequences(bytes: Option<&[u8]>) {
+    let Some(bytes) = bytes else {
+        return;
+    };
+    match decode_refused_sequences(bytes) {
+        Ok(sequences) => refused_sequences::record(sequences),
+        Err(error) => tracing::warn!(
+            %error,
+            "calvin-submit: the sequence results of a forwarded refusal do not decode"
+        ),
     }
 }

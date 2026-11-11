@@ -126,6 +126,7 @@ impl RaftRpcHandler for EchoHandler {
         nodedb_cluster::rpc_codec::SubmitCalvinTxnResponse {
             error: None,
             payload_bytes: None,
+            refused_sequences: None,
         }
     }
 
@@ -282,6 +283,7 @@ impl RaftRpcHandler for SentinelHandler {
                 message: "sentinel: unexpected submit-calvin-txn dispatch".into(),
             }),
             payload_bytes: None,
+            refused_sequences: None,
         }
     }
 
