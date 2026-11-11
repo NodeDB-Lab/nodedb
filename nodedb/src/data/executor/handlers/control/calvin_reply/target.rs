@@ -18,8 +18,8 @@ pub(super) type CollKey = (DatabaseId, TenantId, String);
 pub(in crate::data::executor) enum RowEngine {
     /// Stored document bodies in the sparse store.
     Document,
-    /// CRDT rows: MessagePack bodies in the sparse store in either storage
-    /// mode.
+    /// CRDT rows: their sparse-store projection, stored as a document body
+    /// is, a Binary Tuple on a strict collection.
     Crdt,
     /// KV values, keyed by their raw key.
     Kv,

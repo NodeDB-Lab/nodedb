@@ -143,17 +143,12 @@ impl CoreLoop {
     ) -> Result<Vec<Value>, ErrorCode> {
         match at.engine {
             RowEngine::Document | RowEngine::Crdt => {
-                // A CRDT row is MessagePack in either storage mode.
-                let strict_schema = match at.engine {
-                    RowEngine::Document => {
-                        self.resolve_strict_schema(at.database_id, at.tid, at.collection)
-                    }
-                    RowEngine::Crdt
-                    | RowEngine::Kv
-                    | RowEngine::Vector
-                    | RowEngine::Columnar
-                    | RowEngine::Timeseries => None,
-                };
+                // Each row is a stored body: a base row as the sparse store
+                // holds it, or an installed row as the install stores it.
+                // A strict collection Binary-Tuple-encodes both, a CRDT row
+                // too, so each decodes under the collection's strict schema.
+                let strict_schema =
+                    self.resolve_strict_schema(at.database_id, at.tid, at.collection);
                 let stored: Vec<(&RowIdentity, &[u8])> = rows
                     .iter()
                     .map(|row| (&row.identity, row.bytes.as_slice()))
