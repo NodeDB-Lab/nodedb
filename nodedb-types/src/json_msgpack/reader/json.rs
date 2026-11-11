@@ -215,13 +215,25 @@ fn read_json_map(c: &mut Cursor<'_>, len: usize) -> zerompk::Result<serde_json::
                 other => other.to_string(),
             }
         } else {
-            read_json_value(c)?.to_string()
+            json_key_text(read_json_value(c)?)
         };
         let val = read_json_value(c)?;
         map.insert(key, val);
     }
     c.depth -= 1;
     Ok(serde_json::Value::Object(map))
+}
+
+/// The text of a key that is not a string. A container key names its kind,
+/// so a key nested in a key never renders again. Any other key renders as
+/// its JSON text, cut to [`super::key_text::bounded`].
+fn json_key_text(key: serde_json::Value) -> String {
+    match key {
+        serde_json::Value::Array(_) => "<array>".to_string(),
+        serde_json::Value::Object(_) => "<map>".to_string(),
+        serde_json::Value::String(text) => super::key_text::bounded(text),
+        other => super::key_text::bounded(other.to_string()),
+    }
 }
 
 pub(crate) fn base64_encode(data: &[u8]) -> String {

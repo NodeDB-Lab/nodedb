@@ -9,6 +9,7 @@
 
 pub mod cursor;
 pub mod json;
+mod key_text;
 pub mod native;
 
 pub(crate) use cursor::Cursor;

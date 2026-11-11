@@ -59,7 +59,9 @@ pub enum KvBodyError {
 
 /// The shape of a stored body: a msgpack map header marks a map, a body
 /// that decodes in full as a native tagged object is native, and anything
-/// else (an empty body included) is raw scalar bytes.
+/// else (an empty body included) is raw scalar bytes. A map with a key that
+/// is not a string at any depth is raw: KV values are opaque bytes, and a
+/// field name is text.
 pub fn kv_body_shape(body: &[u8]) -> KvBodyShape {
     classify_body(body).shape()
 }
@@ -88,7 +90,9 @@ impl ClassifiedBody {
 /// header to the last byte, so scalar bytes that merely start with an array
 /// header stay raw.
 pub(crate) fn classify_body(body: &[u8]) -> ClassifiedBody {
-    if map_header(body, 0).is_some() {
+    // RESP `SET` and a raw value column store any bytes. Bytes that only
+    // look like a map, with a key that is not text, stay opaque.
+    if map_header(body, 0).is_some() && nodedb_types::find_non_string_key(body).is_none() {
         return ClassifiedBody::Map;
     }
     let Ok(view) = nodedb_types::ObjectView::new(body) else {
@@ -374,5 +378,22 @@ mod tests {
     fn corrupt_map_body_is_a_decode_error() {
         // fixmap header claiming one entry, then nothing.
         assert!(kv_body_to_row(&[0x81]).is_err());
+    }
+
+    /// An opaque value that parses as a map with an integer key reads as
+    /// its raw bytes, not as fields.
+    #[test]
+    fn a_map_with_a_key_that_is_not_text_is_raw() {
+        // {1: "a"}
+        let body = [0x81, 0x01, 0xa1, b'a'];
+        assert_eq!(kv_body_shape(&body), KvBodyShape::Raw);
+        let (row, shape) = kv_body_to_row(&body).expect("row");
+        assert_eq!(shape, KvBodyShape::Raw);
+        let Value::Object(fields) = row else {
+            panic!("a row");
+        };
+        assert!(fields.contains_key("value") && fields.len() == 1);
+        // {"n": 1} stays a map.
+        assert_eq!(kv_body_shape(&[0x81, 0xa1, b'n', 0x01]), KvBodyShape::Map);
     }
 }

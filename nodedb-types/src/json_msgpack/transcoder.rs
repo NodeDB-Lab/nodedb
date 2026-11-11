@@ -296,11 +296,22 @@ fn transcode_map(c: &mut Cursor<'_>, out: &mut String, len: usize) -> zerompk::R
         {
             transcode_value(c, out)?;
         } else {
+            // A key that is not a string renders as the JSON readers render
+            // it: a container as its kind, so a key nested in a key never
+            // renders again, a string ext as its text, a scalar as its JSON
+            // text in quotes.
             let mut tmp = String::new();
             transcode_value(c, &mut tmp)?;
-            out.push('"');
-            out.push_str(&tmp);
-            out.push('"');
+            match tmp.as_bytes().first() {
+                Some(b'[') => out.push_str("\"<array>\""),
+                Some(b'{') => out.push_str("\"<map>\""),
+                Some(b'"') => out.push_str(&tmp),
+                _ => {
+                    out.push('"');
+                    out.push_str(&tmp);
+                    out.push('"');
+                }
+            }
         }
         out.push(':');
         transcode_value(c, out)?;

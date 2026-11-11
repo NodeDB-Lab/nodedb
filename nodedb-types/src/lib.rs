@@ -117,8 +117,10 @@ pub use id::{
 };
 pub use identity::KeyRepr;
 pub use json_msgpack::{
-    InstantKind, JsonValue, MsgpackError, MsgpackResult, NativeCell, json_from_msgpack,
-    json_to_msgpack, json_to_msgpack_or_empty, msgpack_to_json_string, ordered_map_to_msgpack,
+    InstantKind, JsonValue, MsgpackError, MsgpackResult, NATIVE_CELL_CONSTANT,
+    NATIVE_CELL_GROWTH_DEN, NATIVE_CELL_GROWTH_NUM, NativeCell, NonStringKey,
+    find_body_non_string_key, find_non_string_key, json_from_msgpack, json_to_msgpack,
+    json_to_msgpack_or_empty, msgpack_to_json_string, native_cell_bound, ordered_map_to_msgpack,
     plain_msgpack_keeps_type, read_instant, value_from_msgpack, value_to_document_body,
     value_to_msgpack, value_to_typed_msgpack, write_instant,
 };

@@ -154,6 +154,123 @@ mod tests {
         ));
     }
 
+    /// One value per column type, at the extremes that grow most.
+    fn growing_cells() -> Vec<(ColumnType, Value)> {
+        use nodedb_types::geometry::{Geometry, Srid, SridGeometry};
+        let geometry = |geometry| Value::Geometry(SridGeometry::new(Srid::WGS84, geometry));
+        vec![
+            (ColumnType::Int64, Value::Integer(i64::MIN)),
+            (ColumnType::Float64, Value::Float(f64::MIN_POSITIVE)),
+            (ColumnType::Bool, Value::Bool(true)),
+            (
+                ColumnType::Timestamp,
+                Value::NaiveDateTime(NdbDateTime::from_micros(i64::MIN)),
+            ),
+            (
+                ColumnType::Timestamptz,
+                Value::DateTime(NdbDateTime::from_micros(0)),
+            ),
+            (
+                ColumnType::Decimal(None),
+                Value::Decimal(rust_decimal::Decimal::new(-1, 28)),
+            ),
+            (
+                ColumnType::Decimal(None),
+                Value::Decimal(rust_decimal::Decimal::MAX),
+            ),
+            (
+                ColumnType::Uuid,
+                Value::Uuid("01234567-89ab-cdef-0123-456789abcdef".into()),
+            ),
+            (
+                ColumnType::Ulid,
+                Value::Ulid("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
+            ),
+            (
+                ColumnType::Duration,
+                Value::Duration(nodedb_types::NdbDuration::from_micros(i64::MIN + 1)),
+            ),
+            (ColumnType::Vector(1), Value::Array(vec![Value::Float(1.0)])),
+            (
+                ColumnType::Vector(64),
+                Value::Array(vec![Value::Float(0.5); 64]),
+            ),
+            (ColumnType::String, Value::String(String::new())),
+            (ColumnType::String, Value::String("s".repeat(70_000))),
+            (ColumnType::SparseVector, Value::String("{1: 0.5}".into())),
+            (ColumnType::Bytes, Value::Bytes(Vec::new())),
+            (ColumnType::Bytes, Value::Bytes(vec![7; 300])),
+            (
+                ColumnType::Json,
+                Value::Array(vec![Value::Float(0.25); 100]),
+            ),
+            (
+                ColumnType::Array,
+                Value::Array(vec![Value::DateTime(NdbDateTime::from_micros(0)); 50]),
+            ),
+            (ColumnType::Set, Value::Set(vec![Value::Integer(1); 20])),
+            (ColumnType::Regex, Value::Regex("a+".into())),
+            (
+                ColumnType::Range,
+                Value::Range {
+                    start: Some(Box::new(Value::Integer(1))),
+                    end: None,
+                    inclusive: false,
+                },
+            ),
+            (
+                ColumnType::Record,
+                Value::Record {
+                    table: "t".into(),
+                    id: "i".into(),
+                },
+            ),
+            (
+                ColumnType::Geometry,
+                geometry(Geometry::point(-180.0, 90.0)),
+            ),
+            (
+                ColumnType::Geometry,
+                geometry(Geometry::GeometryCollection {
+                    geometries: Vec::new(),
+                }),
+            ),
+        ]
+    }
+
+    /// A strict cell renders within `G·stored + C`, where `stored` is the
+    /// column's fixed width or variable bytes. A null renders within `C`.
+    #[test]
+    fn every_strict_cell_renders_within_the_growth_bound() {
+        use nodedb_types::columnar::{ColumnDef, StrictSchema};
+        use nodedb_types::{native_cell_bound, value_to_msgpack};
+
+        use crate::{TupleDecoder, TupleEncoder};
+
+        for (column_type, value) in growing_cells() {
+            let schema = StrictSchema::new(vec![
+                ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+                ColumnDef::nullable("cell", column_type),
+            ])
+            .expect("schema");
+            let encoder = TupleEncoder::new(&schema);
+            let tuple = encoder.encode(&[Value::Integer(1), value]).expect("encode");
+            let null = encoder
+                .encode(&[Value::Integer(1), Value::Null])
+                .expect("encode null");
+            let stored = (tuple.len() - null.len()) + column_type.fixed_size().unwrap_or(0);
+            let decoder = TupleDecoder::new(&schema);
+            for (stored, tuple) in [(stored, &tuple), (0, &null)] {
+                let cell = decoder.extract_value(tuple, 1).expect("decode");
+                let native = value_to_msgpack(&cell).expect("render").len();
+                assert!(
+                    native <= native_cell_bound(stored),
+                    "{column_type:?}: {stored} stored bytes render {native}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn vector_dimension_larger_than_raw_bytes_returns_null_without_reserving() {
         assert!(matches!(
