@@ -340,3 +340,98 @@ async fn http_upsert_that_violates_a_check_in_a_later_statement_is_refused() {
     assert_absent(&server, PLAIN, "h3").await;
     assert_absent(&server, CHECKED, "h3").await;
 }
+
+/// The collection whose rows need `hi` at or above `lo`.
+const RANGE: &str = "ce_range";
+/// The CHECK constraint of [`RANGE`].
+const RANGE_CHECK: &str = "ce_hi_at_least_lo";
+
+/// A one-core server with [`RANGE`]. Each `(id, lo, hi)` of `stored` is
+/// written first, as its own request.
+async fn range_fixture(stored: &[(&str, i64, i64)]) -> TestServer {
+    let server = TestServer::start().await;
+    exec(&server, &format!("CREATE COLLECTION {RANGE}")).await;
+    exec(
+        &server,
+        &format!("ALTER COLLECTION {RANGE} ADD CONSTRAINT {RANGE_CHECK} CHECK (NEW.hi >= NEW.lo)"),
+    )
+    .await;
+    for (id, lo, hi) in stored {
+        exec(
+            &server,
+            &format!("INSERT INTO {RANGE} (id, lo, hi) VALUES ('{id}', {lo}, {hi})"),
+        )
+        .await;
+    }
+    server
+}
+
+/// The stored `lo` and `hi` of [`RANGE`] row `id`, as `"lo\thi"`.
+async fn stored_range(server: &TestServer, id: &str) -> Vec<String> {
+    server
+        .query_text_joined(&format!("SELECT lo, hi FROM {RANGE} WHERE id = '{id}'"))
+        .await
+        .unwrap_or_else(|e| panic!("read {RANGE}: {e}"))
+}
+
+/// An INSERT of `(id, 1, 2)`, then an UPDATE of that row to `lo = 5`. The
+/// row the request leaves breaks the CHECK.
+fn insert_then_raise_lo(id: &str) -> String {
+    format!(
+        "INSERT INTO {RANGE} (id, lo, hi) VALUES ('{id}', 1, 2); \
+         UPDATE {RANGE} SET lo = 5 WHERE id = '{id}'"
+    )
+}
+
+/// Two UPDATEs of stored row `id`: `hi` to `hi`, then `lo` to `lo`.
+fn update_hi_then_lo(id: &str, hi: i64, lo: i64) -> String {
+    format!(
+        "UPDATE {RANGE} SET hi = {hi} WHERE id = '{id}'; \
+         UPDATE {RANGE} SET lo = {lo} WHERE id = '{id}'"
+    )
+}
+
+/// The UPDATE's CHECK reads the row the INSERT wrote, so `hi = 2` holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_update_that_breaks_a_cross_field_check_after_an_insert_is_refused() {
+    let server = range_fixture(&[]).await;
+    let sql = insert_then_raise_lo("x1");
+    assert_http_refused(&sql, server.http_query(&sql).await, 409, RANGE_CHECK);
+    assert_absent(&server, RANGE, "x1").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_update_that_breaks_a_cross_field_check_after_an_insert_is_refused() {
+    let server = range_fixture(&[]).await;
+    let sql = insert_then_raise_lo("x2");
+    assert_native_refused(&sql, &native(&server, &sql).await, "23514", RANGE_CHECK);
+    assert_absent(&server, RANGE, "x2").await;
+}
+
+/// The second UPDATE's CHECK reads `hi = 20`, the value the first UPDATE
+/// left, not the stored `hi = 10`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_update_that_meets_the_check_after_an_update_applies() {
+    let server = range_fixture(&[("x3", 1, 10)]).await;
+    server.http_exec(&update_hi_then_lo("x3", 20, 15)).await;
+    assert_eq!(stored_range(&server, "x3").await, ["15\t20"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_update_that_meets_the_check_after_an_update_applies() {
+    let server = range_fixture(&[("x4", 1, 10)]).await;
+    let sql = update_hi_then_lo("x4", 20, 15);
+    let response = native(&server, &sql).await;
+    assert!(response.error.is_none(), "{sql}: {:?}", response.error);
+    assert_eq!(stored_range(&server, "x4").await, ["15\t20"]);
+}
+
+/// The second UPDATE's CHECK reads `hi = 2`, the value the first UPDATE
+/// left. The refused request leaves the stored row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_update_that_breaks_the_check_after_an_update_is_refused() {
+    let server = range_fixture(&[("x5", 1, 10)]).await;
+    let sql = update_hi_then_lo("x5", 2, 5);
+    assert_native_refused(&sql, &native(&server, &sql).await, "23514", RANGE_CHECK);
+    assert_eq!(stored_range(&server, "x5").await, ["1\t10"]);
+}
