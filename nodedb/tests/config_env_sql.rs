@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The `[server.sql]` stateless transaction wrapper switch under its env
-//! override.
+//! The `[server.sql]` transaction-control switches under their env
+//! overrides.
 //!
 //! `false` turns the policy off and `true` turns it on, whatever the config
 //! says. A malformed value stops startup and names the variable and the value.
@@ -36,4 +36,22 @@ fn malformed_txn_wrapper_stateless_fails_startup() {
     let _guard = EnvGuard::set(STATELESS, "off");
     let mut cfg = ServerConfig::default();
     assert_rejected(apply_env_overrides(&mut cfg), STATELESS, "off");
+}
+
+const NATIVE: &str = "NODEDB_SQL_TXN_CONTROL_NATIVE";
+
+#[test]
+fn false_turns_the_native_policy_off() {
+    let _guard = EnvGuard::set(NATIVE, "false");
+    let mut cfg = ServerConfig::default();
+    apply_env_overrides(&mut cfg).expect("false applies");
+    assert!(!cfg.server.sql.txn_control_native);
+    assert!(cfg.server.sql.txn_wrapper_stateless);
+}
+
+#[test]
+fn malformed_txn_control_native_fails_startup() {
+    let _guard = EnvGuard::set(NATIVE, "disabled");
+    let mut cfg = ServerConfig::default();
+    assert_rejected(apply_env_overrides(&mut cfg), NATIVE, "disabled");
 }

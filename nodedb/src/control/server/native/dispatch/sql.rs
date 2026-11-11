@@ -17,6 +17,7 @@ use crate::control::server::shared::txn_control::{TxnControl, classify as classi
 
 use super::sql_admin::{handle_explain, handle_set_sql, handle_show_sql, is_session_show};
 use super::sql_planned::execute_planned;
+use super::sql_txn_request::{run_txn_control_request, txn_control_statements};
 use super::streaming::SqlOutcome;
 use super::transaction::{handle_begin, handle_commit, handle_rollback};
 use super::transaction_savepoint::{
@@ -77,7 +78,6 @@ async fn handle_sql_inner(
         .map(|params| inline_params(sql, params));
     let sql = substituted.as_deref().unwrap_or(sql);
     let sql_trimmed = sql.trim();
-    let upper = sql_trimmed.to_uppercase();
 
     ctx.sessions.ensure_session(*ctx.peer_addr);
 
@@ -98,6 +98,28 @@ async fn handle_sql_inner(
     if let Some(control) = classify_txn_control(sql_trimmed) {
         return resp(handle_txn_control(ctx, seq, control).await);
     }
+
+    // A request of several statements that holds transaction control runs
+    // each statement under PostgreSQL rules. Off, the planner refuses it with
+    // SQLSTATE 0A000.
+    if ctx.state.sql_policy.txn_control_native
+        && let Some(statements) = txn_control_statements(sql_trimmed)
+    {
+        return resp(run_txn_control_request(ctx, seq, &statements).await);
+    }
+
+    dispatch_statement(ctx, seq, sql_trimmed, allow_stream).await
+}
+
+/// Run `sql_trimmed`, text with no transaction control at its head, on the
+/// session of `ctx`. A request of several statements plans as one request.
+pub(super) async fn dispatch_statement(
+    ctx: &DispatchCtx<'_>,
+    seq: u64,
+    sql_trimmed: &str,
+    allow_stream: bool,
+) -> SqlOutcome {
+    let upper = sql_trimmed.to_uppercase();
 
     // An aborted block refuses every other statement until it ends.
     if ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::Failed {
@@ -186,7 +208,7 @@ async fn handle_sql_inner(
 }
 
 /// Run one classified transaction-control statement.
-async fn handle_txn_control(
+pub(super) async fn handle_txn_control(
     ctx: &DispatchCtx<'_>,
     seq: u64,
     control: TxnControl,

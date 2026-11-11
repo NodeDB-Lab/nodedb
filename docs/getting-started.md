@@ -294,14 +294,16 @@ listener is already plaintext.
 ```toml
 [server.sql]
 txn_wrapper_stateless = true   # HTTP, NDJSON, WebSocket: accept BEGIN ... COMMIT around a request
+txn_control_native = true      # native: run BEGIN, COMMIT and ROLLBACK inside a request as PostgreSQL does
 ```
 
 | Config field                | Environment variable               | Default |
 | --------------------------- | ---------------------------------- | ------- |
 | `sql.txn_wrapper_stateless` | `NODEDB_SQL_TXN_WRAPPER_STATELESS` | `true`  |
+| `sql.txn_control_native`    | `NODEDB_SQL_TXN_CONTROL_NATIVE`    | `true`  |
 
-Only an explicit `false` turns the policy off. Off, HTTP, NDJSON and WebSocket
-refuse transaction control inside a request of several statements with SQLSTATE
+Only an explicit `false` turns a policy off. Off, the transport refuses
+transaction control inside a request of several statements with SQLSTATE
 `0A000`. See
 [Transaction control inside one request](protocols.md#transaction-control-inside-one-request).
 

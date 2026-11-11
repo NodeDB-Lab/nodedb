@@ -17,12 +17,19 @@ pub struct SqlSection {
     /// Off, such a request answers SQLSTATE 0A000. Default `true`.
     #[serde(default = "default_true")]
     pub txn_wrapper_stateless: bool,
+
+    /// The native protocol runs `BEGIN`, `COMMIT` and `ROLLBACK` inside a
+    /// request of several statements as PostgreSQL does. Off, such a request
+    /// answers SQLSTATE 0A000. Default `true`.
+    #[serde(default = "default_true")]
+    pub txn_control_native: bool,
 }
 
 impl Default for SqlSection {
     fn default() -> Self {
         Self {
             txn_wrapper_stateless: true,
+            txn_control_native: true,
         }
     }
 }
@@ -48,7 +55,9 @@ mod tests {
             "[server.ports]\nnative = 7433\n",
             "[server.sql]\n",
         ] {
-            assert!(parse(toml).server.sql.txn_wrapper_stateless, "{toml:?}");
+            let sql = parse(toml).server.sql;
+            assert!(sql.txn_wrapper_stateless, "{toml:?}");
+            assert!(sql.txn_control_native, "{toml:?}");
         }
     }
 
@@ -58,12 +67,18 @@ mod tests {
         assert!(on.server.sql.txn_wrapper_stateless);
         let off = parse("[server.sql]\ntxn_wrapper_stateless = false\n");
         assert!(!off.server.sql.txn_wrapper_stateless);
+        assert!(off.server.sql.txn_control_native);
+        let native_off = parse("[server.sql]\ntxn_control_native = false\n");
+        assert!(native_off.server.sql.txn_wrapper_stateless);
+        assert!(!native_off.server.sql.txn_control_native);
     }
 
     #[test]
     fn the_default_section_turns_the_policy_on() {
         assert!(super::SqlSection::default().txn_wrapper_stateless);
         assert!(ServerConfig::default().server.sql.txn_wrapper_stateless);
+        assert!(super::SqlSection::default().txn_control_native);
+        assert!(ServerConfig::default().server.sql.txn_control_native);
     }
 
     #[test]
@@ -71,6 +86,7 @@ mod tests {
         for toml in [
             "[server.sql]\ntxn_wrapper = false\n",
             "[server.sql]\ntxn_wrapper_stateless = \"off\"\n",
+            "[server.sql]\ntxn_control_native = \"off\"\n",
         ] {
             let result: Result<ServerConfig, _> = toml::from_str(toml);
             assert!(result.is_err(), "{toml:?}");

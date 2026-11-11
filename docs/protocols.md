@@ -164,10 +164,24 @@ In a wrapped request, error statement numbers count the inner statements. The fi
 | Config field | Environment variable | Default | Off |
 |---|---|---|---|
 | `server.sql.txn_wrapper_stateless` | `NODEDB_SQL_TXN_WRAPPER_STATELESS` | `true` | HTTP, NDJSON and WebSocket refuse every request of several statements that holds transaction control with `0A000`. |
+| `server.sql.txn_control_native` | `NODEDB_SQL_TXN_CONTROL_NATIVE` | `true` | The native protocol refuses every request of several statements that holds transaction control with `0A000`. |
 
 A missing `[server.sql]` section or key leaves the policy on. A malformed environment value stops startup. The server reads the setting at startup only.
 
-pgwire follows PostgreSQL. The native protocol refuses transaction control beside another statement with `0A000`.
+pgwire follows PostgreSQL.
+
+The native protocol holds a session, so it follows PostgreSQL rules for transaction control inside one request:
+
+| Statement of the request | Action |
+|---|---|
+| A statement outside a block | Joins one implicit transaction with the other statements outside a block. |
+| `BEGIN` | Opens a block. The statements collected before it join the block. |
+| A statement inside a block | Stages in the block. |
+| `COMMIT` | Commits the block, or the implicit transaction. |
+| `ROLLBACK` | Rolls back the block, or drops the implicit transaction. |
+| `SAVEPOINT`, `RELEASE`, `ROLLBACK TO` | Runs as the statement runs alone. |
+
+The first error stops the request and answers that error. An error inside a block marks the block failed. The block stays open until the client ends it. The answer of `BEGIN; A; B; COMMIT` is the answer of `A; B`: the rows in statement order and one summed tag. A request of transaction control alone answers its last statement.
 
 ## RESP (Redis Protocol)
 
