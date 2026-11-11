@@ -101,6 +101,7 @@ pub(super) async fn execute_planned(
             scope: &scope,
             sql: &clean_sql,
             trace_id: TraceId::ZERO,
+            txn_wrapper: false,
         },
         ctx.sessions.tx_id(ctx.peer_addr),
     )

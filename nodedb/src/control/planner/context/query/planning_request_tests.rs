@@ -10,7 +10,7 @@ use nodedb_sql::types::PlanCacheEligibility;
 use nodedb_types::{DatabaseId, TenantId};
 
 use super::planning_request::{
-    SoloKind, join_cache_eligibility, refuse_solo_statements, solo_kind,
+    SoloKind, join_cache_eligibility, refuse_solo_between, refuse_solo_statements, solo_kind,
 };
 use super::{QueryContext, RequestPlan};
 use crate::control::cluster::test_one_node::{OneNodeCluster, boot};
@@ -101,6 +101,30 @@ fn a_request_of_one_statement_is_never_refused() {
         refuse_solo_statements(&request(&[solo])).expect("one statement is never refused");
     }
     refuse_solo_statements(&[]).expect("an empty request is not refused");
+}
+
+/// The range check refuses one solo statement alone, and numbers it in the
+/// range.
+#[test]
+fn a_solo_statement_in_a_range_is_numbered_in_the_range() {
+    let statements = request(&["BEGIN", "SET x = 1", "COMMIT"]);
+    let error = refuse_solo_between(&statements, 1, 2).expect_err("SET is refused alone");
+    let (_, sqlstate, message) = error_to_sqlstate(&error);
+    assert_eq!(sqlstate, "0A000", "{message}");
+    assert!(message.contains("statement 1 of 1 (SET)"), "{message}");
+
+    let statements = request(&[
+        "BEGIN",
+        "INSERT INTO docs (id) VALUES ('a')",
+        "RESET x",
+        "COMMIT",
+    ]);
+    let error = refuse_solo_between(&statements, 1, 3).expect_err("RESET is refused");
+    let (_, _, message) = error_to_sqlstate(&error);
+    assert!(message.contains("statement 2 of 2 (RESET)"), "{message}");
+
+    refuse_solo_between(&statements, 1, 2).expect("DML alone in the range passes");
+    refuse_solo_between(&statements, 3, 1).expect("an empty range passes");
 }
 
 // ── Version merge ──────────────────────────────────────────────────────

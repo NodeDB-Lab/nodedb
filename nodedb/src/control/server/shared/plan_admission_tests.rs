@@ -90,6 +90,7 @@ async fn admit_located(cluster: &OneNodeCluster, sql: &str) -> Result<PlanAdmiss
         scope: &scope,
         sql,
         trace_id: TraceId::ZERO,
+        txn_wrapper: true,
     })
     .await
 }

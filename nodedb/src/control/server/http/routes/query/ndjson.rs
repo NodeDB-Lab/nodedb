@@ -135,12 +135,16 @@ async fn ndjson_at_consistency(
         scope: &scope,
         sql,
         trace_id: crate::types::TraceId::ZERO,
+        txn_wrapper: true,
     })
     .await
     {
         Ok(admission) => admission,
         Err(error) => return ApiError::from_request(error, &body.sql).into_response(),
     };
+    if admission.rolls_back {
+        return ndjson_response(String::new(), rate_limit_headers);
+    }
     let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
     let output_schemas = admission.output_schemas;

@@ -148,6 +148,7 @@ async fn query_at_consistency(
         scope: &scope,
         sql: &clean_sql,
         trace_id: crate::types::TraceId::ZERO,
+        txn_wrapper: true,
     })
     .await
     .map_err(|error| ApiError::from_request(error, sql))?;
@@ -156,6 +157,7 @@ async fn query_at_consistency(
     let output_schemas = admission.output_schemas;
     let lease_scope = admission.lease_scope;
 
+    // A rolled-back wrapper plans no task, so it answers here.
     if tasks.is_empty() {
         return Ok((
             rate_limit_headers,

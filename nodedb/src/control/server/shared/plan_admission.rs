@@ -66,6 +66,11 @@ pub struct PlanAdmission {
     /// written since. Empty for every statement that settled no cross-shard
     /// balance, which is every statement on a collection with no binding.
     pub sum_target_reads: Vec<crate::control::server::shared::session::read_set::ReadSetEntry>,
+    /// True for a request `BEGIN; ..; ROLLBACK` the wrapper policy accepted.
+    /// Its inner statements planned and passed authorization, CHECK and enum
+    /// labels. `tasks` is empty and no lease is held. The caller must apply
+    /// nothing and answer no row.
+    pub rolls_back: bool,
 }
 
 impl PlanAdmission {
@@ -89,6 +94,11 @@ pub struct PlanAdmissionRequest<'a> {
     /// plans it.
     pub sql: &'a str,
     pub trace_id: TraceId,
+    /// Accept a `BEGIN` that opens and a `COMMIT` or `ROLLBACK` that ends a
+    /// request of several statements. A transport with no session passes
+    /// its `[server.sql]` switch. `false` refuses transaction control beside
+    /// other statements with 0A000. See `RequestText::split_with_wrapper`.
+    pub txn_wrapper: bool,
 }
 
 /// Plan `sql`, authorize it, expand implicit graph edges, authorize the expanded
@@ -151,7 +161,7 @@ async fn plan_authorize_and_admit_once(
     let auth_ctx = request.scope.auth();
     // A text of one statement plans whole, as one statement. A text of
     // several plans each statement alone. Each splits off its own `RETURNING`.
-    let text = RequestText::split(request.sql)?;
+    let (text, rolls_back) = RequestText::split_with_wrapper(request.sql, request.txn_wrapper)?;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;
@@ -189,6 +199,21 @@ async fn plan_authorize_and_admit_once(
         authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)
             .map_err(crate::Error::from)?;
 
+    // A rolled-back wrapper stops after the checks: no derived write marks
+    // catalog state, and no lease is held.
+    if rolls_back {
+        return Ok(PlanAdmission {
+            tasks: Vec::new(),
+            statement_map: StatementMap::default(),
+            output_schema,
+            output_schemas,
+            versions,
+            lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+            sum_target_reads: Vec::new(),
+            rolls_back,
+        });
+    }
+
     let mut parents = Vec::new();
     let sum_target_reads = append_derived_tasks_traced(
         state,
@@ -222,6 +247,7 @@ async fn plan_authorize_and_admit_once(
         versions,
         lease_scope,
         sum_target_reads,
+        rolls_back,
     })
 }
 

@@ -227,7 +227,23 @@ pub(super) fn refuse_solo_statements(statements: &[String]) -> crate::Result<()>
     if statements.len() < 2 {
         return Ok(());
     }
-    for (index, statement) in statements.iter().enumerate() {
+    refuse_solo_between(statements, 0, statements.len())
+}
+
+/// Refuse a solo statement among `statements[first..end]`, whatever their
+/// count.
+///
+/// The error numbers the statement among `statements[first..end]`. A
+/// request that `BEGIN` and `COMMIT` wrap checks its inner statements with
+/// this. The wrapper makes it a request of several statements, even with one
+/// inner statement.
+pub(crate) fn refuse_solo_between(
+    statements: &[String],
+    first: usize,
+    end: usize,
+) -> crate::Result<()> {
+    let inner = statements.get(first..end).unwrap_or_default();
+    for (index, statement) in inner.iter().enumerate() {
         let Some(kind) = solo_kind(statement) else {
             continue;
         };
@@ -236,7 +252,7 @@ pub(super) fn refuse_solo_statements(statements: &[String]) -> crate::Result<()>
             detail: format!(
                 "statement {} of {} ({head}) is {}. {} Send this statement as its own request.",
                 index + 1,
-                statements.len(),
+                inner.len(),
                 kind.describe(),
                 kind.rule(),
             ),

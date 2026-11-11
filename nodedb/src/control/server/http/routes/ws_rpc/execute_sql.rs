@@ -77,8 +77,12 @@ pub async fn execute_sql(
         scope: &scope,
         sql: &clean_sql,
         trace_id,
+        txn_wrapper: true,
     })
     .await?;
+    if admission.rolls_back {
+        return Ok(serde_json::Value::Null);
+    }
     let output_schemas = admission.output_schemas;
 
     // A statement admitted under a lease this node then loses ends with a

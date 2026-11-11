@@ -16,4 +16,5 @@ pub use functions::SYSTEM_FUNCTION_NAMES;
 pub use planning::PlanSqlWithRlsParams;
 pub use planning_built::BulkLoadRoute;
 pub use planning_request::RequestPlan;
+pub(crate) use planning_request::refuse_solo_between;
 pub use tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD;

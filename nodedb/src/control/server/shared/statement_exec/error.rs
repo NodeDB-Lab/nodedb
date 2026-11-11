@@ -5,7 +5,8 @@
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::control::server::response_shape::types::DmlFoldError;
 use crate::control::server::shared::retry::RetryableSchemaChange;
-use crate::control::server::shared::sql_split::statement_position;
+use crate::control::server::shared::sql_split::{split_sql_statements, statement_position};
+use crate::control::server::shared::txn_control::wrapper_offset;
 use crate::types::TenantId;
 
 use super::StatementMap;
@@ -124,8 +125,13 @@ impl StatementAt {
 
     /// The 1-based character offset in `sql` where the statement starts.
     /// `sql` is the request text. `None` when it holds fewer statements.
+    ///
+    /// A request that `BEGIN` and an end wrap runs its inner statements
+    /// alone. Its index counts from the statement after `BEGIN`, so the
+    /// offset skips the `BEGIN`.
     pub fn position(self, sql: &str) -> Option<usize> {
-        statement_position(sql, self.statement)
+        let first = wrapper_offset(&split_sql_statements(sql));
+        statement_position(sql, self.statement.saturating_add(first))
     }
 }
 
@@ -243,5 +249,13 @@ mod tests {
         let at = StatementAt::of(1, 2).expect("two statements carry an index");
         assert_eq!(at.number(), 2);
         assert_eq!(at.position("SELECT 1; SELECT 2"), Some(11));
+    }
+
+    /// The index of a wrapped request counts its inner statements.
+    #[test]
+    fn a_wrapped_request_positions_past_its_begin() {
+        let at = StatementAt::of(1, 2).expect("two statements carry an index");
+        assert_eq!(at.number(), 2);
+        assert_eq!(at.position("BEGIN; SELECT 1; SELECT 2; COMMIT"), Some(18));
     }
 }

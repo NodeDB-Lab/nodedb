@@ -16,6 +16,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::DdlError;
 use crate::control::server::shared::sql_split::split_sql_statements;
 use crate::control::server::shared::statement_exec::RequestError;
+use crate::control::server::shared::txn_control::wrapper_offset;
 use crate::control::state::SharedState;
 use crate::types::{TenantId, TxnId};
 
@@ -39,14 +40,18 @@ pub struct RequestChecks<'a> {
 /// INSERT, an UPSERT nor an UPDATE passes.
 ///
 /// A CHECK or enum-label error of statement `k` in a request of several
-/// statements carries `k`.
+/// statements carries `k`. In a request that `BEGIN` and an end wrap, `k`
+/// counts the inner statements, and the wrapper statements pass.
 pub async fn enforce_request_checks(
     checks: &RequestChecks<'_>,
     sql: &str,
 ) -> Result<(), RequestError> {
     let statements = split_sql_statements(sql);
-    let count = statements.len();
-    for (index, statement) in statements.iter().enumerate() {
+    let first = wrapper_offset(&statements);
+    let end = statements.len().saturating_sub(first);
+    let inner = statements.get(first..end).unwrap_or_default();
+    let count = inner.len();
+    for (index, statement) in inner.iter().enumerate() {
         // Both checks answer a `DdlError`. It converts as it does alone.
         let in_statement =
             |error: DdlError| RequestError::in_statement(crate::Error::from(error), index, count);
