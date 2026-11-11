@@ -70,6 +70,8 @@ pub(super) struct TuningOverrides {
     /// Writes `[server.sql]` with `txn_control_native = false`, so a test
     /// reads the refusal native answers then.
     pub(super) txn_control_native_off: bool,
+    /// Overrides `[tuning.network] max_query_result_bytes`.
+    pub(super) max_query_result_bytes: Option<u64>,
 }
 
 impl TuningOverrides {
@@ -158,6 +160,14 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with a lowered query result limit.
+    pub(super) fn result_limit(bytes: u64) -> Self {
+        Self {
+            max_query_result_bytes: Some(bytes),
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -189,6 +199,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.
     toml.push_str("\n[tuning.network]\ndrain_timeout_secs = 2\n");
+    if let Some(bytes) = tuning.max_query_result_bytes {
+        toml.push_str(&format!("max_query_result_bytes = {bytes}\n"));
+    }
     if tuning.fast_version_cleanup {
         toml.push_str(
             "txn_snapshot_max_age_secs = 5\ndefault_deadline_secs = 5\ncopy_deadline_secs = 5\n\
