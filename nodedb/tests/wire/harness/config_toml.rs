@@ -72,6 +72,9 @@ pub(super) struct TuningOverrides {
     pub(super) txn_control_native_off: bool,
     /// Overrides `[tuning.network] max_query_result_bytes`.
     pub(super) max_query_result_bytes: Option<u64>,
+    /// Writes `[auth.metering] enabled = true`, so usage and scope quotas
+    /// account the work a test runs.
+    pub(super) metering: bool,
 }
 
 impl TuningOverrides {
@@ -168,6 +171,14 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with usage metering on.
+    pub(super) fn metering() -> Self {
+        Self {
+            metering: true,
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -231,6 +242,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     }
     if let Some(vectors) = tuning.vector_seal_threshold {
         toml.push_str(&format!("\n[tuning.vector]\nseal_threshold = {vectors}\n"));
+    }
+    if tuning.metering {
+        toml.push_str("\n[auth.metering]\nenabled = true\n");
     }
     if let Some(bytes) = tuning.max_redo_entry_bytes {
         toml.push_str(&format!(

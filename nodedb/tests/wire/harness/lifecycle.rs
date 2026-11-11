@@ -44,6 +44,18 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_multicores`] with usage metering on.
+    pub async fn start_multicores_metered(cores: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::metering(),
+            cores,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
     /// test whose collections must land on different cores.
     #[cfg(feature = "failpoints")]
