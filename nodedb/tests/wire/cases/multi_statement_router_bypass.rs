@@ -8,22 +8,8 @@
 //! router. So the same statement in a request stores the row it stores
 //! alone. Each case fills a key from a sequence default.
 
+use super::wire_support::{exec, rows};
 use crate::harness::TestServer;
-
-async fn exec(server: &TestServer, sql: &str) {
-    server
-        .exec(sql)
-        .await
-        .unwrap_or_else(|e| panic!("run {sql}: {e}"));
-}
-
-/// The rows of `collection`, ordered by key.
-async fn rows(server: &TestServer, collection: &str) -> Vec<Vec<String>> {
-    server
-        .query_rows(&format!("SELECT id, v FROM {collection} ORDER BY id"))
-        .await
-        .unwrap_or_else(|e| panic!("read {collection}: {e}"))
-}
 
 /// A one-core server with `lone` and `paired`, each keyed by its own
 /// sequence, and `other`, keyed by text.

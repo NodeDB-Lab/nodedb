@@ -9,11 +9,10 @@
 //! of one statement answers no `sqlstate`, `statement` or `position` key.
 //! Native prefixes the message with `statement 2 of 2: `.
 
-use futures::{SinkExt, StreamExt};
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
 
+use super::wire_support::{exec, ws_frame};
 use crate::harness::TestServer;
 
 /// The first statement of every request. It applies alone.
@@ -26,13 +25,6 @@ const UNPARSED: &str = "SELECT * FROM rq_plain WHERE";
 const VIOLATION: &str = "INSERT INTO rq_checked (id, n) VALUES ('c1', -1)";
 /// A statement that writes the key the fixture holds. The Data Plane refuses it.
 const DUPLICATE: &str = "INSERT INTO rq_plain (id, n) VALUES ('dup', 2)";
-
-async fn exec(server: &TestServer, sql: &str) {
-    server
-        .exec(sql)
-        .await
-        .unwrap_or_else(|e| panic!("run {sql}: {e}"));
-}
 
 /// A one-core server with `rq_plain`, holding row `dup`, and `rq_checked`.
 async fn fixture() -> TestServer {
@@ -163,33 +155,6 @@ fn error_line(lines: &[Value], sql: &str) -> Value {
         .find(|line| line.get("error").is_some())
         .cloned()
         .unwrap_or_else(|| panic!("{sql} must answer an error line, got {lines:?}"))
-}
-
-/// The WebSocket RPC frame that answers `sql` on a new socket.
-async fn ws_frame(server: &TestServer, sql: &str) -> Value {
-    let url = format!("ws://127.0.0.1:{}/v1/ws", server.http_port);
-    let (mut ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .expect("connect the WebSocket RPC endpoint");
-    let request = serde_json::json!({ "id": 1, "method": "query", "params": { "sql": sql } });
-    ws.send(Message::Text(request.to_string().into()))
-        .await
-        .unwrap_or_else(|e| panic!("send {sql}: {e}"));
-    loop {
-        let message = tokio::time::timeout(std::time::Duration::from_secs(30), ws.next())
-            .await
-            .unwrap_or_else(|_| panic!("no answer to {sql}"))
-            .unwrap_or_else(|| panic!("the socket closed before answering {sql}"))
-            .unwrap_or_else(|e| panic!("read the answer to {sql}: {e}"));
-        let Message::Text(text) = message else {
-            continue;
-        };
-        let frame: Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("a JSON frame for {sql}: {e}: {text}"));
-        if frame["id"] == 1 {
-            return frame;
-        }
-    }
 }
 
 /// Check that `error` names statement 2 of `pair(DUPLICATE)`, its code and

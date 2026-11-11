@@ -10,12 +10,10 @@
 //! UPDATE applies, and one that breaks the CHECK answers 23514. A refused
 //! request applies no row.
 
-use futures::{SinkExt, StreamExt};
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use nodedb_types::protocol::NativeResponse;
-use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
 
+use super::wire_support::{exec, ws_frame};
 use crate::harness::TestServer;
 
 /// The collection with no constraint.
@@ -28,42 +26,6 @@ const CHECK_NAME: &str = "ce_positive_n";
 const ORDERS: &str = "ce_orders";
 /// The text an enum-label refusal holds.
 const ENUM_REFUSAL: &str = "invalid input value for enum";
-
-/// Run `sql` and panic with the server error text on an error.
-async fn exec(server: &TestServer, sql: &str) {
-    server
-        .exec(sql)
-        .await
-        .unwrap_or_else(|e| panic!("run {sql}: {e}"));
-}
-
-/// Send `sql` as WebSocket RPC `query` on a new socket. Returns the frame
-/// that answers it.
-async fn ws_frame(server: &TestServer, sql: &str) -> Value {
-    let url = format!("ws://127.0.0.1:{}/v1/ws", server.http_port);
-    let (mut ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .expect("connect the WebSocket RPC endpoint");
-    let request = serde_json::json!({ "id": 1, "method": "query", "params": { "sql": sql } });
-    ws.send(Message::Text(request.to_string().into()))
-        .await
-        .unwrap_or_else(|e| panic!("send {sql}: {e}"));
-    loop {
-        let message = tokio::time::timeout(std::time::Duration::from_secs(30), ws.next())
-            .await
-            .unwrap_or_else(|_| panic!("no answer to {sql}"))
-            .unwrap_or_else(|| panic!("the socket closed before answering {sql}"))
-            .unwrap_or_else(|e| panic!("read the answer to {sql}: {e}"));
-        let Message::Text(text) = message else {
-            continue;
-        };
-        let frame: Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("a JSON frame for {sql}: {e}: {text}"));
-        if frame["id"] == 1 {
-            return frame;
-        }
-    }
-}
 
 /// A one-core server with [`PLAIN`], [`CHECKED`] and [`ORDERS`].
 async fn fixture() -> TestServer {

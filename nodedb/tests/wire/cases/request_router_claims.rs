@@ -13,22 +13,8 @@
 
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 
+use super::wire_support::{exec, rows};
 use crate::harness::TestServer;
-
-async fn exec(server: &TestServer, sql: &str) {
-    server
-        .exec(sql)
-        .await
-        .unwrap_or_else(|e| panic!("run {sql}: {e}"));
-}
-
-/// The rows of `collection`, ordered by key.
-async fn rows(server: &TestServer, collection: &str) -> Vec<Vec<String>> {
-    server
-        .query_rows(&format!("SELECT id, v FROM {collection} ORDER BY id"))
-        .await
-        .unwrap_or_else(|e| panic!("read {collection}: {e}"))
-}
 
 /// A one-core server with `rc_lone`, `rc_first` and `rc_second`, each keyed
 /// by its own sequence, and `rc_plain`, keyed by text.
