@@ -14,8 +14,8 @@ use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
+use crate::control::server::shared::ddl::neutral::refusal::coded_refusal;
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
-use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::quota_admission::admit_quota_for_tasks;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::txn_route::{
@@ -25,6 +25,7 @@ use crate::control::server::shared::write_admission::all_writes_bufferable;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
+use super::dispatch_calvin::{AutocommitRoute, AutocommitStatement, route_autocommit};
 use super::dispatch_write::{
     ReturningShape, authorization_error_to_ddl, dispatch_staged, error_to_ddl, staging_error_to_ddl,
 };
@@ -96,7 +97,8 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
 }
 
 /// Authorize a planned statement's final task set and dispatch it: staged
-/// inside a transaction block, through Calvin when it spans shards, and
+/// inside a transaction block, through Calvin when it spans shards, holds
+/// settlement reads or carries a `RETURNING` list that can fail, and
 /// through the durable route otherwise.
 async fn dispatch_planned(
     state: &SharedState,
@@ -210,42 +212,36 @@ async fn dispatch_planned(
     admit_quota_for_tasks(state, &auth_scope, &tasks)
         .map_err(|error| ddl_err("53400", error.to_string()))?;
 
-    let sum_read_vshards = crate::control::planner::calvin::read_vshards_of(&sum_target_reads)
-        .map_err(|error| DdlError::from_error(&error))?;
-    // A statement with settlement reads commits through Calvin on any vShard
-    // count: the per-task route below checks no read.
-    if !in_txn_block
-        && (!sum_target_reads.is_empty()
-            || matches!(
-                crate::control::planner::calvin::classify_dispatch(&tasks, &sum_read_vshards),
-                crate::control::planner::calvin::DispatchClass::MultiShard { .. }
-            ))
-    {
-        // A Calvin dispatch returns no per-task payload here, so there is no
-        // stored row to project. Refused before the write commits.
-        if has_returning {
-            return Err(ddl_err(
-                "0A000",
-                "RETURNING is not supported on a write that commits through Calvin on this \
-                 route; remove the RETURNING clause",
-            ));
-        }
-        crate::control::planner::calvin::dispatch_authorized_tasks_to_calvin(
+    let returning_shape = ReturningShape {
+        state,
+        identity,
+        tenant_id,
+        database_id,
+        txn_ctx,
+        output_schema: &output_schema,
+    };
+    // An autocommit statement that spans vShards, holds settlement reads, or
+    // carries a `RETURNING` list that can fail commits through Calvin.
+    let authorized_tasks = if in_txn_block {
+        authorized_tasks
+    } else {
+        match route_autocommit(
             state,
-            authorized_tasks,
             tenant_id,
-            crate::control::planner::calvin::CrossShardTxnMode::Strict,
-            crate::control::planner::calvin::TxnDispatchPosition::Autocommit,
-            &sum_target_reads,
-            None,
+            &returning_shape,
+            AutocommitStatement {
+                tasks: &tasks,
+                authorized: authorized_tasks,
+                reads: &sum_target_reads,
+                has_returning,
+            },
         )
-        .await
-        .map_err(|error| {
-            let (_, sqlstate, message) = error_to_sqlstate(&error);
-            ddl_err(sqlstate, message)
-        })?;
-        return Ok(Vec::new());
-    }
+        .await?
+        {
+            AutocommitRoute::Calvin(results) => return Ok(results),
+            AutocommitRoute::Direct(authorized) => authorized,
+        }
+    };
 
     // The row images the statement's cross-shard balances were settled from
     // join the transaction's read set, so COMMIT's conflict check covers
@@ -264,13 +260,6 @@ async fn dispatch_planned(
         lease_scope: &plan_lease_scope,
         fire_triggers,
     });
-    let returning_shape = ReturningShape {
-        state,
-        identity,
-        database_id,
-        txn_ctx,
-        output_schema: &output_schema,
-    };
     let mut statement_events = StatementEvents::default();
     let mut returned_rows: Option<ShapedRows> = None;
     for (task, initial_authorized) in tasks.into_iter().zip(authorized_tasks.into_tasks()) {
@@ -361,10 +350,8 @@ async fn dispatch_planned(
 
         if response.status == crate::bridge::envelope::Status::Error {
             return Err(match response.error_code.as_deref() {
-                Some(code) => {
-                    let (_, sqlstate, message) = error_code_to_sqlstate(code);
-                    ddl_err(sqlstate, message)
-                }
+                Some(code) => coded_refusal(code),
+                // With no code, the payload holds the Data Plane's message.
                 None => DdlError::internal(String::from_utf8_lossy(&response.payload)),
             });
         }

@@ -62,6 +62,7 @@ pub mod quota_ddl;
 pub mod rate_gate;
 pub mod read_gate;
 pub mod redaction;
+mod refusal;
 pub mod refuse_gate;
 pub mod replicate;
 pub mod retention_policy;

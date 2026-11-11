@@ -9,9 +9,10 @@ use std::sync::Arc;
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
-use crate::control::sequence::SessionSequenceAccess;
+use crate::control::sequence::{SequenceAccess, SessionSequenceAccess};
 use crate::control::server::pgwire::types::error_to_sqlstate;
 use crate::control::server::response_shape::compose::shape_returning_materialized;
+use crate::control::server::response_shape::frozen_answer::shape_frozen_answer;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
@@ -20,8 +21,8 @@ use crate::control::server::shared::authorization::{AuthorizationError, authoriz
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize, write_lease,
 };
+use crate::control::server::shared::ddl::neutral::refusal::refusal_to_ddl;
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
-use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::session::{
     DmlTxnCtx, InTxnRoute, StagingGateError, TransactionState, route_in_tx_write,
 };
@@ -111,13 +112,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn dispat
         Err(error) => Some(Err(error_to_ddl(&error))),
         // A refusal arrives as an error status inside an `Ok` response.
         Ok(response) if response.status == crate::bridge::envelope::Status::Error => {
-            Some(Err(match response.error_code.as_deref() {
-                Some(code) => {
-                    let (_, sqlstate, message) = error_code_to_sqlstate(code);
-                    ddl_err(sqlstate, message)
-                }
-                None => DdlError::internal("unknown data plane error"),
-            }))
+            Some(Err(refusal_to_ddl(response.error_code.as_deref())))
         }
         Ok(_) => None,
     }
@@ -191,11 +186,7 @@ pub(super) fn error_to_ddl(error: &crate::Error) -> DdlError {
 pub(super) fn staging_error_to_ddl(error: StagingGateError) -> DdlError {
     match error {
         StagingGateError::Dispatch(error) => error_to_ddl(&error),
-        StagingGateError::Rejected { code: Some(code) } => {
-            let (_, sqlstate, message) = error_code_to_sqlstate(&code);
-            ddl_err(sqlstate, message)
-        }
-        StagingGateError::Rejected { code: None } => DdlError::internal("unknown data plane error"),
+        StagingGateError::Rejected { code } => refusal_to_ddl(code.as_ref()),
     }
 }
 
@@ -206,6 +197,9 @@ pub(super) fn staging_error_to_ddl(error: StagingGateError) -> DdlError {
 pub(super) struct ReturningShape<'a> {
     pub state: &'a SharedState,
     pub identity: &'a AuthenticatedIdentity,
+    /// The tenant the statement planned and committed under. The rows
+    /// shape, and the session's sequences record, under it.
+    pub tenant_id: crate::types::TenantId,
     pub database_id: crate::types::DatabaseId,
     pub txn_ctx: &'a DmlTxnCtx<'a>,
     /// The statement's announced `RETURNING` columns, so this transport
@@ -223,7 +217,7 @@ impl ReturningShape<'_> {
         payload: &[u8],
         rows: &mut Option<ShapedRows>,
     ) -> Result<(), DdlError> {
-        let tenant_id = self.identity.tenant_id;
+        let tenant_id = self.tenant_id;
         let scope = crate::control::security::request_scope::RequestAuthScope::for_database(
             self.identity,
             self.state.auth_stores(),
@@ -233,14 +227,7 @@ impl ReturningShape<'_> {
         // A RETURNING expression is evaluated here, per returned row, and a
         // sequence accessor in it resolves against this session's `currval`
         // map exactly as the pgwire loop's does.
-        let sequences = SessionSequenceAccess::for_session(
-            self.state,
-            self.txn_ctx
-                .sessions
-                .sequence_values(self.txn_ctx.session_id),
-            self.database_id,
-            tenant_id,
-        );
+        let sequences = self.sequences();
         let shaped = shape_returning_materialized(MaterializedShapeRequest {
             payload,
             plan,
@@ -253,10 +240,49 @@ impl ReturningShape<'_> {
             sequences: Some(&sequences),
         })
         .map_err(|error| DdlError::from_error(&crate::Error::from(error)))?;
-        match rows {
-            Some(accumulated) => accumulated.append(shaped),
-            None => *rows = Some(shaped),
-        }
+        append_rows(rows, shaped);
         Ok(())
+    }
+
+    /// Shape `reply`, the frozen `RETURNING` answer of a statement Calvin
+    /// committed, and fold it into `rows`. The participants froze the rows,
+    /// so they answer as they are, and the session takes the sequence values
+    /// they drew. `plan` is the statement's first plan with a contract.
+    pub(super) fn fold_frozen(
+        &self,
+        plan: &PhysicalPlan,
+        reply: &[u8],
+        rows: &mut Option<ShapedRows>,
+    ) -> Result<(), DdlError> {
+        let sequences = self.sequences();
+        let shaped = shape_frozen_answer(
+            Some(plan),
+            reply,
+            Some(self.output_schema),
+            Some(&sequences as &dyn SequenceAccess),
+        )
+        .map_err(|error| DdlError::from_error(&error))?;
+        append_rows(rows, shaped);
+        Ok(())
+    }
+
+    /// This session's sequence access in the statement's database.
+    fn sequences(&self) -> SessionSequenceAccess<'_> {
+        SessionSequenceAccess::for_session(
+            self.state,
+            self.txn_ctx
+                .sessions
+                .sequence_values(self.txn_ctx.session_id),
+            self.database_id,
+            self.tenant_id,
+        )
+    }
+}
+
+/// Fold `shaped` into `rows`: a statement is ONE result set.
+fn append_rows(rows: &mut Option<ShapedRows>, shaped: ShapedRows) {
+    match rows {
+        Some(accumulated) => accumulated.append(shaped),
+        None => *rows = Some(shaped),
     }
 }

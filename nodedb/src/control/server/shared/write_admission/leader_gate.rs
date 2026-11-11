@@ -12,6 +12,9 @@
 //! - Contended, and the write routes (see `admission_keys`): the propose
 //!   refuses with `RouteToSequencer`, and the proposer submits the write to
 //!   the Calvin sequencer. An append never routes.
+//! - A client entry whose `RETURNING` list can fail routes the same way,
+//!   held key or not (see `returning_route`). A list that cannot fail
+//!   proposes as sent.
 //! - Contended otherwise: the gate waits holding no key, until the keys are
 //!   free or the proposer's deadline passes. A forwarded entry carries what
 //!   remains of that deadline.
@@ -51,6 +54,7 @@ use super::gate::{
     WriteAdmission, WriteAdmissionGuard, WriteTarget, admit_request, admit_routed, lock_manager_of,
 };
 use super::mirror_gate::{await_entry_metadata_floor, check_mirror_proposal};
+use super::returning_route::routes_for_returning;
 use super::route::calvin_route_keeps;
 use super::storage_quota::check_storage_quota;
 use super::tickets::AdmissionTicket;
@@ -296,6 +300,11 @@ pub(crate) fn admit_entry(
             let Some((_, (tenant_id, _, plan, _))) = decode_parsed_entry(entry)? else {
                 return Ok(WriteAdmission::ExemptRead);
             };
+            // A client write whose `RETURNING` list can fail never commits
+            // before its list is evaluated, whatever path proposed it.
+            if routes_for_returning(state, entry, tenant_id, &plan) {
+                return Ok(WriteAdmission::RouteToCalvin);
+            }
             // An entry the scheduler cannot apply as proposed waits for its
             // keys rather than route.
             let may_route = calvin_route_keeps(

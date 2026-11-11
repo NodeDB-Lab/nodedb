@@ -57,16 +57,28 @@ pub(crate) fn returning_commits_through_calvin(
 /// statement then runs in an implicit transaction. A list that cannot fail
 /// keeps the direct or paged path.
 pub(crate) fn orchestrated_returning_can_fail(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
-    let announced = announced_returning();
     tasks.iter().any(|task| {
         expands_in_a_transaction(&task.plan)
-            && returning_can_fail(
-                &task.plan,
-                &state.tuning.network,
-                star_fields(state, task.tenant_id, &task.plan),
-                announced.as_deref(),
-            )
+            && plan_returning_can_fail(state, task.tenant_id, &task.plan)
     })
+}
+
+/// Whether `plan`, a write of `tenant_id`, carries a `RETURNING` contract
+/// that can fail under this node's response limits. The columns the running
+/// statement announced count when one is in scope. Outside one, the list's
+/// own names stand in for them.
+pub(crate) fn plan_returning_can_fail(
+    state: &SharedState,
+    tenant_id: TenantId,
+    plan: &PhysicalPlan,
+) -> bool {
+    let announced = announced_returning();
+    returning_can_fail(
+        plan,
+        &state.tuning.network,
+        star_fields(state, tenant_id, plan),
+        announced.as_deref(),
+    )
 }
 
 /// Whether `plan` is a write the direct path orchestrates and a transaction

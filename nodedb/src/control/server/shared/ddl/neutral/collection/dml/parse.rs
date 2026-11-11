@@ -4,6 +4,7 @@
 //! helpers.
 
 mod dispatch;
+mod dispatch_calvin;
 mod dispatch_write;
 mod encoding;
 mod plan_statement;

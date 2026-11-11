@@ -21,6 +21,7 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
+use super::super::refusal::{coded_refusal, refusal_to_ddl};
 
 /// The op that [`dispatch_and_respond`] routes: its target shard, plan,
 /// function name, and the collections it touches.
@@ -142,7 +143,7 @@ pub(crate) async fn dispatch_and_respond(
             )));
         }
         Err(StagingGateError::Dispatch(e)) => return Err(DdlError::from_error(&e)),
-        Err(StagingGateError::Rejected { code }) => return Err(data_plane_error(code)),
+        Err(StagingGateError::Rejected { code }) => return Err(refusal_to_ddl(code.as_ref())),
     };
 
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
@@ -195,7 +196,7 @@ async fn dispatch_autocommit(
     // refusal, a type mismatch, an overflow, an insufficient balance, a
     // missing key — so the status decides, never the payload's emptiness.
     if response.status == Status::Error {
-        return Err(data_plane_error(response.error_code.map(|code| *code)));
+        return Err(refusal_to_ddl(response.error_code.as_deref()));
     }
     Ok(response.payload.as_ref().to_vec())
 }
@@ -205,35 +206,13 @@ async fn dispatch_autocommit(
 /// the same way the local route's error status does.
 pub(crate) fn error_to_ddl(error: &crate::Error) -> DdlError {
     match error {
-        crate::Error::DataPlane(code) => data_plane_error(Some(code.clone())),
+        crate::Error::DataPlane(code) => coded_refusal(code),
         other => {
             let (_, sqlstate, message) =
                 crate::control::server::pgwire::types::error_to_sqlstate(other);
             ddl_err(sqlstate, message)
         }
     }
-}
-
-/// Translate a terminal Data-Plane verdict into the client-facing error.
-///
-/// Shared by both routes a refusal can arrive on — the staging gate's
-/// `Rejected`, and an `Ok(Response)` whose status is `Error` — so the same
-/// verdict never reaches the client as two different messages depending on
-/// whether the statement ran inside a transaction.
-///
-/// `None` means the Data Plane reported a failure without a code, which is a
-/// bug in whatever produced it; it is surfaced as an internal error rather than
-/// silently downgraded to success.
-fn data_plane_error(code: Option<crate::bridge::envelope::ErrorCode>) -> DdlError {
-    let Some(code) = code else {
-        return DdlError::internal("unknown data plane error");
-    };
-    let (_, sqlstate, message) =
-        crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(&code);
-    // The public error carries the code a client classifies by and the
-    // details naming the collection, which the SQLSTATE alone cannot give.
-    let public = nodedb_types::NodeDbError::from(crate::Error::DataPlane(code));
-    DdlError::from_public(sqlstate, message, &public)
 }
 
 /// Build a single-text-column row set carrying `text` under `col`.

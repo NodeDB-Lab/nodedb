@@ -255,6 +255,7 @@ mod reindex_concurrent;
 mod request_of_mixed_verbs;
 mod restart_refused_write_not_resurrected;
 mod restart_skipped_insert_not_resurrected;
+mod returning_vote_object_literal;
 mod returning_vote_pgwire_routes;
 mod returning_vote_row_level_security;
 mod returning_vote_single_shard;

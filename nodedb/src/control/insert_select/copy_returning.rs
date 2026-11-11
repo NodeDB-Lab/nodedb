@@ -49,8 +49,17 @@ impl CopyReturning {
     }
 
     /// The list each page writes with, and the read policy that gates it.
+    ///
+    /// A page writes the stored columns and carries no contract: the copy's
+    /// list was judged once, for the whole statement, as a list that cannot
+    /// fail. A page with the contract will read as a batch whose list can
+    /// fail, and a data-group leader's gate will send it to Calvin.
     pub(super) fn page_returning(&self) -> (Option<ReturningSpec>, Vec<u8>) {
-        (Some(self.spec.clone()), self.rls_filters.clone())
+        let page = ReturningSpec {
+            columns: self.spec.columns.clone(),
+            precommit: None,
+        };
+        (Some(page), self.rls_filters.clone())
     }
 
     /// Add the rows one page's reply answers, after the rows before them.
@@ -171,6 +180,29 @@ mod tests {
                 vec![Value::Integer(1), Value::Null],
                 vec![Value::Integer(2), Value::Integer(9)],
             ]
+        );
+    }
+
+    /// A page answers the stored columns, and its write carries no
+    /// contract a leader's gate reads.
+    #[test]
+    fn a_page_writes_the_stored_columns_with_no_contract() {
+        let mut copy = answer();
+        let named = ReturningColumns::Named(vec![nodedb_types::ReturningItem::Column {
+            name: "id".into(),
+            alias: None,
+        }]);
+        copy.spec = ReturningSpec {
+            columns: named.clone(),
+            precommit: Some(named.clone()),
+        };
+        let (page, _) = copy.page_returning();
+        assert_eq!(
+            page,
+            Some(ReturningSpec {
+                columns: named,
+                precommit: None,
+            })
         );
     }
 
