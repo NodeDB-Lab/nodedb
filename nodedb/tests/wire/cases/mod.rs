@@ -253,6 +253,7 @@ mod redaction_policy_database_scope;
 mod redaction_provider_relation;
 mod redo_chunked_session_commit;
 mod reindex_concurrent;
+mod request_crdt_apply_rollback;
 mod request_error_statement;
 mod request_implicit_whole;
 mod request_of_mixed_verbs;
