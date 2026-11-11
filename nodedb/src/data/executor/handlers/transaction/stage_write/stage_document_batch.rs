@@ -45,6 +45,8 @@ pub(in crate::data::executor) struct StageBatchInsertParams<'a> {
     pub surrogates: &'a [Surrogate],
     /// `ON CONFLICT DO NOTHING`: a present key skips its row.
     pub if_absent: bool,
+    /// The collection's write policy, decided on each staged row.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 /// The row count a staged point write answered with.
@@ -98,6 +100,7 @@ impl CoreLoop {
             documents,
             surrogates,
             if_absent,
+            rls_write_check,
         } = params;
         // Every overlay slot and every index is keyed by surrogate, so a row
         // without one cannot be staged.
@@ -136,7 +139,7 @@ impl CoreLoop {
             );
             // An earlier row of this page is staged by now, so a key the page
             // names twice is present for the later row.
-            let staged = self.stage_point_insert(&ctx, value, if_absent);
+            let staged = self.stage_point_insert(&ctx, value, if_absent, rls_write_check);
             if staged.status == Status::Error {
                 return staged;
             }

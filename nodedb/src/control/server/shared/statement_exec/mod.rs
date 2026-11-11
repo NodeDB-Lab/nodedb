@@ -9,6 +9,7 @@ pub mod atomic;
 pub mod dispatch;
 pub mod edge_recon;
 pub mod error;
+pub mod fallible_returning;
 pub mod task_loop;
 
 pub(crate) use answer::StatementAnswer;

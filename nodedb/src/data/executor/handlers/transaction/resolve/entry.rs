@@ -1214,6 +1214,7 @@ mod tests {
                 documents: &documents,
                 surrogates: &surrogates,
                 if_absent: false,
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
         assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);

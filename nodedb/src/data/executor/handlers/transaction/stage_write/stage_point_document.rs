@@ -35,6 +35,7 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         value: &[u8],
         if_absent: bool,
+        rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         if let Some(refusal) = crate::data::executor::handlers::unbound_surrogate::refuse_unbound(
             "document",
@@ -70,13 +71,14 @@ impl CoreLoop {
         if let Err(e) = self.stage_check_unique(ctx, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_encode_and_commit(ctx, value)
+        self.stage_encode_and_commit(ctx, value, rls_write_check)
     }
 
     pub(in crate::data::executor) fn stage_point_put(
         &mut self,
         ctx: &StageCtx<'_>,
         value: &[u8],
+        rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         if let Some(refusal) = crate::data::executor::handlers::unbound_surrogate::refuse_unbound(
             "document",
@@ -90,7 +92,7 @@ impl CoreLoop {
         if let Err(e) = self.stage_check_unique(ctx, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_encode_and_commit(ctx, value)
+        self.stage_encode_and_commit(ctx, value, rls_write_check)
     }
 
     pub(in crate::data::executor) fn stage_point_delete(
@@ -243,7 +245,14 @@ impl CoreLoop {
         self.stage_unique_check(ctx, &config, &incoming_doc)
     }
 
-    fn stage_encode_and_commit(&mut self, ctx: &StageCtx<'_>, value: &[u8]) -> Response {
+    /// Encode `value` as the row the COMMIT install writes, gate it on the
+    /// collection's write policy, and stage it.
+    fn stage_encode_and_commit(
+        &mut self,
+        ctx: &StageCtx<'_>,
+        value: &[u8],
+        rls_write_check: &nodedb_types::RlsWriteCheck,
+    ) -> Response {
         let body = match self.stage_encode_put_body(
             ctx.database_id,
             ctx.tid,
@@ -255,6 +264,18 @@ impl CoreLoop {
             Err(e) => return self.response_error(ctx.task, e),
         };
         if let Err(e) = self.stage_check_ctx_row_image(ctx, &body) {
+            return self.response_error(ctx.task, e);
+        }
+        // The encoded body is the materialized row, defaults and generated
+        // columns applied: the image the direct insert's gate decides.
+        if let Err(e) = self.stage_admit_write(
+            rls_write_check,
+            &body,
+            &ctx.document_id,
+            ctx.database_id,
+            ctx.tid,
+            ctx.collection,
+        ) {
             return self.response_error(ctx.task, e);
         }
         if let Err(e) = self.stage_put_capped(ctx, body) {

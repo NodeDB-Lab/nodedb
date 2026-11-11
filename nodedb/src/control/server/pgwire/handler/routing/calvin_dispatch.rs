@@ -20,13 +20,16 @@ use crate::control::server::response_shape::calvin_fold::{
     CalvinBatchFold, CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
+use crate::control::server::shared::quota_admission::admit_quota_for_tasks;
 use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::command_tag::push_folded_tag;
-use super::super::super::types::{dml_fold_error_to_pg, error_to_pg, error_to_sqlstate};
+use super::super::super::types::{
+    dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, sqlstate_error,
+};
 use super::super::core::NodeDbPgHandler;
 
 /// Meter one Calvin task once the batch has committed — Calvin applies the
@@ -66,6 +69,21 @@ fn resolve_calvin_metering_scope<'a>(
         .build()
         .map(Some)
         .map_err(|e| error_to_pg(&e))
+}
+
+/// Refuse the batch when a covering scope's hard quota is spent, before it is
+/// submitted. Calvin dispatches no task alone, so the dispatch loop's
+/// per-task admission never runs for it. `scope` is `None` when metering is
+/// disabled.
+fn admit_calvin_quota(
+    state: &crate::control::state::SharedState,
+    scope: Option<&RequestAuthScope<'_>>,
+    tasks: &[PhysicalTask],
+) -> PgWireResult<()> {
+    let Some(scope) = scope else {
+        return Ok(());
+    };
+    admit_quota_for_tasks(state, scope, tasks).map_err(|e| sqlstate_error("53400", &e.to_string()))
 }
 
 /// Who issued the statement and how its rows must be encoded back.
@@ -150,6 +168,7 @@ impl NodeDbPgHandler {
                 TxnDispatchPosition::Autocommit
             };
             let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
+            admit_calvin_quota(&self.state, metering_scope.as_ref(), &tasks)?;
             let authorized = self.authorize_tasks(identity, &tasks)?;
             let apply_resp = with_announced_returning(
                 projection,
@@ -212,6 +231,7 @@ impl NodeDbPgHandler {
         // list survives to shape the per-task responses afterwards: a RETURNING
         // task emits its rows, every other task its command tag.
         let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
+        admit_calvin_quota(&self.state, metering_scope.as_ref(), &tasks)?;
         let authorized = self.authorize_tasks(identity, &tasks)?;
         let outcome = with_announced_returning(
             projection,

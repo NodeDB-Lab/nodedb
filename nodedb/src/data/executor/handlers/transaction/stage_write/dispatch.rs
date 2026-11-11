@@ -143,6 +143,7 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
+                rls_write_check,
                 ..
             } => {
                 let ctx = StageCtx::new(
@@ -157,7 +158,7 @@ impl CoreLoop {
                     &ctx,
                     StageReturning::of(returning, rls_filters),
                     StagedImage::After,
-                    |core, ctx| core.stage_point_insert(ctx, value, *if_absent),
+                    |core, ctx| core.stage_point_insert(ctx, value, *if_absent, rls_write_check),
                 )
             }
             DocumentOp::PointPut {
@@ -167,6 +168,7 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
+                rls_write_check,
                 ..
             } => {
                 let ctx = StageCtx::new(
@@ -181,7 +183,7 @@ impl CoreLoop {
                     &ctx,
                     StageReturning::of(returning, rls_filters),
                     StagedImage::After,
-                    |core, ctx| core.stage_point_put(ctx, value),
+                    |core, ctx| core.stage_point_put(ctx, value, rls_write_check),
                 )
             }
             DocumentOp::PointDelete {

@@ -65,6 +65,7 @@ impl CoreLoop {
                 value,
                 if_absent,
                 surrogate,
+                rls_write_check,
                 ..
             }) => {
                 let ctx = StageCtx::new(
@@ -75,7 +76,7 @@ impl CoreLoop {
                     RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
-                let resp = self.stage_point_insert(&ctx, value, *if_absent);
+                let resp = self.stage_point_insert(&ctx, value, *if_absent, rls_write_check);
                 Self::stage_result(&resp)
             }
             PhysicalPlan::Document(DocumentOp::PointPut {
@@ -83,6 +84,7 @@ impl CoreLoop {
                 document_id,
                 value,
                 surrogate,
+                rls_write_check,
                 ..
             }) => {
                 let ctx = StageCtx::new(
@@ -93,7 +95,7 @@ impl CoreLoop {
                     RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
-                let resp = self.stage_point_put(&ctx, value);
+                let resp = self.stage_point_put(&ctx, value, rls_write_check);
                 Self::stage_result(&resp)
             }
             PhysicalPlan::Document(DocumentOp::PointDelete {
@@ -213,6 +215,7 @@ impl CoreLoop {
                 documents,
                 surrogates,
                 if_absent,
+                rls_write_check,
                 ..
             }) => {
                 let resp = self.stage_document_batch_insert(StageBatchInsertParams {
@@ -223,6 +226,7 @@ impl CoreLoop {
                     documents,
                     surrogates,
                     if_absent: *if_absent,
+                    rls_write_check,
                 });
                 Self::stage_result(&resp)
             }

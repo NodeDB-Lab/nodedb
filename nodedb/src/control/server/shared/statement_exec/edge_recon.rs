@@ -112,12 +112,13 @@ pub(crate) async fn try_settled_recon(
 }
 
 /// Route `tasks` through the OLLP/Calvin coordinator when one of them is a recon
-/// plan and the statement spans several vShards, outside a transaction block.
+/// plan, outside a transaction block, on one vShard or several.
 ///
-/// The caller classified the statement as multi-shard. A predicate write that
-/// reaches Calvin must carry the rows it matched, which only the coordinator
-/// reads. A shipped balance puts a single-collection write on two vShards, so
-/// the edge-bearing gate does not see it.
+/// The caller decided the statement commits through Calvin: it spans several
+/// vShards, or its `RETURNING` list can fail. A predicate write that reaches
+/// Calvin must carry the rows it matched, which only the coordinator reads.
+/// A shipped balance puts a single-collection write on two vShards, so the
+/// edge-bearing gate does not see it.
 ///
 /// `reads` are the images settlement folded that balance from.
 pub(crate) async fn try_multi_shard_predicate_recon(

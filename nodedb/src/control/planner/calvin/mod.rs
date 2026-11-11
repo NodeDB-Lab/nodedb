@@ -24,6 +24,7 @@ pub mod reservation;
 pub mod retry_budget;
 pub mod retry_loop;
 pub mod settling_writes;
+pub(crate) mod single_vshard_route;
 pub mod submit;
 pub mod tx_class;
 pub mod txn_predict;
