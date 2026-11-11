@@ -166,6 +166,7 @@ mod hash_chain_copies;
 mod healthz_authorization_lease;
 mod healthz_calvin_readiness;
 mod http_result_projection;
+mod implicit_txn_one_cut;
 mod insert_page_conflicts;
 mod insert_select_cross_engine;
 mod insert_select_policy;

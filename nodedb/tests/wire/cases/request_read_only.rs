@@ -6,10 +6,10 @@
 //!
 //! HTTP, NDJSON, WebSocket RPC and native plan a read-only request as one
 //! task set. It takes no implicit transaction and no Calvin route, so its
-//! per-task loop runs with no read set. pgwire opens its implicit block at
-//! the first statement that is not a read. A `WITH` or `EXPLAIN` read with no
-//! write verb is a read too. A leading read before a write still runs, and
-//! the write commits.
+//! per-task loop runs with no read set. pgwire opens its implicit block only
+//! for a run that holds a statement that is not a read. A `WITH` or `EXPLAIN`
+//! read with no write verb is a read too. A leading read before a write runs
+//! in that block, and the write commits.
 //!
 //! Levers:
 //! - Open the pgwire implicit block at every statement (`opens_implicit_block`
@@ -283,6 +283,60 @@ async fn a_leading_read_before_a_write_works_on_every_transport() {
             stored,
             vec![id.clone()],
             "{transport:?}: the write after the read must commit"
+        );
+    }
+}
+
+/// A leading read, an insert and an update that matches the inserted row run
+/// as one request on the HTTP family and native. The update follows a write,
+/// so the request runs in an implicit transaction that holds the read. The
+/// request answers the read's row, and the update lands on the inserted row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leading_read_with_an_insert_and_an_update_commits_on_every_set_transport() {
+    let server = TestServer::start().await;
+    for (index, transport) in [
+        Transport::Http,
+        Transport::Ndjson,
+        Transport::Ws,
+        Transport::Native,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let table = format!("one_set_{index}");
+        exec(
+            &server,
+            &format!(
+                "CREATE COLLECTION {table} (id TEXT PRIMARY KEY, v INT) \
+                 WITH (engine='document_strict')"
+            ),
+        )
+        .await;
+        exec(
+            &server,
+            &format!("INSERT INTO {table} (id, v) VALUES ('a', 1)"),
+        )
+        .await;
+        let sql = format!(
+            "SELECT v FROM {table} WHERE id = 'a'; \
+             INSERT INTO {table} (id, v) VALUES ('b', 2); \
+             UPDATE {table} SET v = 3 WHERE v >= 2"
+        );
+        // The SELECT row answers. A row in the reply drops the write counts
+        // from it.
+        let expected = Expected {
+            rows: 1,
+            statements: 3,
+        };
+        assert_answers(&server, transport, &sql, expected).await;
+        let stored = server
+            .query_text(&format!("SELECT v FROM {table} WHERE id = 'b'"))
+            .await
+            .unwrap_or_else(|e| panic!("read b: {e}"));
+        assert_eq!(
+            stored,
+            vec!["3".to_string()],
+            "{transport:?}: the update must land on the inserted row"
         );
     }
 }
