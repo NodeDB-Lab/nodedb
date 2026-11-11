@@ -27,6 +27,7 @@ mod array_narrow_attrs;
 mod array_reducers;
 mod atomic_request_every_transport;
 mod atomic_request_match_order;
+mod atomic_request_node_delete_snapshot;
 mod atomic_request_read_after_write;
 mod atomic_request_transports;
 mod atomic_transport;
