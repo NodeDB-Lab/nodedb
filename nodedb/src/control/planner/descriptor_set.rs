@@ -143,6 +143,54 @@ impl DescriptorVersionSet {
                 .chain(&self.unleased)
                 .all(|(id, v)| current(id) == Some(*v))
     }
+
+    /// Merge `other`, the set a later statement of the same request
+    /// recorded, into this set.
+    ///
+    /// A descriptor both sets hold at one version keeps one entry. A
+    /// descriptor at two versions returns `RetryableSchemaChanged` and
+    /// leaves this set unchanged. Each statement plans with its own catalog
+    /// adapter, so two versions mean a DDL committed between two statements.
+    /// A caller inside `retry_on_schema_change` then plans the request again.
+    ///
+    /// Each policy version takes the lower value. A lower version can only
+    /// under-state freshness, which costs one replan.
+    pub fn merge_statement(&mut self, other: &DescriptorVersionSet) -> crate::Result<()> {
+        refuse_version_conflict(&self.entries, &other.entries)?;
+        refuse_version_conflict(&self.unleased, &other.unleased)?;
+        for (id, version) in &other.entries {
+            insert_sorted(&mut self.entries, id.clone(), *version);
+        }
+        for (id, version) in &other.unleased {
+            insert_sorted(&mut self.unleased, id.clone(), *version);
+        }
+        self.permission_tree_version = self
+            .permission_tree_version
+            .min(other.permission_tree_version);
+        self.rls_version = self.rls_version.min(other.rls_version);
+        self.redaction_version = self.redaction_version.min(other.redaction_version);
+        Ok(())
+    }
+}
+
+/// Return `RetryableSchemaChanged` for the first descriptor of `other` that
+/// `held` records at a different version.
+fn refuse_version_conflict(
+    held: &[(DescriptorId, u64)],
+    other: &[(DescriptorId, u64)],
+) -> crate::Result<()> {
+    for (id, version) in other {
+        if let Ok(index) = held.binary_search_by(|(k, _)| cmp_id(k, id))
+            && held
+                .get(index)
+                .is_some_and(|(_, held_version)| held_version != version)
+        {
+            return Err(crate::Error::RetryableSchemaChanged {
+                descriptor: id.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Insert `(id, version)` into the sorted `entries`. A repeat of the same
