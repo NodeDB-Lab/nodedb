@@ -47,6 +47,20 @@ impl StatementMap {
             .map_or(0, |highest| *highest as usize + 1)
     }
 
+    /// Put each statement's tasks next to each other, in statement order.
+    ///
+    /// `items` holds one item per task, in task order. Items of one statement
+    /// keep their order. A derived task sits at the end of the set until this
+    /// runs, so it follows the tasks of its own statement and precedes every
+    /// later statement's tasks afterwards. The map is reordered with them.
+    pub fn group_by_statement<T>(&mut self, items: Vec<T>) -> Vec<T> {
+        debug_assert_eq!(self.len(), items.len());
+        let mut keyed: Vec<(u32, T)> = self.0.iter().copied().zip(items).collect();
+        keyed.sort_by_key(|(statement, _)| *statement);
+        self.0 = keyed.iter().map(|(statement, _)| *statement).collect();
+        keyed.into_iter().map(|(_, item)| item).collect()
+    }
+
     /// Add one entry per derived task, in append order.
     ///
     /// `parents[i]` is the index of the task whose processing appended
@@ -150,6 +164,19 @@ mod tests {
         assert_eq!(map.statement_of(2), Some(1));
         assert_eq!(map.statement_of(5), None);
         assert_eq!(map.statement_count(), 2);
+    }
+
+    #[test]
+    fn a_derived_task_moves_next_to_its_statement() {
+        // Tasks 0 and 1 are statements 0 and 1. Task 2 derives from task 0.
+        let mut map = StatementMap::default();
+        map.push(0);
+        map.push(1);
+        map.push_derived(&[0])
+            .expect("the parent precedes its child");
+        let tasks = map.group_by_statement(vec!["write0", "write1", "derived0"]);
+        assert_eq!(tasks, ["write0", "derived0", "write1"]);
+        assert_eq!(map, StatementMap(vec![0, 0, 1]));
     }
 
     #[test]

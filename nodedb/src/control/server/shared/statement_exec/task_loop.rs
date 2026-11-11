@@ -341,9 +341,14 @@ async fn run_task(
 /// that snapshot. A request of writes alone takes no snapshot.
 pub(crate) async fn run_implicit_statement(
     exec: &StatementExec<'_>,
-    statement: PlannedStatement,
+    mut statement: PlannedStatement,
     client: &DmlTxnCtx<'_>,
 ) -> Result<RequestAnswer, StatementError> {
+    // A derived task (a balance move, an implicit edge) runs right after its
+    // statement's own tasks, so a later statement reads what it wrote.
+    statement.tasks = statement
+        .statement_map
+        .group_by_statement(std::mem::take(&mut statement.tasks));
     let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
     let reads = statement
         .tasks
