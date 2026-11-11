@@ -223,9 +223,14 @@ impl NativeFold {
     }
 }
 
-/// Whether `answer` is the status row of a command that carries no count.
+/// Whether `answer` is the status row of a command that carries no count:
+/// one `status` column, one row, no command, and the `Some(1)` sentinel in
+/// `rows_affected`. A read answers no `rows_affected`, so a read of a
+/// column named `status` keeps its rows.
 fn is_status_row(answer: &NativeResponse) -> bool {
     answer.command.is_none()
+        && answer.rows_affected == Some(1)
+        && answer.rows.as_ref().is_some_and(|rows| rows.len() == 1)
         && answer
             .columns
             .as_deref()
@@ -302,6 +307,17 @@ mod tests {
         assert!(r.rows.is_none());
         assert_eq!(r.command.as_deref(), Some("INSERT"));
         assert_eq!(r.rows_affected, Some(1));
+    }
+
+    #[test]
+    fn a_read_of_a_status_column_keeps_its_rows() {
+        let mut read = NativeResponse::ok(7);
+        read.columns = Some(vec!["status".into()]);
+        read.rows = Some(vec![vec![Value::String("open".into())]]);
+        let mut fold = NativeFold::default();
+        fold.add(&read);
+        let r = fold.finish(NativeResponse::status_row(7, "COMMIT"));
+        assert_eq!(r.rows, Some(vec![vec![Value::String("open".into())]]));
     }
 
     #[test]
