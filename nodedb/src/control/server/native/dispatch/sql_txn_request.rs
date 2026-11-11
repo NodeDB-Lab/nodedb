@@ -132,7 +132,9 @@ async fn run_control(
 /// Run the statements collected outside a block as one request: one implicit
 /// transaction that applies all of them or none.
 async fn run_implicit(ctx: &DispatchCtx<'_>, seq: u64, implicit: &[&str]) -> NativeResponse {
-    let text = implicit.join("; ");
+    // A newline on each side of the semicolon ends a `--` comment that closes
+    // a statement, so the comment never swallows the next one.
+    let text = implicit.join("\n;\n");
     dispatch_statement(ctx, seq, &text, false)
         .await
         .into_response()
