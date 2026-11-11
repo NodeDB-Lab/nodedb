@@ -39,6 +39,8 @@ use crate::wal::GroupMembership;
 use crate::wal::manager::{NO_APPLY_KEY, WalManager};
 use nodedb_types::RowIdentity;
 
+mod large_row;
+
 const TID: u64 = 1;
 const ORDERS: &str = "orders";
 /// The collection a sum fold writes into.
