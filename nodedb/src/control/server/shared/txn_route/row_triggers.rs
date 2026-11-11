@@ -7,6 +7,10 @@
 //! with the NEW row a BEFORE body left. After it staged and changed a row:
 //! fire the SYNC AFTER ROW bodies. Every body joins the transaction.
 //!
+//! A point UPDATE of a collection with CHECK constraints and no row body
+//! still derives its NEW row from the OLD row the transaction holds, and
+//! checks it.
+//!
 //! A row write that finds no row to update or delete changes nothing, so no
 //! row trigger fires for it.
 
@@ -17,6 +21,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::Value;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::state::SharedState;
 use crate::control::trigger::dml_hook::{
     DmlWriteInfo, classify_dml_write, fetch_old_row, patch_task_with_mutated_fields, update_new_row,
 };
@@ -86,7 +91,19 @@ pub(super) async fn fire_before(
     {
         info.event = DmlEvent::Update;
     }
-    if !fires_row_body(ctx, scope, &info) {
+    let fires_body = fires_row_body(ctx, scope, &info);
+    let checks_only = !fires_body
+        && matches!(
+            task.plan,
+            PhysicalPlan::Document(DocumentOp::PointUpdate { .. })
+        )
+        && has_check_constraints(
+            ctx.state,
+            task.database_id,
+            task.tenant_id,
+            &info.collection,
+        )?;
+    if !fires_body && !checks_only {
         return Ok(BeforeOutcome::Proceed(None));
     }
 
@@ -130,6 +147,10 @@ pub(super) async fn fire_before(
         return Ok(BeforeOutcome::Proceed(None));
     };
     info.new_fields = new_fields;
+    if checks_only {
+        enforce_checks(ctx, task.database_id, task.tenant_id, &info).await?;
+        return Ok(BeforeOutcome::Proceed(None));
+    }
 
     let fired = fire_pre_dispatch_triggers(DispatchTriggerParams {
         state: ctx.state,
@@ -157,6 +178,22 @@ pub(super) async fn fire_before(
     }
     enforce_checks(ctx, task.database_id, task.tenant_id, &info).await?;
     Ok(BeforeOutcome::Proceed(Some(RowWrite { info, old_row })))
+}
+
+/// Whether `collection`, in its stored form, has CHECK constraints.
+pub(super) fn has_check_constraints(
+    state: &SharedState,
+    database_id: crate::types::DatabaseId,
+    tenant_id: crate::types::TenantId,
+    collection: &str,
+) -> crate::Result<bool> {
+    let bare = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.name();
+    let entry =
+        state
+            .credentials
+            .catalog()
+            .get_collection(database_id, tenant_id.as_u64(), bare)?;
+    Ok(entry.is_some_and(|stored| !stored.check_constraints.is_empty()))
 }
 
 /// Check the NEW row an INSERT or UPDATE writes, as its BEFORE bodies left
