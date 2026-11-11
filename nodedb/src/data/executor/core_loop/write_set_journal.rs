@@ -97,6 +97,18 @@ impl CoreLoop {
             .remove(&task.request_id().as_u64())
     }
 
+    /// Give `task` back the group [`Self::take_journal_group`] took, for a
+    /// task that returns to the queue to run again.
+    pub(in crate::data::executor) fn restore_journal_group(
+        &mut self,
+        task: &ExecutionTask,
+        group: JournalGroup,
+    ) {
+        self.write_set_journal
+            .groups
+            .insert(task.request_id().as_u64(), group);
+    }
+
     /// Forget the group of request `request_id`, which never runs.
     pub(in crate::data::executor) fn drop_journal_group(&mut self, request_id: u64) {
         self.write_set_journal.groups.remove(&request_id);
@@ -362,3 +374,7 @@ mod batch_capture_tests;
 #[cfg(test)]
 #[path = "batch_enforcement_tests.rs"]
 mod batch_enforcement_tests;
+
+#[cfg(test)]
+#[path = "batch_row_limit_tests.rs"]
+mod batch_row_limit_tests;

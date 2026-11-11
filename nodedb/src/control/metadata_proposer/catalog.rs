@@ -69,6 +69,9 @@ async fn propose_and_apply_locally(
     shared: &SharedState,
     entry: &CatalogEntry,
 ) -> Result<(ProposeOutcome, Vec<ConstraintTarget>), Error> {
+    // A collection descriptor past a size limit is refused before it is
+    // buffered or proposed.
+    crate::control::catalog_entry::collection_limits::check_collection_limits(entry)?;
     // A refused entry never joins an open transaction, so its COMMIT holds
     // nothing a mirror refuses.
     crate::control::server::shared::write_admission::check_mirror_ddl(

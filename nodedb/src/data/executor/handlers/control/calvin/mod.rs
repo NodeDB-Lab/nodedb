@@ -31,6 +31,8 @@
 
 mod active_passive;
 mod discard;
+#[cfg(test)]
+mod row_limit_tests;
 mod shared;
 mod snapshot_vote;
 mod static_stage;

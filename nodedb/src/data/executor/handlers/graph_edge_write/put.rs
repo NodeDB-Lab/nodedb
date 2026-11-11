@@ -65,6 +65,14 @@ impl CoreLoop {
                 return self.response_error(task, refusal);
             }
         }
+        // The edge's version journals in one write-set part, so its
+        // properties are held to the row image limit before anything is
+        // written.
+        if let Err(refusal) = crate::data::executor::row_image_limit::check_edge(
+            collection, src_id, label, dst_id, properties,
+        ) {
+            return self.response_error(task, refusal);
+        }
 
         // A decided ordinal marks a committed version that replay or a
         // committed-redo install writes again. The dangling rule admits new
@@ -366,6 +374,53 @@ mod tests {
             resp.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })
         ));
+        let stored = h
+            .core
+            .edge_store
+            .get_edge(
+                task.request.database_id.as_u64(),
+                TenantId::new(1),
+                "knows",
+                "a",
+                "KNOWS",
+                "b",
+            )
+            .expect("edge lookup");
+        assert!(stored.is_none(), "a refused put writes no edge");
+    }
+
+    /// Properties over the row image limit refuse the put with SQLSTATE
+    /// 54000 before any version is written.
+    #[test]
+    fn an_edge_put_with_properties_over_the_row_limit_writes_nothing() {
+        use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
+
+        let mut h = make_core();
+        let task = make_task_with_lsn(80);
+        let properties = vec![0x80; nodedb_types::MAX_ROW_IMAGE_BYTES + 1];
+        let resp = h.core.execute_edge_put(
+            &task,
+            EdgePutParams {
+                tid: 1,
+                collection: "knows",
+                src_id: "a",
+                label: "KNOWS",
+                dst_id: "b",
+                properties: &properties,
+                src_surrogate: Surrogate::new(1),
+                dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
+            },
+        );
+        assert_eq!(resp.status, Status::Error);
+        let code = resp.error_code.as_deref().expect("error code");
+        assert!(
+            matches!(code, ErrorCode::ProgramLimitExceeded { .. }),
+            "{code:?}"
+        );
+        assert_eq!(error_code_to_sqlstate(code).1, "54000");
+        assert!(resp.write_set.is_empty(), "a refused put reports no edge");
         let stored = h
             .core
             .edge_store

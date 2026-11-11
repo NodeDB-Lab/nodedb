@@ -174,6 +174,17 @@ pub async fn convert_collection(
         .map_or(0, |conversion| conversion.generation)
         + 1;
 
+    // The converted descriptor passes the catalog's size limits before any
+    // row moves, so a conversion never lands rows its catalog row refuses.
+    let mut converted = coll.clone();
+    converted.collection_type = new_type.clone();
+    crate::control::catalog_entry::collection_limits::check_stored_collection(&converted).map_err(
+        |e| {
+            let (_, code, message) = error_to_sqlstate(&e);
+            err(code, message)
+        },
+    )?;
+
     // Every replica re-encodes at one position of the collection's data-group
     // log (strict = Binary Tuple). A row the target refuses refuses the entry
     // on every replica, and the catalog keeps its row.

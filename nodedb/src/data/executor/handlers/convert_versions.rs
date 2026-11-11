@@ -190,6 +190,18 @@ impl CoreLoop {
                     (tuple, visible)
                 }
             };
+            // Every converted version is journalled and read as one row, so
+            // a version past the row image limit refuses the conversion
+            // before its transaction commits.
+            let largest = stored.len().max(visible.len());
+            if largest > nodedb_types::MAX_ROW_IMAGE_BYTES {
+                let identity = nodedb_types::RowIdentity::of_row_value(&row, None, version.doc_id);
+                return Err(crate::data::executor::row_image_limit::row_image_too_large(
+                    collection,
+                    identity.as_str(),
+                    largest,
+                ));
+            }
             self.sparse.versioned_put_in_txn(
                 &txn,
                 VersionedPut {

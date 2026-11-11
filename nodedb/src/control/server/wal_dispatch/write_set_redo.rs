@@ -35,7 +35,7 @@ use super::graph::{encode_edge_delete, encode_edge_put};
 /// The bytes of a part's sub-records, when one WAL record holds at most
 /// `max_payload` bytes. A larger write set spreads over more parts. One
 /// sub-record never splits.
-fn part_budget(max_payload: usize) -> usize {
+pub(super) const fn part_budget(max_payload: usize) -> usize {
     max_payload.saturating_sub(2 * crate::wal::redo::continuation::RECORD_OVERHEAD)
 }
 

@@ -188,6 +188,9 @@ impl CoreLoop {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
+        if let Err(e) = self.stage_check_ctx_row_image(ctx, &body) {
+            return self.response_error(ctx.task, e);
+        }
         // Gate the staged post-image on the collection's write policy: this is
         // the row the COMMIT install will write, and the assignments and any
         // regenerated columns are already applied to it.
@@ -251,6 +254,9 @@ impl CoreLoop {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
+        if let Err(e) = self.stage_check_ctx_row_image(ctx, &body) {
+            return self.response_error(ctx.task, e);
+        }
         if let Err(e) = self.stage_put_capped(ctx, body) {
             return self.response_error(ctx.task, e);
         }

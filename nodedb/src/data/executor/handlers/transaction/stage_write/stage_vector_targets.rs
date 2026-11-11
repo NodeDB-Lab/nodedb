@@ -282,6 +282,15 @@ impl CoreLoop {
                     Ok(identity) => identity,
                     Err(e) => return self.response_error(task, e),
                 };
+            // One row over the row image limit refuses the statement before
+            // any row stages.
+            if let Err(e) = crate::data::executor::row_image_limit::check_row_images(
+                collection,
+                identity.as_str(),
+                &[staged.as_slice()],
+            ) {
+                return self.response_error(task, e);
+            }
             planned.push((surrogate, staged, identity));
         }
 

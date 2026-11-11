@@ -165,6 +165,9 @@ impl CoreLoop {
                     identity,
                     params.surrogate,
                 );
+                if let Err(e) = self.stage_check_ctx_row_image(&ctx, &body) {
+                    return self.response_error(task, e);
+                }
                 if let Err(e) = self.stage_put_capped(&ctx, body) {
                     return self.response_error(task, e);
                 }

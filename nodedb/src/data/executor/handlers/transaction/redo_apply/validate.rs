@@ -55,6 +55,7 @@ impl CoreLoop {
         origin: RedoOrigin,
         user_roles: &[String],
     ) -> crate::Result<()> {
+        self.check_redo_row_images(database_id, tid, ops)?;
         let mut by_collection: BTreeMap<&str, Vec<&RedoDocOp>> = BTreeMap::new();
         for op in ops {
             by_collection.entry(op.collection()).or_default().push(op);
@@ -228,6 +229,44 @@ impl CoreLoop {
     ) -> crate::Result<Option<Vec<u8>>> {
         let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
         self.current_row_body(scope.database_id, scope.tid, scope.collection, &key)
+    }
+
+    /// Refuse the record when a post-image it puts is over the row image
+    /// limit, before any of its rows is written.
+    fn check_redo_row_images(
+        &self,
+        database_id: u64,
+        tid: u64,
+        ops: &[RedoDocOp],
+    ) -> crate::Result<()> {
+        for op in ops {
+            let RedoDocOp::Put {
+                collection,
+                value,
+                surrogate,
+                ..
+            } = op
+            else {
+                continue;
+            };
+            if value.len() <= nodedb_types::MAX_ROW_IMAGE_BYTES {
+                continue;
+            }
+            let column = self.identity_column(database_id, tid, collection);
+            let identity = nodedb_types::RowIdentity::of_stored_row(
+                value,
+                Some(column.as_str()),
+                StorageKey::for_surrogate(Surrogate::new(*surrogate)),
+            );
+            return Err(crate::Error::DataPlane(
+                crate::data::executor::row_image_limit::row_image_too_large(
+                    collection,
+                    identity.as_str(),
+                    value.len(),
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 

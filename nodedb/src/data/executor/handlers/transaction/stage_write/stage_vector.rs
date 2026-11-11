@@ -462,6 +462,15 @@ impl CoreLoop {
             Ok(encoded) => encoded,
             Err(e) => return self.response_error(task, e),
         };
+        // The commit install journals the staged row, so it is held to the
+        // row image limit before it stages.
+        if let Err(e) = crate::data::executor::row_image_limit::check_row_images(
+            collection,
+            ctx.document_id.as_str(),
+            &[staged.as_slice()],
+        ) {
+            return self.response_error(task, e);
+        }
         if let Err(e) = self.stage_put_capped(&ctx, staged) {
             return self.response_error(task, e);
         }

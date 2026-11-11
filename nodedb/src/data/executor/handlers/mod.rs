@@ -134,5 +134,6 @@ pub mod vector_write;
 pub mod verify_hash_chain;
 pub mod write_batch;
 mod write_batch_apply;
+mod write_batch_isolate;
 pub mod write_body;
 pub mod write_match_cut;

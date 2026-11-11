@@ -44,6 +44,8 @@ pub(in crate::data::executor) mod priority_queues;
 mod read_vshards;
 pub(in crate::data::executor) mod redo_image;
 mod response;
+#[cfg(test)]
+mod row_image_limit_tests;
 mod segment_keks;
 mod state;
 mod test_governor;

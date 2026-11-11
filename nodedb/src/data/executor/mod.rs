@@ -28,6 +28,7 @@ pub(crate) mod replay_floors;
 mod replay_policy;
 mod replay_task;
 pub mod response_codec;
+pub(crate) mod row_image_limit;
 mod row_shape;
 mod scan_normalize;
 mod scan_timeseries;

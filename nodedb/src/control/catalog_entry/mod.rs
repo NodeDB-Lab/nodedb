@@ -33,6 +33,7 @@
 pub mod apply;
 pub mod authorization;
 pub mod codec;
+pub(crate) mod collection_limits;
 pub mod descriptor_stamp;
 pub mod descriptor_validate;
 pub mod entry;

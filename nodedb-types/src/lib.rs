@@ -62,6 +62,7 @@ pub mod result;
 pub mod returning;
 pub mod rls_write_check;
 pub mod row_identity;
+pub mod row_limits;
 pub mod sparse_vector;
 pub mod sql_quote;
 pub mod surrogate;
@@ -141,6 +142,10 @@ pub use rls_write_check::{RlsWriteCheck, WriteGateDecision};
 pub use row_identity::{
     DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, ROWID_COLUMN, RowIdentity, StorageKey,
     declared_key, extract_pk_value, value_to_pk_string,
+};
+pub use row_limits::{
+    MAX_ADDED_COLUMN_IMAGE_BYTES, MAX_COLLECTION_NAME_BYTES, MAX_OLD_EVENT_IMAGE_BYTES,
+    MAX_ROW_IMAGE_BYTES, MAX_SCHEMA_WITNESS_BYTES, added_column_image_bytes,
 };
 pub use sparse_vector::{SparseVector, SparseVectorError};
 pub use sql_quote::{quote_ident, quote_literal};

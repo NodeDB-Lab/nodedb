@@ -53,6 +53,9 @@ impl CoreLoop {
             surrogate,
             wal_lsn,
         } = row;
+        // Runs before any store, index or history slot is touched, so a
+        // refusal leaves the prior row as it stood.
+        self.check_installed_image_size(database_id, tid, collection, storage_key, &installed)?;
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -276,5 +279,34 @@ impl CoreLoop {
             stats_prior,
             history: None,
         })
+    }
+
+    /// Refuse `installed` when its accepted or stored body is over the row
+    /// image limit. The refusal names the row by the identity INSERT mints.
+    fn check_installed_image_size(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        storage_key: nodedb_types::StorageKey,
+        installed: &SharedInstalledDocument,
+    ) -> crate::Result<()> {
+        let largest = installed.canonical.len().max(installed.stored.len());
+        if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES {
+            return Ok(());
+        }
+        let column = self.identity_column(database_id, tid, collection);
+        let identity = nodedb_types::RowIdentity::of_stored_row(
+            &installed.canonical,
+            Some(column.as_str()),
+            storage_key,
+        );
+        Err(crate::Error::DataPlane(
+            crate::data::executor::row_image_limit::row_image_too_large(
+                collection,
+                identity.as_str(),
+                largest,
+            ),
+        ))
     }
 }

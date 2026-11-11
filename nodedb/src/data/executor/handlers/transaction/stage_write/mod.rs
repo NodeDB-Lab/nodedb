@@ -40,6 +40,7 @@ mod stage_kv_ttl;
 mod stage_point_document;
 mod stage_returning;
 mod stage_rls;
+mod stage_row_limit;
 mod stage_spatial;
 mod stage_timeseries;
 mod stage_timeseries_canonical;

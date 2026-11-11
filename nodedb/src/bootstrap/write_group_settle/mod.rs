@@ -2,6 +2,8 @@
 
 pub mod scan;
 pub mod settle;
+#[cfg(test)]
+mod settle_tests;
 pub mod stores;
 
 pub use scan::{GroupScan, WalGroups};

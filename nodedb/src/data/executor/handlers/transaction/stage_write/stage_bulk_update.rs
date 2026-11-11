@@ -131,6 +131,15 @@ impl CoreLoop {
                 declared_primary_key,
                 *row_key,
             );
+            if let Err(e) = self.stage_check_row_image(
+                database_id.as_u64(),
+                tid,
+                collection,
+                &identity,
+                &new_body,
+            ) {
+                return self.response_error(task, e);
+            }
             if let Err(e) = self.stage_admit_write(
                 rls_write_check,
                 &new_body,

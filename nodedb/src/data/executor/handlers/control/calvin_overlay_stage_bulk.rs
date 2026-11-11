@@ -257,6 +257,13 @@ impl CoreLoop {
                 declared_primary_key,
                 storage_key,
             );
+            self.stage_check_row_image(
+                database_id.as_u64(),
+                tid,
+                collection,
+                &identity,
+                &new_body,
+            )?;
             self.stage_admit_write(
                 rls_write_check,
                 &new_body,

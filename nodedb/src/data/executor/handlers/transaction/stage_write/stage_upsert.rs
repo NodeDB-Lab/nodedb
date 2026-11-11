@@ -67,6 +67,9 @@ impl CoreLoop {
                 }
             }
         };
+        if let Err(e) = self.stage_check_ctx_row_image(ctx, &stored_bytes) {
+            return self.response_error(ctx.task, e);
+        }
 
         // Gate whichever body this branch actually resolved — the incoming row
         // when absent, the merge with the stored row when present. The merged

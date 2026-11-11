@@ -40,6 +40,7 @@ use crate::wal::manager::{NO_APPLY_KEY, WalManager};
 use nodedb_types::RowIdentity;
 
 mod large_row;
+mod row_limit;
 
 const TID: u64 = 1;
 const ORDERS: &str = "orders";

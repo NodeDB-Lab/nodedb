@@ -42,6 +42,20 @@ impl CoreLoop {
         }) {
             return self.response_error(task, refusal);
         }
+        // Each edge's version journals in one write-set part. One edge over
+        // the row image limit refuses the batch before any edge is written.
+        if let Some(refusal) = edges.iter().find_map(|edge| {
+            crate::data::executor::row_image_limit::check_edge(
+                edge.collection.as_str(),
+                &edge.src_id,
+                &edge.label,
+                &edge.dst_id,
+                &edge.properties,
+            )
+            .err()
+        }) {
+            return self.response_error(task, refusal);
+        }
         // Every endpoint is checked before any edge is written, so a dangling
         // refusal applies nothing. A decided ordinal marks committed versions
         // written again, which the dangling rule never refuses.
@@ -272,5 +286,42 @@ mod tests {
             first.is_none(),
             "the edge before the dangling one is not written"
         );
+    }
+
+    /// One edge with properties over the row image limit refuses the batch
+    /// with SQLSTATE 54000, and no edge of the batch is written.
+    #[test]
+    fn an_edge_over_the_row_limit_late_in_the_batch_writes_no_edge() {
+        use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
+
+        let mut h = make_core();
+        let task = make_task_with_lsn(10);
+        let mut large = edge("c", "d");
+        large.properties = vec![0x80; nodedb_types::MAX_ROW_IMAGE_BYTES + 1];
+        let edges = vec![edge("a", "b"), large];
+
+        let resp = h.core.execute_edge_put_batch(&task, 1, &edges);
+
+        assert_eq!(resp.status, Status::Error);
+        let code = resp.error_code.as_deref().expect("error code");
+        assert!(
+            matches!(code, ErrorCode::ProgramLimitExceeded { .. }),
+            "{code:?}"
+        );
+        assert_eq!(error_code_to_sqlstate(code).1, "54000");
+        assert!(resp.write_set.is_empty(), "a refused batch reports no edge");
+        let first = h
+            .core
+            .edge_store
+            .get_edge(
+                DatabaseId::DEFAULT.as_u64(),
+                TenantId::new(1),
+                "knows",
+                "a",
+                "KNOWS",
+                "b",
+            )
+            .expect("read edge");
+        assert!(first.is_none(), "no edge of the refused batch is written");
     }
 }

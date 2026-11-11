@@ -125,10 +125,21 @@ impl CoreLoop {
                 }
             }
         }).transpose()?;
-        Ok(crate::types::document_event::DocumentPutEvent {
+        let event = crate::types::document_event::DocumentPutEvent {
             new_value,
             old_value,
-        })
+        };
+        // Every image the row's write-set entry journals is held to the row
+        // limit before the caller commits, so a refusal leaves no row, no
+        // write set and no event.
+        crate::data::executor::row_image_limit::check_installed_row(
+            row.collection,
+            row.identity.as_str(),
+            &image.canonical,
+            &image.stored,
+            &event,
+        )?;
+        Ok(event)
     }
 
     /// How `stored`, a row of `collection`, reads as MessagePack.

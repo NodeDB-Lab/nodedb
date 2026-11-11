@@ -110,6 +110,15 @@ impl CoreLoop {
                 valid_until_ms,
                 ..
             } => {
+                if let Err(e) = crate::data::executor::row_image_limit::check_edge(
+                    collection.as_str(),
+                    src_id,
+                    label,
+                    dst_id,
+                    properties,
+                ) {
+                    return self.response_error(task, e);
+                }
                 if let Err(e) = self.stage_graph_capped(properties.len()) {
                     return self.response_error(task, e);
                 }
@@ -277,6 +286,20 @@ impl CoreLoop {
             .iter()
             .map(|e| e.src_id.len() + e.label.len() + e.dst_id.len() + e.properties.len())
             .sum();
+        // One edge over the row image limit refuses the batch before any edge
+        // stages.
+        if let Some(e) = edges.iter().find_map(|edge| {
+            crate::data::executor::row_image_limit::check_edge(
+                edge.collection.as_str(),
+                &edge.src_id,
+                &edge.label,
+                &edge.dst_id,
+                &edge.properties,
+            )
+            .err()
+        }) {
+            return self.response_error(task, e);
+        }
         if let Err(e) = self.stage_graph_capped(incoming_bytes) {
             return self.response_error(task, e);
         }

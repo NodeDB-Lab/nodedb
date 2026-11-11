@@ -18,13 +18,20 @@ use nodedb_physical::physical_plan::DocumentOp;
 /// batched task with a bare OK, which carries no row payload, so absorbing one
 /// would drop the rows the statement asked for. It falls through to `poll_one`
 /// and the single-put handler, which projects the stored post-image.
+///
+/// A put whose body is over the row image limit is excluded too, and runs
+/// alone. A put whose body is within the limit can still install images
+/// past it: defaults, generated columns and the stored encoding are known
+/// only after apply. Such a refusal fails that put alone too, through
+/// `write_batch_isolate`.
 fn is_batchable_put(task: &ExecutionTask) -> bool {
     matches!(
         task.plan(),
         PhysicalPlan::Document(DocumentOp::PointPut {
             returning: None,
+            value,
             ..
-        })
+        }) if value.len() <= nodedb_types::MAX_ROW_IMAGE_BYTES
     )
 }
 
@@ -202,6 +209,23 @@ impl CoreLoop {
             // Application and event errors abandon every provisional write.
             drop(txn);
             let fatal = self.abandon_batched_puts(&batch, &mut results);
+            // Each coalesced put is its own statement. When every failure is
+            // a row-limit refusal, only the refused puts answer it, and the
+            // rest run again without them.
+            if fatal.is_none()
+                && super::write_batch_isolate::size_refusals_only(
+                    &results,
+                    preparation_error.as_ref(),
+                )
+            {
+                return self.isolate_size_refusals(
+                    batch,
+                    groups,
+                    results,
+                    preparation_error,
+                    journalled,
+                );
+            }
             let count = batch.len();
             let mut responses = Vec::with_capacity(count);
             for (index, (task, result)) in batch.iter().zip(results).enumerate() {
@@ -352,7 +376,7 @@ impl CoreLoop {
 
     /// Store the write sets of the journalled tasks of `batch`, finish the
     /// journalled run, then send every response.
-    fn finish_journalled_batch(
+    pub(super) fn finish_journalled_batch(
         &mut self,
         batch: &[ExecutionTask],
         groups: Vec<Option<JournalGroup>>,
