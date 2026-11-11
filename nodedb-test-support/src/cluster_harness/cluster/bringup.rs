@@ -35,6 +35,35 @@ impl TestCluster {
         .await
     }
 
+    /// Spawn a 3-node cluster whose nodes cap a query result at
+    /// `max_query_result_bytes`. A small limit makes a result of a few rows
+    /// exceed the cap. Each data group places `replication_factor` of the
+    /// three nodes. Uses the fast-election tuning and 1 core per node.
+    pub async fn spawn_three_with_result_limit(
+        replication_factor: usize,
+        max_query_result_bytes: u64,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_three_with_config(ClusterSpawnConfig {
+            tuning: super::types::fast_cluster_tuning(),
+            graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),
+            query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
+            num_cores: 1,
+            log_compaction_threshold: None,
+            replication_factor,
+            num_groups: DEFAULT_NUM_GROUPS,
+            single_node_calvin: false,
+            backup_storage: None,
+            pitr: None,
+            node_timeseries_tuning: std::collections::HashMap::new(),
+            redo_chunk_limits: None,
+            network_tuning: Some(nodedb_types::config::tuning::NetworkTuning {
+                max_query_result_bytes,
+                ..Default::default()
+            }),
+        })
+        .await
+    }
+
     /// Shared 3-node spawn body. Threads an optional Raft
     /// `log_compaction_threshold` and a Raft `replication_factor` into
     /// every node's spawn; all public `spawn_three_*` entry points funnel
