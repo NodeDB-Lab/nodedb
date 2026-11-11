@@ -198,3 +198,51 @@ fn an_error_of_a_request_of_one_statement_stays_bare() {
         StatementError::TenantIsolation
     ));
 }
+
+/// A counted part keyed `key`, with no rows.
+fn counted_part(key: &'static str, affected: u64) -> StatementPart {
+    StatementPart {
+        rows: Vec::new(),
+        warnings: Vec::new(),
+        tag: Some(FoldedTag::Dml(outcome("INSERT", affected))),
+        count_key: key,
+    }
+}
+
+#[test]
+fn a_sum_of_inserted_parts_answers_under_inserted() {
+    let request = RequestAnswer {
+        statements: vec![counted_part(INSERTED_KEY, 2), counted_part(INSERTED_KEY, 3)],
+        last_lsn: 0,
+    };
+    let answer = request
+        .summed()
+        .unwrap_or_else(|_| panic!("one verb folds"));
+    assert_eq!(answer.count_key, INSERTED_KEY);
+}
+
+#[test]
+fn a_sum_with_an_affected_part_answers_under_affected() {
+    let request = RequestAnswer {
+        statements: vec![counted_part(INSERTED_KEY, 2), counted_part(AFFECTED_KEY, 1)],
+        last_lsn: 0,
+    };
+    assert_eq!(
+        request
+            .summed()
+            .unwrap_or_else(|_| panic!("one verb folds"))
+            .count_key,
+        AFFECTED_KEY
+    );
+    let empty = RequestAnswer {
+        statements: Vec::new(),
+        last_lsn: 0,
+    };
+    assert_eq!(
+        empty
+            .summed()
+            .unwrap_or_else(|_| panic!("nothing folds"))
+            .count_key,
+        AFFECTED_KEY
+    );
+}

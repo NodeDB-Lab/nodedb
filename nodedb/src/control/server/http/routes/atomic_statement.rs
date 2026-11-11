@@ -117,8 +117,8 @@ pub(super) async fn run_http_sequential(
 
 /// A statement's answer as JSON rows, each keyed by its cell keys as
 /// `shape_http_payload` keys a row. A write that answers no rows answers one
-/// `{"affected": n}` row: the shape a single write's count takes on these
-/// routes. A derived task (a balance move, an implicit edge) adds no count.
+/// `{"affected": n}` row, or `{"inserted": n}` under `count_key`: the shape a
+/// single write's count takes on these routes. A derived task (a balance move, an implicit edge) adds no count.
 fn answer_json_rows(answer: StatementAnswer) -> Vec<serde_json::Value> {
     let mut rows: Vec<serde_json::Value> = answer
         .rows
@@ -133,7 +133,7 @@ fn answer_json_rows(answer: StatementAnswer) -> Vec<serde_json::Value> {
     if rows.is_empty()
         && let Some(FoldedTag::Dml(outcome)) = answer.tag
     {
-        rows.push(serde_json::json!({ "affected": outcome.affected }));
+        rows.push(serde_json::json!({ answer.count_key: outcome.affected }));
     }
     rows
 }
@@ -148,6 +148,7 @@ mod tests {
             rows: Vec::new(),
             warnings: Vec::new(),
             tag,
+            count_key: "affected",
             last_lsn: 0,
         }
     }

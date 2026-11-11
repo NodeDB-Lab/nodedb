@@ -33,9 +33,18 @@ pub(crate) struct StatementAnswer {
     pub(crate) warnings: Vec<String>,
     /// The request's one tag. `None` when no task folded into it.
     pub(crate) tag: Option<FoldedTag>,
+    /// The row key a count-only answer takes on the HTTP routes.
+    pub(crate) count_key: &'static str,
     /// The watermark of the last task the request dispatched.
     pub(crate) last_lsn: u64,
 }
+
+/// The count key of a write that answers `{"affected": n}`.
+pub(crate) const AFFECTED_KEY: &str = "affected";
+
+/// The count key of a batch insert or `INSERT .. SELECT` the per-task route
+/// answers: `{"inserted": n}`.
+pub(crate) const INSERTED_KEY: &str = "inserted";
 
 /// One statement's part of a request's answer.
 pub(crate) struct StatementPart {
@@ -44,6 +53,9 @@ pub(crate) struct StatementPart {
     pub(crate) warnings: Vec<String>,
     /// The statement's one tag. `None` when no task folded into it.
     pub(crate) tag: Option<FoldedTag>,
+    /// The row key of the statement's count on the HTTP routes:
+    /// [`AFFECTED_KEY`] or [`INSERTED_KEY`].
+    pub(crate) count_key: &'static str,
 }
 
 /// A request's finished answer: one part per statement, in request order.
@@ -60,11 +72,22 @@ impl RequestAnswer {
     ///
     /// Rows and warnings follow statement order. The tags fold as one
     /// request tag: the same verb sums, different verbs answer `MIXED` with
-    /// the summed count.
+    /// the summed count. The count takes [`INSERTED_KEY`] when every counted
+    /// part takes it, else [`AFFECTED_KEY`].
     pub(crate) fn summed(self) -> Result<StatementAnswer, StatementError> {
         let mut rows = Vec::new();
         let mut warnings = Vec::new();
         let mut tag = StatementTag::for_request(std::iter::empty());
+        let counted = self
+            .statements
+            .iter()
+            .filter(|part| matches!(part.tag, Some(FoldedTag::Dml(_))));
+        let mut keys = counted.map(|part| part.count_key).peekable();
+        let count_key = if keys.peek().is_some() && keys.all(|key| key == INSERTED_KEY) {
+            INSERTED_KEY
+        } else {
+            AFFECTED_KEY
+        };
         for part in self.statements {
             rows.extend(part.rows);
             warnings.extend(part.warnings);
@@ -80,6 +103,7 @@ impl RequestAnswer {
             rows,
             warnings,
             tag: tag.finish(),
+            count_key,
             last_lsn: self.last_lsn,
         })
     }
@@ -252,6 +276,7 @@ impl StatementFold {
             rows: self.rows,
             warnings: self.warnings,
             tag: self.tag.finish(),
+            count_key: AFFECTED_KEY,
         }
     }
 }

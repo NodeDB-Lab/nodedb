@@ -46,7 +46,7 @@ use crate::control::server::shared::sql_split::Statement;
 use crate::control::trigger::statement_txn::{in_block, with_statement_txn_lifted};
 use crate::types::TraceId;
 
-use super::answer::{RequestAnswer, StatementAnswer, StatementPart};
+use super::answer::{AFFECTED_KEY, RequestAnswer, StatementAnswer, StatementPart};
 use super::atomic::{AtomicRoute, AtomicStatement, calvin_answer, route_atomic_statement};
 use super::error::{RequestError, StatementError};
 use super::task_loop::{PlannedStatement, StatementExec, run_statement_loop};
@@ -252,6 +252,7 @@ fn into_part(answer: StatementAnswer) -> (StatementPart, u64) {
         rows,
         warnings,
         tag,
+        count_key,
         last_lsn,
     } = answer;
     (
@@ -259,6 +260,7 @@ fn into_part(answer: StatementAnswer) -> (StatementPart, u64) {
             rows,
             warnings,
             tag,
+            count_key,
         },
         last_lsn,
     )
@@ -270,6 +272,7 @@ fn empty_part() -> StatementPart {
         rows: Vec::new(),
         warnings: Vec::new(),
         tag: None,
+        count_key: AFFECTED_KEY,
     }
 }
 

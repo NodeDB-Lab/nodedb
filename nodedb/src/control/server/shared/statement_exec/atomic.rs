@@ -49,7 +49,7 @@ use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::trigger::statement_txn::in_block;
 
-use super::answer::{RequestAnswer, StatementAnswer};
+use super::answer::{AFFECTED_KEY, RequestAnswer, StatementAnswer};
 use super::edge_recon::{
     CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
@@ -115,9 +115,10 @@ pub(crate) async fn route_atomic_statement(
 
     refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
 
-    match request_txn_route(state, &tasks, &statement_map, session) {
+    let (route, inserted) = request_txn_route(state, &tasks, &statement_map, session);
+    match route {
         ImplicitTxnRoute::Implicit => {
-            let answer = run_implicit_statement(
+            let mut answer = run_implicit_statement(
                 exec,
                 PlannedStatement {
                     tasks,
@@ -128,6 +129,7 @@ pub(crate) async fn route_atomic_statement(
                 session,
             )
             .await?;
+            inserted.apply(&mut answer);
             return Ok(AtomicRoute::Implicit(answer));
         }
         ImplicitTxnRoute::Refuse(error) => return Err(StatementError::Error(error)),
@@ -291,6 +293,7 @@ pub(crate) fn calvin_answer(
         rows,
         warnings,
         tag: fold.tag,
+        count_key: AFFECTED_KEY,
         last_lsn: apply_result.map_or(0, |response| response.watermark_lsn.as_u64()),
     })
 }
