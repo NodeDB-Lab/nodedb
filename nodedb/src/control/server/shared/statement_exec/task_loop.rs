@@ -20,6 +20,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
 use crate::control::lease::QueryLeaseScope;
+use crate::control::planner::calvin::node_delete_txn::derives_node_delete_reads;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
@@ -331,6 +332,17 @@ async fn run_task(
     Ok(())
 }
 
+/// Whether a request holds a read, or a delete that reads the edges of the
+/// nodes it deletes when it stages.
+fn request_reads(state: &SharedState, tasks: &[PhysicalTask]) -> crate::Result<bool> {
+    for task in tasks {
+        if !plan_is_write(&task.plan) || derives_node_delete_reads(state, task)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Run a request in an implicit transaction: it commits when every task
 /// succeeds, and rolls back when one fails. `client` is the session the
 /// request arrived on. The transaction runs on a private session of its
@@ -338,7 +350,9 @@ async fn run_task(
 ///
 /// A request that holds a read takes the transaction's snapshot before its
 /// first task. Its reads join the read set, and COMMIT checks each one at
-/// that snapshot. A request of writes alone takes no snapshot.
+/// that snapshot. A delete of nodes with edges reads those edges when it
+/// stages, so it takes the snapshot too. A request of other writes takes no
+/// snapshot.
 pub(crate) async fn run_implicit_statement(
     exec: &StatementExec<'_>,
     mut statement: PlannedStatement,
@@ -350,10 +364,7 @@ pub(crate) async fn run_implicit_statement(
         .statement_map
         .group_by_statement(std::mem::take(&mut statement.tasks));
     let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
-    let reads = statement
-        .tasks
-        .iter()
-        .any(|task| !plan_is_write(&task.plan));
+    let reads = request_reads(exec.state, &statement.tasks).map_err(StatementError::Error)?;
     crate::control::trigger::statement_txn::with_statement_txn_lifted(
         exec.state,
         exec.identity,

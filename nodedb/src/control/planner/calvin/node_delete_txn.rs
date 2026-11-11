@@ -21,8 +21,10 @@ use super::dependent_recon_node_edges::{
 };
 use super::preexec::{PreexecRequest, PreexecScan, RowIdentityRead, run_preexec_scan};
 use crate::control::planner::implicit_edges::append_implicit_edge_delete_tasks;
+use crate::control::security::catalog::StoredCollection;
 use crate::control::state::SharedState;
 use crate::types::{TraceId, TxnId};
+use nodedb_types::QualifiedCollection;
 
 /// What a transaction does with a TRUNCATE of an edge-bearing collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,82 +54,37 @@ pub async fn txn_node_delete_tasks(
     truncate: TxnEdgeTruncate,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let (tenant_id, database_id) = (task.tenant_id, task.database_id);
-    // The rows the statement deletes: a predicate, one row by surrogate, or
-    // one CRDT document by its id.
-    let (collection, target) = match &task.plan {
-        PhysicalPlan::Document(DocumentOp::BulkDelete {
-            collection,
-            filters,
-            system_time,
-            ..
-        }) => (
-            collection,
-            DeleteTarget::Rows {
-                filters: filters.clone(),
-                prefilter: None,
-                system_time: *system_time,
-            },
-        ),
-        PhysicalPlan::Document(DocumentOp::PointDelete {
-            collection,
-            surrogate: Some(surrogate),
-            ..
-        }) => (
-            collection,
-            DeleteTarget::Rows {
-                filters: Vec::new(),
-                prefilter: Some([*surrogate].into_iter().collect()),
-                // A point delete names its row: the row's current version
-                // with the staged writes on top.
-                system_time: nodedb_types::SystemTimeScope::Current,
-            },
-        ),
-        PhysicalPlan::Crdt(CrdtOp::DocDelete {
-            collection,
-            document_id,
-            surrogate: Some(_),
-            ..
-        }) => (collection, DeleteTarget::Document(document_id.clone())),
-        // A TRUNCATE's edge shares stage nothing: each tombstones its
-        // vShard's edges at the transaction's turn. A read later in the same
-        // transaction still sees the edges, so a transaction that can read
-        // later refuses it.
-        PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) => {
-            if !super::edge_truncate::collection_is_edge_bearing(
-                state,
-                tenant_id,
-                database_id,
-                collection.as_str(),
-            )? {
-                return Ok(Vec::new());
-            }
-            return match truncate {
-                TxnEdgeTruncate::CutAtCommit => {
-                    Ok(super::edge_truncate::edge_share_tasks(task, collection))
-                }
-                TxnEdgeTruncate::Refuse => Err(crate::Error::FeatureNotSupported {
-                    detail: format!(
-                        "TRUNCATE of '{collection}' cannot run in a transaction with a later \
-                         read: graph edges were written into it, and the later read would still \
-                         see them. Run the TRUNCATE as its own statement."
-                    ),
-                }),
-            };
+    // A TRUNCATE's edge shares stage nothing: each tombstones its vShard's
+    // edges at the transaction's turn. A read later in the same transaction
+    // still sees the edges, so a transaction that can read later refuses it.
+    if let PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) = &task.plan {
+        if !super::edge_truncate::collection_is_edge_bearing(
+            state,
+            tenant_id,
+            database_id,
+            collection.as_str(),
+        )? {
+            return Ok(Vec::new());
         }
-        _ => return Ok(Vec::new()),
-    };
-    let bare = nodedb_types::CollectionKey::from_qualified(database_id, collection)?.name();
-    let Some(coll) =
-        state
-            .credentials
-            .catalog()
-            .get_collection(database_id, tenant_id.as_u64(), bare)?
-    else {
-        return Ok(Vec::new());
-    };
-    if !coll.has_implicit_edges {
-        return Ok(Vec::new());
+        return match truncate {
+            TxnEdgeTruncate::CutAtCommit => {
+                Ok(super::edge_truncate::edge_share_tasks(task, collection))
+            }
+            TxnEdgeTruncate::Refuse => Err(crate::Error::FeatureNotSupported {
+                detail: format!(
+                    "TRUNCATE of '{collection}' cannot run in a transaction with a later \
+                     read: graph edges were written into it, and the later read would still \
+                     see them. Run the TRUNCATE as its own statement."
+                ),
+            }),
+        };
     }
+    let Some((collection, target)) = delete_target(&task.plan) else {
+        return Ok(Vec::new());
+    };
+    let Some(coll) = edge_bearing_collection(state, task, collection)? else {
+        return Ok(Vec::new());
+    };
     let declared_primary_key = coll.declared_primary_key;
 
     // The rows as this transaction sees them, read before the delete stages.
@@ -215,6 +172,74 @@ pub async fn txn_node_delete_tasks(
     guards.extend(edge_tasks);
     guards.extend(deletes);
     Ok(guards)
+}
+
+/// Whether staging the delete `task` reads the edges of the nodes it
+/// deletes: a `BulkDelete`, a `PointDelete` of a bound surrogate, or a CRDT
+/// `DocDelete` of a bound document, on a collection with implicit edges.
+/// COMMIT checks those reads at the transaction's snapshot.
+pub fn derives_node_delete_reads(state: &SharedState, task: &PhysicalTask) -> crate::Result<bool> {
+    let Some((collection, _)) = delete_target(&task.plan) else {
+        return Ok(false);
+    };
+    Ok(edge_bearing_collection(state, task, collection)?.is_some())
+}
+
+/// The collection a delete `plan` removes rows or a document from, and what
+/// it removes: a predicate, one row by surrogate, or one CRDT document by its
+/// id. `None` for any other plan.
+fn delete_target(plan: &PhysicalPlan) -> Option<(&QualifiedCollection, DeleteTarget)> {
+    match plan {
+        PhysicalPlan::Document(DocumentOp::BulkDelete {
+            collection,
+            filters,
+            system_time,
+            ..
+        }) => Some((
+            collection,
+            DeleteTarget::Rows {
+                filters: filters.clone(),
+                prefilter: None,
+                system_time: *system_time,
+            },
+        )),
+        PhysicalPlan::Document(DocumentOp::PointDelete {
+            collection,
+            surrogate: Some(surrogate),
+            ..
+        }) => Some((
+            collection,
+            DeleteTarget::Rows {
+                filters: Vec::new(),
+                prefilter: Some([*surrogate].into_iter().collect()),
+                // A point delete names its row: the row's current version
+                // with the staged writes on top.
+                system_time: nodedb_types::SystemTimeScope::Current,
+            },
+        )),
+        PhysicalPlan::Crdt(CrdtOp::DocDelete {
+            collection,
+            document_id,
+            surrogate: Some(_),
+            ..
+        }) => Some((collection, DeleteTarget::Document(document_id.clone()))),
+        _ => None,
+    }
+}
+
+/// The catalog entry of `collection`, when edges were ever written into it.
+fn edge_bearing_collection(
+    state: &SharedState,
+    task: &PhysicalTask,
+    collection: &QualifiedCollection,
+) -> crate::Result<Option<StoredCollection>> {
+    let (tenant_id, database_id) = (task.tenant_id, task.database_id);
+    let bare = nodedb_types::CollectionKey::from_qualified(database_id, collection)?.name();
+    Ok(state
+        .credentials
+        .catalog()
+        .get_collection(database_id, tenant_id.as_u64(), bare)?
+        .filter(|coll| coll.has_implicit_edges))
 }
 
 /// What a transaction delete removes.
