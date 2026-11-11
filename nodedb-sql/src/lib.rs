@@ -81,6 +81,11 @@ pub fn plan_sql(sql: &str, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     if let Some(stmt) = try_parse_array_statement(sql)? {
         return plan_array_statement(stmt, catalog);
     }
+    // Refused before the parser: such a text does not parse, and the caller
+    // must learn it is unsupported rather than read a syntax error.
+    if let Some(statements) = preprocess::rewritten_batch(sql)? {
+        refuse_rewritten_batch(true, statements)?;
+    }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
     let is_upsert = preprocessed.as_ref().is_some_and(|p| p.is_upsert);
@@ -111,6 +116,10 @@ pub fn plan_sql_with_params(
     if let Some(stmt) = try_parse_array_statement(sql)? {
         let _ = params; // arrays don't accept bound params today
         return plan_array_statement(stmt, catalog);
+    }
+    // Refused before the parser, exactly as the no-params path does.
+    if let Some(statements) = preprocess::rewritten_batch(sql)? {
+        refuse_rewritten_batch(true, statements)?;
     }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
