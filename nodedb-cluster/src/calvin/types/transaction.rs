@@ -126,6 +126,10 @@ pub struct TxClass {
     /// role-guarded state transition against the same set. Empty for a
     /// transaction no user wrote.
     pub user_roles: Vec<String>,
+    /// The transaction is the COMMIT flush of a block. Each statement
+    /// answered when it ran, so the coordinator answers with the install
+    /// counts alone.
+    pub answer_counts_only: bool,
     /// Cached participating-vshard set. Re-derived on decode; not serialized.
     #[serde(skip)]
     #[msgpack(ignore)]
@@ -282,6 +286,7 @@ impl TxClass {
             multi_part: None,
             restore_id: 0,
             user_roles: Vec::new(),
+            answer_counts_only: false,
             participating_vshards: Vec::new(),
             write_vshards: Vec::new(),
         }

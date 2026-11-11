@@ -128,6 +128,10 @@ pub(crate) async fn dispatch_strict_atomic_tasks_to_calvin(
     tx_class.set_body_plans(provenance.body_tasks);
     tx_class.set_publishes(provenance.publishes);
     tx_class.set_user_roles(provenance.user_roles);
+    // A COMMIT returns no rows: its statements answered when they ran.
+    if position == TxnDispatchPosition::CommitFlush {
+        tx_class.set_answer_counts_only();
+    }
     if let Some((applied_key, vshard)) = provenance.applied_key {
         tx_class.set_applied_key(applied_key, vshard);
     }

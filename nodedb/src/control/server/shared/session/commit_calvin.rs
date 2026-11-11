@@ -236,6 +236,9 @@ async fn submit_commit_calvin(
                 tx_class.set_event_source(group_source.wal_code());
                 tx_class.set_body_plans(body_tasks);
                 tx_class.set_user_roles(user_roles.clone());
+                // The COMMIT returns no rows: its statements answered when
+                // they ran.
+                tx_class.set_answer_counts_only();
                 if let Some(publishes) = publishes.take() {
                     tx_class.set_publishes(publishes);
                 }

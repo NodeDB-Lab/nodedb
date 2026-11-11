@@ -232,6 +232,9 @@ pub(crate) async fn submit_prepared_and_await(
         .calvin
         .apply_results
         .take(&TxnId::new(epoch, position));
+    if fold == ReplyFold::InstallCounts {
+        return Ok(super::commit_answer::install_counts(&report.ack_results));
+    }
     let applied = match drained {
         Some(CalvinApplyResult::Single {
             response,
@@ -419,6 +422,9 @@ pub(crate) enum ReplyFold {
     /// counts only the edges it owns, so the sum of every home's count is
     /// the statement's count, each edge counted once.
     SumOwnedEdges,
+    /// A COMMIT flush. Its statements answered when they ran, so the answer
+    /// holds the install counts alone.
+    InstallCounts,
 }
 
 impl ReplyFold {
@@ -441,6 +447,9 @@ impl ReplyFold {
     /// split into parts reads its manifest, and one with no edge key reads
     /// nothing.
     pub(crate) fn of_prepared(tx_class: &TxClass, plans: &[PhysicalPlan]) -> Self {
+        if tx_class.answer_counts_only {
+            return Self::InstallCounts;
+        }
         if !super::edge_slices::writes_edges(tx_class) {
             return Self::SumSlices;
         }

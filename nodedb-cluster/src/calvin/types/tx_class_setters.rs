@@ -29,6 +29,12 @@ impl TxClass {
         self.user_roles = user_roles;
     }
 
+    /// Mark the transaction as the COMMIT flush of a block: the coordinator
+    /// answers with the install counts alone.
+    pub fn set_answer_counts_only(&mut self) {
+        self.answer_counts_only = true;
+    }
+
     /// Mark the transaction as the re-issue of RESTORE `restore_id`.
     pub fn set_restore_id(&mut self, restore_id: u64) {
         self.restore_id = restore_id;
