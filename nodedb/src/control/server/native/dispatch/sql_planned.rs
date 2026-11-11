@@ -81,7 +81,8 @@ pub(super) async fn execute_planned(
         Err(error) => return resp(error_to_native(seq, &error)),
     }
 
-    // Planning, authorization, implicit-edge extraction (pgwire parity: a
+    // Planning, authorization, the CHECK and enum-label checks of every
+    // statement, implicit-edge extraction (pgwire parity: a
     // schemaless document carrying `_from`/`_to` is mirrored as a
     // `GraphOp::EdgePut` task so the classify/Calvin/single-shard logic below
     // routes it like an explicit edge) and lease admission run as ONE retried
@@ -109,6 +110,7 @@ pub(super) async fn execute_planned(
         Err(error) => return resp(error_to_native(seq, &error)),
     };
 
+    let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
     if admission.tasks.is_empty() {
         return resp(NativeResponse::status_row(seq, "OK"));
@@ -190,7 +192,8 @@ pub(super) async fn execute_planned(
     // A native lazy stream outlives this handler, so transfer its descriptor
     // leases to the session-owned `SqlStream` before returning it. The session
     // loop retains that owner through final emission or connection teardown.
-    if allow_stream {
+    // A request of several statements answers one materialized response.
+    if allow_stream && !several_statements {
         match try_open_sql_stream(ctx, seq, &tasks, database_id, Some(&output_schema)).await {
             Ok(Some(mut stream)) => {
                 let Some(scope) = lease_scope.take() else {

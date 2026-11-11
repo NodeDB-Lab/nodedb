@@ -145,6 +145,7 @@ async fn ndjson_at_consistency(
         Ok(admission) => admission,
         Err(error) => return ApiError::from(error).into_response(),
     };
+    let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
 
     let trace_id = crate::control::trace_context::generate_trace_id();
@@ -191,16 +192,21 @@ async fn ndjson_at_consistency(
 
     // `Body::from_stream` polls the data-plane stream under normal HTTP backpressure
     // while its captured lease scope stays alive until body completion or disconnect.
-    match try_open_stream(
-        &state,
-        &tasks,
-        &identity,
-        database_id,
-        &output_schema,
-        trace_id,
-    )
-    .await
-    {
+    // A request of several statements answers one materialized body.
+    let opened = if several_statements {
+        Ok(None)
+    } else {
+        try_open_stream(
+            &state,
+            &tasks,
+            &identity,
+            database_id,
+            &output_schema,
+            trace_id,
+        )
+        .await
+    };
+    match opened {
         Ok(Some((stream, limit))) => {
             let Some(lease_scope) = lease_scope.take() else {
                 return ApiError::from(crate::Error::Internal {

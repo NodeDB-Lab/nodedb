@@ -14,6 +14,7 @@ use crate::control::server::shared::plan_admission::{
 };
 use crate::control::server::shared::session::read_consistency::parse_request_field;
 use crate::control::server::shared::session::read_scope::with_request_consistency;
+use crate::control::server::shared::sql_split::holds_several_statements;
 use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
@@ -101,14 +102,17 @@ async fn query_at_consistency(
 
     // Try DDL commands first. Reached only after the admission call above, so
     // `shared::ddl::user_dispatch` must not admit this request a second time.
-    if let Some(result) = crate::control::server::shared::ddl::dispatch(
-        &state.shared,
-        &identity,
-        sql.trim(),
-        database_id,
-        &txn_ctx,
-    )
-    .await
+    // A request of several statements skips the router: the request planner
+    // plans each statement and refuses DDL beside DML.
+    if !holds_several_statements(sql)
+        && let Some(result) = crate::control::server::shared::ddl::dispatch(
+            &state.shared,
+            &identity,
+            sql.trim(),
+            database_id,
+            &txn_ctx,
+        )
+        .await
     {
         return match result {
             Ok(results) => {

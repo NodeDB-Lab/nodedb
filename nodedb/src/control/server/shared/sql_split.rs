@@ -261,9 +261,24 @@ fn dollar_tag(rest: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<String>
     }
 }
 
+/// Whether [`split_sql_statements`] splits `sql` into more than one
+/// statement.
+pub(crate) fn holds_several_statements(sql: &str) -> bool {
+    split_sql_statements(sql).len() > 1
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split_sql_statements;
+    use super::{holds_several_statements, split_sql_statements};
+
+    #[test]
+    fn one_statement_with_a_trailing_semicolon_is_not_several() {
+        assert!(!holds_several_statements(
+            "INSERT INTO docs (id) VALUES ('a');"
+        ));
+        assert!(!holds_several_statements(" ; "));
+        assert!(holds_several_statements("SELECT 1; SELECT 2"));
+    }
 
     #[test]
     fn single_statement_no_semicolon() {

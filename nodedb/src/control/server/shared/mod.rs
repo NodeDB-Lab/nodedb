@@ -9,6 +9,9 @@ pub mod ddl;
 pub mod metering;
 pub mod panic_isolation;
 pub mod plan_admission;
+mod plan_admission_request;
+#[cfg(test)]
+mod plan_admission_tests;
 pub mod plan_util;
 pub mod planning_overrides;
 pub mod quota_admission;

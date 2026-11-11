@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Protocol-neutral statement setup: plan, authorize, extract implicit edges,
-//! resolve materialized-sum targets, authorize again, and admit the descriptor
-//! leases — as ONE retried unit.
+//! Protocol-neutral statement setup: enforce CHECK and enum labels, then plan,
+//! authorize, extract implicit edges, resolve materialized-sum targets,
+//! authorize again, and admit the descriptor leases — as ONE retried unit.
+//!
+//! A request of several statements plans each statement alone and joins the
+//! tasks into one set. Every later step runs once over that set.
 //!
 //! Planning reads the catalog and records a descriptor version; the lease that
 //! pins that version is only acquired afterwards. A descriptor drain that starts
@@ -27,8 +30,8 @@ use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
+use crate::control::server::shared::plan_admission_request::{PlannedRequest, RequestText};
 use crate::control::server::shared::retry::retry_on_schema_change;
-use crate::control::server::shared::returning;
 use crate::control::server::shared::statement_exec::StatementMap;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
@@ -44,8 +47,12 @@ pub struct PlanAdmission {
     /// The statement of each task in `tasks`, one entry per task. A derived
     /// task takes the statement of the task it derives from.
     pub statement_map: StatementMap,
-    /// Output schema for the planned statement.
+    /// The output schema the response folds read. For a request of several
+    /// statements, the last statement's schema that announces columns, else
+    /// the first statement's.
     pub output_schema: OutputSchema,
+    /// One output schema per statement. Index `k` is statement `k`.
+    pub output_schemas: Vec<OutputSchema>,
     /// Descriptor versions this statement was planned against.
     pub versions: DescriptorVersionSet,
     /// Descriptor lease holds; must stay alive for the whole execution.
@@ -59,6 +66,14 @@ pub struct PlanAdmission {
     /// written since. Empty for every statement that settled no cross-shard
     /// balance, which is every statement on a collection with no binding.
     pub sum_target_reads: Vec<crate::control::server::shared::session::read_set::ReadSetEntry>,
+}
+
+impl PlanAdmission {
+    /// Whether the request holds more than one statement. Such a request
+    /// never opens a lazy stream.
+    pub fn holds_several_statements(&self) -> bool {
+        self.output_schemas.len() > 1
+    }
 }
 
 /// Inputs for [`plan_authorize_and_admit`].
@@ -131,19 +146,22 @@ async fn plan_authorize_and_admit_once(
     let query_ctx = request.query_ctx;
     let identity = request.scope.identity();
     let auth_ctx = request.scope.auth();
-    // The planner does not parse a DML `RETURNING` clause, so it is split off
-    // here. The item text resolves inside the planner against the planned
-    // target, which announces the projection and attaches the Data-Plane spec
-    // to every task. Planned with the clause still in the text, the statement
-    // drops it and answers a count with no rows.
-    let (sql, returning_items) = returning::strip_returning(request.sql)?;
+    // A text of one statement plans whole, as one statement. A text of
+    // several plans each statement alone. Each splits off its own `RETURNING`.
+    let text = RequestText::split(request.sql)?;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;
 
     // Re-read per attempt: a retry must plan against the catalog and permission
     // state as they are NOW, not as they were when the drained attempt started.
-    let (mut tasks, output_schema, versions) = {
+    let PlannedRequest {
+        mut tasks,
+        mut statement_map,
+        output_schema,
+        output_schemas,
+        versions,
+    } = {
         crate::control::security::auth_fence::admit_permission_view(state, tenant_id).await?;
         let security = PlanSecurityContext {
             identity,
@@ -156,19 +174,9 @@ async fn plan_authorize_and_admit_once(
                 &state.permission_cache,
             ),
         };
-        let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
-            .plan_sql_with_rls_and_versions(
-                &sql,
-                tenant_id,
-                database_id,
-                &security,
-                returning_items.as_deref(),
-            )
-            .await?;
-        (tasks, output_schema, versions)
+        text.plan(query_ctx, tenant_id, database_id, &security)
+            .await?
     };
-    // The request text plans as one statement.
-    let mut statement_map = StatementMap::single(tasks.len());
 
     let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
 
@@ -205,6 +213,7 @@ async fn plan_authorize_and_admit_once(
         tasks,
         statement_map,
         output_schema,
+        output_schemas,
         versions,
         lease_scope,
         sum_target_reads,

@@ -12,6 +12,7 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::session::TransactionState;
+use crate::control::server::shared::sql_split::holds_several_statements;
 use crate::control::server::shared::txn_control::{TxnControl, classify as classify_txn_control};
 
 use super::sql_admin::{handle_explain, handle_set_sql, handle_show_sql, is_session_show};
@@ -139,19 +140,21 @@ async fn handle_sql_inner(
         return resp(handle_explain(ctx, seq, sql_trimmed).await);
     }
 
-    // DDL: try DDL router first.
+    // DDL: try DDL router first. A request of several statements skips it:
+    // the request planner plans each statement and refuses DDL beside DML.
     let txn_ctx = crate::control::server::shared::session::DmlTxnCtx {
         sessions: ctx.sessions,
         session_id: ctx.peer_addr.into(),
     };
-    if let Some(result) = crate::control::server::shared::ddl::dispatch(
-        ctx.state,
-        ctx.identity,
-        sql_trimmed,
-        database_id,
-        &txn_ctx,
-    )
-    .await
+    if !holds_several_statements(sql_trimmed)
+        && let Some(result) = crate::control::server::shared::ddl::dispatch(
+            ctx.state,
+            ctx.identity,
+            sql_trimmed,
+            database_id,
+            &txn_ctx,
+        )
+        .await
     {
         return resp(super::ddl_result_to_native(seq, result));
     }
