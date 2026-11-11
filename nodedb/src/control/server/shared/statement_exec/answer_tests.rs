@@ -156,6 +156,39 @@ fn an_error_names_its_statement_in_a_request_of_several() {
     ));
 }
 
+/// `INSERT a; INSERT a` plus a derived task of statement 0: statement 1
+/// ends at task 1, statement 0 at its derived task 2. Each statement fires
+/// its statement triggers once, at its own end.
+#[test]
+fn each_statement_ends_at_its_own_last_task() {
+    let plans = [insert_into("a"), insert_into("a"), insert_into("a")];
+    let fold = request_fold(&plans, &map_of(&[0, 1, 0]), 2);
+    assert_eq!(fold.statement_count(), 2);
+    let ends: Vec<_> = (0..4).map(|task| fold.statement_ending_at(task)).collect();
+    assert_eq!(ends, [None, Some(1), Some(0), None]);
+    assert_eq!(fold.statement_of_task(2), Some(0));
+    assert_eq!(fold.statement_of_task(3), None);
+}
+
+/// A request of one statement ends once, at its last task.
+#[test]
+fn one_statement_ends_once_at_its_last_task() {
+    let plans = [insert_into("a"), insert_into("b")];
+    let fold = request_fold(&plans, &StatementMap::single(2), 1);
+    let ends: Vec<_> = (0..2).map(|task| fold.statement_ending_at(task)).collect();
+    assert_eq!(ends, [None, Some(0)]);
+}
+
+/// A statement that planned no task never ends: it fires no trigger.
+#[test]
+fn a_statement_with_no_task_never_ends() {
+    let plans = [insert_into("a")];
+    let fold = request_fold(&plans, &map_of(&[0]), 2);
+    assert_eq!(fold.statement_count(), 2);
+    assert_eq!(fold.statement_ending_at(0), Some(0));
+    assert_eq!(fold.statement_ending_at(1), None);
+}
+
 #[test]
 fn an_error_of_a_request_of_one_statement_stays_bare() {
     let plans = [insert_into("a")];

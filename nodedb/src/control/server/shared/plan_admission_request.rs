@@ -13,7 +13,9 @@ use nodedb_physical::physical_task::PhysicalTask;
 use crate::control::planner::context::query::refuse_solo_between;
 use crate::control::planner::context::{PlanSecurityContext, QueryContext};
 use crate::control::planner::descriptor_set::DescriptorVersionSet;
+use crate::control::security::deny::DenyMode;
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::session_auth::extract_on_deny;
 use crate::control::server::shared::returning::strip_returning;
 use crate::control::server::shared::sql_split::split_sql_statements;
 use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
@@ -40,6 +42,10 @@ pub(super) enum RequestText {
     Whole {
         sql: String,
         returning_items: Option<String>,
+        /// The statement's own `ON DENY` override. Set only for the one
+        /// statement a wrapper holds. The transport reads the clause of a
+        /// request of one statement off its whole text.
+        on_deny: Option<DenyMode>,
     },
     /// Several statements. Each plans alone through the request planner.
     Several(Vec<String>),
@@ -62,6 +68,7 @@ impl RequestText {
         Ok(Self::Whole {
             sql,
             returning_items,
+            on_deny: None,
         })
     }
 
@@ -101,16 +108,19 @@ impl RequestText {
     }
 
     /// The text of the statements inside a wrapper. One statement plans
-    /// whole, as a request of one statement. None plans no task.
+    /// whole, as a request of one statement, under its own `ON DENY`
+    /// clause. None plans no task.
     fn inner(mut statements: Vec<String>) -> crate::Result<Self> {
         if statements.len() != 1 {
             return Ok(Self::Several(statements));
         }
         let statement = statements.pop().unwrap_or_default();
+        let (statement, on_deny) = extract_on_deny(&statement);
         let (sql, returning_items) = strip_returning(&statement)?;
         Ok(Self::Whole {
             sql,
             returning_items,
+            on_deny,
         })
     }
 
@@ -127,7 +137,20 @@ impl RequestText {
             Self::Whole {
                 sql,
                 returning_items,
+                on_deny,
             } => {
+                let statement_auth;
+                let statement_security;
+                let security = match on_deny {
+                    Some(mode) => {
+                        let mut auth = security.auth.clone();
+                        auth.on_deny_override = Some(mode);
+                        statement_auth = auth;
+                        statement_security = security.with_auth(&statement_auth);
+                        &statement_security
+                    }
+                    None => security,
+                };
                 let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
                     .plan_sql_with_rls_and_versions(
                         &sql,
@@ -250,6 +273,7 @@ mod tests {
         let RequestText::Whole {
             sql,
             returning_items,
+            ..
         } = text
         else {
             panic!("one statement must plan whole");
@@ -319,6 +343,7 @@ mod tests {
         let RequestText::Whole {
             sql,
             returning_items,
+            ..
         } = text
         else {
             panic!("one inner statement must plan whole");
@@ -358,6 +383,33 @@ mod tests {
             let detail = sqlstate_0a000(RequestText::split_with_wrapper(sql, true));
             assert!(detail.contains(needle), "{sql}: {detail}");
         }
+    }
+
+    /// The one statement a wrapper holds reads its own `ON DENY` clause.
+    #[test]
+    fn one_inner_statement_reads_its_own_on_deny() {
+        let (text, _) =
+            RequestText::split_with_wrapper("BEGIN; SELECT id FROM a ON DENY SILENT; COMMIT", true)
+                .expect("the wrapper is accepted");
+        let RequestText::Whole { sql, on_deny, .. } = text else {
+            panic!("one inner statement must plan whole");
+        };
+        assert_eq!(sql.trim(), "SELECT id FROM a");
+        assert!(matches!(on_deny, Some(DenyMode::Silent)));
+    }
+
+    /// A text of several statements keeps every clause for the request
+    /// planner. Read off the joined text, the clause of statement 1
+    /// swallows statement 2.
+    #[test]
+    fn a_text_of_several_statements_keeps_its_on_deny_clauses() {
+        let sql = "SELECT id FROM a ON DENY ERROR 'X' MESSAGE 'no'; SELECT id FROM b";
+        let (text, mode) = extract_on_deny(sql);
+        assert_eq!(text, sql);
+        assert!(mode.is_none());
+        let (one, mode) = extract_on_deny("SELECT id FROM a ON DENY SILENT");
+        assert_eq!(one, "SELECT id FROM a");
+        assert!(matches!(mode, Some(DenyMode::Silent)));
     }
 
     /// Off, the wrapper splits into every statement. The planner refuses it.

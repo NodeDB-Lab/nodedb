@@ -14,6 +14,7 @@ use super::QueryContext;
 use crate::control::planner::context::security::PlanSecurityContext;
 use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::session_auth::extract_on_deny;
 use crate::control::server::shared::ddl::neutral::router;
 use crate::control::server::shared::returning::strip_returning;
 use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
@@ -38,6 +39,8 @@ impl QueryContext {
     /// set.
     ///
     /// `statements` is the request text split at top-level semicolons.
+    /// In a request of several statements, statement `k` reads its own
+    /// `ON DENY` clause and plans under that override alone.
     /// Statement `k` splits off its own `RETURNING` clause. It then plans
     /// through [`Self::plan_sql_with_rls_and_versions`], the single-statement
     /// path. So its tasks take that path's row filters, policy checks,
@@ -73,9 +76,28 @@ impl QueryContext {
             let map_index = statement_index(index)?;
             let in_statement =
                 |error: crate::Error| RequestError::in_statement(error, index, count);
+            // Read this statement's own `ON DENY` clause. A request of one
+            // statement had its clause read off the whole text already.
+            let (statement, on_deny) = if count > 1 {
+                extract_on_deny(statement)
+            } else {
+                (statement.clone(), None)
+            };
+            let statement_auth;
+            let statement_sec;
+            let sec = match on_deny {
+                Some(mode) => {
+                    let mut auth = sec.auth.clone();
+                    auth.on_deny_override = Some(mode);
+                    statement_auth = auth;
+                    statement_sec = sec.with_auth(&statement_auth);
+                    &statement_sec
+                }
+                None => sec,
+            };
             // Split off this statement alone. A clause split off the joined
             // text swallows every later statement into its item list.
-            let (sql, returning_items) = strip_returning(statement).map_err(in_statement)?;
+            let (sql, returning_items) = strip_returning(&statement).map_err(in_statement)?;
             let (statement_tasks, output_schema, statement_versions, eligibility) = self
                 .plan_sql_with_rls_and_versions(
                     &sql,

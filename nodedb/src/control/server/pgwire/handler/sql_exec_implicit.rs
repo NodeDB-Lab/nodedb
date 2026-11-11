@@ -4,7 +4,9 @@
 //!
 //! Rules:
 //! - The implicit block opens lazily at the first statement that is not a read.
-//!   A read is a statement whose first word is `SELECT` or `SHOW`.
+//!   A read is a statement whose first word is `SELECT`, `SHOW`, `VALUES` or `TABLE`.
+//!   A `WITH` or `EXPLAIN` statement is a read when no write verb sits outside its literals.
+//!   A request of reads alone opens no block, so it never ends in a commit-time 40001.
 //! - It opens only while the session is `Idle`. An explicit block buffers the statements itself.
 //! - A `BEGIN` inside the implicit block turns it into the explicit block.
 //! - A `COMMIT` or `ROLLBACK` ends it. The next statement that is not a read opens a new one.
@@ -15,7 +17,7 @@
 //! The block opens and ends through the BEGIN, COMMIT and ROLLBACK adapters.
 //! So DDL buffers in the block, and a command that refuses a block answers 25001.
 
-use nodedb_sql::parser::preprocess::lex::first_sql_word;
+use nodedb_sql::parser::preprocess::lex::{first_sql_word, keyword_position_outside_literals};
 use pgwire::api::portal::Format;
 use pgwire::api::results::Response;
 use pgwire::error::PgWireResult;
@@ -29,7 +31,16 @@ use crate::control::server::shared::txn_control::{
 };
 
 /// First words of a statement that runs before the implicit block opens.
-const READ_HEADS: &[&str] = &["SELECT", "SHOW"];
+const READ_HEADS: &[&str] = &["SELECT", "SHOW", "VALUES", "TABLE"];
+
+/// First words of a statement that is a read only when it holds no write verb.
+const READ_WRAPPER_HEADS: &[&str] = &["WITH", "EXPLAIN"];
+
+/// Verbs that make a `WITH` or `EXPLAIN` statement a write.
+///
+/// The check is word-based. An identifier spelled as a verb opens the block, which costs a commit
+/// and never skips one.
+const WRITE_VERBS: &[&str] = &["INSERT", "UPSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE"];
 
 /// First words of a transaction-control statement.
 ///
@@ -123,7 +134,21 @@ fn opens_implicit_block(statement: &str) -> bool {
         return false;
     };
     let head = head.to_ascii_uppercase();
-    !READ_HEADS.contains(&head.as_str()) && !TRANSACTION_CONTROL_HEADS.contains(&head.as_str())
+    let head = head.as_str();
+    if READ_HEADS.contains(&head) || TRANSACTION_CONTROL_HEADS.contains(&head) {
+        return false;
+    }
+    if READ_WRAPPER_HEADS.contains(&head) {
+        return holds_write_verb(statement);
+    }
+    true
+}
+
+/// Whether a write verb sits outside the literals of `statement`.
+fn holds_write_verb(statement: &str) -> bool {
+    WRITE_VERBS
+        .iter()
+        .any(|verb| keyword_position_outside_literals(statement, verb).is_some())
 }
 
 #[cfg(test)]
@@ -152,8 +177,26 @@ mod tests {
             "select(1)",
             "  -- c\n SELECT 2",
             "SHOW client_encoding",
+            "VALUES (1), (2)",
+            "TABLE t",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "with x as (select 'insert into t' AS s) select s from x",
+            "EXPLAIN SELECT * FROM t",
         ] {
             assert!(!opens_implicit_block(sql), "{sql} must not open the block");
+        }
+    }
+
+    /// A `WITH` or `EXPLAIN` statement that holds a write verb opens the block.
+    #[test]
+    fn a_wrapped_write_opens_the_block() {
+        for sql in [
+            "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x",
+            "with x as (select 1) update t set v = 1",
+            "EXPLAIN ANALYZE INSERT INTO t (id) VALUES ('a')",
+            "WITH x AS (SELECT 1) MERGE INTO t USING x ON true WHEN MATCHED THEN DELETE",
+        ] {
+            assert!(opens_implicit_block(sql), "{sql} must open the block");
         }
     }
 

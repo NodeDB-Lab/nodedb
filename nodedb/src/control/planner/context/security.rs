@@ -23,6 +23,26 @@ pub struct PlanSecurityContext<'a> {
     pub permission_tree: PermissionTreeSource<'a>,
 }
 
+impl PlanSecurityContext<'_> {
+    /// This context with `auth` in place of its own auth context. A request
+    /// of several statements plans each statement under its own `ON DENY`
+    /// override this way.
+    pub fn with_auth<'b>(
+        &'b self,
+        auth: &'b crate::control::security::auth_context::AuthContext,
+    ) -> PlanSecurityContext<'b> {
+        PlanSecurityContext {
+            identity: self.identity,
+            auth,
+            rls_store: self.rls_store,
+            redaction_store: self.redaction_store,
+            permissions: self.permissions,
+            roles: self.roles,
+            permission_tree: self.permission_tree,
+        }
+    }
+}
+
 /// Where planning reads the permission tree cache for hierarchical ACL
 /// injection.
 #[derive(Clone, Copy)]

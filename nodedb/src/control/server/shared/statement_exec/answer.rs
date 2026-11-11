@@ -262,6 +262,9 @@ pub(crate) struct RequestFold {
     folds: Vec<StatementFold>,
     /// The statement of each task, in task order.
     task_statements: Vec<usize>,
+    /// The index of each statement's last task, in statement order. `None`
+    /// for a statement that planned no task.
+    last_tasks: Vec<Option<usize>>,
     /// The watermark of the last task the request dispatched.
     pub(crate) last_lsn: u64,
 }
@@ -293,12 +296,43 @@ impl RequestFold {
             .into_iter()
             .enumerate()
             .map(|(index, plans)| StatementFold::for_plans(index, plans))
-            .collect();
+            .collect::<Vec<_>>();
+        let mut last_tasks = vec![None; folds.len()];
+        for (task, &statement) in groups.task_statements.iter().enumerate() {
+            if let Some(last) = last_tasks.get_mut(statement) {
+                *last = Some(task);
+            }
+        }
         Ok(Self {
             folds,
             task_statements: groups.task_statements,
+            last_tasks,
             last_lsn: 0,
         })
+    }
+
+    /// The number of statements the request holds.
+    pub(crate) fn statement_count(&self) -> usize {
+        self.folds.len()
+    }
+
+    /// The statement task `task` belongs to, or `None` for a task past the
+    /// end.
+    pub(crate) fn statement_of_task(&self, task: usize) -> Option<usize> {
+        self.task_statements.get(task).copied()
+    }
+
+    /// The statement whose last task is `task`, or `None` when the
+    /// statement of `task` has later tasks.
+    ///
+    /// A derived task sits at the end of the task set. So a statement with a
+    /// derived task ends after every statement planned after it.
+    pub(crate) fn statement_ending_at(&self, task: usize) -> Option<usize> {
+        let statement = self.statement_of_task(task)?;
+        match self.last_tasks.get(statement) {
+            Some(Some(last)) if *last == task => Some(statement),
+            _ => None,
+        }
     }
 
     /// The fold of the statement task `task` belongs to.

@@ -91,7 +91,10 @@ pub(crate) struct PlannedStatement {
 /// its command tag. A count-bearing task contributes its reported count and
 /// verb. An opaque task contributes nothing: a buffered write, index or
 /// graph maintenance, a computed-value payload, a derived balance or edge
-/// write. Neither is ever synthesised from the task count.
+/// write. Neither is ever synthesised from the task count. Each statement's
+/// statement triggers fire once, after that statement's last task. A
+/// statement's derived tasks sit at the end of the set, so its triggers fire
+/// after every later statement's tasks.
 ///
 /// In a request of several statements, an error names the statement that
 /// raised it.
@@ -123,14 +126,26 @@ pub(crate) async fn run_statement_loop(
         lease_scope: &plan_lease_scope,
         fire_triggers: true,
     });
-    let mut statement_events = StatementEvents::default();
+    // One event set per statement: each statement fires its own SYNC AFTER
+    // STATEMENT bodies once, after its own last task.
+    let mut statement_events: Vec<StatementEvents> = (0..request.statement_count())
+        .map(|_| StatementEvents::default())
+        .collect();
 
     for (index, task) in tasks.into_iter().enumerate() {
+        let Some(events) = request
+            .statement_of_task(index)
+            .and_then(|statement| statement_events.get_mut(statement))
+        else {
+            return Err(StatementError::Error(crate::Error::Internal {
+                detail: format!("task {index} has no statement event set"),
+            }));
+        };
         let ran = run_task(
             exec,
             txn,
             route_ctx.as_ref(),
-            &mut statement_events,
+            events,
             &mut request,
             index,
             task,
@@ -139,13 +154,15 @@ pub(crate) async fn run_statement_loop(
         if let Err(error) = ran {
             return Err(request.in_statement(index, error));
         }
-    }
-
-    if let Some(route) = route_ctx.as_ref() {
-        statement_events
-            .fire(route)
-            .await
-            .map_err(StatementError::Error)?;
+        if let Some(route) = route_ctx.as_ref()
+            && let Some(ended) = request.statement_ending_at(index)
+            && let Some(events) = statement_events.get_mut(ended)
+        {
+            let fired = std::mem::take(events).fire(route).await;
+            if let Err(error) = fired {
+                return Err(request.in_statement(index, StatementError::Error(error)));
+            }
+        }
     }
 
     Ok(request.finish())
@@ -153,7 +170,8 @@ pub(crate) async fn run_statement_loop(
 
 /// Run task `index` of a request and fold its answer into the fold of its
 /// statement. `route_ctx` is the request's transaction route, `None` for an
-/// autocommit request.
+/// autocommit request. `statement_events` is the event set of the task's
+/// statement.
 async fn run_task(
     exec: &StatementExec<'_>,
     txn: Option<&DmlTxnCtx<'_>>,
