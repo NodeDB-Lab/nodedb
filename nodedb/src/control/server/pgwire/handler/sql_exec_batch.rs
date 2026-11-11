@@ -5,6 +5,7 @@
 //! A simple query of several statements stops at the first error. The client reads
 //! the responses of the earlier statements, then the ErrorResponse of the failed one,
 //! as PostgreSQL does. Statements after the failed one do not run.
+//! A simple query of several statements runs in an implicit transaction: see `sql_exec_implicit.rs`.
 
 use pgwire::api::portal::Format;
 use pgwire::api::results::Response;
@@ -37,7 +38,7 @@ impl NodeDbPgHandler {
         requested: &Format,
     ) -> PgWireResult<Vec<Response>> {
         let (all, outcome) = self
-            .execute_statements(identity, session_id, sql, requested)
+            .execute_statements(identity, session_id, sql, requested, false)
             .await;
         outcome.map(|()| all)
     }
@@ -46,6 +47,7 @@ impl NodeDbPgHandler {
     ///
     /// An error at statement k answers the responses of statements 1 to k-1, then the error.
     /// See [`answer_after_error`] for the cases that return the error alone.
+    /// A query of several statements runs in an implicit transaction block.
     pub(super) async fn execute_simple_query(
         &self,
         identity: &AuthenticatedIdentity,
@@ -54,7 +56,7 @@ impl NodeDbPgHandler {
         requested: &Format,
     ) -> PgWireResult<Vec<Response>> {
         let (all, outcome) = self
-            .execute_statements(identity, session_id, sql, requested)
+            .execute_statements(identity, session_id, sql, requested, true)
             .await;
         answer_after_error(all, outcome)
     }
@@ -63,16 +65,25 @@ impl NodeDbPgHandler {
     ///
     /// Returns the responses of the statements that ran, and the error of the
     /// statement that stopped the loop.
+    ///
+    /// With `implicit_block`, two or more statements run through
+    /// [`Self::execute_statements_implicit`]. One statement runs alone in every mode.
     async fn execute_statements(
         &self,
         identity: &AuthenticatedIdentity,
         session_id: SessionId,
         sql: &str,
         requested: &Format,
+        implicit_block: bool,
     ) -> (Vec<Response>, PgWireResult<()>) {
         let statements = split_sql_statements(sql);
         if statements.is_empty() {
             return (vec![Response::EmptyQuery], Ok(()));
+        }
+        if implicit_block && statements.len() > 1 {
+            return self
+                .execute_statements_implicit(identity, session_id, statements, requested)
+                .await;
         }
         let mut all = Vec::new();
         for stmt in statements {
