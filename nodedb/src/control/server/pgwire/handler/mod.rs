@@ -22,6 +22,7 @@ mod session_explain;
 mod session_show;
 pub(in crate::control::server::pgwire) mod shape_encode;
 mod sql_exec;
+mod sql_exec_batch;
 mod sql_prepared;
 mod stream_response;
 mod submit;

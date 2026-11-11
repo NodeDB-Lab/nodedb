@@ -94,10 +94,11 @@ impl SimpleQueryHandler for NodeDbPgHandler {
                 .await;
         }
 
-        // `execute_sql` installs the DDL audit context of each statement the
-        // message splits into.
+        // `execute_simple_query` installs the DDL audit context of each
+        // statement the message splits into. An error after earlier
+        // statements answers their responses, then the ErrorResponse.
         let result = self
-            .execute_sql(&identity, session_id, query, &TEXT_RESULTS)
+            .execute_simple_query(&identity, session_id, query, &TEXT_RESULTS)
             .await;
 
         // Drain queued NOTICE messages emitted by response shapers (e.g.
