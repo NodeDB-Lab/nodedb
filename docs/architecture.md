@@ -76,6 +76,68 @@ nodedb-client / nodedb-lite-ffi / nodedb-lite-wasm
 
 SDKs support **both modes** on the same connection. Use SQL for complex queries and rapid prototyping (`client.sql("SELECT ...")`). Use native methods for hot-path CRUD and high-throughput ingest (`client.get()`, `client.put()`, `client.vector_search()`) where parsing overhead matters.
 
+## Request model
+
+A request is the SQL text of one call. It holds zero, one, or several statements. Each transport splits the text once at the entry. Each statement of the split holds its text and its start offset. `select_route` reads the statements and the transport policy, then returns one route. Every transport matches the same route.
+
+### Routes
+
+| Route | Runs when | Path |
+|---|---|---|
+| `Lone` | The request holds zero or one statement. | The DDL router first. Then the whole text plans through the single-statement path. |
+| `Sequential` | The request holds two or more statements. At least one is DDL or a statement the DDL router runs. None is transaction control, `SET`, `RESET`, or a `SHOW` the router does not run. | The sequential runner. |
+| `OneSet` | The request holds two or more statements and the sequential gate declines it. | The per-statement planner joins the plans into one task set. |
+| `Wrapper` | A transport with no session gets `BEGIN; ..; COMMIT` or `BEGIN; ..; ROLLBACK` around the whole request, and the wrapper config is on. | The inner statements run as `OneSet`. A rollback wrapper plans and checks the statements, then applies nothing. |
+| `WrapperRefused` | The wrapper config is on and the request holds transaction control in any other place. | Admission answers SQLSTATE `0A000`. |
+| `TransactionControl` | The native transport gets two or more statements, one of them transaction control, and the native config is on. | Each statement runs under PostgreSQL rules on the session. |
+
+The checks run in this order: fewer than two statements, `TransactionControl`, `Sequential`, the wrapper shapes, then `OneSet`. The sequential gate declines every request that holds transaction control, so the checks never overlap.
+
+### Paths
+
+| Path | What it does | Where each statement plans |
+|---|---|---|
+| Per-statement planner | Plans each statement alone and joins the task lists in statement order. A statement map records the statement of each task. | Against the committed catalog. A later statement never sees what an earlier one changes. |
+| One-set path | Runs admission once over the joined set: authorization, CHECK and enum labels, implicit edges, materialized-sum targets, leases. Then one atomic route dispatches the set. | The committed catalog. |
+| Sequential runner | Opens one transaction. Runs each statement in order. A statement the DDL router takes runs through the router. Any other statement plans after the statement before it ran. The first error rolls back the transaction. | The catalog overlay of the transaction, so a later statement sees earlier DDL. |
+
+A one-statement request never leaves the `Lone` path.
+
+Every route answers one reply per request: the rows of every statement in statement order and one summed tag. pgwire answers one tag per statement.
+
+### Transport policy
+
+| Transport | Wrapper config | Native config |
+|---|---|---|
+| HTTP `/v1/query`, NDJSON, WebSocket RPC | `txn_wrapper_stateless` | Not read. |
+| Native | Not read. | `txn_control_native` |
+
+### Refusals of a request of several statements
+
+| Refusal | SQLSTATE | Cause |
+|---|---|---|
+| Transaction control, `SET`, `RESET`, an unclaimed `SHOW`, or a wrapper request beside DML in a request the gate declines | `0A000` | The one-set path plans DML and queries only. Native runs the `TransactionControl` route when its config is on. |
+| A statement the DDL router takes, in a request the gate declines | `0A000` | The one-set planner skips the router steps. |
+| Transaction control in a place the wrapper does not accept | `0A000` | A stateless transport has no session. |
+| Several RETURNING statements in a Calvin-routed request | `0A000` | The Calvin reply holds one RETURNING set. |
+| A command that refuses a transaction block, on the sequential route | `25001` | The sequential runner runs every statement in one transaction. |
+
+### Code
+
+| Part | File |
+|---|---|
+| Splitter and `Statement` | `nodedb/src/control/server/shared/sql_split.rs` |
+| `select_route`, `RequestRoute`, `RequestPolicy` | `nodedb/src/control/server/shared/request_route.rs` |
+| Sequential gate and runner | `nodedb/src/control/server/shared/statement_exec/sequential.rs` |
+| Admission and its route input | `nodedb/src/control/server/shared/plan_admission.rs` |
+| Request text per route | `nodedb/src/control/server/shared/plan_admission_request.rs` |
+| Per-statement planner and solo-statement refusals | `nodedb/src/control/planner/context/query/planning_request.rs` |
+| Wrapper shapes | `nodedb/src/control/server/shared/txn_control/wrapper.rs` |
+| HTTP, NDJSON and WebSocket RPC routes | `nodedb/src/control/server/http/routes/query/materialized/request.rs`, `query/ndjson.rs`, `ws_rpc/execute_sql.rs` |
+| Native routes | `nodedb/src/control/server/native/dispatch/sql.rs`, `sql_sequential.rs`, `sql_txn_request.rs`, `sql_planned.rs` |
+
+The pgwire transport keeps its own statement loop. See `nodedb/src/control/server/pgwire/handler/sql_exec_batch.rs`.
+
 ## Storage Tiers
 
 NodeDB uses tiered storage to match data temperature to the right medium:

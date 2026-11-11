@@ -19,6 +19,7 @@ use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::types::FoldedTag;
 use crate::control::server::shared::session::DetachedTxnScope;
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::statement_exec::{
     AtomicRoute, AtomicStatement, RequestError, SequentialRequest, StatementAnswer, StatementExec,
     calvin_answer, route_atomic_statement, run_sequential_request,
@@ -71,8 +72,8 @@ pub(super) struct HttpSequential<'a> {
     pub(super) trace_id: TraceId,
 }
 
-/// Run a request `sequential_gate` accepted through the sequential request
-/// runner, on a private implicit transaction, and answer it as JSON rows.
+/// Run a request routed `RequestRoute::Sequential` through the sequential
+/// request runner, on a private implicit transaction, and answer it as JSON rows.
 ///
 /// These routes carry no session, so the transaction is never the client's
 /// block. The rows are the sum of every statement's answer, as
@@ -80,7 +81,7 @@ pub(super) struct HttpSequential<'a> {
 /// stopped.
 pub(super) async fn run_http_sequential(
     run: &HttpSequential<'_>,
-    statements: &[String],
+    statements: &[Statement],
 ) -> Result<Vec<serde_json::Value>, RequestError> {
     let tenant_id = run.identity.tenant_id;
     let _request = run.state.tenant_request_guard(tenant_id);

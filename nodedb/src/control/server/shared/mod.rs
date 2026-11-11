@@ -16,6 +16,7 @@ pub mod plan_util;
 pub mod planning_overrides;
 pub mod quota_admission;
 pub(crate) mod request_collection;
+pub mod request_route;
 pub mod response_payload;
 pub mod retry;
 pub mod returning;

@@ -3,9 +3,16 @@
 use super::{ddl_part, sequential_gate};
 use crate::control::server::response_shape::types::{DmlOutcome, FoldedTag};
 use crate::control::server::shared::ddl::DdlResult;
+use crate::control::server::shared::sql_split::Statement;
 
-fn request(statements: &[&str]) -> Vec<String> {
-    statements.iter().map(|s| (*s).to_owned()).collect()
+fn request(statements: &[&str]) -> Vec<Statement> {
+    statements
+        .iter()
+        .map(|text| Statement {
+            text: (*text).to_owned(),
+            start: 0,
+        })
+        .collect()
 }
 
 const INSERT: &str = "INSERT INTO docs (id, v) VALUES ('a', 'b')";

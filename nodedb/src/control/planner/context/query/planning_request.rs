@@ -56,9 +56,10 @@ impl QueryContext {
     /// of one statement is never refused here. A request of no statement
     /// plans no task.
     ///
-    /// The transports send a request that `sequential_gate` accepts to the
-    /// sequential request runner, so it never reaches this planner. Only a
-    /// request the gate declines takes the refusal.
+    /// The transports send a request that `select_route` routes to
+    /// `RequestRoute::Sequential` to the sequential request runner, so it
+    /// never reaches this planner. Only a request the gate declines takes the
+    /// refusal.
     ///
     /// A plan error of statement `k` in a request of several statements
     /// carries `k`.

@@ -31,7 +31,9 @@ use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
 use crate::control::server::shared::plan_admission_request::{PlannedRequest, RequestText};
+use crate::control::server::shared::request_route::RequestRoute;
 use crate::control::server::shared::retry::retry_on_schema_change;
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 use crate::control::state::SharedState;
 use crate::types::TraceId;
@@ -93,12 +95,13 @@ pub struct PlanAdmissionRequest<'a> {
     /// `RETURNING` clause stays in the text: admission splits it off and
     /// plans it.
     pub sql: &'a str,
+    /// `sql` split once by the transport. Admission never splits again.
+    pub statements: &'a [Statement],
+    /// The route `select_route` picked for `statements`. A transport with no
+    /// session selects it with the stateless wrapper policy. A route of
+    /// `WrapperRefused` answers 0A000. See `RequestText::for_route`.
+    pub route: RequestRoute,
     pub trace_id: TraceId,
-    /// Accept a `BEGIN` that opens and a `COMMIT` or `ROLLBACK` that ends a
-    /// request of several statements. A transport with no session passes
-    /// its `[server.sql]` switch. `false` refuses transaction control beside
-    /// other statements with 0A000. See `RequestText::split_with_wrapper`.
-    pub txn_wrapper: bool,
 }
 
 /// Plan `sql`, authorize it, expand implicit graph edges, authorize the expanded
@@ -161,7 +164,8 @@ async fn plan_authorize_and_admit_once(
     let auth_ctx = request.scope.auth();
     // A text of one statement plans whole, as one statement. A text of
     // several plans each statement alone. Each splits off its own `RETURNING`.
-    let (text, rolls_back) = RequestText::split_with_wrapper(request.sql, request.txn_wrapper)?;
+    let (text, rolls_back) =
+        RequestText::for_route(request.sql, request.statements, request.route)?;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;

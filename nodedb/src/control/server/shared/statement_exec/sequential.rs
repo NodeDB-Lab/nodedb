@@ -3,8 +3,8 @@
 //! The sequential request runner: the statements of one request run in
 //! order inside one transaction.
 //!
-//! [`sequential_gate`] picks the requests it runs. Each transport calls the
-//! gate on the split request text, so the transports cannot drift.
+//! [`sequential_gate`] picks the requests it runs. `select_route` calls the
+//! gate, so the transports cannot drift.
 //!
 //! [`run_sequential_request`] opens the request's transaction, then runs
 //! each statement on it in order:
@@ -39,8 +39,10 @@ use crate::control::server::shared::ddl::neutral::router;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit_in_txn,
 };
+use crate::control::server::shared::request_route::{RequestPolicy, select_route};
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::session::audit_context::AuditScope;
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::trigger::statement_txn::{in_block, with_statement_txn_lifted};
 use crate::types::TraceId;
 
@@ -57,16 +59,16 @@ use super::task_loop::{PlannedStatement, StatementExec, run_statement_loop};
 /// run. The runner cannot run transaction control, `SET`, `RESET`, or a
 /// `SHOW` the router does not take. A request the gate declines takes the
 /// one-set planner and its refusals.
-pub(crate) fn sequential_gate(statements: &[String]) -> bool {
+pub(crate) fn sequential_gate(statements: &[Statement]) -> bool {
     if statements.len() < 2 {
         return false;
     }
     let mut sequential = false;
     for statement in statements {
-        match solo_kind(statement) {
+        match solo_kind(&statement.text) {
             None => {}
             Some(SoloKind::Ddl | SoloKind::Routed) => sequential = true,
-            Some(SoloKind::SessionCommand) if is_routed_show(statement) => {
+            Some(SoloKind::SessionCommand) if is_routed_show(&statement.text) => {
                 sequential = true;
             }
             Some(SoloKind::SessionCommand | SoloKind::TransactionControl) => return false,
@@ -87,8 +89,9 @@ pub(crate) struct SequentialRequest<'a> {
     /// shapes against the schemas it plans.
     pub(crate) exec: &'a StatementExec<'a>,
     pub(crate) query_ctx: &'a QueryContext,
-    /// The request text split at top-level semicolons.
-    pub(crate) statements: &'a [String],
+    /// The request text split at top-level semicolons, split once by the
+    /// transport.
+    pub(crate) statements: &'a [Statement],
     pub(crate) trace_id: TraceId,
 }
 
@@ -139,10 +142,11 @@ pub(crate) async fn run_sequential_request(
 /// last dispatched task, `0` when it dispatched none.
 async fn run_statement(
     request: &SequentialRequest<'_>,
-    statement: &str,
+    carried: &Statement,
     txn: &DmlTxnCtx<'_>,
 ) -> Result<(StatementPart, u64), RequestError> {
     let base = request.exec;
+    let statement = carried.text.as_str();
     // Each statement's DDL proposals carry that statement's own text.
     let _audit = AuditScope::statement(base.identity, statement);
 
@@ -162,6 +166,8 @@ async fn run_statement(
 
     // The statement reads its own `ON DENY` clause and plans under it alone.
     let (sql, scope) = apply_per_query_on_deny(statement, base.scope.clone());
+    // The statement plans alone, as a request of one statement.
+    let alone = std::slice::from_ref(carried);
     // Planned after the statement before it ran: the catalog overlay shows
     // this transaction's DDL, and derived writes read its staged rows.
     let admission = plan_authorize_and_admit_in_txn(
@@ -170,8 +176,9 @@ async fn run_statement(
             query_ctx: request.query_ctx,
             scope: &scope,
             sql: &sql,
+            statements: alone,
+            route: select_route(alone, RequestPolicy::NONE),
             trace_id: request.trace_id,
-            txn_wrapper: false,
         },
         txn.sessions.tx_id(txn.session_id),
     )

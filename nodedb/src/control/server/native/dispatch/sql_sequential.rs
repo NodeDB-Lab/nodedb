@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A native request that `sequential_gate` accepts: its statements run in
+//! A native request routed `RequestRoute::Sequential`: its statements run in
 //! order through the sequential request runner.
 
 use nodedb_types::protocol::NativeResponse;
 
 use crate::control::server::shared::session::DmlTxnCtx;
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::statement_exec::{
     RequestAnswer, SequentialRequest, StatementError, StatementExec, run_sequential_request,
 };
@@ -26,7 +27,7 @@ use super::{DispatchCtx, error_to_native};
 pub(super) async fn run_native_sequential(
     ctx: &DispatchCtx<'_>,
     seq: u64,
-    statements: &[String],
+    statements: &[Statement],
     database_id: DatabaseId,
 ) -> NativeResponse {
     if let Err(error) = ctx.state.check_tenant_quota(ctx.tenant_id()) {

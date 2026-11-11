@@ -28,45 +28,32 @@ use nodedb_types::protocol::{NativeResponse, ResponseStatus};
 use crate::control::server::response_shape::types::DmlOutcome;
 use crate::control::server::response_shape::types::dml_outcome::MIXED_VERB;
 use crate::control::server::shared::session::TransactionState;
-use crate::control::server::shared::sql_split::split_sql_statements;
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::txn_control::{TxnControl, classify};
 
 use super::DispatchCtx;
 use super::sql::{dispatch_statement, handle_txn_control};
 use super::transaction::{handle_begin, handle_commit, handle_rollback};
 
-/// The statements of `sql` when it holds two or more and at least one is
-/// transaction control. `None` sends the text down the plain path.
-pub(super) fn txn_control_statements(sql: &str) -> Option<Vec<String>> {
-    let statements = split_sql_statements(sql);
-    if statements.len() < 2 {
-        return None;
-    }
-    statements
-        .iter()
-        .any(|statement| classify(statement).is_some())
-        .then_some(statements)
-}
-
 /// Run `statements` in order on the session of `ctx` under PostgreSQL rules.
 pub(super) async fn run_txn_control_request(
     ctx: &DispatchCtx<'_>,
     seq: u64,
-    statements: &[String],
+    statements: &[Statement],
 ) -> NativeResponse {
     let mut implicit: Vec<&str> = Vec::new();
     let mut fold = NativeFold::default();
     let mut last = NativeResponse::ok(seq);
     for statement in statements {
-        let answer = match classify(statement) {
+        let answer = match classify(&statement.text) {
             Some(control) => run_control(ctx, seq, control, &mut implicit, &mut fold).await,
             None if in_block(ctx) => {
-                let answer = run_alone(ctx, seq, statement).await;
+                let answer = run_alone(ctx, seq, &statement.text).await;
                 fold.add(&answer);
                 answer
             }
             None => {
-                implicit.push(statement.as_str());
+                implicit.push(statement.text.as_str());
                 continue;
             }
         };
@@ -250,39 +237,7 @@ mod tests {
     use nodedb_types::protocol::NativeResponse;
     use nodedb_types::value::Value;
 
-    use super::{NativeFold, txn_control_statements};
-
-    #[test]
-    fn a_request_of_one_statement_takes_the_plain_path() {
-        assert_eq!(txn_control_statements("BEGIN"), None);
-        assert_eq!(txn_control_statements("BEGIN;"), None);
-        assert_eq!(
-            txn_control_statements("INSERT INTO t (id) VALUES ('a')"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_request_with_no_transaction_control_takes_the_plain_path() {
-        assert_eq!(txn_control_statements("SELECT 1; SELECT 2"), None);
-        assert_eq!(txn_control_statements("SET x = 1; SELECT 2"), None);
-    }
-
-    #[test]
-    fn a_request_with_transaction_control_splits_into_its_statements() {
-        assert_eq!(
-            txn_control_statements("BEGIN; SELECT 1; COMMIT"),
-            Some(vec!["BEGIN".into(), "SELECT 1".into(), "COMMIT".into()])
-        );
-        assert_eq!(
-            txn_control_statements("SELECT 1; COMMIT; SELECT 2"),
-            Some(vec!["SELECT 1".into(), "COMMIT".into(), "SELECT 2".into()])
-        );
-        assert_eq!(
-            txn_control_statements("SAVEPOINT s; SELECT 1"),
-            Some(vec!["SAVEPOINT s".into(), "SELECT 1".into()])
-        );
-    }
+    use super::NativeFold;
 
     fn write(verb: &str, affected: u64) -> NativeResponse {
         let mut r = NativeResponse::ok(7);

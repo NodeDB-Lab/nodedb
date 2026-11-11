@@ -17,11 +17,10 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
 use crate::control::server::shared::session::{read_consistency, read_scope};
-use crate::control::server::shared::sql_split::split_sql_statements;
-use crate::control::server::shared::statement_exec::{
-    AtomicStatement, StatementAt, StatementExec, sequential_gate,
-};
+use crate::control::server::shared::sql_split::split_statements;
+use crate::control::server::shared::statement_exec::{AtomicStatement, StatementAt, StatementExec};
 
 use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve_auth_parts};
 use super::super::super::peer::PeerAddr;
@@ -135,8 +134,12 @@ async fn ndjson_at_consistency(
     // A request of several statements that holds DDL or a statement the DDL
     // router runs takes the sequential request runner. It answers one
     // materialized body, as any request of several statements does.
-    let statements = split_sql_statements(sql);
-    if sequential_gate(&statements) {
+    let statements = split_statements(sql);
+    let route = select_route(
+        &statements,
+        RequestPolicy::stateless(&state.shared.sql_policy),
+    );
+    if route == RequestRoute::Sequential {
         let run = HttpSequential {
             state: &state.shared,
             identity: &identity,
@@ -162,8 +165,9 @@ async fn ndjson_at_consistency(
         query_ctx,
         scope: &scope,
         sql,
+        statements: &statements,
+        route,
         trace_id: crate::types::TraceId::ZERO,
-        txn_wrapper: state.shared.sql_policy.txn_wrapper_stateless,
     })
     .await
     {

@@ -16,10 +16,10 @@ use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::security::deny::DenyMode;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::session_auth::extract_on_deny;
+use crate::control::server::shared::request_route::RequestRoute;
 use crate::control::server::shared::returning::strip_returning;
-use crate::control::server::shared::sql_split::split_sql_statements;
+use crate::control::server::shared::sql_split::{Statement, statement_texts};
 use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
-use crate::control::server::shared::txn_control::{TxnWrapper, classify_txn_wrapper};
 use crate::types::{DatabaseId, TenantId};
 
 /// The planned task set of one request, before authorization.
@@ -52,18 +52,14 @@ pub(super) enum RequestText {
 }
 
 impl RequestText {
-    /// Split `sql` at top-level semicolons.
+    /// The text of a request of one statement, or none.
     ///
     /// The planner does not parse a DML `RETURNING` clause. A text of one
     /// statement splits its clause off here. The item text resolves inside
     /// the planner against the planned target. A statement planned with the
     /// clause in its text drops it and answers a count with no rows.
     /// The request planner splits each statement's clause off on its own.
-    pub(super) fn split(sql: &str) -> crate::Result<Self> {
-        let statements = split_sql_statements(sql);
-        if statements.len() > 1 {
-            return Ok(Self::Several(statements));
-        }
+    fn whole(sql: &str) -> crate::Result<Self> {
         let (sql, returning_items) = strip_returning(sql)?;
         Ok(Self::Whole {
             sql,
@@ -72,37 +68,37 @@ impl RequestText {
         })
     }
 
-    /// [`Self::split`] under the whole-request transaction wrapper policy.
+    /// The text of the request `sql` for `route`. `statements` is `sql`
+    /// split once by the transport. The route comes from `select_route`.
     ///
-    /// `wrapper` turns the policy on. Off, a request of several statements
-    /// that holds transaction control takes the planner's 0A000 refusal. A
-    /// request of one statement, or one with no transaction control, splits
-    /// as [`Self::split`] splits it, policy on or off.
-    ///
-    /// On, the policy reads [`classify_txn_wrapper`] over the statements:
-    ///
-    /// | Shape | Text | Rolls back |
+    /// | Route | Text | Rolls back |
     /// |---|---|---|
-    /// | `BEGIN; ..; COMMIT` | the inner statements | false |
-    /// | `BEGIN; ..; ROLLBACK` | the inner statements | true |
-    /// | any other transaction control | error 0A000 | - |
+    /// | `Lone` | the whole text | false |
+    /// | `Wrapper { rolls_back }` | the inner statements | `rolls_back` |
+    /// | `WrapperRefused` | error 0A000 | - |
+    /// | any other | every statement, planned alone | false |
     ///
     /// The second value is true when the caller must apply nothing. Each
-    /// inner statement passes the planner's solo check, even when only one
-    /// sits inside the wrapper. The check numbers the inner statements.
-    pub(super) fn split_with_wrapper(sql: &str, wrapper: bool) -> crate::Result<(Self, bool)> {
-        let statements = split_sql_statements(sql);
-        if !wrapper || statements.len() < 2 {
-            return Self::split(sql).map(|text| (text, false));
-        }
-        match classify_txn_wrapper(&statements) {
-            TxnWrapper::None => Ok((Self::Several(statements), false)),
-            TxnWrapper::Unsupported => Err(unsupported_txn_control(statements.len())),
-            TxnWrapper::Wrapped { commit } => {
-                let end = statements.len().saturating_sub(1);
-                refuse_solo_between(&statements, 1, end)?;
-                let inner = statements.get(1..end).unwrap_or_default().to_vec();
-                Self::inner(inner).map(|text| (text, !commit))
+    /// inner statement of a wrapper passes the planner's solo check, even
+    /// when only one sits inside the wrapper. The check numbers the inner
+    /// statements.
+    pub(super) fn for_route(
+        sql: &str,
+        statements: &[Statement],
+        route: RequestRoute,
+    ) -> crate::Result<(Self, bool)> {
+        match route {
+            RequestRoute::Lone => Self::whole(sql).map(|text| (text, false)),
+            RequestRoute::WrapperRefused => Err(unsupported_txn_control(statements.len())),
+            RequestRoute::Wrapper { rolls_back } => {
+                let texts = statement_texts(statements);
+                let end = texts.len().saturating_sub(1);
+                refuse_solo_between(&texts, 1, end)?;
+                let inner = texts.get(1..end).unwrap_or_default().to_vec();
+                Self::inner(inner).map(|text| (text, rolls_back))
+            }
+            RequestRoute::Sequential | RequestRoute::TransactionControl | RequestRoute::OneSet => {
+                Ok((Self::Several(statement_texts(statements)), false))
             }
         }
     }
@@ -219,6 +215,27 @@ pub(super) fn folded_schema(schemas: &[OutputSchema]) -> Option<&OutputSchema> {
         .rev()
         .find(|schema| !schema.columns.is_empty() || schema.is_star)
         .or_else(|| schemas.first())
+}
+
+#[cfg(test)]
+impl RequestText {
+    /// Split `sql` once, select its route under the wrapper policy
+    /// `wrapper`, and read the text for that route.
+    fn split_with_wrapper(sql: &str, wrapper: bool) -> crate::Result<(Self, bool)> {
+        let statements = crate::control::server::shared::sql_split::split_statements(sql);
+        let policy = crate::control::server::shared::request_route::RequestPolicy {
+            txn_wrapper: wrapper,
+            txn_control_native: false,
+        };
+        let route =
+            crate::control::server::shared::request_route::select_route(&statements, policy);
+        Self::for_route(sql, &statements, route)
+    }
+
+    /// [`Self::split_with_wrapper`] with the wrapper policy off.
+    fn split(sql: &str) -> crate::Result<Self> {
+        Self::split_with_wrapper(sql, false).map(|(text, _)| text)
+    }
 }
 
 #[cfg(test)]

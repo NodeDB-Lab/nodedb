@@ -13,7 +13,9 @@ use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit_in_txn,
 };
+use crate::control::server::shared::request_route::RequestRoute;
 use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::statement_exec::{
     AtomicRoute, AtomicStatement, StatementExec, route_atomic_statement,
 };
@@ -32,10 +34,15 @@ use super::{DispatchCtx, error_to_native};
 /// [`SqlOutcome::Stream`] for lazy frame emission. Every other case — writes,
 /// in-block buffering, multi-task, set-ops, errors — collapses to a single
 /// [`SqlOutcome::Response`].
+///
+/// `statements` is `sql` split once, and `route` is the route `select_route`
+/// picked for it.
 pub(super) async fn execute_planned(
     ctx: &DispatchCtx<'_>,
     seq: u64,
     sql: &str,
+    statements: &[Statement],
+    route: RequestRoute,
     database_id: crate::types::DatabaseId,
     allow_stream: bool,
 ) -> SqlOutcome {
@@ -100,8 +107,9 @@ pub(super) async fn execute_planned(
             query_ctx: ctx.query_ctx,
             scope: &scope,
             sql: &clean_sql,
+            statements,
+            route,
             trace_id: TraceId::ZERO,
-            txn_wrapper: false,
         },
         ctx.sessions.tx_id(ctx.peer_addr),
     )

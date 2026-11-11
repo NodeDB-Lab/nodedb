@@ -17,9 +17,10 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
-use crate::control::server::shared::sql_split::split_sql_statements;
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
+use crate::control::server::shared::sql_split::split_statements;
 use crate::control::server::shared::statement_exec::{
-    AtomicStatement, RequestError, StatementExec, authorize_one_task, sequential_gate,
+    AtomicStatement, RequestError, StatementExec, authorize_one_task,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
@@ -74,8 +75,9 @@ pub async fn execute_sql(
     );
     // A request of several statements that holds DDL or a statement the DDL
     // router runs takes the sequential request runner.
-    let statements = split_sql_statements(sql);
-    if sequential_gate(&statements) {
+    let statements = split_statements(sql);
+    let route = select_route(&statements, RequestPolicy::stateless(&shared.sql_policy));
+    if route == RequestRoute::Sequential {
         let run = HttpSequential {
             state: shared,
             identity,
@@ -94,8 +96,9 @@ pub async fn execute_sql(
         query_ctx,
         scope: &scope,
         sql: &clean_sql,
+        statements: &statements,
+        route,
         trace_id,
-        txn_wrapper: shared.sql_policy.txn_wrapper_stateless,
     })
     .await?;
     if admission.rolls_back {

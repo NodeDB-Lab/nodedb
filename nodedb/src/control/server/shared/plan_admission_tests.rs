@@ -10,6 +10,8 @@ use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 use nodedb_types::{CollectionKey, DatabaseId, TenantId};
 
 use super::plan_admission::{PlanAdmission, PlanAdmissionRequest, plan_authorize_and_admit};
+use super::request_route::{RequestPolicy, select_route};
+use super::sql_split::split_statements;
 use super::statement_exec::{RequestError, StatementAt, StatementMap};
 use crate::control::cluster::test_one_node::{OneNodeCluster, boot};
 use crate::control::planner::context::QueryContext;
@@ -84,13 +86,19 @@ async fn admit_located(cluster: &OneNodeCluster, sql: &str) -> Result<PlanAdmiss
     let identity = identity();
     let scope = RequestAuthScope::for_database(&identity, cluster.state.auth_stores(), DB)?;
     let query_ctx = QueryContext::for_state(&cluster.state);
+    let statements = split_statements(sql);
+    let policy = RequestPolicy {
+        txn_wrapper: true,
+        txn_control_native: false,
+    };
     plan_authorize_and_admit(PlanAdmissionRequest {
         state: &cluster.state,
         query_ctx: &query_ctx,
         scope: &scope,
         sql,
+        statements: &statements,
+        route: select_route(&statements, policy),
         trace_id: TraceId::ZERO,
-        txn_wrapper: true,
     })
     .await
 }

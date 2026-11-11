@@ -12,12 +12,11 @@ use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
 use crate::control::server::shared::session::read_consistency::parse_request_field;
 use crate::control::server::shared::session::read_scope::with_request_consistency;
-use crate::control::server::shared::sql_split::{holds_several_statements, split_sql_statements};
-use crate::control::server::shared::statement_exec::{
-    AtomicStatement, StatementExec, sequential_gate,
-};
+use crate::control::server::shared::sql_split::split_statements;
+use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
     ApiError, AppState, build_request_scope, resolve_auth_parts,
@@ -107,8 +106,12 @@ async fn query_at_consistency(
     // A request of several statements that holds DDL or a statement the DDL
     // router runs takes the sequential request runner. Each statement runs
     // in order on one implicit transaction.
-    let statements = split_sql_statements(sql);
-    if sequential_gate(&statements) {
+    let statements = split_statements(sql);
+    let route = select_route(
+        &statements,
+        RequestPolicy::stateless(&state.shared.sql_policy),
+    );
+    if route == RequestRoute::Sequential {
         state
             .shared
             .check_tenant_quota(identity.tenant_id)
@@ -134,7 +137,7 @@ async fn query_at_consistency(
     // `shared::ddl::user_dispatch` must not admit this request a second time.
     // A request of several statements the gate declines skips the router:
     // the request planner plans each statement and refuses DDL beside DML.
-    if !holds_several_statements(sql)
+    if route == RequestRoute::Lone
         && let Some(result) = crate::control::server::shared::ddl::dispatch(
             &state.shared,
             &identity,
@@ -177,8 +180,9 @@ async fn query_at_consistency(
         query_ctx: &state.query_ctx,
         scope: &scope,
         sql: &clean_sql,
+        statements: &statements,
+        route,
         trace_id: crate::types::TraceId::ZERO,
-        txn_wrapper: state.shared.sql_policy.txn_wrapper_stateless,
     })
     .await
     .map_err(|error| ApiError::from_request(error, sql))?;

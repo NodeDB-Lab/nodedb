@@ -11,15 +11,15 @@ use std::sync::Arc;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::shared::authorization::authorize_database;
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
 use crate::control::server::shared::session::TransactionState;
-use crate::control::server::shared::sql_split::{holds_several_statements, split_sql_statements};
-use crate::control::server::shared::statement_exec::sequential_gate;
+use crate::control::server::shared::sql_split::{Statement, split_statements};
 use crate::control::server::shared::txn_control::{TxnControl, classify as classify_txn_control};
 
 use super::sql_admin::{handle_explain, handle_set_sql, handle_show_sql, is_session_show};
 use super::sql_planned::execute_planned;
 use super::sql_sequential::run_native_sequential;
-use super::sql_txn_request::{run_txn_control_request, txn_control_statements};
+use super::sql_txn_request::run_txn_control_request;
 use super::streaming::SqlOutcome;
 use super::transaction::{handle_begin, handle_commit, handle_rollback};
 use super::transaction_savepoint::{
@@ -101,24 +101,40 @@ async fn handle_sql_inner(
         return resp(handle_txn_control(ctx, seq, control).await);
     }
 
-    // A request of several statements that holds transaction control runs
-    // each statement under PostgreSQL rules. Off, the planner refuses it with
-    // SQLSTATE 0A000.
-    if ctx.state.sql_policy.txn_control_native
-        && let Some(statements) = txn_control_statements(sql_trimmed)
-    {
+    // The request text splits once here. A request of several statements that
+    // holds transaction control runs each statement under PostgreSQL rules.
+    // Off, the planner refuses it with SQLSTATE 0A000.
+    let statements = split_statements(sql_trimmed);
+    let route = select_route(&statements, RequestPolicy::session(&ctx.state.sql_policy));
+    if route == RequestRoute::TransactionControl {
         return resp(run_txn_control_request(ctx, seq, &statements).await);
     }
 
-    dispatch_statement(ctx, seq, sql_trimmed, allow_stream).await
+    dispatch_routed(ctx, seq, sql_trimmed, &statements, route, allow_stream).await
 }
 
 /// Run `sql_trimmed`, text with no transaction control at its head, on the
 /// session of `ctx`. A request of several statements plans as one request.
+/// The text splits here, once, for a caller that holds no split.
 pub(super) async fn dispatch_statement(
     ctx: &DispatchCtx<'_>,
     seq: u64,
     sql_trimmed: &str,
+    allow_stream: bool,
+) -> SqlOutcome {
+    let statements = split_statements(sql_trimmed);
+    let route = select_route(&statements, RequestPolicy::NONE);
+    dispatch_routed(ctx, seq, sql_trimmed, &statements, route, allow_stream).await
+}
+
+/// Run `sql_trimmed` on the session of `ctx`. `statements` is `sql_trimmed`
+/// split once, and `route` is the route `select_route` picked for it.
+async fn dispatch_routed(
+    ctx: &DispatchCtx<'_>,
+    seq: u64,
+    sql_trimmed: &str,
+    statements: &[Statement],
+    route: RequestRoute,
     allow_stream: bool,
 ) -> SqlOutcome {
     let upper = sql_trimmed.to_uppercase();
@@ -166,9 +182,8 @@ pub(super) async fn dispatch_statement(
 
     // A request of several statements that holds DDL or a statement the DDL
     // router runs takes the sequential request runner.
-    let statements = split_sql_statements(sql_trimmed);
-    if sequential_gate(&statements) {
-        return resp(run_native_sequential(ctx, seq, &statements, database_id).await);
+    if route == RequestRoute::Sequential {
+        return resp(run_native_sequential(ctx, seq, statements, database_id).await);
     }
 
     // DDL: try DDL router first. A request of several statements the gate
@@ -178,7 +193,7 @@ pub(super) async fn dispatch_statement(
         sessions: ctx.sessions,
         session_id: ctx.peer_addr.into(),
     };
-    if !holds_several_statements(sql_trimmed)
+    if route == RequestRoute::Lone
         && let Some(result) = crate::control::server::shared::ddl::dispatch(
             ctx.state,
             ctx.identity,
@@ -206,7 +221,16 @@ pub(super) async fn dispatch_statement(
     // `allow_stream`) can return a `SqlStream`; otherwise this collapses to a
     // single materialized `NativeResponse`.
     let _request = ctx.state.tenant_request_guard(ctx.tenant_id());
-    let outcome = execute_planned(ctx, seq, sql_trimmed, database_id, allow_stream).await;
+    let outcome = execute_planned(
+        ctx,
+        seq,
+        sql_trimmed,
+        statements,
+        route,
+        database_id,
+        allow_stream,
+    )
+    .await;
 
     if let SqlOutcome::Response(ref r) = outcome
         && r.status == nodedb_types::protocol::ResponseStatus::Error

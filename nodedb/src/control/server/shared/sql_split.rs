@@ -2,6 +2,37 @@
 
 //! SQL statement splitter for multi-statement requests.
 
+/// One statement of a split request text.
+///
+/// A transport splits the request text once. Admission and the sequential
+/// runner read the carried statements and never split again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Statement {
+    /// The statement, trimmed, with no trailing semicolon.
+    pub text: String,
+    /// The byte offset in the request text of the first character of the
+    /// statement that is not whitespace.
+    pub start: usize,
+}
+
+impl Statement {
+    /// The 1-based character offset in `sql` where the statement starts.
+    /// `sql` is the request text the statement was split from. `None` when
+    /// `start` is not a boundary of `sql`.
+    pub fn char_position(&self, sql: &str) -> Option<usize> {
+        sql.get(..self.start)
+            .map(|prefix| prefix.chars().count() + 1)
+    }
+}
+
+/// The texts of `statements`, in order.
+pub(crate) fn statement_texts(statements: &[Statement]) -> Vec<String> {
+    statements
+        .iter()
+        .map(|statement| statement.text.clone())
+        .collect()
+}
+
 /// Split a SQL string at top-level semicolons into individual statements.
 ///
 /// Respects single-quoted strings, `E'..'` strings (a backslash escapes the
@@ -14,28 +45,26 @@
 /// query message (e.g. heredoc input), ensuring `parts[2]` in DDL handlers
 /// never contains a trailing semicolon.
 pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
-    split_with_starts(sql)
-        .into_iter()
-        .map(|(_, statement)| statement)
-        .collect()
+    statement_texts(&split_statements(sql))
 }
 
 /// The 1-based character offset in `sql` where statement `statement` starts.
 ///
-/// `statement` is 0-based, in [`split_sql_statements`] order. A statement
+/// `statement` is 0-based, in [`split_statements`] order. A statement
 /// starts at its first character that is not whitespace. A leading comment
 /// belongs to the statement. `None` when `sql` holds fewer statements.
 pub(crate) fn statement_position(sql: &str, statement: usize) -> Option<usize> {
-    let (start, _) = split_with_starts(sql).into_iter().nth(statement)?;
-    sql.get(..start).map(|prefix| prefix.chars().count() + 1)
+    split_statements(sql)
+        .get(statement)
+        .and_then(|found| found.char_position(sql))
 }
 
-/// [`split_sql_statements`] with the byte offset in `sql` where each
-/// trimmed statement starts.
+/// Split `sql` at top-level semicolons. Each [`Statement`] holds the trimmed
+/// text and the byte offset in `sql` where it starts.
 ///
 /// `current` holds every byte of `sql` from `current_start` up to the
 /// splitting semicolon. So the next statement begins one byte past it.
-fn split_with_starts(sql: &str) -> Vec<(usize, String)> {
+pub(crate) fn split_statements(sql: &str) -> Vec<Statement> {
     let mut stmts = Vec::new();
     let mut current = String::new();
     let mut current_start = 0usize;
@@ -265,13 +294,16 @@ fn split_with_starts(sql: &str) -> Vec<(usize, String)> {
 /// Push `current` trimmed, with the byte offset of its first character that
 /// is not whitespace. `start` is the offset of `current` in the request text.
 /// An empty statement is discarded.
-fn push_trimmed(stmts: &mut Vec<(usize, String)>, start: usize, current: &str) {
+fn push_trimmed(stmts: &mut Vec<Statement>, start: usize, current: &str) {
     let trimmed = current.trim();
     if trimmed.is_empty() {
         return;
     }
     let leading = current.len() - current.trim_start().len();
-    stmts.push((start + leading, trimmed.to_string()));
+    stmts.push(Statement {
+        text: trimmed.to_string(),
+        start: start + leading,
+    });
 }
 
 /// The tag of a dollar quote delimiter. `rest` starts just after a `$`.
@@ -291,154 +323,11 @@ fn dollar_tag(rest: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<String>
     }
 }
 
-/// Whether [`split_sql_statements`] splits `sql` into more than one
-/// statement.
+/// Whether [`split_statements`] splits `sql` into more than one statement.
 pub(crate) fn holds_several_statements(sql: &str) -> bool {
-    split_sql_statements(sql).len() > 1
+    split_statements(sql).len() > 1
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{holds_several_statements, split_sql_statements, statement_position};
-
-    #[test]
-    fn a_statement_position_counts_characters_from_one() {
-        let sql = "SELECT 1;  SELECT 2";
-        assert_eq!(statement_position(sql, 0), Some(1));
-        // Both spaces belong to the gap before the second statement, so its
-        // first character is the twelfth of the request, one-based.
-        assert_eq!(statement_position(sql, 1), Some(12));
-        assert_eq!(statement_position(sql, 2), None);
-    }
-
-    #[test]
-    fn a_statement_position_skips_whitespace_and_counts_multibyte_characters() {
-        let sql = "  SELECT 'é';\n SELECT 2";
-        assert_eq!(statement_position(sql, 0), Some(3));
-        assert_eq!(statement_position(sql, 1), Some(16));
-    }
-
-    #[test]
-    fn a_statement_position_skips_empty_statements() {
-        assert_eq!(statement_position(";; SELECT 1", 0), Some(4));
-    }
-
-    #[test]
-    fn one_statement_with_a_trailing_semicolon_is_not_several() {
-        assert!(!holds_several_statements(
-            "INSERT INTO docs (id) VALUES ('a');"
-        ));
-        assert!(!holds_several_statements(" ; "));
-        assert!(holds_several_statements("SELECT 1; SELECT 2"));
-    }
-
-    #[test]
-    fn single_statement_no_semicolon() {
-        let stmts = split_sql_statements("SELECT 1");
-        assert_eq!(stmts, vec!["SELECT 1"]);
-    }
-
-    #[test]
-    fn single_statement_with_semicolon() {
-        let stmts = split_sql_statements("CREATE COLLECTION docs;");
-        assert_eq!(stmts, vec!["CREATE COLLECTION docs"]);
-    }
-
-    #[test]
-    fn multi_statement_heredoc() {
-        let sql = "CREATE COLLECTION docs;\nINSERT INTO docs (x) VALUES (1);\nSELECT * FROM docs;";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 3);
-        assert_eq!(stmts[0], "CREATE COLLECTION docs");
-        assert_eq!(stmts[1], "INSERT INTO docs (x) VALUES (1)");
-        assert_eq!(stmts[2], "SELECT * FROM docs");
-    }
-
-    #[test]
-    fn semicolon_inside_string_not_split() {
-        let sql = "INSERT INTO t (v) VALUES ('a;b');";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0], "INSERT INTO t (v) VALUES ('a;b')");
-    }
-
-    #[test]
-    fn empty_statements_discarded() {
-        let stmts = split_sql_statements(";;  ;SELECT 1;;");
-        assert_eq!(stmts, vec!["SELECT 1"]);
-    }
-
-    #[test]
-    fn procedural_begin_end_not_split() {
-        let sql = "CREATE FUNCTION f(x INT) RETURNS TEXT AS \
-                    BEGIN IF x > 0 THEN RETURN 'pos'; ELSE RETURN 'neg'; END IF; END";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].starts_with("CREATE FUNCTION"));
-        assert!(stmts[0].ends_with("END"));
-    }
-
-    #[test]
-    fn procedural_with_trailing_semicolon() {
-        let sql = "CREATE FUNCTION f(x INT) RETURNS INT AS \
-                    BEGIN RETURN x; END;";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].contains("BEGIN"));
-        assert!(stmts[0].ends_with("END"));
-    }
-
-    #[test]
-    fn trigger_body_in_batch_splits_correctly() {
-        let sql = "CREATE COLLECTION after_src;\n\
-                   CREATE COLLECTION after_log;\n\
-                   CREATE TRIGGER log_insert AFTER INSERT ON after_src FOR EACH ROW\n\
-                   BEGIN\n\
-                       INSERT INTO after_log (id, src_id, action)\n\
-                       VALUES (NEW.id || '_log', NEW.id, 'inserted');\n\
-                   END;\n\
-                   INSERT INTO after_src (id, name, val) VALUES ('as1', 'Alpha', 10);\n\
-                   SELECT * FROM after_log;";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 5);
-        assert!(stmts[2].starts_with("CREATE TRIGGER log_insert"));
-        assert!(stmts[2].contains("VALUES (NEW.id || '_log', NEW.id, 'inserted');"));
-        assert!(stmts[2].ends_with("END"));
-        assert_eq!(
-            stmts[3],
-            "INSERT INTO after_src (id, name, val) VALUES ('as1', 'Alpha', 10)"
-        );
-        assert_eq!(stmts[4], "SELECT * FROM after_log");
-    }
-
-    #[test]
-    fn trigger_body_with_if_block_remains_single_statement() {
-        let sql = "CREATE TRIGGER normalize BEFORE INSERT ON users FOR EACH ROW \
-                   BEGIN \
-                     IF NEW.active = TRUE THEN \
-                       INSERT INTO audit (id) VALUES (NEW.id); \
-                     END IF; \
-                   END; \
-                   SELECT 1;";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("END IF;"));
-        assert!(stmts[0].ends_with("END"));
-        assert_eq!(stmts[1], "SELECT 1");
-    }
-
-    #[test]
-    fn sync_trigger_body_in_batch_splits_correctly() {
-        let sql = "CREATE SYNC TRIGGER log_insert AFTER INSERT ON after_src FOR EACH ROW \
-                   BEGIN \
-                     INSERT INTO after_log (id) VALUES (NEW.id); \
-                   END; \
-                   SELECT 1;";
-        let stmts = split_sql_statements(sql);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].starts_with("CREATE SYNC TRIGGER log_insert"));
-        assert!(stmts[0].contains("INSERT INTO after_log (id) VALUES (NEW.id);"));
-        assert!(stmts[0].ends_with("END"));
-        assert_eq!(stmts[1], "SELECT 1");
-    }
-}
+#[path = "sql_split_tests.rs"]
+mod tests;
