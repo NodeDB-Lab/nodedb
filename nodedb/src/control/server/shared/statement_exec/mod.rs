@@ -10,6 +10,7 @@ pub mod atomic;
 pub mod dispatch;
 pub mod edge_recon;
 pub mod error;
+pub mod implicit_request;
 pub mod route_decision;
 pub mod sequential;
 pub mod statement_map;

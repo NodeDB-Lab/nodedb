@@ -7,10 +7,12 @@
 //!
 //! In order:
 //!
-//! 1. A statement outside a transaction block that [`implicit_txn_route`]
+//! 1. A statement outside a transaction block that
+//!    [`implicit_txn_route`](super::route_decision::implicit_txn_route)
 //!    flags runs in an implicit transaction: its writes stage on their
 //!    vShards' leaders and commit together at its end, through Calvin when
-//!    they span vShards.
+//!    they span vShards. A request of several statements with a write whose
+//!    writes all stage runs in one too (`super::implicit_request`).
 //! 2. A dependent predicate on an edge-bearing collection runs through the
 //!    implicit-edge OLLP/Calvin coordinator.
 //! 3. A statement on one vShard that holds settlement reads commits through
@@ -52,9 +54,8 @@ use super::edge_recon::{
     CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 use super::error::StatementError;
-use super::route_decision::{
-    AutocommitRoute, ImplicitTxnRoute, autocommit_route, implicit_txn_route,
-};
+use super::implicit_request::request_txn_route;
+use super::route_decision::{AutocommitRoute, ImplicitTxnRoute, autocommit_route};
 use super::statement_map::StatementMap;
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
@@ -114,7 +115,7 @@ pub(crate) async fn route_atomic_statement(
 
     refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
 
-    match implicit_txn_route(state, &tasks, session) {
+    match request_txn_route(state, &tasks, &statement_map, session) {
         ImplicitTxnRoute::Implicit => {
             let answer = run_implicit_statement(
                 exec,
