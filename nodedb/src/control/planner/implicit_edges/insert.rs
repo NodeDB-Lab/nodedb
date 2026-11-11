@@ -39,10 +39,36 @@ pub async fn append_implicit_edge_tasks(
     database_id: DatabaseId,
     trace_id: TraceId,
 ) -> crate::Result<()> {
+    append_implicit_edge_tasks_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`append_implicit_edge_tasks`] that also records each edge's parent.
+///
+/// For each appended task this pushes onto `parents` the index of the
+/// document write it mirrors. Appended tasks go to the end, so each parent
+/// sits before its child.
+pub async fn append_implicit_edge_tasks_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<()> {
     // Collect a SNAPSHOT of candidate edges first so the immutable scan of
     // `tasks` does not borrow-conflict with the `&mut Vec` we push into below.
+    // `edge_parents[i]` is the index of the task `edges[i]` came from.
     let mut edges = Vec::new();
-    for task in tasks.iter() {
+    let mut edge_parents = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
         match &task.plan {
             PhysicalPlan::Document(DocumentOp::PointInsert {
                 collection, value, ..
@@ -52,6 +78,7 @@ pub async fn append_implicit_edge_tasks(
             }) => {
                 if let Some(edge) = extract_edge(collection.as_str(), value) {
                     edges.push(edge);
+                    edge_parents.push(index);
                 }
             }
             PhysicalPlan::Document(
@@ -69,6 +96,7 @@ pub async fn append_implicit_edge_tasks(
                 for (_doc_id, value) in documents {
                     if let Some(edge) = extract_edge(collection.as_str(), value) {
                         edges.push(edge);
+                        edge_parents.push(index);
                     }
                 }
             }
@@ -130,7 +158,7 @@ pub async fn append_implicit_edge_tasks(
     }
     drop(marked);
 
-    for edge in edges {
+    for (edge, parent) in edges.into_iter().zip(edge_parents) {
         // The write routes to the source endpoint's home.
         let vsrc = RecordHomes::edge(&edge.src, &edge.dst).owner();
         let endpoint = |id: &str| {
@@ -175,6 +203,7 @@ pub async fn append_implicit_edge_tasks(
             post_set_op: PostSetOp::None,
             txn_id: None,
         });
+        parents.push(parent);
     }
 
     Ok(())

@@ -9,6 +9,7 @@ pub mod atomic;
 pub mod dispatch;
 pub mod edge_recon;
 pub mod error;
+pub mod statement_map;
 pub mod task_loop;
 
 pub(crate) use answer::StatementAnswer;
@@ -18,6 +19,7 @@ pub(crate) use edge_recon::{
     EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 pub(crate) use error::StatementError;
+pub use statement_map::StatementMap;
 pub(crate) use task_loop::{
     PlannedStatement, StatementExec, run_implicit_statement, run_statement_loop,
 };

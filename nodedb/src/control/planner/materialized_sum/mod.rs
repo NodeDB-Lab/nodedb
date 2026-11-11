@@ -24,12 +24,15 @@ pub mod resolve;
 pub mod resolve_target;
 pub mod settle;
 pub mod stored;
+#[cfg(test)]
+mod traced_tests;
 
-pub use cross_shard::append_cross_shard_balance_tasks;
+pub use cross_shard::{append_cross_shard_balance_tasks, append_cross_shard_balance_tasks_traced};
 pub use extract::join_value_from_body;
 pub use index::MaterializedSumIndex;
 pub use resolve::{
-    drives_cross_shard_sum, resolve_materialized_sum_targets, resolve_sum_targets_for_bodies,
+    drives_cross_shard_sum, resolve_materialized_sum_targets,
+    resolve_materialized_sum_targets_traced, resolve_sum_targets_for_bodies,
     source_drives_bindings,
 };
 pub use resolve_target::ResolvedTargets;

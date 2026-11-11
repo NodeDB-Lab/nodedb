@@ -29,6 +29,7 @@ use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
 use crate::control::server::shared::retry::retry_on_schema_change;
 use crate::control::server::shared::returning;
+use crate::control::server::shared::statement_exec::StatementMap;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -40,6 +41,9 @@ pub struct PlanAdmission {
     /// this set is NOT pre-authorized, so a batch-authorize-then-loop will
     /// retarget before the clone check.
     pub tasks: Vec<PhysicalTask>,
+    /// The statement of each task in `tasks`, one entry per task. A derived
+    /// task takes the statement of the task it derives from.
+    pub statement_map: StatementMap,
     /// Output schema for the planned statement.
     pub output_schema: OutputSchema,
     /// Descriptor versions this statement was planned against.
@@ -163,6 +167,8 @@ async fn plan_authorize_and_admit_once(
             .await?;
         (tasks, output_schema, versions)
     };
+    // The request text plans as one statement.
+    let mut statement_map = StatementMap::single(tasks.len());
 
     let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
 
@@ -171,15 +177,19 @@ async fn plan_authorize_and_admit_once(
     let _preauthorized_tasks =
         authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
 
-    let sum_target_reads = append_derived_tasks(
+    let mut parents = Vec::new();
+    let sum_target_reads = append_derived_tasks_traced(
         state,
         &mut tasks,
         tenant_id,
         database_id,
         read_txn,
         trace_id,
+        &mut parents,
     )
     .await?;
+    statement_map.push_derived(&parents)?;
+    statement_map.debug_check_covers(&tasks);
 
     // Deliberate gate: proves the final task set is authorizable before a
     // descriptor lease is acquired. The caller re-derives the capability per
@@ -193,6 +203,7 @@ async fn plan_authorize_and_admit_once(
 
     Ok(PlanAdmission {
         tasks,
+        statement_map,
         output_schema,
         versions,
         lease_scope,
@@ -219,22 +230,59 @@ pub async fn append_derived_tasks(
     read_txn: Option<crate::types::TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
-    crate::control::planner::implicit_edges::append_implicit_edge_tasks(
+    append_derived_tasks_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`append_derived_tasks`] that also records each derived task's parent.
+///
+/// For each appended task, in append order, this pushes onto `parents` the
+/// index of the task whose processing appended it. Each pass appends at the
+/// end, so a parent always sits before its child. The caller can extend a
+/// [`StatementMap`] with [`StatementMap::push_derived`].
+pub async fn append_derived_tasks_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
+    crate::control::planner::implicit_edges::append_implicit_edge_tasks_traced(
         state,
         tasks,
         tenant_id,
         database_id,
         trace_id,
+        parents,
     )
     .await?;
-    append_sum_and_period_targets(state, tasks, tenant_id, database_id, read_txn, trace_id).await
+    append_sum_and_period_targets_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        parents,
+    )
+    .await
 }
 
 /// Resolve every write's materialized-sum targets, append one
 /// `ApplyBalanceDelta` task per cross-shard balance, and resolve every
 /// write's period-lock reference row.
 ///
-/// A plain statement runs this through [`append_derived_tasks`]. The
+/// A plain statement runs this through [`append_derived_tasks_traced`]. The
 /// in-transaction expanders run it on the point writes they emit. So every
 /// write that moves a sum source ships its cross-shard balance on a task
 /// homed on the target's vShard.
@@ -253,24 +301,50 @@ pub async fn append_sum_and_period_targets(
     read_txn: Option<crate::types::TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
+    append_sum_and_period_targets_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`append_sum_and_period_targets`] that also records each appended
+/// balance task's parent onto `parents`, as
+/// [`append_derived_tasks_traced`] does.
+pub async fn append_sum_and_period_targets_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
     let sum_target_reads =
-        crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
+        crate::control::planner::materialized_sum::resolve_materialized_sum_targets_traced(
             state,
             tasks,
             tenant_id,
             database_id,
             read_txn,
             trace_id,
+            parents,
         )
         .await?;
 
     // Follows the resolution: it consumes the surrogates that pass bound, and
     // issues no lookup of its own.
-    crate::control::planner::materialized_sum::append_cross_shard_balance_tasks(
+    crate::control::planner::materialized_sum::append_cross_shard_balance_tasks_traced(
         state,
         tasks,
         tenant_id,
         database_id,
+        parents,
     )?;
 
     // Resolves each write's period-lock reference row into the same slot the

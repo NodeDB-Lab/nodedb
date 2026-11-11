@@ -52,11 +52,14 @@ use super::edge_recon::{
     CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 use super::error::StatementError;
+use super::statement_map::StatementMap;
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
 /// A planned statement before it takes a route.
 pub(crate) struct AtomicStatement {
     pub(crate) tasks: Vec<PhysicalTask>,
+    /// The statement of each task in `tasks`, one entry per task.
+    pub(crate) statement_map: StatementMap,
     /// The statement's descriptor leases. They stay alive through dispatch.
     pub(crate) lease_scope: QueryLeaseScope,
     /// The row images the statement's cross-shard balances were settled
@@ -85,9 +88,11 @@ pub(crate) async fn route_atomic_statement(
 ) -> Result<AtomicRoute, StatementError> {
     let AtomicStatement {
         tasks,
+        statement_map,
         lease_scope,
         sum_target_reads,
     } = statement;
+    statement_map.debug_check_covers(&tasks);
     let state = exec.state;
 
     // Calvin dispatch and edge reconciliation are trusted internal mechanisms
@@ -116,6 +121,7 @@ pub(crate) async fn route_atomic_statement(
             exec,
             PlannedStatement {
                 tasks,
+                statement_map,
                 plan_lease_scope: Arc::new(lease_scope),
                 sum_target_reads,
             },
@@ -159,6 +165,8 @@ pub(crate) async fn route_atomic_statement(
         }
         EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
     };
+    // A gate that does not fire hands the tasks back unchanged.
+    statement_map.debug_check_covers(&tasks);
 
     // An autocommit statement has no session read set to widen with. The
     // reads to widen with are those materialized-sum settlement stamped.
@@ -241,8 +249,10 @@ pub(crate) async fn route_atomic_statement(
         }
     }
 
+    statement_map.debug_check_covers(&tasks);
     Ok(AtomicRoute::PerTask(AtomicStatement {
         tasks,
+        statement_map,
         lease_scope,
         sum_target_reads,
     }))

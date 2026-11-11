@@ -43,6 +43,7 @@ use crate::types::{DatabaseId, TenantId};
 use super::answer::{StatementAnswer, StatementFold};
 use super::dispatch::{DispatchedTask, authorize_one_task, dispatch_statement_task};
 use super::error::StatementError;
+use super::statement_map::StatementMap;
 
 /// Who runs a statement, and what its answer shapes against.
 pub(crate) struct StatementExec<'a> {
@@ -67,6 +68,8 @@ impl StatementExec<'_> {
 /// A planned statement's tasks and what they carry into dispatch.
 pub(crate) struct PlannedStatement {
     pub(crate) tasks: Vec<PhysicalTask>,
+    /// The statement of each task in `tasks`, one entry per task.
+    pub(crate) statement_map: StatementMap,
     /// The statement's descriptor leases, kept on every task it buffers.
     pub(crate) plan_lease_scope: Arc<QueryLeaseScope>,
     /// The row images the statement's cross-shard balances were settled
@@ -90,9 +93,11 @@ pub(crate) async fn run_statement_loop(
 ) -> Result<StatementAnswer, StatementError> {
     let PlannedStatement {
         tasks,
+        statement_map,
         plan_lease_scope,
         sum_target_reads,
     } = statement;
+    statement_map.debug_check_covers(&tasks);
     if let Some(txn) = txn
         && !sum_target_reads.is_empty()
     {

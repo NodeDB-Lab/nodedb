@@ -143,6 +143,7 @@ pub(super) async fn execute_planned(
         &exec,
         AtomicStatement {
             tasks: admission.tasks,
+            statement_map: admission.statement_map,
             lease_scope: admission.lease_scope,
             // Covers the images every cross-shard materialized-sum balance in
             // the tasks was settled from, so Calvin's OCC check aborts rather
@@ -155,6 +156,7 @@ pub(super) async fn execute_planned(
     .await;
     let AtomicStatement {
         tasks,
+        statement_map,
         lease_scope,
         sum_target_reads,
     } = match routed {
@@ -232,6 +234,7 @@ pub(super) async fn execute_planned(
         seq,
         PlannedStatement {
             tasks,
+            statement_map,
             output_schema: Some(&output_schema),
             database_id,
             plan_lease_scope: lease_scope,

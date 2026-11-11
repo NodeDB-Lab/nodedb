@@ -169,6 +169,7 @@ async fn ndjson_at_consistency(
         &exec,
         AtomicStatement {
             tasks: admission.tasks,
+            statement_map: admission.statement_map,
             lease_scope: admission.lease_scope,
             sum_target_reads: admission.sum_target_reads,
         },

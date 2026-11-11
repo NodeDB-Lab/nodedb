@@ -25,12 +25,14 @@ pub mod catalog;
 pub mod delete;
 pub mod extract;
 pub mod insert;
+#[cfg(test)]
+mod insert_tests;
 mod routed;
 pub mod update;
 
 pub use catalog::mark_collection_edge_bearing;
 pub use delete::append_implicit_edge_delete_tasks;
-pub use insert::append_implicit_edge_tasks;
+pub use insert::{append_implicit_edge_tasks, append_implicit_edge_tasks_traced};
 pub use update::{
     EdgeFieldOverrides, EdgeUpdateCtx, FieldUpdate, WeightUpdate,
     append_implicit_edge_update_tasks, parse_edge_field_overrides,

@@ -58,12 +58,38 @@ pub async fn resolve_materialized_sum_targets(
     read_txn: Option<TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<ReadSetEntry>> {
+    resolve_materialized_sum_targets_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`resolve_materialized_sum_targets`] that also records each appended
+/// balance task's parent: the index of the write it settles. Appended tasks
+/// go to the end, so each parent sits before its child.
+pub async fn resolve_materialized_sum_targets_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    read_txn: Option<TxnId>,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<Vec<ReadSetEntry>> {
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
     let mut appended: Vec<PhysicalTask> = Vec::new();
+    // `appended_parents[i]` is the index of the task `appended[i]` settles.
+    let mut appended_parents: Vec<usize> = Vec::new();
     let mut reads: Vec<ReadSetEntry> = Vec::new();
 
-    for task in tasks.iter_mut() {
+    for (index, task) in tasks.iter_mut().enumerate() {
         let txn_id = task.txn_id;
         let PhysicalPlan::Document(op) = &mut task.plan else {
             continue;
@@ -82,6 +108,7 @@ pub async fn resolve_materialized_sum_targets(
         )
         .await?
         {
+            appended_parents.extend(std::iter::repeat_n(index, settlement.tasks.len()));
             appended.extend(settlement.tasks);
             reads.extend(settlement.reads);
             continue;
@@ -183,6 +210,7 @@ pub async fn resolve_materialized_sum_targets(
         let (resolved, settlements) = outcome;
         set_resolved(op, resolved);
         for settlement in settlements {
+            appended_parents.extend(std::iter::repeat_n(index, settlement.tasks.len()));
             appended.extend(settlement.tasks);
             reads.extend(settlement.reads);
         }
@@ -191,6 +219,7 @@ pub async fn resolve_materialized_sum_targets(
     // Every protocol settles here, so one refusal covers each of them.
     crate::control::planner::calvin::refuse_repeated_settled_rows(&reads)?;
     tasks.extend(appended);
+    parents.extend(appended_parents);
     Ok(reads)
 }
 
@@ -466,7 +495,7 @@ async fn resolve_bodies(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use nodedb_physical::physical_task::PostSetOp;
@@ -476,10 +505,10 @@ mod tests {
     use crate::types::VShardId;
     use crate::wal::WalManager;
 
-    const TENANT: TenantId = TenantId::new(7);
-    const DB: DatabaseId = DatabaseId::DEFAULT;
+    pub(crate) const TENANT: TenantId = TenantId::new(7);
+    pub(crate) const DB: DatabaseId = DatabaseId::DEFAULT;
 
-    fn test_state() -> (Arc<SharedState>, tempfile::TempDir) {
+    pub(crate) fn test_state() -> (Arc<SharedState>, tempfile::TempDir) {
         let directory = tempfile::tempdir().expect("create materialized-sum test directory");
         let wal = Arc::new(
             WalManager::open_for_testing(&directory.path().join("msum.wal"))
@@ -492,7 +521,7 @@ mod tests {
 
     /// Declare `entries` (the source collection) as the source of a
     /// `balance` materialized sum on `accounts`, joined on `account_id`.
-    fn declare_binding(state: &SharedState) {
+    pub(crate) fn declare_binding(state: &SharedState) {
         let catalog = state.credentials.catalog();
         let mut target = StoredCollection::stamped_for_test(TENANT.as_u64(), "accounts", "tester");
         target.materialized_sums.push(MaterializedSumDef {
@@ -531,7 +560,7 @@ mod tests {
         state.materialized_sum_index.invalidate();
     }
 
-    fn body(account_id: &str) -> Vec<u8> {
+    pub(crate) fn body(account_id: &str) -> Vec<u8> {
         let map = rmpv::Value::Map(vec![
             (
                 rmpv::Value::String("account_id".into()),
@@ -547,7 +576,7 @@ mod tests {
         buf
     }
 
-    fn insert_task(collection: &str, value: Vec<u8>) -> PhysicalTask {
+    pub(crate) fn insert_task(collection: &str, value: Vec<u8>) -> PhysicalTask {
         PhysicalTask {
             tenant_id: TENANT,
             vshard_id: VShardId::new(0),

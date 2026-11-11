@@ -183,6 +183,7 @@ async fn query_at_consistency(
         &exec,
         AtomicStatement {
             tasks,
+            statement_map: admission.statement_map,
             lease_scope,
             sum_target_reads: admission.sum_target_reads,
         },
