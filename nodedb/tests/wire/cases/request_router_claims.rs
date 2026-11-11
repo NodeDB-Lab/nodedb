@@ -4,19 +4,16 @@
 //!
 //! Alone, the router runs it with its own steps: sequence defaults, field
 //! inference, vector writes, engine functions. A request of several
-//! statements plans each statement without the router. So such a statement,
-//! as statement 1 or 2 of a request, answers 0A000 (HTTP 501). The error
-//! names the statement and tells the client to send it as its own request.
-//! The request applies nothing.
+//! statements that holds one takes the sequential request runner, which
+//! runs it through the router too. So such a statement, as statement 1 or
+//! 2 of a request, stores what it stores alone, and the plain statement
+//! beside it applies.
 //!
 //! A plain INSERT and SELECT pair is not claimed and applies as one request.
 
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 
 use crate::harness::TestServer;
-
-/// The text every refusal holds.
-const NEXT_ACTION: &str = "Send this statement as its own request";
 
 async fn exec(server: &TestServer, sql: &str) {
     server
@@ -57,57 +54,60 @@ async fn fixture() -> TestServer {
     server
 }
 
-/// The plain statement each refused request pairs with the claimed one.
+/// The plain statements each request pairs with the claimed one.
 const PLAIN: &str = "INSERT INTO rc_plain (id, v) VALUES ('p1', 'b')";
+const PLAIN_SECOND: &str = "INSERT INTO rc_plain (id, v) VALUES ('p2', 'b')";
 
-/// Check that `sql` answers the 0A000 refusal of statement `index` of 2
-/// over HTTP.
-async fn assert_http_refused(server: &TestServer, sql: &str, index: usize) {
+/// Check that `sql` applies over HTTP and answers one summed reply.
+async fn assert_http_applies(server: &TestServer, sql: &str) {
     let (status, body) = server.http_query(sql).await;
-    assert_eq!(status, 501, "{sql}: {body}");
-    let statement = format!("statement {index} of 2");
-    assert!(
-        body.contains(&statement) && body.contains(NEXT_ACTION),
-        "the refusal names {statement} and the next action: {body}"
-    );
+    assert_eq!(status, 200, "{sql}: {body}");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+    // The reply is the sum of both statements, with no per-statement array.
+    assert!(body.get("statements").is_none(), "{sql}: {body}");
+    assert!(body["rows"].is_array(), "{sql}: {body}");
+}
+
+/// Check that both plain statements applied.
+async fn assert_plain_applied(server: &TestServer) {
+    assert_eq!(rows(server, "rc_plain").await, [["p1", "b"], ["p2", "b"]]);
 }
 
 /// Run `claimed` alone into `rc_lone`, then as statement 1 and 2 of a
 /// request into `rc_first` and `rc_second`. `claimed` names its target as
-/// `{t}`.
-async fn assert_write_alone_or_refused(claimed: &str) {
+/// `{t}`. All three store the same row.
+async fn assert_write_alone_or_in_request(claimed: &str) {
     let server = fixture().await;
     let on = |table: &str| claimed.replace("{t}", table);
 
     server.http_exec(&on("rc_lone")).await;
-    assert_http_refused(&server, &format!("{}; {PLAIN}", on("rc_first")), 1).await;
-    assert_http_refused(&server, &format!("{PLAIN}; {}", on("rc_second")), 2).await;
+    assert_http_applies(&server, &format!("{}; {PLAIN}", on("rc_first"))).await;
+    assert_http_applies(&server, &format!("{PLAIN_SECOND}; {}", on("rc_second"))).await;
 
+    let lone = rows(&server, "rc_lone").await;
     assert_eq!(
-        rows(&server, "rc_lone").await,
+        lone,
         [["1", "a"]],
         "the router fills the key from the sequence"
     );
-    for table in ["rc_first", "rc_second", "rc_plain"] {
-        assert!(
-            rows(&server, table).await.is_empty(),
-            "a refused request applies nothing to {table}"
-        );
+    for table in ["rc_first", "rc_second"] {
+        assert_eq!(rows(&server, table).await, lone, "{table}");
     }
+    assert_plain_applied(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_upsert_with_a_sequence_default_runs_alone_or_is_refused() {
-    assert_write_alone_or_refused("UPSERT INTO {t} (v) VALUES ('a')").await;
+async fn an_upsert_with_a_sequence_default_runs_alone_or_in_a_request() {
+    assert_write_alone_or_in_request("UPSERT INTO {t} (v) VALUES ('a')").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_object_literal_insert_runs_alone_or_is_refused() {
-    assert_write_alone_or_refused("INSERT INTO {t} { v: 'a' }").await;
+async fn an_object_literal_insert_runs_alone_or_in_a_request() {
+    assert_write_alone_or_in_request("INSERT INTO {t} { v: 'a' }").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_kv_incr_runs_alone_or_is_refused() {
+async fn a_kv_incr_runs_alone_or_in_a_request() {
     let server = fixture().await;
     exec(
         &server,
@@ -119,22 +119,18 @@ async fn a_kv_incr_runs_alone_or_is_refused() {
 
     let (status, after_incr) = server.http_query(incr).await;
     assert_eq!(status, 200, "{incr}: {after_incr}");
-    assert_http_refused(&server, &format!("{incr}; {PLAIN}"), 1).await;
-    assert_http_refused(&server, &format!("{PLAIN}; {incr}"), 2).await;
+    assert_http_applies(&server, &format!("{incr}; {PLAIN}")).await;
+    assert_http_applies(&server, &format!("{PLAIN_SECOND}; {incr}")).await;
 
-    // A zero step reads the counter. It answers what the lone step answered,
-    // so neither refused request moved it.
+    // A zero step reads the counter. Each request moved it.
     let (status, read) = server.http_query("SELECT KV_INCR('rc_kv', 'ctr', 0)").await;
     assert_eq!(status, 200, "{read}");
-    assert_eq!(
-        read, after_incr,
-        "a refused request must not move the counter"
-    );
-    assert!(rows(&server, "rc_plain").await.is_empty());
+    assert_ne!(read, after_incr, "each request moves the counter");
+    assert_plain_applied(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_topk_runs_alone_or_is_refused() {
+async fn a_topk_runs_alone_or_in_a_request() {
     let server = fixture().await;
     exec(
         &server,
@@ -151,13 +147,13 @@ async fn a_topk_runs_alone_or_is_refused() {
 
     let (status, body) = server.http_query(topk).await;
     assert_eq!(status, 200, "{topk}: {body}");
-    assert_http_refused(&server, &format!("{topk}; {PLAIN}"), 1).await;
-    assert_http_refused(&server, &format!("{PLAIN}; {topk}"), 2).await;
-    assert!(rows(&server, "rc_plain").await.is_empty());
+    assert_http_applies(&server, &format!("{topk}; {PLAIN}")).await;
+    assert_http_applies(&server, &format!("{PLAIN_SECOND}; {topk}")).await;
+    assert_plain_applied(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_refuses_a_claimed_statement_in_a_request() {
+async fn native_runs_a_claimed_statement_in_a_request() {
     let server = fixture().await;
     let mut stream = open_trust_session(server.native_port, "nodedb").await;
     let alone = send_sql(&mut stream, 2, "UPSERT INTO rc_lone (v) VALUES ('a')").await;
@@ -165,15 +161,12 @@ async fn native_refuses_a_claimed_statement_in_a_request() {
 
     let sql = format!("{PLAIN}; UPSERT INTO rc_second (v) VALUES ('a')");
     let paired = send_sql(&mut stream, 3, &sql).await;
-    let error = paired.error.expect("the request must be refused");
-    assert_eq!(error.code, "0A000", "{error:?}");
-    assert!(
-        error.message.contains("statement 2 of 2") && error.message.contains(NEXT_ACTION),
-        "{error:?}"
-    );
+    assert!(paired.error.is_none(), "the request applies: {paired:?}");
+    // One frame sums the INSERT and the routed UPSERT counts.
+    assert_eq!(paired.rows_affected, Some(2), "{paired:?}");
     assert_eq!(rows(&server, "rc_lone").await, [["1", "a"]]);
-    assert!(rows(&server, "rc_second").await.is_empty());
-    assert!(rows(&server, "rc_plain").await.is_empty());
+    assert_eq!(rows(&server, "rc_second").await, [["1", "a"]]);
+    assert_eq!(rows(&server, "rc_plain").await, [["p1", "b"]]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

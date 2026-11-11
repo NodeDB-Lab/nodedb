@@ -3,9 +3,10 @@
 //! A statement the DDL router runs never plans through the request planner.
 //!
 //! The router takes a lone `UPSERT .. VALUES` and a lone object-literal
-//! `INSERT` over HTTP `/v1/query`. A request of several statements skips the
-//! router. So the same statement in a request answers 0A000 (HTTP 501) and
-//! applies nothing. Each case fills a key from a sequence default.
+//! `INSERT` over HTTP `/v1/query`. A request of several statements that
+//! holds one takes the sequential request runner, which runs it through the
+//! router. So the same statement in a request stores the row it stores
+//! alone. Each case fills a key from a sequence default.
 
 use crate::harness::TestServer;
 
@@ -48,41 +49,38 @@ async fn fixture(lone: &str, paired: &str) -> TestServer {
     server
 }
 
-/// Check that `lone` holds `expected` and that `paired` and `rb_other`
-/// hold nothing.
-async fn assert_lone_rows(server: &TestServer, lone: &str, paired: &str, expected: &[[&str; 2]]) {
-    assert_eq!(
-        rows(server, lone).await,
-        expected,
-        "the router path must store the expected row in {lone}"
-    );
-    for refused in [paired, "rb_other"] {
-        assert!(
-            rows(server, refused).await.is_empty(),
-            "a refused request must apply nothing to {refused}"
+/// Check that `lone` and `paired` hold `expected`, and that `rb_other`
+/// holds the row of the request's second statement.
+async fn assert_same_rows(server: &TestServer, lone: &str, paired: &str, expected: &[[&str; 2]]) {
+    for table in [lone, paired] {
+        assert_eq!(
+            rows(server, table).await,
+            expected,
+            "the router path must store the expected row in {table}"
         );
     }
+    assert_eq!(rows(server, "rb_other").await, [["o1", "b"]]);
 }
 
-/// Check that `sql` answers the 0A000 refusal of its first statement.
-async fn assert_refused(server: &TestServer, sql: &str) {
+/// Check that `sql` applies and answers one summed reply.
+async fn assert_applies(server: &TestServer, sql: &str) {
     let (status, body) = server.http_query(sql).await;
-    assert_eq!(status, 501, "{sql}: {body}");
-    assert!(
-        body.contains("statement 1 of 2") && body.contains("as its own request"),
-        "{sql}: {body}"
-    );
+    assert_eq!(status, 200, "{sql}: {body}");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+    // The reply is the sum of both statements, with no per-statement array.
+    assert!(body.get("statements").is_none(), "{sql}: {body}");
+    assert!(body["rows"].is_array(), "{sql}: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_upsert_with_a_sequence_key_stores_alone_and_is_refused_in_a_request() {
+async fn an_upsert_with_a_sequence_key_stores_the_same_row_alone_or_in_a_request() {
     let (lone, paired) = ("rb_upsert_lone", "rb_upsert_paired");
     let server = fixture(lone, paired).await;
 
     server
         .http_exec(&format!("UPSERT INTO {lone} (v) VALUES ('a')"))
         .await;
-    assert_refused(
+    assert_applies(
         &server,
         &format!(
             "UPSERT INTO {paired} (v) VALUES ('a'); \
@@ -91,18 +89,18 @@ async fn an_upsert_with_a_sequence_key_stores_alone_and_is_refused_in_a_request(
     )
     .await;
 
-    assert_lone_rows(&server, lone, paired, &[["1", "a"]]).await;
+    assert_same_rows(&server, lone, paired, &[["1", "a"]]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_object_literal_insert_with_a_sequence_key_stores_alone_and_is_refused_in_a_request() {
+async fn an_object_literal_insert_with_a_sequence_key_stores_the_same_row_alone_or_in_a_request() {
     let (lone, paired) = ("rb_literal_lone", "rb_literal_paired");
     let server = fixture(lone, paired).await;
 
     server
         .http_exec(&format!("INSERT INTO {lone} {{ v: 'a' }}"))
         .await;
-    assert_refused(
+    assert_applies(
         &server,
         &format!(
             "INSERT INTO {paired} {{ v: 'a' }}; \
@@ -111,5 +109,5 @@ async fn an_object_literal_insert_with_a_sequence_key_stores_alone_and_is_refuse
     )
     .await;
 
-    assert_lone_rows(&server, lone, paired, &[["1", "a"]]).await;
+    assert_same_rows(&server, lone, paired, &[["1", "a"]]).await;
 }

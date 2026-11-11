@@ -67,6 +67,9 @@ pub(super) struct TuningOverrides {
     /// Writes `[server.sql]` with `txn_wrapper_stateless = false`, so a test
     /// reads the refusal HTTP, NDJSON and WebSocket answer then.
     pub(super) txn_wrapper_off: bool,
+    /// Writes `[server.sql]` with `txn_control_native = false`, so a test
+    /// reads the refusal native answers then.
+    pub(super) txn_control_native_off: bool,
 }
 
 impl TuningOverrides {
@@ -143,6 +146,14 @@ impl TuningOverrides {
     pub(super) fn txn_wrapper_off() -> Self {
         Self {
             txn_wrapper_off: true,
+            ..Self::default()
+        }
+    }
+
+    /// Boot with native transaction control switched off.
+    pub(super) fn txn_control_native_off() -> Self {
+        Self {
+            txn_control_native_off: true,
             ..Self::default()
         }
     }
@@ -232,6 +243,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     }
     if tuning.txn_wrapper_off {
         toml.push_str("\n[server.sql]\ntxn_wrapper_stateless = false\n");
+    }
+    if tuning.txn_control_native_off {
+        toml.push_str("\n[server.sql]\ntxn_control_native = false\n");
     }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",
