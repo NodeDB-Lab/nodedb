@@ -4,16 +4,14 @@
 //! files.
 //!
 //! Checkpoint layout:
-//! `{data_dir}/sparse-vector-ckpt/core-{n}/gen-{m}/{db}_{tid}_{enc(coll)}_{enc(field)}.ckpt`,
-//! with each core's `MANIFEST` naming its live generation. Reclaim walks EVERY
+//! `{data_dir}/sparse-vector-ckpt/core-{n}/gen-{m}/{hash(key)}.ckpt`, with each core's `MANIFEST` naming its live generation. Reclaim walks EVERY
 //! core's directory, because `data_dir` is shared and the dropped collection may
 //! have been routed to any of them, and resolves each core's live generation
 //! through the same manifest reader the load path uses so the two can never
 //! disagree about which files are reachable.
 //!
-//! The filename prefix is built by the SAME encoder the write path uses
-//! ([`sparse_vector_checkpoint_prefix`]) so the `starts_with` match can never
-//! drift from the on-disk names.
+//! Each file stores its key, and reclaim matches the stored key through the
+//! SAME decoder the load path uses ([`sparse_vector_map_key`]).
 //!
 //! Unlinking a file out of a published generation does not break the manifest's
 //! promise. That promise is about the collections that are LIVE, and this runs
@@ -23,11 +21,11 @@
 
 use std::path::Path;
 
-use tracing::debug;
-
+use super::keyed::reclaim_keyed_matching;
 use super::{ReclaimError, ReclaimStats, Result};
+use crate::data::executor::checkpoint_key::CheckpointKey;
 use crate::data::executor::sparse_vector_checkpoint::{
-    read_sparse_vector_manifest_at, sparse_vector_checkpoint_prefix, sparse_vector_ckpt_gen_dir,
+    read_sparse_vector_manifest_at, sparse_vector_ckpt_gen_dir, sparse_vector_map_key,
 };
 
 /// Unlink every sparse-vector checkpoint file for
@@ -54,9 +52,13 @@ pub fn reclaim_sparse_vector_checkpoints(
         }
     };
 
-    // Build the prefix via the shared encoder so it always matches the
-    // filenames the write path produced.
-    let prefix = sparse_vector_checkpoint_prefix(database_id, tenant_id, collection);
+    // Every field index of the collection matches; the decoded key is
+    // compared whole, so "docs" never matches "docs_archive".
+    let matches = |key: &CheckpointKey| {
+        sparse_vector_map_key(key).is_some_and(|(db, tid, coll, _)| {
+            db.as_u64() == database_id && tid.as_u64() == tenant_id && coll == collection
+        })
+    };
 
     let mut stats = ReclaimStats::default();
     for core_entry in cores {
@@ -93,75 +95,44 @@ pub fn reclaim_sparse_vector_checkpoints(
             }
         };
         let gen_dir = sparse_vector_ckpt_gen_dir(&core_dir, manifest.generation);
-        reclaim_generation(&gen_dir, &prefix, &mut stats)?;
+        reclaim_keyed_matching("sparse-vector", &gen_dir, &[], matches, &mut stats)?;
     }
     Ok(stats)
-}
-
-/// Unlink every file in `gen_dir` whose name carries `prefix`.
-fn reclaim_generation(gen_dir: &Path, prefix: &str, stats: &mut ReclaimStats) -> Result<()> {
-    let entries = std::fs::read_dir(gen_dir).map_err(|source| ReclaimError::Io {
-        operation: "read sparse-vector live generation",
-        path: gen_dir.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| ReclaimError::Io {
-            operation: "read sparse-vector generation entry",
-            path: gen_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !name.starts_with(prefix) {
-            continue;
-        }
-        // `.ckpt.tmp` is debris from a write that never renamed; it belongs to
-        // this collection just the same and nothing else will collect it.
-        if !(name.ends_with(".ckpt") || name.ends_with(".ckpt.tmp")) {
-            continue;
-        }
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-                stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-                debug!(path = %path.display(), size, "sparse-vector reclaim: unlinked");
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ReclaimError::Io {
-                    operation: "unlink sparse-vector checkpoint",
-                    path,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::executor::sparse_vector_checkpoint::sparse_vector_ckpt_dir;
+    use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
+    use crate::data::executor::sparse_vector_checkpoint::{
+        sparse_vector_ckpt_dir, sparse_vector_ckpt_key,
+    };
     use tempfile::TempDir;
 
-    /// Publish a live generation under `core_id` holding `files`, through the
-    /// same manifest the load path reads.
-    fn publish(data_dir: &Path, core_id: usize, generation: u64, files: &[&str]) {
+    /// Publish a live generation under `core_id` holding one file per key,
+    /// through the same manifest the load path reads. Returns each file's path.
+    fn publish(
+        data_dir: &Path,
+        core_id: usize,
+        generation: u64,
+        keys: &[CheckpointKey],
+    ) -> Vec<std::path::PathBuf> {
         let ckpt_dir = sparse_vector_ckpt_dir(data_dir, core_id);
         let gen_dir = sparse_vector_ckpt_gen_dir(&ckpt_dir, generation);
         std::fs::create_dir_all(&gen_dir).expect("mkdir");
-        for f in files {
-            std::fs::write(gen_dir.join(f), b"x").expect("write");
-        }
+        let paths = keys
+            .iter()
+            .map(|key| write_keyed_checkpoint(&gen_dir, key, b"x").expect("write"))
+            .collect();
         let manifest =
             crate::data::executor::sparse_vector_checkpoint::test_manifest_bytes(generation);
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, "MANIFEST", &manifest)
             .expect("manifest");
+        paths
+    }
+
+    fn key(db: u64, tid: u64, coll: &str, field: &str) -> CheckpointKey {
+        sparse_vector_ckpt_key(db, tid, coll, field)
     }
 
     /// Reclaim must reach files under EVERY core's live generation — the dropped
@@ -170,59 +141,62 @@ mod tests {
     #[test]
     fn unlinks_the_collections_files_across_cores() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(
+        let core0 = publish(
             tmp.path(),
             0,
             3,
             &[
-                "0_1_docs_title.ckpt",
-                "0_1_docs_body.ckpt",
+                key(0, 1, "docs", "title"),
+                key(0, 1, "docs", "body"),
                 // Keep: different collection.
-                "0_1_posts_title.ckpt",
+                key(0, 1, "posts", "title"),
             ],
         );
-        publish(
+        let core1 = publish(
             tmp.path(),
             1,
             0,
             &[
-                "0_1_docs_title.ckpt",
+                key(0, 1, "docs", "title"),
                 // Keep: different tenant.
-                "0_2_docs_title.ckpt",
+                key(0, 2, "docs", "title"),
                 // Keep: different database.
-                "1_1_docs_title.ckpt",
+                key(1, 1, "docs", "title"),
             ],
         );
 
-        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").unwrap();
+        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").expect("reclaim");
         assert_eq!(
             stats.files_unlinked, 3,
             "both of core 0's files and core 1's one file must be unlinked"
         );
-
-        let gen0 = sparse_vector_ckpt_gen_dir(&sparse_vector_ckpt_dir(tmp.path(), 0), 3);
-        assert!(!gen0.join("0_1_docs_title.ckpt").exists());
-        assert!(!gen0.join("0_1_docs_body.ckpt").exists());
-        assert!(gen0.join("0_1_posts_title.ckpt").exists());
-
-        let gen1 = sparse_vector_ckpt_gen_dir(&sparse_vector_ckpt_dir(tmp.path(), 1), 0);
-        assert!(!gen1.join("0_1_docs_title.ckpt").exists());
-        assert!(gen1.join("0_2_docs_title.ckpt").exists());
-        assert!(gen1.join("1_1_docs_title.ckpt").exists());
+        assert!(!core0[0].exists() && !core0[1].exists());
+        assert!(core0[2].exists());
+        assert!(!core1[0].exists());
+        assert!(core1[1].exists() && core1[2].exists());
     }
 
-    /// A collection whose encoded name merely starts with the target's bytes
-    /// must survive — the `_` in the prefix is a structural separator and the
-    /// encoder escapes literal underscores precisely so this cannot collide.
+    /// A collection whose name merely starts with the target's bytes must
+    /// survive — the stored key is compared whole.
     #[test]
     fn does_not_unlink_a_longer_collection_name() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 0, &["0_1_docs%5Farchive_title.ckpt"]);
+        let paths = publish(tmp.path(), 0, 0, &[key(0, 1, "docs_archive", "title")]);
 
-        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").unwrap();
+        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
-        let gen_dir = sparse_vector_ckpt_gen_dir(&sparse_vector_ckpt_dir(tmp.path(), 0), 0);
-        assert!(gen_dir.join("0_1_docs%5Farchive_title.ckpt").exists());
+        assert!(paths[0].exists());
+    }
+
+    /// A 255-byte collection with a 200-byte field reclaims by stored key.
+    #[test]
+    fn long_names_are_reclaimed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let coll = "c".repeat(255);
+        let paths = publish(tmp.path(), 0, 0, &[key(0, 1, &coll, &"f".repeat(200))]);
+        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, &coll).expect("reclaim");
+        assert_eq!(stats.files_unlinked, 1);
+        assert!(!paths[0].exists());
     }
 
     #[test]
@@ -232,7 +206,8 @@ mod tests {
         std::fs::create_dir_all(&core_dir).expect("mkdir");
         std::fs::write(core_dir.join("MANIFEST"), b"not-a-manifest").expect("manifest");
 
-        let error = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").unwrap_err();
+        let error =
+            reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").expect_err("must fail");
         assert!(error.to_string().contains("manifest"));
     }
 
@@ -242,14 +217,15 @@ mod tests {
     #[test]
     fn ignores_superseded_generations() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 1, &["0_1_docs_title.ckpt"]);
+        publish(tmp.path(), 0, 1, &[key(0, 1, "docs", "title")]);
         let stale = sparse_vector_ckpt_gen_dir(&sparse_vector_ckpt_dir(tmp.path(), 0), 0);
         std::fs::create_dir_all(&stale).expect("mkdir");
-        std::fs::write(stale.join("0_1_docs_title.ckpt"), b"old").expect("write");
+        let old =
+            write_keyed_checkpoint(&stale, &key(0, 1, "docs", "title"), b"old").expect("write");
 
-        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").unwrap();
+        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").expect("reclaim");
         assert_eq!(stats.files_unlinked, 1, "only the live generation's file");
-        assert!(stale.join("0_1_docs_title.ckpt").exists());
+        assert!(old.exists());
     }
 
     /// No checkpoint root at all is the common case (no sparse-vector index ever
@@ -257,7 +233,7 @@ mod tests {
     #[test]
     fn absent_root_is_a_noop() {
         let tmp = TempDir::new().expect("tempdir");
-        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").unwrap();
+        let stats = reclaim_sparse_vector_checkpoints(tmp.path(), 0, 1, "docs").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
     }
 }

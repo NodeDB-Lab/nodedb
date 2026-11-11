@@ -24,6 +24,7 @@
 
 pub mod atomic_io;
 pub mod checkpoint_frame;
+pub mod checkpoint_keyed_frame;
 pub mod continuity;
 pub mod decrypt;
 pub mod discovery;
@@ -36,6 +37,10 @@ pub use atomic_io::{
     atomic_swap_dirs_fsync, atomic_write_fsync, fsync_directory, read_checkpoint_dontneed,
 };
 pub use checkpoint_frame::{read_checkpoint_framed, write_checkpoint_framed};
+pub use checkpoint_keyed_frame::{
+    KeyedCheckpoint, MAX_CHECKPOINT_KEY_LEN, read_checkpoint_key, read_checkpoint_keyed,
+    write_checkpoint_keyed,
+};
 pub use continuity::SegmentContinuity;
 pub use decrypt::SegmentDecryptor;
 pub use discovery::discover_segments;

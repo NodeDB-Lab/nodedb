@@ -16,6 +16,9 @@ use nodedb_array::schema::ArraySchema;
 use nodedb_array::types::ArrayId;
 
 use super::store::ArrayStore;
+use super::store_dir::{
+    array_dir, bind_array_dir, check_dir_key, drop_tombstone_dir, write_dir_key,
+};
 
 #[derive(Clone)]
 pub struct ArrayEngineConfig {
@@ -127,6 +130,7 @@ impl ArrayEngine {
         // The key goes in through the constructor: `ArrayStore::open` opens
         // every segment the manifest names, and an encrypted segment opened
         // without it is a typed error.
+        bind_array_dir(&dir, &id)?;
         let store = ArrayStore::open(dir, schema, schema_hash, self.cfg.kek.clone())?;
         self.arrays.insert(id, store);
         Ok(())
@@ -163,9 +167,12 @@ impl ArrayEngine {
         let dir = array_dir(&self.cfg.root, id);
         let tombstone = drop_tombstone_dir(&dir);
         match (dir.exists(), tombstone.exists()) {
-            (true, false) => std::fs::rename(&dir, &tombstone).map_err(|e| ArrayEngineError::Io {
-                detail: format!("stage array drop {dir:?} -> {tombstone:?}: {e}"),
-            }),
+            (true, false) => {
+                check_dir_key(&dir, id)?;
+                std::fs::rename(&dir, &tombstone).map_err(|e| ArrayEngineError::Io {
+                    detail: format!("stage array drop {dir:?} -> {tombstone:?}: {e}"),
+                })
+            }
             (false, true) | (false, false) => Ok(()),
             (true, true) => Err(ArrayEngineError::Io {
                 detail: format!(
@@ -191,6 +198,7 @@ impl ArrayEngine {
                 ),
             }),
             (true, false) => {
+                check_dir_key(&source, from)?;
                 self.purge_drop_array(to)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| ArrayEngineError::Io {
@@ -199,7 +207,9 @@ impl ArrayEngine {
                 }
                 std::fs::rename(&source, &target).map_err(|e| ArrayEngineError::Io {
                     detail: format!("rekey array {source:?} -> {target:?}: {e}"),
-                })
+                })?;
+                // The directory now answers to `to`; its key must say so.
+                write_dir_key(&target, to)
             }
         }
     }
@@ -220,6 +230,9 @@ impl ArrayEngine {
             });
         }
         if tombstone.exists() {
+            // A tombstone that stores another array's id is not this array's
+            // to purge.
+            check_dir_key(&tombstone, id)?;
             std::fs::remove_dir_all(&tombstone).map_err(|e| ArrayEngineError::Io {
                 detail: format!("purge array tombstone {tombstone:?}: {e}"),
             })?;
@@ -292,21 +305,6 @@ impl ArrayEngine {
         let dropped = super::purge::execute(store, plan)?;
         Ok(dropped)
     }
-}
-
-fn drop_tombstone_dir(dir: &std::path::Path) -> PathBuf {
-    let name = dir.file_name().unwrap_or_default().to_string_lossy();
-    dir.with_file_name(format!(".{name}.drop-pending"))
-}
-
-/// Build the store directory for one array. Hex-encoding the name keeps
-/// separators and traversal components out of the path.
-pub(super) fn array_dir(root: &std::path::Path, id: &ArrayId) -> PathBuf {
-    let encoded_name = hex::encode(&id.name);
-    root.join("arrays")
-        .join(format!("d{}", id.database_id.as_u64()))
-        .join(format!("t{}", id.tenant_id.as_u64()))
-        .join(encoded_name)
 }
 
 #[cfg(test)]

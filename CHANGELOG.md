@@ -9,6 +9,10 @@ NodeDB uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### ⚠️ Breaking changes
+
+- **Long names:** long collection, field and array names no longer break checkpoints. The on-disk layout changed, so start on an empty data directory.
+
 ### Fixed
 
 - **Large rows:** updating a row of about 500 KiB or more no longer fails or stops the node from restarting.

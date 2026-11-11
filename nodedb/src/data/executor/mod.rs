@@ -5,7 +5,7 @@ pub(crate) mod array_checkpoint;
 #[cfg(test)]
 mod cascade_journal_tests;
 pub(crate) mod checkpoint_decode_error;
-pub(crate) mod checkpoint_encoding;
+pub(crate) mod checkpoint_key;
 pub(crate) mod checkpoint_outcome;
 pub(crate) mod columnar_checkpoint;
 pub mod core_loop;

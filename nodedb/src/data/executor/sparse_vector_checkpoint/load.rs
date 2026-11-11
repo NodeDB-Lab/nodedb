@@ -9,8 +9,9 @@ use nodedb_types::DatabaseId;
 use tracing::info;
 
 use super::manifest::read_sparse_vector_manifest_at;
-use super::paths::{parse_sparse_vector_key, sparse_vector_ckpt_dir, sparse_vector_ckpt_gen_dir};
+use super::paths::{sparse_vector_ckpt_dir, sparse_vector_ckpt_gen_dir, sparse_vector_map_key};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{is_keyed_checkpoint_path, read_keyed_checkpoint};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::vector::sparse::SparseInvertedIndex;
 use crate::types::{Lsn, TenantId};
@@ -106,22 +107,16 @@ impl CoreLoop {
         for entry in entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let key = parse_sparse_vector_key(stem).ok_or_else(|| {
-                CheckpointDecodeError::UnparseableFilename {
-                    stem: stem.to_string(),
-                }
-            })?;
-
-            let bytes = nodedb_wal::segment::read_checkpoint_framed(&path).map_err(|source| {
-                CheckpointDecodeError::ReadFile {
+            let (stored, bytes) = read_keyed_checkpoint(&path)?;
+            let key =
+                sparse_vector_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
                     path: path.clone(),
-                    source,
-                }
-            })?;
+                    stored: stored.to_string(),
+                    expected: "sparse-vector",
+                })?;
             let index = SparseInvertedIndex::from_checkpoint(&bytes)
                 .ok_or_else(|| CheckpointDecodeError::UndecodableIndex { path: path.clone() })?;
             decoded.insert(key, index);
@@ -133,8 +128,11 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use super::super::format::{SPARSE_VECTOR_CKPT_FORMAT_VERSION, SparseVectorCheckpointManifest};
-    use super::super::paths::{SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_checkpoint_stem};
+    use super::super::paths::{SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_ckpt_key};
     use super::*;
+    use crate::data::executor::checkpoint_key::{
+        read_keyed_checkpoint_expecting, write_keyed_checkpoint,
+    };
     use nodedb_types::SparseVector;
 
     fn index_with(docs: &[(&str, &[(u32, f32)])]) -> SparseInvertedIndex {
@@ -159,13 +157,11 @@ mod tests {
         assert_eq!(index.doc_count(), 2);
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let stem = sparse_vector_checkpoint_stem(0, 7, "docs", "emb");
-        let path = tmp.path().join(format!("{stem}.ckpt"));
+        let key = sparse_vector_ckpt_key(0, 7, "docs", "emb");
         let bytes = index.checkpoint_to_bytes().expect("encode");
-        nodedb_wal::segment::write_checkpoint_framed(tmp.path(), &format!("{stem}.ckpt"), &bytes)
-            .expect("write");
+        let path = write_keyed_checkpoint(tmp.path(), &key, &bytes).expect("write");
 
-        let read_back = nodedb_wal::segment::read_checkpoint_framed(&path).expect("read");
+        let read_back = read_keyed_checkpoint_expecting(&path, &key).expect("read");
         let restored = SparseInvertedIndex::from_checkpoint(&read_back).expect("decode");
 
         assert_eq!(
@@ -335,15 +331,15 @@ mod tests {
             ),
             index_with(&[("doc-a", &[(1, 0.5)]), ("doc-b", &[(2, 0.25)])]),
         );
-        // A second index, under a name whose literal `_` the filename encoding
-        // has to escape — a stem that round-trips wrong restores under a key no
-        // query ever computes, and the index reads back missing.
+        // A second index, under a 255-byte collection and a 200-byte field: the
+        // file name must stay short, and the stored key must restore the index
+        // under the exact key it was written with.
         before.sparse_vector_indexes.insert(
             (
                 DatabaseId::new(0),
                 TenantId::new(7),
-                "my_docs".into(),
-                "title_emb".into(),
+                "d".repeat(255),
+                "t".repeat(200),
             ),
             index_with(&[("doc-c", &[(3, 1.0)])]),
         );
@@ -385,8 +381,8 @@ mod tests {
             .get(&(
                 DatabaseId::new(0),
                 TenantId::new(7),
-                "my_docs".into(),
-                "title_emb".into(),
+                "d".repeat(255),
+                "t".repeat(200),
             ))
             .expect("an index must restore under the exact key it was written with");
         assert_eq!(restored.doc_count(), 1);

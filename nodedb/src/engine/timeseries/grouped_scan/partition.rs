@@ -11,7 +11,7 @@ use std::path::Path;
 use nodedb_query::simd_filter;
 
 use super::super::columnar_memtable::{ColumnData, ColumnarMemtable};
-use super::super::columnar_segment::ColumnarSegmentReader;
+use super::super::columnar_segment::{ColumnarSegmentReader, column_file_name, symbol_file_name};
 use super::super::grouped_filter::{self, UnsupportedPredicate};
 use super::exact_keys::{intern_exact_group_columns, point_group_columns_at_codes};
 use super::strategies::dispatch_grouping;
@@ -227,7 +227,7 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
     let mut sym_dicts: HashMap<usize, nodedb_types::timeseries::SymbolDictionary> = HashMap::new();
     for (i, (name, ty)) in schema.columns.iter().enumerate() {
         let needed = p.needed_columns.is_empty() || p.needed_columns.iter().any(|n| n == name);
-        if !ty.is_dictionary() || !needed || !dir.join(format!("{name}.sym")).exists() {
+        if !ty.is_dictionary() || !needed || !dir.join(symbol_file_name(name)).exists() {
             continue;
         }
         let dict = ColumnarSegmentReader::read_symbol_dict(dir, name, kek)
@@ -435,7 +435,7 @@ fn read_partition_columns(
     // io_uring path: batch-read all needed .col files in parallel.
     let col_paths: Vec<std::path::PathBuf> = needed_indices
         .iter()
-        .map(|&i| partition_dir.join(format!("{}.col", schema_columns[i].0)))
+        .map(|&i| partition_dir.join(column_file_name(&schema_columns[i].0)))
         .collect();
     let path_refs: Vec<&Path> = col_paths.iter().map(|p| p.as_path()).collect();
 
@@ -523,8 +523,8 @@ mod tests {
         write_ramp_partition(dir.path(), "ts-full", 10);
         write_ramp_partition(dir.path(), "ts-short", 3);
         std::fs::copy(
-            dir.path().join("ts-short/value.col"),
-            dir.path().join("ts-full/value.col"),
+            dir.path().join("ts-short").join(column_file_name("value")),
+            dir.path().join("ts-full").join(column_file_name("value")),
         )
         .expect("swap the column");
 

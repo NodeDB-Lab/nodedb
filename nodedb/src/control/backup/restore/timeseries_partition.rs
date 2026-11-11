@@ -26,7 +26,9 @@ use nodedb_wal::crypto::WalEncryptionKey;
 use crate::Error;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnarFlushView, ColumnarSchema};
 use crate::engine::timeseries::columnar_segment::encrypt::is_encrypted;
-use crate::engine::timeseries::columnar_segment::{ColumnarSegmentReader, ColumnarSegmentWriter};
+use crate::engine::timeseries::columnar_segment::{
+    ColumnarSegmentReader, ColumnarSegmentWriter, symbol_file_name,
+};
 use crate::types::TsFlushedPartitionBlob;
 use crate::wal::TimeseriesEndedPartitionRedo;
 
@@ -106,7 +108,7 @@ pub(super) fn read_backed_up_partition(
         .map_err(|e| partition_error(collection, &part.dir_name, "the columns", e))?;
     let mut sym_dicts = HashMap::new();
     for (i, (name, ty)) in schema.columns.iter().enumerate() {
-        let dict_file = format!("{name}.sym");
+        let dict_file = symbol_file_name(name);
         if !ty.is_dictionary() || !part.files.iter().any(|(file, _)| *file == dict_file) {
             continue;
         }

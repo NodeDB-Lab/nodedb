@@ -9,8 +9,9 @@ use nodedb_types::DatabaseId;
 use tracing::info;
 
 use super::manifest::{read_vector_manifest_at, storage_err};
-use super::paths::{parse_vector_ckpt_stem, vector_ckpt_dir, vector_ckpt_gen_dir};
+use super::paths::{vector_ckpt_dir, vector_ckpt_gen_dir, vector_map_key};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{is_keyed_checkpoint_path, read_keyed_checkpoint};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::vector::collection::VectorCollection;
 use crate::types::{Lsn, TenantId};
@@ -100,25 +101,21 @@ impl CoreLoop {
         for entry in entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
 
-            // Checkpoint filenames come from `vector_ckpt_stem`. This directory
-            // is engine-private, so a `.ckpt` whose stem does not parse is a
-            // corrupted real checkpoint, not a foreign file to skip.
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let key = parse_vector_ckpt_stem(stem).ok_or_else(|| {
-                CheckpointDecodeError::UnparseableFilename {
-                    stem: stem.to_string(),
-                }
+            // A framing/CRC fault, a key fault, or a decode fault below is
+            // fail-stop, not a skip: the file is present, so its bytes are the
+            // only surviving copy of these vectors once the WAL below the
+            // generation's LSN has been truncated. This directory is
+            // engine-private, so a key that is not a vector key is corruption.
+            let (stored, bytes) = read_keyed_checkpoint(&path)?;
+            let key = vector_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
+                path: path.clone(),
+                stored: stored.to_string(),
+                expected: "vector",
             })?;
-
-            // A framing/CRC fault or a decode fault below is fail-stop, not a
-            // skip: the file is present, so its bytes are the only surviving
-            // copy of these vectors once the WAL below the generation's LSN has
-            // been truncated.
-            let bytes = nodedb_wal::segment::read_checkpoint_framed(&path)?;
             let kek = self.segment_keks.vector_checkpoint_kek.as_ref();
             let memory = nodedb_mem::ScopedMemory::new(
                 self.governor.clone(),
@@ -205,9 +202,8 @@ mod tests {
         let ckpt_dir = vector_ckpt_dir(&core.data_dir, core.core_id);
         let gen_dir = vector_ckpt_gen_dir(&ckpt_dir, 0);
         std::fs::create_dir_all(&gen_dir).expect("create gen dir");
-        let stem = super::super::paths::vector_ckpt_stem(0, 1, "docs");
-        std::fs::write(gen_dir.join(format!("{stem}.ckpt")), b"garbage")
-            .expect("write garbage index");
+        let name = super::super::paths::vector_ckpt_key(0, 1, "docs").file_name();
+        std::fs::write(gen_dir.join(name), b"garbage").expect("write garbage index");
         let bytes = super::super::format::test_manifest_bytes(0);
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, VECTOR_CKPT_MANIFEST, &bytes)
             .expect("write manifest");

@@ -708,6 +708,10 @@ mod tests {
             captured.iter().any(|p| p.ends_with(".ndas")),
             "the segment the manifest names is captured"
         );
+        assert!(
+            captured.iter().any(|p| p.ends_with("/KEY")),
+            "the key file naming the array is captured: {captured:?}"
+        );
     }
 
     /// A partition directory the registry does not hold stays behind.

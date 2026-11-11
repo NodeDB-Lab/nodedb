@@ -6,9 +6,9 @@
 //!
 //! ```text
 //! {data_dir}/spatial-ckpt/core-{core_id}/
-//!     MANIFEST                                             # names the live generation
-//!     gen-{n}/{db}_{tid}_{enc(coll)}_{enc(field)}.ckpt     # the R-tree
-//!     gen-{n}/{db}_{tid}_{enc(coll)}_{enc(field)}.docmap   # its identity half
+//!     MANIFEST                    # names the live generation
+//!     gen-{n}/{hash(key)}.ckpt    # the R-tree, key stored inside
+//!     gen-{n}/{hash(key)}.docmap  # its identity half, same key
 //! ```
 //!
 //! ## Why a generation + manifest
@@ -47,8 +47,10 @@ mod test_support;
 mod write;
 
 pub(crate) use manifest::read_spatial_manifest_at;
+#[cfg(test)]
+pub(crate) use paths::spatial_ckpt_key;
 pub(crate) use paths::{
-    SPATIAL_CKPT_MANIFEST, spatial_checkpoint_prefix, spatial_ckpt_dir, spatial_ckpt_gen_dir,
+    SPATIAL_CKPT_MANIFEST, spatial_ckpt_dir, spatial_ckpt_gen_dir, spatial_map_key,
 };
 
 #[cfg(test)]

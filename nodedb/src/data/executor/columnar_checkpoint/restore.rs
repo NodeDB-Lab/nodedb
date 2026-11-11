@@ -4,8 +4,9 @@
 //! each with its flushed segments and surrogate sidecar in lockstep.
 
 use super::format::{COLUMNAR_CKPT_FORMAT_VERSION, ColumnarCheckpointFile};
-use super::paths::parse_columnar_ckpt_stem;
+use super::paths::columnar_map_key;
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{is_keyed_checkpoint_path, read_keyed_checkpoint};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, TenantId};
 
@@ -44,23 +45,16 @@ impl CoreLoop {
         for entry in entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let (stored, bytes) = read_keyed_checkpoint(&path)?;
             let (database_id, tenant_id, collection) =
-                parse_columnar_ckpt_stem(stem).ok_or_else(|| {
-                    CheckpointDecodeError::UnparseableFilename {
-                        stem: stem.to_string(),
-                    }
-                })?;
-
-            let bytes = nodedb_wal::segment::read_checkpoint_framed(&path).map_err(|source| {
-                CheckpointDecodeError::ReadFile {
+                columnar_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
                     path: path.clone(),
-                    source,
-                }
-            })?;
+                    stored: stored.to_string(),
+                    expected: "columnar",
+                })?;
             let file =
                 zerompk::from_msgpack::<ColumnarCheckpointFile>(&bytes).map_err(|source| {
                     CheckpointDecodeError::MsgpackDecode {
@@ -352,5 +346,30 @@ mod tests {
             "a memtable-only collection's rows are exactly the ones a segment-file \
              design could not have persisted"
         );
+    }
+
+    /// A 255-byte collection name checkpoints under a short file name and
+    /// restores every row under its full name.
+    #[test]
+    fn long_collection_name_checkpoints_and_restores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let coll = "c".repeat(255);
+
+        let mut core = open_core(dir.path());
+        seed_collection(
+            &mut core,
+            &coll,
+            &[(1, "a", Surrogate(301))],
+            &[(2, "b", Surrogate(302))],
+        );
+        core.checkpoint_columnar_engines()
+            .expect("a long-named collection must publish");
+        drop(core);
+
+        let mut restored = open_core(dir.path());
+        restored
+            .load_columnar_checkpoints()
+            .expect("checkpoint load must succeed");
+        assert_eq!(ids(&scan(&mut restored, &coll, None)), vec![1, 2]);
     }
 }

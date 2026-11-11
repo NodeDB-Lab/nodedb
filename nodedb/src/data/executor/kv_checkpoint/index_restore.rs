@@ -68,8 +68,11 @@ mod tests {
     use super::super::format::{KV_CKPT_FORMAT_VERSION, KvCheckpointEntry, KvCheckpointFile};
     use super::super::index_decode::decode_kv_indexes;
     use super::super::index_export::export_collection_indexes;
-    use super::super::paths::kv_ckpt_filename;
+    use super::super::paths::kv_ckpt_key;
     use super::*;
+    use crate::data::executor::checkpoint_key::{
+        read_keyed_checkpoint_expecting, write_keyed_checkpoint,
+    };
     use crate::data::executor::handlers::kv::sorted_index_compute::{
         BuildSortedIndexDefParams, build_sorted_index_def,
     };
@@ -203,11 +206,10 @@ mod tests {
     /// load paths make, so an index kind that cannot survive msgpack fails here.
     fn through_disk(file: &KvCheckpointFile) -> KvCheckpointFile {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let name = kv_ckpt_filename(TID, COLL);
-        let path = tmp.path().join(&name);
+        let key = kv_ckpt_key(TID, COLL);
         let bytes = zerompk::to_msgpack_vec(file).expect("encode");
-        nodedb_wal::segment::write_checkpoint_framed(tmp.path(), &name, &bytes).expect("write");
-        let read_back = nodedb_wal::segment::read_checkpoint_framed(&path).expect("read");
+        let path = write_keyed_checkpoint(tmp.path(), &key, &bytes).expect("write");
+        let read_back = read_keyed_checkpoint_expecting(&path, &key).expect("read");
         zerompk::from_msgpack(&read_back).expect("decode")
     }
 

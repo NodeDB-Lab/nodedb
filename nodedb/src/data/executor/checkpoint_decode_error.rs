@@ -36,10 +36,41 @@ pub(crate) enum CheckpointDecodeError {
         source: std::io::Error,
     },
 
-    /// The filename does not encode the key its contents restore under. Guessing
-    /// a key would install the state where nothing ever reads it.
-    #[error("unparseable checkpoint filename {stem:?}")]
-    UnparseableFilename { stem: String },
+    /// The key stored in a checkpoint file did not decode.
+    #[error("cannot decode the key stored in {}: {detail}", path.display())]
+    KeyUndecodable { path: PathBuf, detail: String },
+
+    /// The key stored in a checkpoint file hashes to another file name. The
+    /// file was renamed or copied under another key's name.
+    #[error(
+        "{} holds key {stored}, whose file stem is {stored_stem}, not {found_stem}",
+        path.display()
+    )]
+    KeyNameMismatch {
+        path: PathBuf,
+        stored: String,
+        stored_stem: String,
+        found_stem: String,
+    },
+
+    /// A checkpoint file holds a key other than the one its reader expects:
+    /// a hash collision or a misplaced file. Loading it would install another
+    /// collection's state.
+    #[error("{} holds key {stored}, expected key {expected}", path.display())]
+    KeyMismatch {
+        path: PathBuf,
+        expected: String,
+        stored: String,
+    },
+
+    /// A checkpoint file's key belongs to another engine or has the wrong shape
+    /// for the directory it sits in.
+    #[error("{} holds key {stored}, which is not a {expected} key", path.display())]
+    KeyShape {
+        path: PathBuf,
+        stored: String,
+        expected: &'static str,
+    },
 
     /// A checkpoint file could not be read off disk.
     #[error("cannot read {}: {source}", path.display())]

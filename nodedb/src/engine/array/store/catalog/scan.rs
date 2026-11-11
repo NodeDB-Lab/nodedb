@@ -267,7 +267,8 @@ mod tests {
     /// flush truncated it.
     #[test]
     fn reopen_supplies_the_kek_to_encrypted_segments() {
-        use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig, array_dir};
+        use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
+        use crate::engine::array::store_dir::array_dir;
         use crate::engine::array::test_support::{aid, put_one, schema as engine_schema};
         use nodedb_wal::crypto::WalEncryptionKey;
 

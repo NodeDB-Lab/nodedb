@@ -20,6 +20,7 @@ pub mod read;
 pub mod recovery;
 pub mod rollback;
 pub mod store;
+pub mod store_dir;
 #[cfg(test)]
 mod test_support;
 pub mod wal;

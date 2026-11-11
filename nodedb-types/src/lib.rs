@@ -134,7 +134,7 @@ pub use mirror::{
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
 pub use object_msgpack::{ObjectFormat, ObjectView, decode_object};
-pub use path_component::is_plain_path_component;
+pub use path_component::{hashed_file_stem, is_plain_path_component};
 pub use quota::{
     PriorityClass, PriorityClassParseError, QuotaRecord, QuotaSpec, QuotaValidationError,
 };

@@ -223,6 +223,7 @@ mod tests {
 
     use super::super::row_emit::extract_timestamp;
     use super::*;
+    use crate::engine::timeseries::columnar_segment::column_file_name;
     use crate::engine::timeseries::columnar_segment::test_partition::write_metric_partition as write_partition;
 
     fn scan_of(limit: usize) -> PartitionScan<'static> {
@@ -360,7 +361,11 @@ mod tests {
         let good = write_partition(dir.path(), "ts-a", &[100]);
         let full = write_partition(dir.path(), "ts-b", &[200, 201, 202]);
         let short = write_partition(dir.path(), "ts-c", &[300]);
-        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        std::fs::copy(
+            short.join(column_file_name("value")),
+            full.join(column_file_name("value")),
+        )
+        .expect("swap column");
         let crs = CrsContext::builtin_only();
 
         let result = scan_partitions::<rmpv::Value>(&[good, full], &scan_of(10), &crs);

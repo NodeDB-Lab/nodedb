@@ -19,6 +19,8 @@
 
 use std::path::Path;
 
+use crate::engine::timeseries::columnar_segment::column_file_name;
+
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
@@ -78,7 +80,7 @@ pub fn advise_dontneed(path: &Path) -> std::io::Result<()> {
 /// partition scan loop. By the time reads execute, pages are warm.
 pub fn prefetch_partition_columns(partition_dir: &Path, needed_columns: &[String]) {
     for col_name in needed_columns {
-        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let col_path = partition_dir.join(column_file_name(col_name));
         // Best-effort: ignore errors (file may not exist for projected-away columns).
         let _ = advise_willneed(&col_path);
     }
@@ -93,7 +95,7 @@ pub fn prefetch_partition_columns(partition_dir: &Path, needed_columns: &[String
 /// for other engines (vector, graph, document) sharing the process.
 pub fn release_partition_columns(partition_dir: &Path, needed_columns: &[String]) {
     for col_name in needed_columns {
-        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let col_path = partition_dir.join(column_file_name(col_name));
         let _ = advise_dontneed(&col_path);
     }
 }
@@ -138,7 +140,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Create some column files.
         for name in &["timestamp", "value", "qtype"] {
-            let path = dir.path().join(format!("{name}.col"));
+            let path = dir.path().join(column_file_name(name));
             let mut f = std::fs::File::create(&path).unwrap();
             f.write_all(&[0u8; 4096]).unwrap();
         }

@@ -8,9 +8,10 @@ use tracing::{info, warn};
 use super::format::{SPARSE_VECTOR_CKPT_FORMAT_VERSION, SparseVectorCheckpointManifest};
 use super::manifest::{read_sparse_vector_manifest_at, storage_err};
 use super::paths::{
-    SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_checkpoint_stem, sparse_vector_ckpt_dir,
-    sparse_vector_ckpt_gen_dir,
+    SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_ckpt_dir, sparse_vector_ckpt_gen_dir,
+    sparse_vector_ckpt_key,
 };
+use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 use crate::types::replay_stamp::ReplayStamp;
@@ -103,17 +104,16 @@ impl CoreLoop {
             // disk under a manifest claiming a later LSN — resurrecting every
             // document the deletes removed.
             let bytes = index.checkpoint_to_bytes()?;
-            let stem = sparse_vector_checkpoint_stem(db.as_u64(), tid.as_u64(), coll, field);
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &format!("{stem}.ckpt"), &bytes)
-                .map_err(|e| crate::Error::Storage {
-                    engine: "sparse_vector".to_string(),
-                    detail: format!(
-                        "sparse-vector checkpoint write failed for database {} tenant {} \
+            let key = sparse_vector_ckpt_key(db.as_u64(), tid.as_u64(), coll, field);
+            write_keyed_checkpoint(gen_dir, &key, &bytes).map_err(|e| crate::Error::Storage {
+                engine: "sparse_vector".to_string(),
+                detail: format!(
+                    "sparse-vector checkpoint write failed for database {} tenant {} \
                          collection {coll} field {field}: {e}",
-                        db.as_u64(),
-                        tid.as_u64()
-                    ),
-                })?;
+                    db.as_u64(),
+                    tid.as_u64()
+                ),
+            })?;
             written += 1;
         }
         Ok(written)

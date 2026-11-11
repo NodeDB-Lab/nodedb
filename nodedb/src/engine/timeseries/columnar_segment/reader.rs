@@ -12,6 +12,7 @@ use super::super::columnar_memtable::{ColumnData, ColumnType, ColumnarSchema};
 use super::codec::decode_column;
 use super::encrypt::{decrypt_file, is_encrypted};
 use super::error::SegmentError;
+use super::file_names::{column_file_name, symbol_file_name};
 use super::mmap::{BackingStore, ColumnMmap, advise_sequential};
 use super::schema::{SchemaJson, schema_from_parsed};
 
@@ -89,7 +90,7 @@ impl ColumnarSegmentReader {
         codec: Option<ResolvedColumnCodec>,
         kek: Option<&WalEncryptionKey>,
     ) -> Result<ColumnData, SegmentError> {
-        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let col_path = partition_dir.join(column_file_name(col_name));
         let raw = std::fs::read(&col_path)
             .map_err(|e| SegmentError::Io(format!("read {}: {e}", col_path.display())))?;
         let data = decrypt_segment_file(kek, &raw)?;
@@ -126,7 +127,7 @@ impl ColumnarSegmentReader {
         col_name: &str,
         kek: Option<&WalEncryptionKey>,
     ) -> Result<SymbolDictionary, SegmentError> {
-        let sym_path = partition_dir.join(format!("{col_name}.sym"));
+        let sym_path = partition_dir.join(symbol_file_name(col_name));
         let raw = std::fs::read(&sym_path)
             .map_err(|e| SegmentError::Io(format!("read {}: {e}", sym_path.display())))?;
         let plaintext = decrypt_segment_file(kek, &raw)?;
@@ -199,7 +200,7 @@ impl ColumnarSegmentReader {
         col_name: &str,
         kek: Option<&WalEncryptionKey>,
     ) -> Result<Vec<u8>, SegmentError> {
-        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let col_path = partition_dir.join(column_file_name(col_name));
         let raw = std::fs::read(&col_path)
             .map_err(|e| SegmentError::Io(format!("read {}: {e}", col_path.display())))?;
         decrypt_segment_file(kek, &raw)
@@ -314,7 +315,7 @@ impl ColumnarSegmentReader {
         col_name: &str,
         kek: Option<&WalEncryptionKey>,
     ) -> Result<ColumnMmap, SegmentError> {
-        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let col_path = partition_dir.join(column_file_name(col_name));
         match kek {
             None => {
                 let file = std::fs::File::open(&col_path)
@@ -506,7 +507,7 @@ mod tests {
             .write_partition("ts-enc", &memtable.drain().view(), 0, 1, Some(&kek))
             .expect("write");
         let part = dir.path().join("ts-enc");
-        let raw = std::fs::read(part.join("value.col")).expect("read file");
+        let raw = std::fs::read(part.join(column_file_name("value"))).expect("read file");
         let codec = ColumnarSegmentReader::read_meta(&part, Some(&kek))
             .expect("meta")
             .column_stats
@@ -544,7 +545,11 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let full = write_ramp_partition(dir.path(), "ts-full", 10);
         let short = write_ramp_partition(dir.path(), "ts-short", 3);
-        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        std::fs::copy(
+            short.join(column_file_name("value")),
+            full.join(column_file_name("value")),
+        )
+        .expect("swap column");
         let schema = ColumnarSegmentReader::read_schema(&full, None).expect("schema");
 
         let result = ColumnarSegmentReader::read_columns(&full, &schema.columns, None);
@@ -889,7 +894,7 @@ mod tests {
             .unwrap();
 
         let part_dir = tmp.path().join("tamper-part");
-        let col_path = part_dir.join("timestamp.col");
+        let col_path = part_dir.join(column_file_name("timestamp"));
         let mut bytes = std::fs::read(&col_path).unwrap();
         // Flip a byte inside ciphertext after the current envelope preamble.
         bytes[nodedb_wal::crypto::SEGMENT_ENVELOPE_PREAMBLE_SIZE + 2] ^= 0xFF;

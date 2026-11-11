@@ -18,12 +18,13 @@ use nodedb_array::types::coord::value::CoordValue;
 use nodedb_array::types::{ArrayId, TileId};
 use tracing::warn;
 
-use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult, array_dir};
+use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult};
 use super::export::{ArrayCellVersion, export_store};
 use super::flush::build_segment_from_memtable;
 use super::memtable::{Memtable, PutCell};
 use super::store::SegmentRef;
 use super::store::catalog::ArrayStoreError;
+use super::store_dir::array_dir;
 use crate::types::replay_stamp::ReplayStamp;
 
 impl ArrayEngine {

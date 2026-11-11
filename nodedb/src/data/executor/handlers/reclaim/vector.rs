@@ -3,14 +3,14 @@
 //! Vector engine reclaim — unlink a dropped collection's HNSW checkpoint files.
 //!
 //! Checkpoint layout:
-//! `{data_dir}/vector-ckpt/core-{n}/gen-{m}/{stem}.ckpt`, where `{stem}` comes
-//! from `vector_ckpt_stem` and encodes the bare collection or one of its
-//! named-field indexes,
-//! with each core's `MANIFEST` naming its live generation. Reclaim of a whole
-//! collection walks EVERY core's directory — the caller does not know which
-//! core(s) ever held the collection — and resolves each core's live generation
-//! through the same manifest reader the load path uses, so the two can never
-//! disagree about which files are reachable.
+//! `{data_dir}/vector-ckpt/core-{n}/gen-{m}/{hash(key)}.ckpt`, where the key
+//! comes from `vector_ckpt_key` and names the bare collection or one of its
+//! named-field indexes, with each core's `MANIFEST` naming its live generation.
+//! Each file stores its key, and reclaim matches files by that stored key.
+//! Reclaim of a whole collection walks EVERY core's directory — the caller does
+//! not know which core(s) ever held the collection — and resolves each core's
+//! live generation through the same manifest reader the load path uses, so the
+//! two can never disagree about which files are reachable.
 //!
 //! Unlinking a file out of a published generation does not break the manifest's
 //! promise. That promise is about the collections that are LIVE, and this runs
@@ -20,11 +20,11 @@
 
 use std::path::Path;
 
-use tracing::debug;
-
+use super::keyed::{reclaim_keyed_exact, reclaim_keyed_matching};
 use super::{ReclaimError, ReclaimStats, Result};
+use crate::data::executor::checkpoint_key::CheckpointKey;
 use crate::data::executor::vector_checkpoint::{
-    read_vector_manifest_at, vector_ckpt_dir, vector_ckpt_gen_dir, vector_ckpt_stem,
+    read_vector_manifest_at, vector_ckpt_dir, vector_ckpt_gen_dir, vector_ckpt_key, vector_map_key,
 };
 
 /// Unlink every vector checkpoint file for `(database_id, tenant_id, collection)`
@@ -51,12 +51,17 @@ pub fn reclaim_vector_checkpoints(
         }
     };
 
-    // Built through the write path's own encoder so the match can never drift
-    // from the on-disk names.
-    let prefix_exact = vector_ckpt_stem(database_id, tenant_id, collection);
-    // `3a` is the hex for `:`, the separator between collection and field in
-    // the key the stem encodes.
-    let prefix_field = format!("{prefix_exact}3a");
+    // A key belongs to the collection when it names the bare collection or one
+    // of its field indexes (`{collection}:{field}`). Comparing the decoded key,
+    // not a name prefix, keeps "docs" from matching "docs_archive".
+    let field_prefix = format!("{collection}:");
+    let matches = |key: &CheckpointKey| {
+        vector_map_key(key).is_some_and(|(db, tid, coll_key)| {
+            db.as_u64() == database_id
+                && tid.as_u64() == tenant_id
+                && (coll_key == collection || coll_key.starts_with(&field_prefix))
+        })
+    };
 
     let mut stats = ReclaimStats::default();
     for core_entry in cores {
@@ -72,7 +77,7 @@ pub fn reclaim_vector_checkpoints(
         let Some(gen_dir) = live_generation_dir(&core_dir)? else {
             continue;
         };
-        reclaim_generation(&gen_dir, &prefix_exact, &prefix_field, &mut stats)?;
+        reclaim_keyed_matching("vector", &gen_dir, &[], matches, &mut stats)?;
     }
     Ok(stats)
 }
@@ -94,77 +99,9 @@ fn live_generation_dir(core_dir: &Path) -> Result<Option<std::path::PathBuf>> {
     }
 }
 
-/// Unlink every matching file in one core's live generation. A missing
-/// generation directory is a no-op, not an error: the manifest alone decides
-/// what is reachable, so there is nothing a boot could restore.
-fn reclaim_generation(
-    gen_dir: &Path,
-    prefix_exact: &str,
-    prefix_field: &str,
-    stats: &mut ReclaimStats,
-) -> Result<()> {
-    let entries = match std::fs::read_dir(gen_dir) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(ReclaimError::Io {
-                operation: "read vector checkpoint live generation",
-                path: gen_dir.to_path_buf(),
-                source,
-            });
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|source| ReclaimError::Io {
-            operation: "read vector checkpoint entry",
-            path: gen_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // Match the bare collection stem or any of its field-index stems. The
-        // trailing separator on `prefix_field` is what stops a collection whose
-        // name is a prefix of another's (e.g. "docs" vs "docs_archive") from
-        // matching: the stem of "docs_archive" is neither equal to the stem of
-        // "docs" nor a continuation of it past the separator.
-        if stem != prefix_exact && !stem.starts_with(prefix_field) {
-            continue;
-        }
-        // Only unlink `.ckpt` and `.ckpt.tmp` files (skip unrelated
-        // artifacts that happen to share the stem).
-        let ext_ok = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e == "ckpt" || e == "tmp")
-            .unwrap_or(false);
-        if !ext_ok {
-            continue;
-        }
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-                stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-                debug!(path = %path.display(), size, "vector reclaim: unlinked ckpt");
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ReclaimError::Io {
-                    operation: "unlink vector checkpoint",
-                    path,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Unlink the checkpoint of exactly one vector index on one core — the `.ckpt`
-/// whose stem encodes `{coll}` for the default field, or `{coll}:{field}` for a
-/// named one — leaving every other index of the same collection in place.
+/// whose key is `{coll}` for the default field, or `{coll}:{field}` for a named
+/// one — leaving every other index of the same collection in place.
 /// Idempotent.
 ///
 /// Unlike [`reclaim_vector_checkpoints`], this does not fan out across every
@@ -186,92 +123,88 @@ pub fn reclaim_vector_index_checkpoint(
     } else {
         format!("{collection}:{field_name}")
     };
-    let stem = vector_ckpt_stem(database_id, tenant_id, &coll_key);
+    let key = vector_ckpt_key(database_id, tenant_id, &coll_key);
     let core_dir = vector_ckpt_dir(data_dir, core_id);
     let Some(gen_dir) = live_generation_dir(&core_dir)? else {
         return Ok(ReclaimStats::default());
     };
     let mut stats = ReclaimStats::default();
-    for extension in ["ckpt", "ckpt.tmp"] {
-        let path = gen_dir.join(format!("{stem}.{extension}"));
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-                stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-                debug!(path = %path.display(), size, "vector reclaim: unlinked index ckpt");
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ReclaimError::Io {
-                    operation: "unlink vector index checkpoint",
-                    path,
-                    source,
-                });
-            }
-        }
-    }
+    reclaim_keyed_exact("vector", &gen_dir, &key, &[], &mut stats)?;
     Ok(stats)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
     use crate::data::executor::vector_checkpoint::test_manifest_bytes;
     use tempfile::TempDir;
 
     /// Publish a live generation under `core_id` holding `files`, through the
-    /// same manifest the load path reads.
-    fn publish(data_dir: &Path, core_id: usize, generation: u64, files: &[(String, &[u8])]) {
+    /// same manifest the load path reads. Returns the path of each file.
+    fn publish(
+        data_dir: &Path,
+        core_id: usize,
+        generation: u64,
+        files: &[(CheckpointKey, &[u8])],
+    ) -> Vec<std::path::PathBuf> {
         let ckpt_dir = vector_ckpt_dir(data_dir, core_id);
         let gen_dir = vector_ckpt_gen_dir(&ckpt_dir, generation);
         std::fs::create_dir_all(&gen_dir).expect("mkdir");
-        for (name, bytes) in files {
-            std::fs::write(gen_dir.join(name), bytes).expect("write");
-        }
+        let paths = files
+            .iter()
+            .map(|(key, bytes)| write_keyed_checkpoint(&gen_dir, key, bytes).expect("write"))
+            .collect();
         let manifest = test_manifest_bytes(generation);
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, "MANIFEST", &manifest)
             .expect("manifest");
+        paths
     }
 
-    /// The checkpoint filename the write path produces for one index key.
-    fn ckpt(db: u64, tid: u64, coll_key: &str) -> String {
-        format!("{}.ckpt", vector_ckpt_stem(db, tid, coll_key))
+    fn key(db: u64, tid: u64, coll_key: &str) -> CheckpointKey {
+        vector_ckpt_key(db, tid, coll_key)
     }
 
     fn gen_dir_of(data_dir: &Path, core_id: usize, generation: u64) -> std::path::PathBuf {
         vector_ckpt_gen_dir(&vector_ckpt_dir(data_dir, core_id), generation)
     }
 
+    fn size(path: &Path) -> u64 {
+        std::fs::metadata(path).expect("metadata").len()
+    }
+
     #[test]
     fn unlinks_bare_and_named_field_ckpts() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        publish(
+        let paths = publish(
             base,
             0,
             0,
             &[
-                (ckpt(0, 1, "users"), b"x"),
-                (ckpt(0, 1, "users:email"), b"xy"),
-                (format!("{}.tmp", ckpt(0, 1, "users:name")), b"xyz"),
+                (key(0, 1, "users"), b"x"),
+                (key(0, 1, "users:email"), b"xy"),
+                (key(0, 1, "users:name"), b"xyz"),
                 // Other collection: must not touch.
-                (ckpt(0, 1, "orders"), b"keep"),
+                (key(0, 1, "orders"), b"keep"),
                 // Different tenant: must not touch.
-                (ckpt(0, 2, "users"), b"keep2"),
+                (key(0, 2, "users"), b"keep2"),
                 // Different database: must not touch.
-                (ckpt(1, 1, "users"), b"keepdb"),
+                (key(1, 1, "users"), b"keepdb"),
             ],
         );
+        // Staging debris of a write that never renamed.
+        let staged = paths[2].with_extension("ckpt.tmp");
+        std::fs::rename(&paths[2], &staged).expect("rename");
+        let expected = size(&paths[0]) + size(&paths[1]) + size(&staged);
 
         let stats = reclaim_vector_checkpoints(base, 0, 1, "users").expect("reclaim");
         assert_eq!(stats.files_unlinked, 3);
-        assert_eq!(stats.bytes_freed, 1 + 2 + 3);
-        let live = gen_dir_of(base, 0, 0);
-        assert!(live.join(ckpt(0, 1, "orders")).exists());
-        assert!(live.join(ckpt(0, 2, "users")).exists());
-        assert!(live.join(ckpt(1, 1, "users")).exists());
-        assert!(!live.join(ckpt(0, 1, "users")).exists());
+        assert_eq!(stats.bytes_freed, expected);
+        for kept in &paths[3..] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        assert!(!paths[0].exists() && !paths[1].exists() && !staged.exists());
     }
 
     /// The dropped collection's vectors could have been checkpointed by ANY
@@ -281,24 +214,23 @@ mod tests {
     fn unlinks_across_every_core_subdirectory() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        publish(base, 0, 2, &[(ckpt(0, 1, "docs"), b"a")]);
-        publish(
+        let core0 = publish(base, 0, 2, &[(key(0, 1, "docs"), b"a")]);
+        let core1 = publish(
             base,
             1,
             0,
             &[
-                (ckpt(0, 1, "docs:emb"), b"bb"),
+                (key(0, 1, "docs:emb"), b"bb"),
                 // Different core, different collection: must survive.
-                (ckpt(0, 1, "posts"), b"keep"),
+                (key(0, 1, "posts"), b"keep"),
             ],
         );
 
         let stats = reclaim_vector_checkpoints(base, 0, 1, "docs").expect("reclaim");
         assert_eq!(stats.files_unlinked, 2, "both cores' files must be reached");
-        assert_eq!(stats.bytes_freed, 1 + 2);
-        assert!(!gen_dir_of(base, 0, 2).join(ckpt(0, 1, "docs")).exists());
-        assert!(!gen_dir_of(base, 1, 0).join(ckpt(0, 1, "docs:emb")).exists());
-        assert!(gen_dir_of(base, 1, 0).join(ckpt(0, 1, "posts")).exists());
+        assert!(!core0[0].exists());
+        assert!(!core1[0].exists());
+        assert!(core1[1].exists());
     }
 
     /// Files under a SUPERSEDED generation are already unreachable: the manifest
@@ -307,14 +239,14 @@ mod tests {
     #[test]
     fn ignores_superseded_generations() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 1, &[(ckpt(0, 1, "docs"), b"live")]);
+        publish(tmp.path(), 0, 1, &[(key(0, 1, "docs"), b"live")]);
         let stale = gen_dir_of(tmp.path(), 0, 0);
         std::fs::create_dir_all(&stale).expect("mkdir");
-        std::fs::write(stale.join(ckpt(0, 1, "docs")), b"old").expect("write");
+        let old = write_keyed_checkpoint(&stale, &key(0, 1, "docs"), b"old").expect("write");
 
         let stats = reclaim_vector_checkpoints(tmp.path(), 0, 1, "docs").expect("reclaim");
         assert_eq!(stats.files_unlinked, 1, "only the live generation's file");
-        assert!(stale.join(ckpt(0, 1, "docs")).exists());
+        assert!(old.exists());
     }
 
     #[test]
@@ -328,16 +260,30 @@ mod tests {
         assert!(error.to_string().contains("manifest"));
     }
 
+    /// A published file whose key cannot be read has an unknown owner, so the
+    /// pass fails rather than guessing.
+    #[test]
+    fn unreadable_key_is_returned_to_lifecycle_barrier() {
+        let tmp = TempDir::new().expect("tempdir");
+        publish(tmp.path(), 0, 0, &[]);
+        let garbage = gen_dir_of(tmp.path(), 0, 0).join(key(0, 1, "users").file_name());
+        std::fs::write(&garbage, b"garbage").expect("write");
+
+        let error = reclaim_vector_checkpoints(tmp.path(), 0, 1, "users").expect_err("must fail");
+        assert!(matches!(error, ReclaimError::Key { .. }), "{error}");
+        assert!(garbage.exists());
+    }
+
     #[test]
     fn unlink_failure_is_returned_to_lifecycle_barrier() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 0, &[]);
-        // A directory where a checkpoint file is expected: `remove_file` fails.
-        let invalid_target = gen_dir_of(tmp.path(), 0, 0).join(ckpt(0, 1, "users"));
+        let paths = publish(tmp.path(), 0, 0, &[(key(0, 1, "users"), b"x")]);
+        // A directory where the staging file is expected: `remove_file` fails.
+        let invalid_target = paths[0].with_extension("ckpt.tmp");
         std::fs::create_dir_all(&invalid_target).expect("mkdir");
 
         let error = reclaim_vector_checkpoints(tmp.path(), 0, 1, "users").expect_err("must fail");
-        assert!(error.to_string().contains("unlink vector checkpoint"));
+        assert!(error.to_string().contains("unlink checkpoint"), "{error}");
         assert!(invalid_target.exists());
     }
 
@@ -351,29 +297,28 @@ mod tests {
     #[test]
     fn index_scoped_reclaim_spares_sibling_indexes() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(
+        let paths = publish(
             tmp.path(),
             0,
             0,
             &[
-                (ckpt(0, 1, "docs"), b"default"),
-                (ckpt(0, 1, "docs:text_emb"), b"text"),
-                (ckpt(0, 1, "docs:image_emb"), b"image"),
+                (key(0, 1, "docs"), b"default"),
+                (key(0, 1, "docs:text_emb"), b"text"),
+                (key(0, 1, "docs:image_emb"), b"image"),
             ],
         );
-        let live = gen_dir_of(tmp.path(), 0, 0);
 
         let stats = reclaim_vector_index_checkpoint(tmp.path(), 0, 0, 1, "docs", "text_emb")
             .expect("reclaim");
         assert_eq!(stats.files_unlinked, 1);
-        assert!(!live.join(ckpt(0, 1, "docs:text_emb")).exists());
-        assert!(live.join(ckpt(0, 1, "docs:image_emb")).exists());
-        assert!(live.join(ckpt(0, 1, "docs")).exists());
+        assert!(!paths[1].exists());
+        assert!(paths[2].exists());
+        assert!(paths[0].exists());
 
-        // The default (unnamed) field targets the bare stem only.
+        // The default (unnamed) field targets the bare key only.
         reclaim_vector_index_checkpoint(tmp.path(), 0, 0, 1, "docs", "").expect("reclaim");
-        assert!(!live.join(ckpt(0, 1, "docs")).exists());
-        assert!(live.join(ckpt(0, 1, "docs:image_emb")).exists());
+        assert!(!paths[0].exists());
+        assert!(paths[2].exists());
     }
 
     #[test]
@@ -390,28 +335,41 @@ mod tests {
     #[test]
     fn index_scoped_reclaim_does_not_touch_other_cores() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 1, 0, &[(ckpt(0, 1, "docs"), b"x")]);
+        let paths = publish(tmp.path(), 1, 0, &[(key(0, 1, "docs"), b"x")]);
 
         let stats =
             reclaim_vector_index_checkpoint(tmp.path(), 0, 0, 1, "docs", "").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
-        assert!(
-            gen_dir_of(tmp.path(), 1, 0)
-                .join(ckpt(0, 1, "docs"))
-                .exists()
-        );
+        assert!(paths[0].exists());
     }
 
     #[test]
     fn no_false_prefix_match() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 0, &[(ckpt(0, 1, "users_archive"), b"keep")]);
+        let paths = publish(tmp.path(), 0, 0, &[(key(0, 1, "users_archive"), b"keep")]);
         let stats = reclaim_vector_checkpoints(tmp.path(), 0, 1, "users").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
-        assert!(
-            gen_dir_of(tmp.path(), 0, 0)
-                .join(ckpt(0, 1, "users_archive"))
-                .exists()
+        assert!(paths[0].exists());
+    }
+
+    /// A 255-byte collection with a 200-byte field index checkpoints under a
+    /// short name, and reclaim of the collection finds it by its stored key.
+    #[test]
+    fn long_named_collection_and_field_are_reclaimed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let coll = "c".repeat(255);
+        let field_key = format!("{coll}:{}", "f".repeat(200));
+        let paths = publish(
+            tmp.path(),
+            0,
+            0,
+            &[
+                (key(0, 1, &coll), b"bare"),
+                (key(0, 1, &field_key), b"field"),
+            ],
         );
+        let stats = reclaim_vector_checkpoints(tmp.path(), 0, 1, &coll).expect("reclaim");
+        assert_eq!(stats.files_unlinked, 2);
+        assert!(!paths[0].exists() && !paths[1].exists());
     }
 }

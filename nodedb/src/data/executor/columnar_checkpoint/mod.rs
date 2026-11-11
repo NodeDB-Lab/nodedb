@@ -49,16 +49,16 @@
 //!
 //! ```text
 //! {data_dir}/columnar-ckpt/core-{core_id}/
-//!     MANIFEST                                              # names the live generation
-//!     gen-{n}/db-{did}-tenant-{tid}-coll-{hex(coll)}.ckpt   # one file per collection
+//!     MANIFEST                  # names the live generation
+//!     gen-{n}/{hash(key)}.ckpt  # one file per collection, key stored inside
 //! ```
 //!
 //! The per-core directory is required because `data_dir` is shared across cores
-//! and each core only owns the collections routed to its vShards. Filenames
-//! mirror the CRDT / KV checkpoint scheme: the collection is hex-encoded so the
-//! `-coll-` separator can never collide with a name containing `-`, `/` or `:`.
-//! Unlike KV, the database id is part of the name — `columnar_engines` is keyed
-//! by `(DatabaseId, TenantId, String)` and the id is not recoverable from the
+//! and each core only owns the collections routed to its vShards. File names
+//! follow the shared keyed-checkpoint scheme: a fixed-length hash of the
+//! `(database, tenant, collection)` key, which the file stores. The database id
+//! is part of the key — `columnar_engines` is keyed by
+//! `(DatabaseId, TenantId, String)` and the id is not recoverable from the
 //! collection name.
 //!
 //! ## Why a generation + manifest, and not a stamp per file
@@ -132,5 +132,5 @@ mod write;
 pub(crate) use format::test_manifest_bytes;
 pub(crate) use manifest::read_columnar_manifest_at;
 pub(crate) use paths::{
-    COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_filename, columnar_ckpt_gen_dir,
+    COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_gen_dir, columnar_ckpt_key,
 };

@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Filesystem naming for spatial checkpoints: directories, generation
-//! directories, per-index filenames, and the inverse parse.
+//! directories, and the per-index checkpoint key.
 //!
-//! ## On-disk filename encoding
-//!
-//! Each index is checkpointed to a file whose stem encodes its logical key:
-//! `{db}_{tid}_{enc(coll)}_{enc(field)}`, with the R-tree under `.ckpt` and its
-//! doc_map companion under `.docmap`. `db`/`tid` are numeric and pass through
-//! unchanged; `coll`/`field` are percent-encoded by [`enc_component`] so the
-//! structural `_` separator can never collide with a literal underscore in a
-//! collection or field name. This makes the encoding round-trippable for
-//! arbitrary names. [`spatial_checkpoint_prefix`] is the single shared builder
-//! used by both the write path and reclaim, so the two can never drift.
+//! Each index is checkpointed to `{hash(key)}.ckpt` (the R-tree) and
+//! `{hash(key)}.docmap` (its doc_map companion), where the key is
+//! `(db, tid, collection, field)`. Both files store the key. [`spatial_ckpt_key`]
+//! is the single key builder shared by the write path, the load path, and
+//! reclaim, so the three can never drift.
 
 use nodedb_types::DatabaseId;
 
-use crate::data::executor::checkpoint_encoding::{dec_component, enc_component};
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 use crate::types::TenantId;
 
 /// Filename of the manifest that names the live generation.
@@ -41,39 +36,33 @@ pub(crate) fn spatial_ckpt_gen_dir(
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// Build the full filename stem for a spatial checkpoint:
-/// `{db}_{tid}_{enc(coll)}_{enc(field)}`.
-pub(super) fn checkpoint_stem(db: DatabaseId, tid: TenantId, coll: &str, field: &str) -> String {
-    format!(
-        "{}_{}_{}_{}",
-        db.as_u64(),
-        tid.as_u64(),
-        enc_component(coll),
-        enc_component(field)
+/// Extension of the doc_map companion that shares its R-tree's stem.
+pub(super) const SPATIAL_DOCMAP_EXTENSION: &str = "docmap";
+
+/// The checkpoint key for one spatial index.
+pub(crate) fn spatial_ckpt_key(db: u64, tid: u64, coll: &str, field: &str) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::Spatial,
+        db,
+        tid,
+        vec![coll.to_string(), field.to_string()],
     )
 }
 
-/// Shared prefix builder for reclaim: every checkpoint file for
-/// `(db, tid, coll)` begins with `{db}_{tid}_{enc(coll)}_`. This is the single
-/// authority on the filename encoding so reclaim can never drift from the
-/// write path.
-pub(crate) fn spatial_checkpoint_prefix(db: u64, tid: u64, coll: &str) -> String {
-    format!("{}_{}_{}_", db, tid, enc_component(coll))
-}
-
-/// Parse a stem `{db}_{tid}_{enc(coll)}_{enc(field)}` into a key.
-/// Requires EXACTLY 4 underscore-separated parts with numeric db + tid.
-/// Returns `None` on any structural or numeric parse failure.
-pub(super) fn parse_spatial_key(stem: &str) -> Option<(DatabaseId, TenantId, String, String)> {
-    let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() != 4 {
-        return None;
+/// The `(db, tid, collection, field)` map key a stored key restores under, or
+/// `None` when the key is not a spatial key.
+pub(crate) fn spatial_map_key(
+    key: &CheckpointKey,
+) -> Option<(DatabaseId, TenantId, String, String)> {
+    match (key.engine, key.parts.as_slice()) {
+        (CheckpointEngine::Spatial, [coll, field]) => Some((
+            DatabaseId::new(key.database_id),
+            TenantId::new(key.tenant_id),
+            coll.clone(),
+            field.clone(),
+        )),
+        _ => None,
     }
-    let db: u64 = parts[0].parse().ok()?;
-    let tid: u64 = parts[1].parse().ok()?;
-    let coll = dec_component(parts[2]);
-    let field = dec_component(parts[3]);
-    Some((DatabaseId::new(db), TenantId::new(tid), coll, field))
 }
 
 #[cfg(test)]
@@ -81,51 +70,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enc_dec_roundtrips_special_chars() {
-        for raw in ["geom", "my_coll", "a%b", "x/y", "weird_:_name", "a_b_c"] {
-            assert_eq!(dec_component(&enc_component(raw)), raw);
-        }
-    }
-
-    #[test]
-    fn stem_roundtrips_through_parse() {
-        let db = DatabaseId::new(7);
-        let tid = TenantId::new(42);
-        let stem = checkpoint_stem(db, tid, "my_places", "geo_field");
-        // No structural ambiguity: components are encoded.
-        let parsed = parse_spatial_key(&stem).expect("stem must parse");
-        assert_eq!(parsed.0, db);
-        assert_eq!(parsed.1, tid);
+    fn key_roundtrips_through_map_key() {
+        let key = spatial_ckpt_key(7, 42, "my_places", "geo_field");
+        let parsed = spatial_map_key(&key).expect("spatial key");
+        assert_eq!(parsed.0, DatabaseId::new(7));
+        assert_eq!(parsed.1, TenantId::new(42));
         assert_eq!(parsed.2, "my_places");
         assert_eq!(parsed.3, "geo_field");
     }
 
+    /// Collection and field are separate key parts, so moving bytes between
+    /// them names a different file.
     #[test]
-    fn prefix_matches_stem_for_same_collection() {
-        let stem = checkpoint_stem(DatabaseId::new(3), TenantId::new(9), "p_l", "f");
-        let prefix = spatial_checkpoint_prefix(3, 9, "p_l");
-        assert!(
-            stem.starts_with(&prefix),
-            "stem {stem} must start with prefix {prefix}"
-        );
-    }
-
-    /// A collection whose encoded name merely starts with the target's bytes
-    /// must not match — the encoder escapes literal underscores precisely so
-    /// the structural separator cannot collide.
-    #[test]
-    fn prefix_does_not_match_a_longer_collection_name() {
-        let other = checkpoint_stem(DatabaseId::new(3), TenantId::new(9), "places_archive", "f");
-        let prefix = spatial_checkpoint_prefix(3, 9, "places");
-        assert!(
-            !other.starts_with(&prefix),
-            "prefix {prefix} must not swallow {other}"
+    fn part_boundary_is_part_of_the_name() {
+        assert_ne!(
+            spatial_ckpt_key(0, 1, "a_b", "c").file_name(),
+            spatial_ckpt_key(0, 1, "a", "b_c").file_name()
         );
     }
 
     #[test]
-    fn non_numeric_stem_is_none() {
-        assert!(parse_spatial_key("a_b_c_d").is_none());
+    fn max_length_names_fit() {
+        let name = spatial_ckpt_key(0, 1, &"c".repeat(255), &"f".repeat(200)).file_name();
+        assert!(name.len() < 64, "{name}");
     }
 
     #[test]

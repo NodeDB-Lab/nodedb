@@ -27,7 +27,9 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::io::IoMetrics;
 use crate::data::io::uring_reader::UringReader;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnarSchema};
-use crate::engine::timeseries::columnar_segment::{ColumnarSegmentReader, SegmentError};
+use crate::engine::timeseries::columnar_segment::{
+    ColumnarSegmentReader, SegmentError, column_file_name, symbol_file_name,
+};
 use crate::storage::quarantine::{CollectionScope, QuarantineRegistry, SegmentKey};
 use crate::types::{DatabaseId, TenantId};
 
@@ -121,7 +123,7 @@ pub(in crate::data::executor) fn read_ts_partition_on_core(
     }
     let mut sym_dicts = HashMap::new();
     for (i, (name, ty)) in schema.columns.iter().enumerate() {
-        if !ty.is_dictionary() || !part_dir.join(format!("{name}.sym")).exists() {
+        if !ty.is_dictionary() || !part_dir.join(symbol_file_name(name)).exists() {
             continue;
         }
         let dict = ColumnarSegmentReader::read_symbol_dict(part_dir, name, kek)
@@ -185,7 +187,7 @@ fn batch_read_column_files(
     let paths: Vec<std::path::PathBuf> = schema
         .columns
         .iter()
-        .map(|(name, _)| part_dir.join(format!("{name}.col")))
+        .map(|(name, _)| part_dir.join(column_file_name(name)))
         .collect();
     let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
     Some(reader.read_files_with_priority(&path_refs, io.priority, io.metrics))
@@ -396,7 +398,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let full = write_metric_partition(dir.path(), "ts-full", 10);
         let short = write_metric_partition(dir.path(), "ts-short", 3);
-        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        std::fs::copy(
+            short.join(column_file_name("value")),
+            full.join(column_file_name("value")),
+        )
+        .expect("swap column");
 
         assert!(matches!(
             read_ts_partition(&full, "test", None),

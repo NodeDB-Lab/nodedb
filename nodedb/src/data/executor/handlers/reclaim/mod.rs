@@ -23,6 +23,7 @@
 pub mod columnar;
 pub mod crdt;
 mod error;
+mod keyed;
 pub mod sparse_vector;
 pub mod spatial;
 mod stats;

@@ -23,6 +23,7 @@ pub mod mmap;
 
 mod codec;
 mod error;
+mod file_names;
 mod fixed_cells;
 mod reader;
 mod schema;
@@ -32,6 +33,7 @@ mod util;
 mod writer;
 
 pub use error::SegmentError;
+pub use file_names::{column_file_name, symbol_file_name};
 pub use mmap::{ColumnMmap, observability};
 pub use reader::ColumnarSegmentReader;
 pub use writer::{ColumnarSegmentWriter, write_partition_meta};

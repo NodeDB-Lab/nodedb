@@ -18,9 +18,10 @@ use nodedb_array::types::ArrayId;
 use nodedb_array::types::coord::value::CoordValue;
 use serde::{Deserialize, Serialize};
 
-use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult, array_dir};
+use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult};
 use super::memtable::Memtable;
 use super::store::ArrayStore;
+use super::store_dir::array_dir;
 
 /// One version of one cell.
 #[derive(

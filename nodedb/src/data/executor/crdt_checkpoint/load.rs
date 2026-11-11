@@ -6,8 +6,9 @@
 use tracing::info;
 
 use super::manifest::{read_crdt_manifest_at, storage_err};
-use super::paths::{crdt_ckpt_dir, crdt_ckpt_gen_dir, parse_crdt_ckpt_stem};
+use super::paths::{crdt_ckpt_dir, crdt_ckpt_gen_dir, crdt_map_key};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{is_keyed_checkpoint_path, read_keyed_checkpoint};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 
@@ -88,21 +89,19 @@ impl CoreLoop {
         for entry in entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
 
-            // This directory is engine-private, so a `.ckpt` whose stem does not
-            // parse is a corrupted real checkpoint, not a foreign file to skip.
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            // This directory is engine-private, so a stored key that is not a
+            // CRDT key is a corrupted real checkpoint, not a foreign file.
+            let (stored, snapshot) = read_keyed_checkpoint(&path)?;
             let (database_id, tenant_id, collection) =
-                parse_crdt_ckpt_stem(stem).ok_or_else(|| {
-                    CheckpointDecodeError::UnparseableFilename {
-                        stem: stem.to_string(),
-                    }
+                crdt_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
+                    path: path.clone(),
+                    stored: stored.to_string(),
+                    expected: "crdt",
                 })?;
-
-            let snapshot = nodedb_wal::segment::read_checkpoint_dontneed(&path)?;
             decoded.push(DecodedCrdtCollection {
                 database_id: crate::types::DatabaseId::new(database_id),
                 tenant_id: crate::types::TenantId::new(tenant_id),
@@ -117,7 +116,7 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use super::super::format::test_manifest_bytes;
-    use super::super::paths::{CRDT_CKPT_MANIFEST, crdt_ckpt_filename};
+    use super::super::paths::{CRDT_CKPT_MANIFEST, crdt_ckpt_key};
     use super::super::test_support::open_core_at;
     use super::*;
 
@@ -141,7 +140,7 @@ mod tests {
             .expect("an absent checkpoint dir must not be treated as corruption");
     }
 
-    /// A file with a parseable stem but bytes that are not a real Loro snapshot
+    /// A keyed file whose bytes are not a real Loro snapshot
     /// must fail the load: once the WAL below this generation's LSN is
     /// truncated, the checkpoint is the only durable copy of the CRDT state.
     #[test]
@@ -150,8 +149,9 @@ mod tests {
         let core = open_core_at(dir.path());
         let ckpt_dir = crdt_ckpt_dir(&core.data_dir, core.core_id);
         publish(&ckpt_dir, |gen_dir| {
-            std::fs::write(
-                gen_dir.join(crdt_ckpt_filename(3, 7, "orders")),
+            crate::data::executor::checkpoint_key::write_keyed_checkpoint(
+                gen_dir,
+                &crdt_ckpt_key(3, 7, "orders"),
                 b"not a valid Loro snapshot",
             )
             .expect("write garbage checkpoint");
@@ -164,25 +164,52 @@ mod tests {
             .expect_err("a corrupt CRDT checkpoint must fail the load, not silently skip it");
     }
 
-    /// A `.ckpt` inside the live generation whose stem does not parse is
-    /// corruption of a real checkpoint: this directory only ever holds files
-    /// this module wrote, so guessing a key would import the state under a
-    /// tenant nothing ever reads.
+    /// A `.ckpt` inside the live generation that holds a key other than the
+    /// one its name is for is refused: the file was renamed or copied under
+    /// another collection's name.
     #[test]
-    fn unparseable_stem_fails_the_load() {
+    fn misnamed_checkpoint_fails_the_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let core = open_core_at(dir.path());
+        let ckpt_dir = crdt_ckpt_dir(&core.data_dir, core.core_id);
+        publish(&ckpt_dir, |gen_dir| {
+            let written = crate::data::executor::checkpoint_key::write_keyed_checkpoint(
+                gen_dir,
+                &crdt_ckpt_key(0, 5, "orders"),
+                b"whatever bytes",
+            )
+            .expect("write checkpoint");
+            std::fs::rename(
+                written,
+                gen_dir.join(crdt_ckpt_key(0, 5, "users").file_name()),
+            )
+            .expect("rename");
+        });
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        let err = restored
+            .load_crdt_checkpoints()
+            .expect_err("a misnamed checkpoint inside a live generation must fail the load");
+        assert!(err.to_string().contains("orders"), "{err}");
+    }
+
+    /// A `.ckpt` without a keyed frame is corruption of a real checkpoint.
+    #[test]
+    fn unkeyed_file_fails_the_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = open_core_at(dir.path());
         let ckpt_dir = crdt_ckpt_dir(&core.data_dir, core.core_id);
         publish(&ckpt_dir, |gen_dir| {
             std::fs::write(gen_dir.join("tenant-5.ckpt"), b"whatever bytes")
-                .expect("write badly named checkpoint");
+                .expect("write badly framed checkpoint");
         });
         drop(core);
 
         let mut restored = open_core_at(dir.path());
         restored
             .load_crdt_checkpoints()
-            .expect_err("an unparseable filename inside a live generation must fail the load");
+            .expect_err("an unkeyed file inside a live generation must fail the load");
     }
 
     /// A corrupt manifest must fail the load, not read as "nothing published".

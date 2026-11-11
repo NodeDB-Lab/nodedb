@@ -9,8 +9,10 @@ use tracing::{info, warn};
 use super::format::{SPATIAL_CKPT_FORMAT_VERSION, SpatialCheckpointManifest};
 use super::manifest::{read_spatial_manifest_at, storage_err};
 use super::paths::{
-    SPATIAL_CKPT_MANIFEST, checkpoint_stem, spatial_ckpt_dir, spatial_ckpt_gen_dir,
+    SPATIAL_CKPT_MANIFEST, SPATIAL_DOCMAP_EXTENSION, spatial_ckpt_dir, spatial_ckpt_gen_dir,
+    spatial_ckpt_key,
 };
+use crate::data::executor::checkpoint_key::{write_keyed_checkpoint, write_keyed_checkpoint_as};
 use crate::data::executor::checkpoint_outcome::CheckpointOutcome;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
@@ -120,10 +122,10 @@ impl CoreLoop {
         let kek = self.segment_keks.spatial_checkpoint_kek.as_ref();
         let mut files_written = 0usize;
         for ((db, tid, coll, field), rtree) in &self.spatial_indexes {
-            let stem = checkpoint_stem(*db, *tid, coll, field);
+            let key = spatial_ckpt_key(db.as_u64(), tid.as_u64(), coll, field);
             let bytes = rtree
                 .checkpoint_to_bytes(kek)
-                .map_err(|e| storage_err(&gen_dir.join(&stem), "encode R-tree", &e))?;
+                .map_err(|e| storage_err(gen_dir, &format!("encode R-tree for {key}"), &e))?;
             // An R-tree emptied by deletes is written, not skipped: the encoder
             // always produces a header, so the file records that the index is
             // durably EMPTY. An index that has disappeared from the map
@@ -132,9 +134,8 @@ impl CoreLoop {
             // the manifest swing below, so "no file" restores as "no entries"
             // rather than leaving last cycle's populated pair reachable under a
             // manifest claiming a later LSN.
-            let ckpt_name = format!("{stem}.ckpt");
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &ckpt_name, &bytes)
-                .map_err(|e| storage_err(&gen_dir.join(&ckpt_name), "publish checkpoint", &e))?;
+            write_keyed_checkpoint(gen_dir, &key, &bytes)
+                .map_err(|e| storage_err(gen_dir, "publish checkpoint", &e))?;
             files_written += 1;
 
             let doc_entries: Vec<(u64, String)> = self
@@ -146,11 +147,10 @@ impl CoreLoop {
             let map_bytes =
                 zerompk::to_msgpack_vec(&doc_entries).map_err(|e| crate::Error::Serialization {
                     format: "msgpack".to_string(),
-                    detail: format!("spatial doc_map encode failed for {stem}: {e}"),
+                    detail: format!("spatial doc_map encode failed for {key}: {e}"),
                 })?;
-            let map_name = format!("{stem}.docmap");
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &map_name, &map_bytes)
-                .map_err(|e| storage_err(&gen_dir.join(&map_name), "publish doc_map", &e))?;
+            write_keyed_checkpoint_as(gen_dir, &key, SPATIAL_DOCMAP_EXTENSION, &map_bytes)
+                .map_err(|e| storage_err(gen_dir, "publish doc_map", &e))?;
             files_written += 1;
         }
         Ok(files_written)
@@ -249,7 +249,7 @@ mod tests {
 
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
         let gen_dir = spatial_ckpt_gen_dir(&ckpt_dir, 0);
-        let stem = checkpoint_stem(DatabaseId::DEFAULT, TenantId::new(7), "places", "geom");
+        let stem = spatial_ckpt_key(DatabaseId::DEFAULT.as_u64(), 7, "places", "geom").file_stem();
         assert!(gen_dir.join(format!("{stem}.ckpt")).exists());
         assert!(
             gen_dir.join(format!("{stem}.docmap")).exists(),
@@ -337,6 +337,48 @@ mod tests {
         assert_eq!(
             restored.spatial_indexes.get(&key()).map(|r| r.len()),
             Some(1)
+        );
+    }
+
+    /// A 255-byte collection with a 200-byte field checkpoints both halves of
+    /// its pair under short names and restores them under the full key.
+    #[test]
+    fn long_collection_and_field_names_checkpoint_and_restore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = open_core_at(dir.path());
+        let (db, tid) = (DatabaseId::DEFAULT, TenantId::new(7));
+        let key = (db, tid, "p".repeat(255), "g".repeat(200));
+        let mut rtree = RTree::new(
+            test_rtree_memory(db, tid),
+            crate::engine::spatial::TreeSrid::WGS84,
+        );
+        rtree.insert(RTreeEntry {
+            id: 1,
+            bbox: BoundingBox::new(0.0, 0.0, 1.0, 1.0),
+        });
+        core.spatial_indexes.insert(key.clone(), rtree);
+        core.spatial_doc_map.insert(
+            (db, tid, key.2.clone(), key.3.clone(), 1),
+            "doc-1".to_string(),
+        );
+
+        let outcome = core
+            .checkpoint_spatial_indexes()
+            .expect("a long-named index must publish");
+        assert_eq!(outcome.files_written, 2);
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        restored
+            .load_spatial_checkpoints()
+            .expect("load must succeed");
+        assert_eq!(restored.spatial_indexes.get(&key).map(|r| r.len()), Some(1));
+        assert_eq!(
+            restored
+                .spatial_doc_map
+                .get(&(db, tid, key.2.clone(), key.3.clone(), 1))
+                .map(String::as_str),
+            Some("doc-1")
         );
     }
 }
