@@ -21,9 +21,10 @@
 //! * `DeleteBySurrogate` → `RecordType::VectorDelete`,
 //!   `(collection, surrogate, field_name, provenance)`.
 //! * `DirectInsert` / `DirectInsertIfAbsent` / `DirectUpsert` /
-//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` register their
-//!   collection only: a vector-primary row is staged whole, so those resolve
-//!   from the overlay (`vector_primary`).
+//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` and a
+//!   `DirectBatchWrite` page register their collection only: a
+//!   vector-primary row is staged whole, so those resolve from the overlay
+//!   (`vector_primary`).
 //! * `MultiVectorInsert` → `RecordType::MultiVectorPut`, the 6-element
 //!   flattened multi-vector shape (`replay_multi_vector_put`).
 //! * `MultiVectorDelete` → `RecordType::MultiVectorDelete`,
@@ -218,15 +219,37 @@ pub(super) fn serialize_vector_op(
             );
             Ok(())
         }
-        // A transaction stages a page as its point writes, so the overlay
-        // never holds a page. A page here was never staged.
-        VectorOp::DirectBatchWrite { collection, .. } => Err(crate::Error::PlanError {
-            detail: format!(
-                "a vector-primary page for '{}' reached transaction resolve unstaged; a \
-                 transaction stages each row of a page as its own point write",
-                collection.as_str()
-            ),
-        }),
+        // A page stages each row as its point write: a session block
+        // splits it on the Control Plane, and a Calvin stage expands it. The
+        // overlay holds every row, so the page registers its collection and
+        // each row's key, as each point write does.
+        VectorOp::DirectBatchWrite {
+            collection,
+            field,
+            rows,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            ..
+        } => {
+            note_direct_write(
+                direct_writes,
+                collection.as_str(),
+                field,
+                Some(spec(*quantization, *storage_dtype, payload_indexes)),
+                None,
+            );
+            for row in rows {
+                note_direct_write(
+                    direct_writes,
+                    collection.as_str(),
+                    field,
+                    None,
+                    Some((row.surrogate, row.pk_bytes.as_slice())),
+                );
+            }
+            Ok(())
+        }
         VectorOp::DirectUpdate {
             collection,
             field,
