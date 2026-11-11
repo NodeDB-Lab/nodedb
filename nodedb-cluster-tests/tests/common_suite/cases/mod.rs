@@ -20,6 +20,7 @@ mod calvin_backup_cut_snapshot_install;
 mod calvin_cdc_net_kinds;
 mod calvin_cluster_array_read_set;
 mod calvin_cluster_pgwire_e2e;
+mod calvin_commit_participant_over_limit;
 mod calvin_dependent_read_commit;
 mod calvin_dependent_read_early_result;
 mod calvin_dependent_read_fixture;
