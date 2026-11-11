@@ -32,14 +32,7 @@ pub(crate) fn check_collection_limits(entry: &CatalogEntry) -> crate::Result<()>
 /// Refuse `stored` when its name, its schema witness, or what its added
 /// columns add to an older row is past its limit.
 pub(crate) fn check_stored_collection(stored: &StoredCollection) -> crate::Result<()> {
-    if stored.name.len() > MAX_COLLECTION_NAME_BYTES {
-        return Err(refusal(format!(
-            "collection name '{}' is {} bytes, over the limit of {MAX_COLLECTION_NAME_BYTES} \
-             bytes; use a shorter name",
-            crate::data::executor::row_image_limit::shown_id(&stored.name),
-            stored.name.len()
-        )));
-    }
+    check_collection_name(&stored.name)?;
     let Some(schema) = strict_schema(&stored.collection_type) else {
         return Ok(());
     };
@@ -66,6 +59,21 @@ pub(crate) fn check_stored_collection(stored: &StoredCollection) -> crate::Resul
              over the limit of {MAX_ADDED_COLUMN_IMAGE_BYTES} bytes; use shorter names and \
              defaults for added columns",
             stored.name
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a collection name over [`MAX_COLLECTION_NAME_BYTES`]. DDL that
+/// derives a collection name from a user name checks the derived name with
+/// this before it proposes anything.
+pub(crate) fn check_collection_name(name: &str) -> crate::Result<()> {
+    if name.len() > MAX_COLLECTION_NAME_BYTES {
+        return Err(refusal(format!(
+            "collection name '{}' is {} bytes, over the limit of {MAX_COLLECTION_NAME_BYTES} \
+             bytes; use a shorter name",
+            crate::data::executor::row_image_limit::shown_id(name),
+            name.len()
         )));
     }
     Ok(())

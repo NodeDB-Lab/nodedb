@@ -458,16 +458,19 @@ impl CoreLoop {
             | VectorDirectWriteIntent::Upsert => {}
         }
 
-        let (staged, _sidecar) = match encode_staged_vector_row(vector, &fields) {
+        let (staged, sidecar) = match encode_staged_vector_row(vector, &fields) {
             Ok(encoded) => encoded,
             Err(e) => return self.response_error(task, e),
         };
-        // The commit install journals the staged row, so it is held to the
-        // row image limit before it stages.
-        if let Err(e) = crate::data::executor::row_image_limit::check_row_images(
+        // The commit install journals the staged row, so its native image is
+        // held to the row image limit before it stages, as a live write's is.
+        if let Err(e) = crate::data::executor::row_image_native::check_vector_row(
             collection,
-            ctx.document_id.as_str(),
-            &[staged.as_slice()],
+            || ctx.document_id.as_str().to_string(),
+            field,
+            vector.len(),
+            &fields,
+            sidecar.len(),
         ) {
             return self.response_error(task, e);
         }

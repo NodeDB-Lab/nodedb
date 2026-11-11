@@ -69,7 +69,7 @@ impl CoreLoop {
                 ..
             } => {
                 let ctx = self.kv_stage_ctx(task, tid, txn_id, collection.as_str(), key, *surrogate);
-                self.stage_kv_put(&ctx, value, *ttl_ms)
+                self.stage_kv_put(&ctx, key, value, *ttl_ms)
             }
             KvOp::Insert {
                 collection,
@@ -260,7 +260,17 @@ impl CoreLoop {
 
     // ── Put: upsert, no existence check ─────────────────────────────────────
 
-    fn stage_kv_put(&mut self, ctx: &StageCtx<'_>, value: &[u8], ttl_ms: u64) -> Response {
+    fn stage_kv_put(
+        &mut self,
+        ctx: &StageCtx<'_>,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: u64,
+    ) -> Response {
+        // A row over the row limit refuses before its TTL or body stages.
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
+            return self.response_error(ctx.task, e);
+        }
         self.stage_kv_ttl_side_effect(ctx, ttl_ms);
         if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
             return self.response_error(ctx.task, e);
@@ -283,6 +293,9 @@ impl CoreLoop {
                 crate::data::executor::handlers::kv::crud::kv_duplicate_key(ctx.collection, key),
             );
         }
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
+            return self.response_error(ctx.task, e);
+        }
         self.stage_kv_ttl_side_effect(ctx, ttl_ms);
         if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
             return self.response_error(ctx.task, e);
@@ -301,6 +314,9 @@ impl CoreLoop {
     ) -> Response {
         if self.stage_kv_pk_present(ctx, key) {
             return self.stage_count_response(ctx.task, 0);
+        }
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
+            return self.response_error(ctx.task, e);
         }
         self.stage_kv_ttl_side_effect(ctx, ttl_ms);
         if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
@@ -455,7 +471,7 @@ mod tests {
         let txn_id = TxnId::new(1);
         let ctx = core.kv_stage_ctx(&task, 1, txn_id, "cache", b"k1", Surrogate::new(5));
 
-        let resp = core.stage_kv_put(&ctx, b"v1", 30_000);
+        let resp = core.stage_kv_put(&ctx, b"k1", b"v1", 30_000);
         assert_eq!(resp.status, Status::Ok);
 
         assert_eq!(
@@ -477,7 +493,7 @@ mod tests {
         let txn_id = TxnId::new(1);
         let ctx = core.kv_stage_ctx(&task, 1, txn_id, "cache", b"k1", Surrogate::new(5));
 
-        let resp = core.stage_kv_put(&ctx, b"v1", 0);
+        let resp = core.stage_kv_put(&ctx, b"k1", b"v1", 0);
         assert_eq!(resp.status, Status::Ok);
 
         assert_eq!(
@@ -503,7 +519,7 @@ mod tests {
         let txn_id = TxnId::new(1);
         let stage_task = make_task(None);
         let ctx = core.kv_stage_ctx(&stage_task, 1, txn_id, "cache", b"k1", Surrogate::new(5));
-        let put_resp = core.stage_kv_put(&ctx, b"v1", 5_000);
+        let put_resp = core.stage_kv_put(&ctx, b"k1", b"v1", 5_000);
         assert_eq!(put_resp.status, Status::Ok);
 
         // `txn_id` set so `execute_kv_get` consults the overlay first.
@@ -542,7 +558,7 @@ mod tests {
         let txn_id = TxnId::new(1);
         let stage_task = make_task(None);
         let ctx = core.kv_stage_ctx(&stage_task, 1, txn_id, "cache", b"k1", Surrogate::new(5));
-        let put_resp = core.stage_kv_put(&ctx, b"v1", 0);
+        let put_resp = core.stage_kv_put(&ctx, b"k1", b"v1", 0);
         assert_eq!(put_resp.status, Status::Ok);
 
         let read_task = make_task(Some(txn_id));

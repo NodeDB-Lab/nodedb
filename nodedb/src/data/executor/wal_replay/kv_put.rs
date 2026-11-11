@@ -116,7 +116,7 @@ impl CoreLoop {
             None => self.kv_engine.put(params),
         };
         if let Err(e) = written {
-            self.replay_record_unapplied("kv", "put_identity", record_lsn, &e.to_string());
+            self.replay_kv_write_refused("put", record_lsn, e);
             return Some(0);
         }
         self.note_replay_write(
@@ -176,6 +176,13 @@ impl CoreLoop {
             },
             expire_at_ms,
         );
+        let rewritten = match rewritten {
+            Ok(rewritten) => rewritten,
+            Err(e) => {
+                self.replay_kv_write_refused("rewrite", record_lsn, e);
+                return Some(0);
+            }
+        };
         self.note_replay_write(
             database_id,
             tenant_id,
@@ -264,7 +271,7 @@ impl CoreLoop {
             None => self.kv_engine.batch_put(params),
         };
         if let Err(e) = written {
-            self.replay_record_unapplied("kv", "batch_put_identity", record_lsn, &e.to_string());
+            self.replay_kv_write_refused("batch_put", record_lsn, e);
             return Some(0);
         }
         for (entry_key, _entry_value) in &entries {

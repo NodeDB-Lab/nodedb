@@ -40,7 +40,7 @@ use crate::data::executor::handlers::point::apply_put::PutEnforcement;
 use crate::engine::document::store::{CollectionConfig, StorageKey};
 use crate::types::{DatabaseId, TenantId};
 
-use super::sub_ops::RedoDocOp;
+use super::sub_ops::{RedoDocOp, RedoKvOp};
 
 impl CoreLoop {
     /// Refuse `ops` when applying them would break a constraint the
@@ -268,6 +268,22 @@ impl CoreLoop {
         }
         Ok(())
     }
+}
+
+/// Refuse the record when a KV row it puts holds a key and value over the
+/// row image limit, before any of its rows is written.
+pub(super) fn check_redo_kv_row_images(ops: &[RedoKvOp]) -> crate::Result<()> {
+    for op in ops {
+        if let RedoKvOp::Put {
+            collection,
+            key,
+            value,
+        } = op
+        {
+            crate::engine::kv::KvRowTooLarge::check(collection, key, value)?;
+        }
+    }
+    Ok(())
 }
 
 /// One collection's slice of a record, with what its checks read.

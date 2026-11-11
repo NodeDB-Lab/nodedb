@@ -265,6 +265,11 @@ impl CoreLoop {
                 );
                 Some(0)
             }
+            // Refused the same way on every replica (`replay_policy`).
+            Err(AtomicError::RowTooLarge(error)) => {
+                self.replay_kv_row_too_large("incr_float", record_lsn, error);
+                Some(0)
+            }
         }
     }
 
@@ -343,6 +348,10 @@ impl CoreLoop {
             AtomicError::TypeMismatch { detail } | AtomicError::Encode { detail } => detail,
             AtomicError::Counter(fault) => fault.message().to_string(),
             AtomicError::Declared(error) => error.to_string(),
+            AtomicError::RowTooLarge(error) => {
+                self.replay_kv_row_too_large(op, record_lsn, error);
+                return;
+            }
             AtomicError::Rejected(error) => {
                 self.replay_record_unapplied(
                     "kv",

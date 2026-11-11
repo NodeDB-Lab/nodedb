@@ -165,12 +165,7 @@ impl CoreLoop {
             None => self.kv_engine.put(params),
         };
         if let Err(e) = written {
-            self.replay_record_unapplied(
-                "kv",
-                "insert_on_conflict_identity",
-                record_lsn,
-                &e.to_string(),
-            );
+            self.replay_kv_write_refused("insert_on_conflict", record_lsn, e);
             return 0;
         }
         self.note_replay_write(

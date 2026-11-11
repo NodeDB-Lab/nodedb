@@ -88,6 +88,25 @@ impl CoreLoop {
             {
                 return self.response_error(task, error);
             }
+            // A row over the row limit is refused here, before any mutation
+            // applies.
+            if let KvResolvedMutation::Put {
+                collection,
+                key,
+                value,
+                ..
+            }
+            | KvResolvedMutation::Rewrite {
+                collection,
+                key,
+                value,
+                ..
+            } = mutation
+                && let Err(refusal) =
+                    crate::engine::kv::KvRowTooLarge::check(collection.as_str(), key, value)
+            {
+                return self.response_error(task, refusal);
+            }
             // A put binds its row. One carrying `Surrogate::ZERO` is refused
             // here, before any mutation applies.
             if let KvResolvedMutation::Put {
@@ -187,7 +206,7 @@ impl CoreLoop {
                         now_ms,
                     },
                     *expire_at_ms,
-                );
+                )?;
                 if let Some(ref m) = self.metrics {
                     m.record_kv_put();
                 }

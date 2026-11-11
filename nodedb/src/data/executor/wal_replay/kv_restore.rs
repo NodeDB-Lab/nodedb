@@ -134,7 +134,7 @@ impl CoreLoop {
                 self.kv_engine
                     .restore_live_row(target.put(live), live.expire_at_ms, live.sys_from);
             if let Err(e) = restored {
-                self.replay_record_unapplied("kv", "restore_identity", record_lsn, &e.to_string());
+                self.replay_kv_write_refused("restore", record_lsn, e);
                 return Some(0);
             }
         }
@@ -156,12 +156,7 @@ impl CoreLoop {
                         ordinal,
                     );
                     if let Err(e) = set_again {
-                        self.replay_record_unapplied(
-                            "kv",
-                            "restore_identity",
-                            record_lsn,
-                            &e.to_string(),
-                        );
+                        self.replay_kv_write_refused("restore", record_lsn, e);
                         return Some(0);
                     }
                 }

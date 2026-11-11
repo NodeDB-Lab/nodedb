@@ -182,6 +182,11 @@ impl CoreLoop {
         if let Err(e) = self.stage_admit_kv_image(ctx, &computed.new_value, rls_write_check) {
             return self.response_error(ctx.task, e);
         }
+        if let Err(e) =
+            crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &computed.new_value)
+        {
+            return self.response_error(ctx.task, e);
+        }
         if let Err(e) = self.stage_put_capped(ctx, computed.new_value) {
             return self.response_error(ctx.task, e);
         }
@@ -254,6 +259,15 @@ impl CoreLoop {
         if let Err(e) = self.stage_admit_kv_image(&dest_ctx, &computed.new_dest, rls_write_check) {
             return self.response_error(task, e);
         }
+        // Both rows are held to the row limit before either stages.
+        for (key, value) in [
+            (source_key, computed.new_source.as_slice()),
+            (dest_key, computed.new_dest.as_slice()),
+        ] {
+            if let Err(e) = crate::engine::kv::KvRowTooLarge::check(collection, key, value) {
+                return self.response_error(task, e);
+            }
+        }
 
         if let Err(e) = self.stage_put_capped(&source_ctx, computed.new_source) {
             return self.response_error(task, e);
@@ -316,6 +330,13 @@ impl CoreLoop {
         }
         let dest_bytes = fitted.unwrap_or(item_bytes);
         if let Err(e) = self.stage_admit_kv_image(&dest_ctx, &dest_bytes, dest_rls_write_check) {
+            return self.response_error(task, e);
+        }
+        // The arriving row is held to the row limit before the source row is
+        // tombstoned.
+        if let Err(e) =
+            crate::engine::kv::KvRowTooLarge::check(dest_ctx.collection, dest_key, &dest_bytes)
+        {
             return self.response_error(task, e);
         }
 

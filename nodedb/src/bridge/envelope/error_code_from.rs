@@ -67,6 +67,23 @@ impl From<crate::engine::kv::UnboundKvWrite> for ErrorCode {
     }
 }
 
+/// A KV row over the row image limit is refused with SQLSTATE 54000, as
+/// every other stored row over the limit is.
+impl From<crate::engine::kv::KvRowTooLarge> for ErrorCode {
+    fn from(e: crate::engine::kv::KvRowTooLarge) -> Self {
+        crate::data::executor::row_image_limit::row_image_too_large(&e.collection, &e.key, e.bytes)
+    }
+}
+
+impl From<crate::engine::kv::KvWriteRefusal> for ErrorCode {
+    fn from(e: crate::engine::kv::KvWriteRefusal) -> Self {
+        match e {
+            crate::engine::kv::KvWriteRefusal::Unbound(e) => e.into(),
+            crate::engine::kv::KvWriteRefusal::RowTooLarge(e) => e.into(),
+        }
+    }
+}
+
 impl From<crate::Error> for ErrorCode {
     fn from(e: crate::Error) -> Self {
         match e {

@@ -295,6 +295,18 @@ impl CoreLoop {
             Ok(bytes) => bytes,
             Err(e) => return self.response_error(task, e),
         };
+        // The row, a patched one included, is held to the row image limit
+        // before the stored row is removed.
+        if let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+            collection,
+            || surrogate.as_u32().to_string(),
+            field,
+            vector.len(),
+            &fields,
+            sidecar.len(),
+        ) {
+            return self.response_error(task, e);
+        }
 
         if existing
             && let Err(e) = self.remove_vector_direct_row(&index_key, tid, collection, surrogate)

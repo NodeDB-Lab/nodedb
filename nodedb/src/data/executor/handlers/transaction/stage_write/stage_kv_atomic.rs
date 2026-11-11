@@ -228,6 +228,11 @@ impl CoreLoop {
                 if let Err(e) = self.stage_admit_kv_image(ctx, &new_bytes, rls_write_check) {
                     return self.response_error(ctx.task, e);
                 }
+                if let Err(e) =
+                    crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &new_bytes)
+                {
+                    return self.response_error(ctx.task, e);
+                }
                 if let Err(e) = self.stage_put_capped(ctx, new_bytes) {
                     return self.response_error(ctx.task, e);
                 }
@@ -257,6 +262,11 @@ impl CoreLoop {
                     Err(e) => return self.response_error(ctx.task, e),
                 };
                 if let Err(e) = self.stage_admit_kv_image(ctx, &new_bytes, rls_write_check) {
+                    return self.response_error(ctx.task, e);
+                }
+                if let Err(e) =
+                    crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &new_bytes)
+                {
                     return self.response_error(ctx.task, e);
                 }
                 let reply = incr_float_reply(new_f64, &new_bytes);
@@ -325,6 +335,11 @@ impl CoreLoop {
             if let Err(e) = self.stage_admit_kv_image(ctx, &write_bytes, rls_write_check) {
                 return self.response_error(ctx.task, e);
             }
+            if let Err(e) =
+                crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &write_bytes)
+            {
+                return self.response_error(ctx.task, e);
+            }
             if let Err(e) = self.stage_put_capped(ctx, write_bytes) {
                 return self.response_error(ctx.task, e);
             }
@@ -362,6 +377,9 @@ impl CoreLoop {
             Err(e) => return self.response_error(ctx.task, e),
         };
         if let Err(e) = self.stage_admit_kv_image(ctx, &write_bytes, rls_write_check) {
+            return self.response_error(ctx.task, e);
+        }
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &write_bytes) {
             return self.response_error(ctx.task, e);
         }
         if let Err(e) = self.stage_put_capped(ctx, write_bytes) {
@@ -433,6 +451,14 @@ impl CoreLoop {
                 ) {
                     return self.response_error(task, e);
                 }
+            }
+        }
+        // Every row is held to the row limit before the first one stages.
+        for row in &rows {
+            if let Err(e) =
+                crate::engine::kv::KvRowTooLarge::check(collection, row.key, &row.stored)
+            {
+                return self.response_error(task, e);
             }
         }
         for row in &rows {

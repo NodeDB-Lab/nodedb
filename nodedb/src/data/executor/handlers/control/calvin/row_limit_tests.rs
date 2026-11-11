@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{DocumentOp, GraphOp, KvOp, PhysicalPlan};
 use nodedb_types::{
     DatabaseId, MAX_ROW_IMAGE_BYTES, QualifiedCollection, RlsWriteCheck, Surrogate, TenantId, Value,
 };
@@ -67,6 +67,19 @@ fn large_edge(len: usize) -> PhysicalPlan {
     })
 }
 
+fn large_kv_put(len: usize) -> PhysicalPlan {
+    PhysicalPlan::Kv(KvOp::Put {
+        collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
+        key: b"k".to_vec(),
+        value: vec![0u8; len],
+        ttl_ms: 0,
+        surrogate: Surrogate::new(1),
+        returning: None,
+        rls_filters: Vec::new(),
+        provenance: None,
+    })
+}
+
 /// The slice refuses with SQLSTATE 54000, votes abort, and keeps nothing
 /// staged.
 fn assert_aborts_at_the_limit(core: &CoreLoop, response: &Response) {
@@ -97,5 +110,14 @@ fn a_calvin_edge_with_properties_over_the_limit_votes_abort() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
     let response = stage(&mut core, &[large_edge(MAX_ROW_IMAGE_BYTES + 1)]);
+    assert_aborts_at_the_limit(&core, &response);
+}
+
+#[test]
+fn a_calvin_kv_write_over_the_limit_votes_abort() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    // One key byte makes the row one byte over the limit.
+    let response = stage(&mut core, &[large_kv_put(MAX_ROW_IMAGE_BYTES)]);
     assert_aborts_at_the_limit(&core, &response);
 }

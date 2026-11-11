@@ -240,3 +240,69 @@ impl CoreLoop {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::{MAX_ROW_IMAGE_BYTES, RlsWriteCheck, Surrogate, Value};
+
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::handlers::kv::atomic::KvAtomicCtx;
+
+    fn text(len: usize) -> Vec<u8> {
+        nodedb_types::value_to_msgpack(&Value::String("x".repeat(len))).expect("encode")
+    }
+
+    /// Each FieldSet grows the stored value. The one that would grow it past
+    /// the row limit refuses with SQLSTATE 54000, and the value stays.
+    #[test]
+    fn a_field_set_growing_past_the_limit_refuses_and_keeps_the_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let did = task.request.database_id.as_u64();
+        let check = RlsWriteCheck::NoPolicyApplies;
+        let set = |core: &mut CoreLoop, field: &str, len: usize| {
+            let updates = [(field.to_string(), text(len))];
+            core.execute_kv_field_set(
+                KvAtomicCtx {
+                    task: &task,
+                    did,
+                    tid: 1,
+                    collection: "cache",
+                    key: b"k",
+                    surrogate: Surrogate::new(1),
+                    rls_write_check: &check,
+                },
+                KvFieldSetArgs {
+                    updates: &updates,
+                    if_present: false,
+                    returning: None,
+                    rls_filters: &[],
+                },
+            )
+        };
+        let half = MAX_ROW_IMAGE_BYTES / 2;
+        assert_eq!(set(&mut core, "a", half).status, Status::Ok);
+        let before = core
+            .kv_engine
+            .get(did, 1, "cache", b"k", current_ms())
+            .expect("the first set stores the row");
+
+        let refused = set(&mut core, "b", half);
+        assert_eq!(refused.status, Status::Error, "{refused:?}");
+        assert!(
+            matches!(
+                refused.error_code.as_deref(),
+                Some(ErrorCode::ProgramLimitExceeded { .. })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            core.kv_engine.get(did, 1, "cache", b"k", current_ms()),
+            Some(before),
+            "the refused set leaves the stored value"
+        );
+    }
+}

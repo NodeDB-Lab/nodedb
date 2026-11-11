@@ -62,9 +62,10 @@ pub(in crate::data::executor) struct StageKvPredicateDeleteParams<'a> {
     pub system_as_of: Option<i64>,
 }
 
-/// One matched row under BASE ∪ OVERLAY: its overlay identity, the
+/// One matched row under BASE ∪ OVERLAY: its key, its overlay identity, the
 /// surrogate the staged entry binds to, and the current body.
 struct KvStageMatch {
+    key: Vec<u8>,
     doc_id: RowIdentity,
     surrogate: u32,
     body: Vec<u8>,
@@ -111,6 +112,11 @@ impl CoreLoop {
                 Ok(c) => c,
                 Err(e) => return self.response_error(task, e),
             };
+            if let Err(e) =
+                crate::engine::kv::KvRowTooLarge::check(collection, &row.key, &computed.new_value)
+            {
+                return self.response_error(task, e);
+            }
             // A rejected row fails the statement rather than being skipped:
             // skipping would under-report `affected` while the rest of the
             // predicate's matches were still rewritten.
@@ -265,6 +271,7 @@ impl CoreLoop {
             };
             matched.push(KvStageMatch {
                 doc_id: kv_row_identity(&key),
+                key,
                 surrogate: surrogate.as_u32(),
                 body,
             });

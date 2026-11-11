@@ -103,6 +103,7 @@ pub async fn create_continuous_aggregate(
     };
 
     crate::control::relation_name::check_relation_name("continuous aggregate", &def.name)?;
+    crate::control::catalog_entry::collection_limits::check_collection_name(&def.name)?;
 
     // Validate source collection exists and is timeseries.
     let tenant_id = identity.tenant_id;

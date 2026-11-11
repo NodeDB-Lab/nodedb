@@ -349,6 +349,15 @@ impl CoreLoop {
             ) {
                 return Err(self.response_error(task, error));
             }
+            // A row over the row image limit refuses the statement before any
+            // row is written.
+            if let Err(error) = crate::data::executor::row_image_native::check_columnar_row(
+                engine_key.2.as_str(),
+                schema,
+                &final_values,
+            ) {
+                return Err(self.response_error(task, error));
+            }
 
             if unique {
                 let taken = batch_rows.contains_key(&pk_bytes)

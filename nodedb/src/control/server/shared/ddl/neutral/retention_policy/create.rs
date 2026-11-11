@@ -35,6 +35,16 @@ fn err(sqlstate: &str, message: String) -> DdlError {
     DdlError::new(sqlstate, message)
 }
 
+/// Refuse `def` when the continuous aggregate name of a downsample tier is
+/// over the collection name limit.
+fn check_tier_names(def: &RetentionPolicyDef) -> crate::Result<()> {
+    def.downsample_tiers().iter().try_for_each(|tier| {
+        crate::control::catalog_entry::collection_limits::check_collection_name(
+            &def.aggregate_name(tier.tier_index),
+        )
+    })
+}
+
 fn assemble_retention_parser_input(
     name: &str,
     collection: &str,
@@ -141,6 +151,10 @@ pub async fn create_retention_policy(
         created_at: now,
     };
 
+    // Every tier's continuous aggregate name fits the collection name limit
+    // before anything is proposed.
+    check_tier_names(&def)?;
+
     // Replicated: every node writes the row and installs the definition in
     // its own `RetentionPolicyRegistry` via post-apply.
     propose_put(state, &def).await?;
@@ -210,6 +224,55 @@ pub async fn create_retention_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::timeseries::retention_policy::TierDef;
+    use nodedb_types::MAX_COLLECTION_NAME_BYTES;
+
+    fn tier(tier_index: u32, resolution_ms: u64) -> TierDef {
+        TierDef {
+            tier_index,
+            resolution_ms,
+            aggregates: Vec::new(),
+            retain_ms: 0,
+            archive: None,
+        }
+    }
+
+    fn policy(name: String) -> RetentionPolicyDef {
+        RetentionPolicyDef {
+            database_id: 0,
+            tenant_id: 1,
+            name,
+            collection: "metrics".into(),
+            tiers: vec![tier(0, 0), tier(1, 60_000)],
+            auto_tier: false,
+            enabled: true,
+            eval_interval_ms: 0,
+            owner: "admin".into(),
+            created_at: 0,
+        }
+    }
+
+    /// A policy whose tier aggregate name passes the collection name limit
+    /// refuses with SQLSTATE 54000. One whose name fits passes.
+    #[test]
+    fn a_tier_name_over_the_collection_name_limit_refuses() {
+        let fits = policy("p".repeat(16));
+        check_tier_names(&fits).expect("a short policy name");
+        let derived = fits.aggregate_name(1).len() - 16;
+        let over = policy("p".repeat(MAX_COLLECTION_NAME_BYTES - derived + 1));
+        let refused = check_tier_names(&over).expect_err("refused");
+        assert!(
+            matches!(
+                refused,
+                crate::Error::DataPlane(
+                    crate::bridge::envelope::ErrorCode::ProgramLimitExceeded { .. }
+                )
+            ),
+            "{refused:?}"
+        );
+        let at = policy("p".repeat(MAX_COLLECTION_NAME_BYTES - derived));
+        check_tier_names(&at).expect("a tier name at the limit");
+    }
 
     #[test]
     fn reconstructed_sql_quotes_identifier_and_interval_inputs() {

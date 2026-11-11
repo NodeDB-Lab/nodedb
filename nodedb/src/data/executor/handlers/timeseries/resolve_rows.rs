@@ -9,9 +9,12 @@
 //! some Event Plane consumer reads the collection or the statement projects
 //! rows, its scan image. The live memtable is not touched.
 
+use nodedb_types::MAX_ROW_IMAGE_BYTES;
+
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::row_image_limit::check_row_image;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::columnar_memtable::ColumnarSchema;
+use crate::engine::timeseries::columnar_memtable::{ColumnValue, ColumnarMemtable, ColumnarSchema};
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest::{self, RowStamp};
 use crate::engine::timeseries::resolved_ingest::{ResolvedTsBatch, ResolvedTsRow, TsDriftPolicy};
@@ -122,6 +125,18 @@ impl CoreLoop {
                 }
                 None => Vec::new(),
             };
+            // A row over the row image limit refuses the ingest before its
+            // record exists.
+            check_ts_row_image(
+                collection,
+                &scratch,
+                RowAt {
+                    line: *line_index,
+                    row: outcome.accepted_row_indices.get(position).copied(),
+                },
+                &values,
+                &image,
+            )?;
             rows.push(ResolvedTsRow {
                 line: *line_index as u64,
                 timestamp_ms,
@@ -144,6 +159,74 @@ impl CoreLoop {
             carried_system: false,
         })
     }
+}
+
+/// Bytes one rendered timeseries cell adds beyond its column name and its
+/// symbol text, at most: a `str 32` key header, and a value header with a
+/// fixed payload up to a UUID or a decimal as text.
+const TS_CELL_BYTES: usize = 5 + 48;
+
+/// Bytes a rendered row adds beyond its cells, at most: a `map 32` header.
+const TS_ROW_HEADER: usize = 5;
+
+/// Where a resolved row came from: its input line and its scratch memtable
+/// row.
+struct RowAt {
+    line: usize,
+    row: Option<usize>,
+}
+
+/// Refuse a resolved row whose scan image is over [`MAX_ROW_IMAGE_BYTES`].
+///
+/// A row that carries its `image` measures it. Any other row is rendered
+/// only when a bound on its image is over the limit.
+fn check_ts_row_image(
+    collection: &str,
+    scratch: &ColumnarMemtable,
+    at: RowAt,
+    values: &[ColumnValue],
+    image: &[u8],
+) -> crate::Result<()> {
+    let row_id = || format!("line {}", at.line);
+    if !image.is_empty() {
+        return check_row_image(collection, &row_id(), image.len());
+    }
+    let bound = scratch
+        .schema()
+        .columns
+        .iter()
+        .zip(values)
+        .map(|((name, _), value)| {
+            let text = match value {
+                ColumnValue::Symbol(text) => text.len(),
+                _ => 0,
+            };
+            name.len()
+                .saturating_add(text)
+                .saturating_add(TS_CELL_BYTES)
+        })
+        .fold(TS_ROW_HEADER, usize::saturating_add);
+    if bound <= MAX_ROW_IMAGE_BYTES {
+        return Ok(());
+    }
+    let unmeasured = |reason: &str| crate::Error::Internal {
+        detail: format!(
+            "timeseries resolve of '{collection}': {} cannot be measured against the row \
+             image limit: {reason}",
+            row_id()
+        ),
+    };
+    let row = at
+        .row
+        .ok_or_else(|| unmeasured("its scratch row is not recorded"))?;
+    let rendered = emit_memtable_rows_at(scratch, &[row])?;
+    let rendered = rendered
+        .first()
+        .ok_or_else(|| unmeasured("its scratch row does not render"))?;
+    let mut bytes = Vec::new();
+    rmpv::encode::write_value(&mut bytes, rendered)
+        .map_err(|error| unmeasured(&format!("its image does not encode: {error}")))?;
+    check_row_image(collection, &row_id(), bytes.len())
 }
 
 /// Positions in `schema` that `line` does not name. The time column, the
@@ -190,5 +273,42 @@ mod tests {
             .into_lines();
         let line = parsed.first().expect("one line");
         assert_eq!(unnamed_columns(&schema, line, false), vec![3]);
+    }
+
+    /// A line whose row renders past the row image limit refuses the
+    /// resolve with SQLSTATE 54000, so its ingest stores nothing.
+    #[test]
+    fn a_row_over_the_row_limit_refuses_the_resolve() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (core, _tx, _rx) =
+            crate::data::executor::core_loop::tests::make_core_with_dir(dir.path());
+        let task = crate::data::executor::core_loop::tests::make_default_task();
+        let lines = vec![format!(
+            "cpu,host={} value=1.5 1000000000",
+            "h".repeat(MAX_ROW_IMAGE_BYTES)
+        )];
+        let refused = core
+            .resolve_ts_batch(
+                &task,
+                TsResolveInput {
+                    tid: TenantId::new(1),
+                    collection: "metrics",
+                    lines: &lines,
+                    now_ms: 1_000,
+                    drift: TsDriftPolicy::Refuse,
+                    needs_images: false,
+                    base: None,
+                },
+            )
+            .expect_err("a row over the limit refuses");
+        assert!(
+            matches!(
+                refused,
+                crate::Error::DataPlane(
+                    crate::bridge::envelope::ErrorCode::ProgramLimitExceeded { .. }
+                )
+            ),
+            "{refused:?}"
+        );
     }
 }

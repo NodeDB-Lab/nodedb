@@ -178,6 +178,13 @@ impl CoreLoop {
                 .collect();
             self.check_columnar_geometry_srids(task, schema, collection, &post_images)?;
         }
+        // Every post-image is held to the row image limit before the first
+        // row changes, so a row grown past it changes nothing.
+        for (_, new_row) in rows {
+            crate::data::executor::row_image_native::check_columnar_row(
+                collection, schema, new_row,
+            )?;
+        }
 
         for (((old_pk, new_row), pre_image), closing) in rows.iter().zip(pre_images).zip(closings) {
             let old_pk_bytes = encode_pk(old_pk);

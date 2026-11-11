@@ -50,6 +50,20 @@ impl CoreLoop {
         }) {
             return self.response_error(task, refusal);
         }
+        // Every vector holds `dim` floats, so one measure holds the batch to
+        // the row image limit before any vector is inserted.
+        if let Some(surrogate) = surrogates.first()
+            && let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+                collection,
+                || surrogate.as_u32().to_string(),
+                "",
+                dim,
+                &std::collections::HashMap::new(),
+                0,
+            )
+        {
+            return self.response_error(task, e);
+        }
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, "");
         // A committed-redo install seals once the whole record landed.
         let defer_seal = self.recording_redo_undo();

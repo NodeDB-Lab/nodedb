@@ -19,6 +19,8 @@ mod event_emit_engines;
 pub(in crate::data::executor) mod event_image;
 pub(in crate::data::executor) mod event_outlet;
 pub(in crate::data::executor) use event_emit_engines::KvWriteEvent;
+#[cfg(test)]
+mod engine_row_limit_tests;
 pub(in crate::data::executor) mod fail_stop;
 pub(in crate::data::executor) mod filter_match;
 pub(in crate::data::executor) mod graph_metrics;

@@ -29,6 +29,7 @@ mod replay_policy;
 mod replay_task;
 pub mod response_codec;
 pub(crate) mod row_image_limit;
+pub(crate) mod row_image_native;
 mod row_shape;
 mod scan_normalize;
 mod scan_timeseries;
@@ -60,6 +61,8 @@ mod wal_replay_kv_incr;
 mod wal_replay_kv_index;
 mod wal_replay_kv_insert_conflict;
 mod wal_replay_kv_reap;
+#[cfg(test)]
+mod wal_replay_kv_row_limit_tests;
 mod wal_replay_kv_sorted_index;
 mod wal_replay_kv_transfer;
 mod wal_replay_kv_ttl;

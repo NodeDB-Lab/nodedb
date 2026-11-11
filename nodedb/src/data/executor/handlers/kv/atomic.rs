@@ -48,6 +48,7 @@ pub(in crate::data::executor) fn atomic_error_code(
         // installs the computed value.
         AtomicError::Declared(error) | AtomicError::Rejected(error) => (*error).into(),
         AtomicError::Unbound(error) => error.into(),
+        AtomicError::RowTooLarge(error) => error.into(),
     }
 }
 

@@ -80,6 +80,8 @@ impl CoreLoop {
                     planned.push(row);
                 }
             }
+            self.check_vector_update_rows(&index_key, collection, field, new_vector, &planned)
+                .map_err(ErrorCode::from)?;
         }
 
         let response_payload = match returning {

@@ -103,7 +103,7 @@ pub(crate) fn check_installed_row(
 }
 
 /// Refuse an edge whose properties, endpoints or label are over
-/// [`MAX_ROW_IMAGE_BYTES`].
+/// [`MAX_ROW_IMAGE_BYTES`]. The refusal names the first part over the limit.
 pub(crate) fn check_edge(
     collection: &str,
     src_id: &str,
@@ -111,18 +111,23 @@ pub(crate) fn check_edge(
     dst_id: &str,
     properties: &[u8],
 ) -> crate::Result<()> {
-    let largest = src_id
-        .len()
-        .max(label.len())
-        .max(dst_id.len())
-        .max(properties.len());
-    if largest <= MAX_ROW_IMAGE_BYTES {
+    let parts = [
+        ("src", src_id.len()),
+        ("label", label.len()),
+        ("dst", dst_id.len()),
+        ("properties", properties.len()),
+    ];
+    let Some((part, bytes)) = parts
+        .into_iter()
+        .find(|(_, bytes)| *bytes > MAX_ROW_IMAGE_BYTES)
+    else {
         return Ok(());
-    }
+    };
     Err(crate::Error::DataPlane(ErrorCode::ProgramLimitExceeded {
         detail: format!(
-            "edge ({})-[{}]->({}) of '{collection}' is {largest} bytes, over the row limit of \
-             {MAX_ROW_IMAGE_BYTES} bytes; store the large value in smaller rows or as a blob",
+            "the {part} of edge ({})-[{}]->({}) of '{collection}' is {bytes} bytes, over the \
+             row limit of {MAX_ROW_IMAGE_BYTES} bytes; store the large value in smaller rows or \
+             as a blob",
             shown_id(src_id),
             shown_id(label),
             shown_id(dst_id)
@@ -192,6 +197,32 @@ mod tests {
             old_value: Some(vec![0u8; MAX_ROW_IMAGE_BYTES + 1]),
         };
         check_installed_row("orders", "o1", &[1], &[1], &event).expect("within the prior limit");
+    }
+
+    #[test]
+    fn an_edge_refusal_names_the_part_over_the_limit() {
+        let over = "x".repeat(MAX_ROW_IMAGE_BYTES + 1);
+        let properties = vec![0u8; MAX_ROW_IMAGE_BYTES + 1];
+        for (part, refusal) in [
+            ("src", check_edge("people", &over, "knows", "b", &[])),
+            ("label", check_edge("people", "a", &over, "b", &[])),
+            ("dst", check_edge("people", "a", "knows", &over, &[])),
+            (
+                "properties",
+                check_edge("people", "a", "knows", "b", &properties),
+            ),
+        ] {
+            let detail = detail(refusal.expect_err("refused"));
+            assert!(
+                detail.starts_with(&format!("the {part} of edge")),
+                "{detail}"
+            );
+            assert!(
+                detail.contains(&(MAX_ROW_IMAGE_BYTES + 1).to_string()),
+                "{detail}"
+            );
+        }
+        check_edge("people", "a", "knows", "b", &[0u8; 16]).expect("a small edge");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::engine_helpers::{
     decode_document, expiry_key, extract_all_field_values_from_msgpack, table_key,
 };
 use super::entry::NO_EXPIRY;
+use super::write_refusal::{KvRowTooLarge, KvWriteRefusal};
 
 /// Parameters for [`KvEngine::put`].
 #[derive(Debug, Clone, Copy)]
@@ -87,9 +88,10 @@ impl KvEngine {
     /// `surrogate` is the row's stable global identity. An existing entry
     /// keeps the surrogate it was first bound under. A rewrite of an existing
     /// row that allocates no identity uses
-    /// [`KvEngine::rewrite_with_absolute_expiry`]. A `Surrogate::ZERO` write
-    /// is refused with [`UnboundKvWrite`] and writes nothing.
-    pub fn put(&mut self, params: KvPutParams<'_>) -> Result<Option<Vec<u8>>, UnboundKvWrite> {
+    /// [`KvEngine::rewrite_with_absolute_expiry`]. A `Surrogate::ZERO` write,
+    /// or a key and value over the row limit, is refused with
+    /// [`KvWriteRefusal`] and writes nothing.
+    pub fn put(&mut self, params: KvPutParams<'_>) -> Result<Option<Vec<u8>>, KvWriteRefusal> {
         let expire_at = if params.ttl_ms > 0 {
             params.now_ms + params.ttl_ms
         } else {
@@ -112,19 +114,20 @@ impl KvEngine {
         &mut self,
         params: KvPutParams<'_>,
         expire_at_ms: u64,
-    ) -> Result<Option<Vec<u8>>, UnboundKvWrite> {
+    ) -> Result<Option<Vec<u8>>, KvWriteRefusal> {
         self.put_resolved(params, expire_at_ms)
     }
 
     /// Replace the value and expiry of a row the table already holds, keeping
     /// the row's bound surrogate. Returns the old value. An absent row is not
     /// written and returns `None`. `expire_at_ms` is installed verbatim, as
-    /// for [`KvEngine::put_with_absolute_expiry`].
+    /// for [`KvEngine::put_with_absolute_expiry`]. A key and value over the
+    /// row limit are refused and nothing is written.
     pub fn rewrite_with_absolute_expiry(
         &mut self,
         params: KvRewriteParams<'_>,
         expire_at_ms: u64,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, KvWriteRefusal> {
         self.write_resolved(params, RowIdentity::KeepExisting, expire_at_ms)
     }
 
@@ -136,7 +139,7 @@ impl KvEngine {
         &mut self,
         params: KvPutParams<'_>,
         expire_at: u64,
-    ) -> Result<Option<Vec<u8>>, UnboundKvWrite> {
+    ) -> Result<Option<Vec<u8>>, KvWriteRefusal> {
         let KvPutParams {
             database_id,
             tenant_id,
@@ -148,7 +151,7 @@ impl KvEngine {
             surrogate,
         } = params;
         require_bound(collection, surrogate)?;
-        Ok(self.write_resolved(
+        self.write_resolved(
             KvRewriteParams {
                 database_id,
                 tenant_id,
@@ -160,16 +163,17 @@ impl KvEngine {
             },
             RowIdentity::Bind(surrogate),
             expire_at,
-        ))
+        )
     }
 
-    /// The write body shared by a bound put and a rewrite.
+    /// The write body shared by a bound put and a rewrite. A row over the
+    /// row limit is refused before anything changes.
     fn write_resolved(
         &mut self,
         params: KvRewriteParams<'_>,
         identity: RowIdentity,
         expire_at: u64,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, KvWriteRefusal> {
         let KvRewriteParams {
             database_id,
             tenant_id,
@@ -179,12 +183,13 @@ impl KvEngine {
             ttl_ms: _,
             now_ms,
         } = params;
+        KvRowTooLarge::check(collection, key, value)?;
 
         let tkey = table_key(database_id, tenant_id, collection);
         // One probe serves both the rewrite's presence check and the old expiry.
         let old_meta = self.tables.get(&tkey).and_then(|t| t.get_entry_meta(key));
         if matches!(identity, RowIdentity::KeepExisting) && old_meta.is_none() {
-            return None;
+            return Ok(None);
         }
 
         let has_indexes = self.indexes.get(&tkey).is_some_and(|idx| !idx.is_empty());
@@ -246,7 +251,7 @@ impl KvEngine {
             }
         }
 
-        old
+        Ok(old)
     }
 
     /// DELETE: remove key(s) at the current write ordinal. Returns count of
@@ -475,6 +480,70 @@ mod tests {
             ..params
         })
         .expect("a bound put writes");
+        assert_eq!(e.get(0, 1, "cache", b"k1", n), Some(b"v1".to_vec()));
+    }
+
+    /// A key and value over the row limit are refused by every write form,
+    /// and the stored row keeps its value.
+    #[test]
+    fn a_row_over_the_limit_is_refused_and_keeps_the_stored_value() {
+        let mut e = make_engine();
+        let n = now();
+        let params = KvPutParams {
+            database_id: 0,
+            tenant_id: 1,
+            collection: "cache",
+            key: b"k1",
+            value: b"v1",
+            ttl_ms: 0,
+            now_ms: n,
+            surrogate: Surrogate::new(5),
+        };
+        e.put(params).expect("a row within the limit writes");
+        // Two key bytes make the row one byte over the limit.
+        let over = vec![0u8; nodedb_types::MAX_ROW_IMAGE_BYTES - 1];
+        let refused = e
+            .put(KvPutParams {
+                value: &over,
+                ..params
+            })
+            .expect_err("a row over the limit is refused");
+        assert!(
+            matches!(refused, KvWriteRefusal::RowTooLarge(_)),
+            "{refused:?}"
+        );
+        let rewritten = e.rewrite_with_absolute_expiry(
+            KvRewriteParams {
+                database_id: 0,
+                tenant_id: 1,
+                collection: "cache",
+                key: b"k1",
+                value: &over,
+                ttl_ms: 0,
+                now_ms: n,
+            },
+            NO_EXPIRY,
+        );
+        assert!(rewritten.is_err(), "a rewrite over the limit is refused");
+
+        let entries = vec![(b"a".to_vec(), b"1".to_vec()), (b"k1".to_vec(), over)];
+        let batch = e.batch_put(KvBatchPutParams {
+            database_id: 0,
+            tenant_id: 1,
+            collection: "cache",
+            entries: &entries,
+            ttl_ms: 0,
+            now_ms: n,
+            surrogates: &[Surrogate::new(6), Surrogate::new(5)],
+        });
+        assert!(
+            batch.is_err(),
+            "a batch with a row over the limit is refused"
+        );
+        assert!(
+            e.get(0, 1, "cache", b"a", n).is_none(),
+            "a refused batch writes no entry"
+        );
         assert_eq!(e.get(0, 1, "cache", b"k1", n), Some(b"v1".to_vec()));
     }
 

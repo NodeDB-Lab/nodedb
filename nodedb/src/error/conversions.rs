@@ -67,6 +67,22 @@ impl From<crate::engine::kv::UnboundKvWrite> for Error {
     }
 }
 
+/// A KV row over the row image limit, refused with SQLSTATE 54000.
+impl From<crate::engine::kv::KvRowTooLarge> for Error {
+    fn from(e: crate::engine::kv::KvRowTooLarge) -> Self {
+        Error::DataPlane(e.into())
+    }
+}
+
+impl From<crate::engine::kv::KvWriteRefusal> for Error {
+    fn from(e: crate::engine::kv::KvWriteRefusal) -> Self {
+        match e {
+            crate::engine::kv::KvWriteRefusal::Unbound(e) => e.into(),
+            crate::engine::kv::KvWriteRefusal::RowTooLarge(e) => e.into(),
+        }
+    }
+}
+
 /// A KV restore whose ended versions overlap the versions the key holds. The
 /// restore is refused as a whole, and nothing of it is written.
 impl From<crate::engine::kv::KvHistoryOverlap> for Error {

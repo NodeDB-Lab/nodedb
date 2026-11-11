@@ -223,7 +223,11 @@ impl CoreLoop {
         ) {
             return self.response_error(task, error);
         }
-        let kv_images = self.kv_prior_images(database_id, tid, kv_ops(&redo.ops));
+        let kv_writes = kv_ops(&redo.ops);
+        if let Err(error) = super::validate::check_redo_kv_row_images(&kv_writes) {
+            return self.response_error(task, error);
+        }
+        let kv_images = self.kv_prior_images(database_id, tid, kv_writes);
         let labels = label_ops(&redo.ops);
 
         let record = match WalRecord::new(WalRecordArgs {

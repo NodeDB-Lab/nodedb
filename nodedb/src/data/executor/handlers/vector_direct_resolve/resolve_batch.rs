@@ -246,6 +246,17 @@ impl CoreLoop {
             .iter()
             .map(|key| encode_sidecar(&key.fields))
             .collect::<Result<_, _>>()?;
+        for (key, sidecar) in keys.iter().zip(&sidecars) {
+            crate::data::executor::row_image_native::check_vector_row(
+                collection,
+                || key.surrogate.as_u32().to_string(),
+                page.field,
+                key.vector.len(),
+                &key.fields,
+                sidecar.len(),
+            )
+            .map_err(ErrorCode::from)?;
+        }
         let response_payload =
             self.page_reply(database_id, tid, page, &keys, &sidecars, &written)?;
         let mutations = keys

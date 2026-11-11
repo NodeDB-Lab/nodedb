@@ -64,6 +64,10 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &stored_bytes)
+        {
+            return self.response_error(ctx.task, e);
+        }
         // `ttl_ms` applies unconditionally, on both the insert and the
         // update branch above -- mirrors `execute_kv_insert_on_conflict_update`,
         // which passes `ttl_ms` straight into `kv_engine.put(..)` regardless

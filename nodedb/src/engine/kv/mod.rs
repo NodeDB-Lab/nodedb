@@ -21,6 +21,7 @@ pub mod slab;
 pub mod sorted_index;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod write_refusal;
 
 pub use batch_put::KvBatchPutParams;
 pub use clock::current_ms;
@@ -38,3 +39,4 @@ pub use engine_sorted::SortedIndexRangeParams;
 pub use engine_stats::{ExpiredKey, KvStats};
 pub use engine_write::{KvPutParams, KvRewriteParams, UnboundKvWrite};
 pub use scan::KvScanParams;
+pub use write_refusal::{KvRowTooLarge, KvWriteRefusal};

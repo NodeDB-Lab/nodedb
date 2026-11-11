@@ -188,6 +188,14 @@ impl CoreLoop {
             }
         }
 
+        // Every row is held to the row image limit before the first stages.
+        for (_, _, row) in &resolved {
+            if let Err(e) = crate::data::executor::row_image_native::check_columnar_row(
+                collection, &schema, row,
+            ) {
+                return self.response_error(task, e);
+            }
+        }
         // The gate stays on every write path even though `DecidedEarlierInRequest`
         // makes this a no-op — mirrors `execute_columnar_resolved_update`.
         if let Err(response) = self.stage_admit_columnar_rows(

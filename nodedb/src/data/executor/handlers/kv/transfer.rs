@@ -155,10 +155,15 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        // Both rows are bound before either is written, so a transfer cannot
-        // half-apply.
-        for surrogate in [debit_surrogate, credit_surrogate] {
-            if let Err(e) = crate::engine::kv::UnboundKvWrite::check(collection, surrogate) {
+        // Both rows are bound and within the row limit before either is
+        // written, so a transfer cannot half-apply.
+        for (key, value, surrogate) in [
+            (source_key, new_source.as_slice(), debit_surrogate),
+            (dest_key, new_dest.as_slice(), credit_surrogate),
+        ] {
+            if let Err(e) =
+                crate::engine::kv::KvWriteRefusal::check(collection, key, value, surrogate)
+            {
                 return self.response_error(task, e);
             }
         }
@@ -298,9 +303,14 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        // The moved row is bound before the source row is deleted, so a move
-        // cannot delete and then fail to insert.
-        if let Err(e) = crate::engine::kv::UnboundKvWrite::check(dest_collection, surrogate) {
+        // The moved row is bound and within the row limit before the source
+        // row is deleted, so a move cannot delete and then fail to insert.
+        if let Err(e) = crate::engine::kv::KvWriteRefusal::check(
+            dest_collection,
+            dest_key,
+            dest_data,
+            surrogate,
+        ) {
             return self.response_error(task, e);
         }
 

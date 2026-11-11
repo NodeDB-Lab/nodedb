@@ -87,7 +87,7 @@ impl CoreLoop {
             now_ms,
             surrogate: nodedb_types::Surrogate::new(surrogate),
         }) {
-            self.replay_record_unapplied("kv", "field_set_identity", record_lsn, &e.to_string());
+            self.replay_kv_write_refused("field_set", record_lsn, e);
             return Some(0);
         }
         self.note_replay_write(

@@ -50,6 +50,15 @@
 //! rebuilt at a new dimension, and a resolved-row drift that replay has no
 //! caller to retry against. Online policy: the same failure is an error of
 //! this apply and fails its response.
+//!
+//! ## Rows over the row image limit
+//!
+//! A KV record whose row is over the row image limit is refused the same
+//! way on every replica: restart replay logs and skips it, and a
+//! committed-redo apply fails with SQLSTATE 54000. The live write refused
+//! the same row against the same pre-state, so the record never changed
+//! state anywhere. Such a record reaches the WAL only when the node crashed
+//! between the append and the Data Plane's refusal.
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -191,6 +200,37 @@ impl CoreLoop {
             }),
             None => self.halt_replay(engine, stage, record_lsn, detail),
         }
+    }
+
+    /// A KV record refused by the engine. A row over the row image limit is
+    /// rejected (`replay_record_rejected`). A row with no bound identity
+    /// cannot be applied (`replay_record_unapplied`).
+    pub(in crate::data::executor) fn replay_kv_write_refused(
+        &mut self,
+        stage: &str,
+        record_lsn: u64,
+        refusal: crate::engine::kv::KvWriteRefusal,
+    ) {
+        match refusal {
+            crate::engine::kv::KvWriteRefusal::Unbound(error) => {
+                self.replay_record_unapplied("kv", stage, record_lsn, &error.to_string());
+            }
+            crate::engine::kv::KvWriteRefusal::RowTooLarge(error) => {
+                self.replay_kv_row_too_large(stage, record_lsn, error);
+            }
+        }
+    }
+
+    /// A KV record whose row is over the row image limit. See the module
+    /// docs: every replica refuses it the same way.
+    pub(in crate::data::executor) fn replay_kv_row_too_large(
+        &mut self,
+        stage: &str,
+        record_lsn: u64,
+        error: crate::engine::kv::KvRowTooLarge,
+    ) {
+        let detail = format!("KV {stage} row over the row image limit: {error}");
+        self.replay_record_rejected("kv", record_lsn, Some(Box::new(error.into())), &detail);
     }
 
     /// A handler rejected a record. Restart replay logs it with its LSN and
