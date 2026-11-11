@@ -336,7 +336,7 @@ pub(super) fn convert_one(
         use crate::control::server::shared::returning::{
             attach_returning_spec, plan_returning_spec,
         };
-        attach_returning_spec(&mut tasks, &plan_returning_spec(returning))?;
+        attach_returning_spec(&mut tasks, &plan_returning_spec(returning));
     }
     Ok(tasks)
 }

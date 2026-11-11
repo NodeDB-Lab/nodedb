@@ -31,6 +31,8 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
     let PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
         target_collection,
         rls_write_check,
+        returning,
+        rls_filters,
         ..
     }) = &task.plan
     else {
@@ -41,6 +43,8 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
     };
     let target_collection = target_collection.clone();
     let rls_write_check = rls_write_check.clone();
+    let returning = returning.clone();
+    let rls_filters = rls_filters.clone();
 
     let resolved = resolve_update_rows(state, identity, tenant_id, task).await?;
 
@@ -94,9 +98,10 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
                 value: body,
                 surrogate,
                 pk_bytes,
-                // The op owns the statement's projection; expanded puts answer no client.
-                returning: None,
-                rls_filters: Vec::new(),
+                // Each updated row answers the statement's `RETURNING` from
+                // the row it stages, under the target's read policy.
+                returning: returning.clone(),
+                rls_filters: rls_filters.clone(),
                 rls_write_check: rls_write_check.clone(),
                 // Filled by the caller's sum and period-lock pass. It reads
                 // the stored row, so a join-column rewrite debits the target

@@ -20,7 +20,8 @@
 //!    through the Calvin sequencer, on one vShard or several and in every
 //!    cross-shard mode. Its participant evaluates the list before it votes,
 //!    so an error in the list stores nothing. A list that cannot fail keeps
-//!    the direct path.
+//!    the direct path. An `INSERT ... SELECT`, `UPDATE ... FROM` or `MERGE`
+//!    whose list can fail takes route 1 instead: Calvin keys none of them.
 //! 5. A write that spans vShards commits through the Calvin sequencer, so a
 //!    derived task (a cross-shard balance move, an implicit edge) commits
 //!    with the user's write. A predicate write among them takes the
@@ -141,7 +142,6 @@ async fn route_atomic(
                 plan_lease_scope: Arc::new(lease_scope),
                 sum_target_reads,
             },
-            session,
         )
         .await?;
         return Ok(AtomicRoute::Implicit(answer));

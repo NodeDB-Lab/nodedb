@@ -45,6 +45,31 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// A server with no `RETURNING` response limit: every limit is the
+    /// largest value a config file holds.
+    pub async fn start_with_unlimited_returning() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::unlimited_returning(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// A server whose `[tuning.query] max_txn_overlay_bytes` is `bytes`.
+    pub async fn start_with_max_txn_overlay_bytes(bytes: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_txn_overlay_bytes(bytes),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
     /// test whose collections must land on different cores.
     #[cfg(feature = "failpoints")]

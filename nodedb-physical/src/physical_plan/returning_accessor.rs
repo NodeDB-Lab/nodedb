@@ -40,6 +40,11 @@ macro_rules! match_returning_slot {
                     target_collection: $c,
                     $r,
                     ..
+                }
+                | DocumentOp::InsertSelect {
+                    target_collection: $c,
+                    $r,
+                    ..
                 },
             )
             | PhysicalPlan::Kv(
@@ -79,7 +84,6 @@ macro_rules! match_returning_slot {
                 | DocumentOp::BackfillIndex { .. }
                 | DocumentOp::Truncate { .. }
                 | DocumentOp::EstimateCount { .. }
-                | DocumentOp::InsertSelect { .. }
                 | DocumentOp::MaterializeScan { .. }
                 | DocumentOp::ApplyBalanceDelta { .. }
                 | DocumentOp::ResolveWrite(_)

@@ -66,7 +66,7 @@ impl TxnOverlay {
 
     /// Sum of staged `Put` body byte lengths across all collections. The
     /// staging handlers cap it at
-    /// [`MAX_TXN_OVERLAY_BYTES`](super::staged::MAX_TXN_OVERLAY_BYTES).
+    /// `[tuning.query] max_txn_overlay_bytes`.
     pub fn memory_size_estimate(&self) -> usize {
         self.collections
             .values()

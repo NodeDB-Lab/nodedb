@@ -63,6 +63,13 @@ pub(super) struct TuningOverrides {
     /// Overrides `[tuning.network] max_returning_rows` so a test can exceed
     /// the `RETURNING` row limit with a single row.
     pub(super) max_returning_rows: Option<u64>,
+    /// Sets every `[tuning.network]` `RETURNING` limit and
+    /// `max_query_result_bytes` to the largest value a config file holds,
+    /// which reads as no limit.
+    pub(super) unlimited_returning: bool,
+    /// Overrides `[tuning.query] max_txn_overlay_bytes` so a test can pass
+    /// the transaction staging budget with a few small rows.
+    pub(super) max_txn_overlay_bytes: Option<usize>,
     /// Runs the version cleanup pass every 200 ms with a short history
     /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
     /// so a superseded version leaves about 12 s after its successor.
@@ -147,6 +154,22 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with no `RETURNING` response limit.
+    pub(super) fn unlimited_returning() -> Self {
+        Self {
+            unlimited_returning: true,
+            ..Self::default()
+        }
+    }
+
+    /// Boot with a lowered transaction staging budget.
+    pub(super) fn max_txn_overlay_bytes(bytes: usize) -> Self {
+        Self {
+            max_txn_overlay_bytes: Some(bytes),
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -181,6 +204,13 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     if let Some(rows) = tuning.max_returning_rows {
         toml.push_str(&format!("max_returning_rows = {rows}\n"));
     }
+    if tuning.unlimited_returning {
+        let most = i64::MAX;
+        toml.push_str(&format!(
+            "max_returning_rows = {most}\nmax_returning_columns = {most}\n\
+             max_returning_cells = {most}\nmax_query_result_bytes = {most}\n"
+        ));
+    }
     if tuning.fast_version_cleanup {
         toml.push_str(
             "txn_snapshot_max_age_secs = 5\ndefault_deadline_secs = 5\ncopy_deadline_secs = 5\n\
@@ -195,6 +225,11 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     if let Some(min_mutations) = tuning.auto_analyze_min_mutations {
         toml.push_str(&format!(
             "\n[tuning.maintenance]\nauto_analyze_min_mutations = {min_mutations}\n"
+        ));
+    }
+    if let Some(bytes) = tuning.max_txn_overlay_bytes {
+        toml.push_str(&format!(
+            "\n[tuning.query]\nmax_txn_overlay_bytes = {bytes}\n"
         ));
     }
     if let Some(rows) = tuning.stream_chunk_size {

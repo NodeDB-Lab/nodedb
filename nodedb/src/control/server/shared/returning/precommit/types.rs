@@ -59,6 +59,14 @@ impl ReturningLimits {
         }
     }
 
+    /// Whether no limit applies: every limit is `usize::MAX`.
+    pub(crate) fn unlimited(&self) -> bool {
+        self.rows == usize::MAX
+            && self.columns == usize::MAX
+            && self.cells == usize::MAX
+            && self.payload_bytes == usize::MAX
+    }
+
     /// The contract form of these limits.
     pub(crate) fn to_contract(self) -> ReturningContractLimits {
         ReturningContractLimits {
@@ -70,7 +78,12 @@ impl ReturningLimits {
     }
 }
 
+/// A limit as a `usize`. A config file holds integers up to `i64::MAX`, so
+/// a limit at or past it reads as no limit, `usize::MAX`.
 fn to_usize(value: u64) -> usize {
+    if value >= i64::MAX.unsigned_abs() {
+        return usize::MAX;
+    }
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 

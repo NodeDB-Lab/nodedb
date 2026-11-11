@@ -12,7 +12,7 @@ use super::stage_returning::{StageReturning, StagedImage};
 use super::{StageBalanceDeltaParams, StageSpatialInsertParams};
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{MAX_TXN_OVERLAY_BYTES, Staged};
+use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
@@ -422,9 +422,9 @@ impl CoreLoop {
             .get(&ctx.txn_id)
             .map(|o| o.memory_size_estimate())
             .unwrap_or(0);
-        if current.saturating_add(body.len()) > MAX_TXN_OVERLAY_BYTES {
+        if current.saturating_add(body.len()) > self.query_tuning.max_txn_overlay_bytes {
             return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
+                limit: self.query_tuning.max_txn_overlay_bytes,
             });
         }
         self.txn_overlay_mut(ctx.txn_id).insert_put(

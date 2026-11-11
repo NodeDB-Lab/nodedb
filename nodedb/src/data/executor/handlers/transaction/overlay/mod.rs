@@ -33,7 +33,7 @@ pub(in crate::data::executor) use multi_vector_merge::MultiVectorHides;
 pub use row_tags::BodyWrites;
 pub(in crate::data::executor) use sparse_merge::SparseMergeParams;
 pub(in crate::data::executor) use spatial_merge::SpatialOverlayMergeParams;
-pub use staged::{CollectionOverlay, MAX_TXN_OVERLAY_BYTES, Staged, TouchedSlot, TxnOverlay};
+pub use staged::{CollectionOverlay, Staged, TouchedSlot, TxnOverlay};
 pub use staged_sidecar::{BitemporalStamp, StagedTtl};
 pub use staged_vector::StagedVectorRow;
 pub(in crate::data::executor) use timeseries_merge::{StagedTsRows, TimeseriesOverlayMergeParams};

@@ -23,7 +23,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::bulk_dml::{TxnPrediction, decode_bulk_filters};
 use crate::data::executor::handlers::generated;
-use crate::data::executor::handlers::transaction::overlay::MAX_TXN_OVERLAY_BYTES;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TxnId};
@@ -214,7 +213,7 @@ impl CoreLoop {
     /// per-transaction overlay memory cap point writes enforce
     /// (`stage_put_capped` in `dispatch.rs`): reject with the identical
     /// [`crate::Error::TxnOverlayMemoryExceeded`] once the cumulative staged
-    /// byte total would exceed [`MAX_TXN_OVERLAY_BYTES`]. Rows staged before
+    /// byte total would exceed `[tuning.query] max_txn_overlay_bytes`. Rows staged before
     /// the row that trips the cap remain staged — the same
     /// stage-then-fail-on-overflow behavior `stage_put_capped` exhibits for a
     /// single point write, applied per matched row here.
@@ -231,9 +230,9 @@ impl CoreLoop {
             .get(&txn_id)
             .map(|o| o.memory_size_estimate())
             .unwrap_or(0);
-        if current.saturating_add(body.len()) > MAX_TXN_OVERLAY_BYTES {
+        if current.saturating_add(body.len()) > self.query_tuning.max_txn_overlay_bytes {
             return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
+                limit: self.query_tuning.max_txn_overlay_bytes,
             });
         }
         self.txn_overlay_mut(txn_id)

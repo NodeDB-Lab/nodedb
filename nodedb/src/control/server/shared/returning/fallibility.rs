@@ -11,7 +11,9 @@
 //! - Every item is a column, `*`, or a literal. A function call, operator,
 //!   cast or sequence accessor can raise an error.
 //! - The write changes at most one row by construction: a point insert,
-//!   put, upsert, update or delete by primary key.
+//!   put, upsert, update or delete by primary key. An `INSERT ... SELECT`
+//!   copies an unbounded row count, so it counts only when no response
+//!   limit applies: no row, column, cell or byte limit.
 //! - One row of the list fits the configured row, column and cell limits,
 //!   and its payload bound fits `network.max_query_result_bytes`.
 //!
@@ -45,13 +47,12 @@ pub fn returning_can_fail(
     else {
         return false;
     };
-    if !writes_at_most_one_row(plan) {
+    let limits = ReturningLimits::from_tuning(network);
+    if !writes_at_most_one_row(plan) && !(copies_rows(plan) && limits.unlimited()) {
         return true;
     }
     match ListShape::of(list) {
-        Some(shape) => {
-            !shape.fits_one_row(&ReturningLimits::from_tuning(network), fields, announced)
-        }
+        Some(shape) => !shape.fits_one_row(&limits, fields, announced),
         None => true,
     }
 }
@@ -68,6 +69,15 @@ pub fn tasks_returning_can_fail(
     tasks
         .iter()
         .any(|task| returning_can_fail(&task.plan, network, fields_of(&task.plan), announced))
+}
+
+/// Whether `plan` is an `INSERT ... SELECT`, which copies an unbounded
+/// row count page by page.
+fn copies_rows(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Document(DocumentOp::InsertSelect { .. })
+    )
 }
 
 /// Whether `plan` changes at most one row by construction. A variant not
@@ -462,6 +472,39 @@ mod tests {
     fn a_multi_row_insert_can_fail() {
         let plan = batch_insert(spec(vec![column("id")]));
         assert!(can_fail(&plan, &unbounded()));
+    }
+
+    fn insert_select(returning: Option<ReturningSpec>) -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::InsertSelect {
+            target_collection: collection(),
+            source: nodedb_physical::physical_plan::RowSource::whole_collection(
+                QualifiedCollection::new(DatabaseId::DEFAULT, "src"),
+            ),
+            returning,
+            rls_filters: Vec::new(),
+        })
+    }
+
+    /// A copy's row count has no bound, so any response limit can fail it.
+    /// With no limit at all, only an item that can fail does.
+    #[test]
+    fn a_copy_cannot_fail_only_with_no_limit() {
+        let columns = insert_select(spec(vec![column("id")]));
+        assert!(can_fail(&columns, &NetworkTuning::default()));
+        let no_limit = NetworkTuning {
+            max_returning_rows: u64::MAX,
+            ..unbounded()
+        };
+        assert!(!can_fail(&columns, &no_limit));
+        let divide = SqlExpr::BinaryOp {
+            left: Box::new(SqlExpr::Literal(Value::Integer(1))),
+            op: BinaryOp::Div,
+            right: Box::new(SqlExpr::Column("n".into())),
+        };
+        assert!(can_fail(
+            &insert_select(spec(vec![computed("q", divide)])),
+            &no_limit
+        ));
     }
 
     #[test]

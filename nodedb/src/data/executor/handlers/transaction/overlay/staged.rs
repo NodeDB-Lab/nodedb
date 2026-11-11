@@ -23,12 +23,6 @@ use super::staged_sidecar::{BitemporalStamp, StagedTtl};
 use crate::engine::timeseries::columnar_memtable::ColumnarSchema;
 use crate::types::{DatabaseId, TenantId};
 
-/// Per-core upper bound on the total staged-body bytes a single transaction's
-/// overlay may hold. Staging a point write that would push the overlay past
-/// this budget is rejected with `program_limit_exceeded` (SQLSTATE 54000)
-/// rather than growing a core's resident memory without bound.
-pub const MAX_TXN_OVERLAY_BYTES: usize = 256 * 1024 * 1024;
-
 /// A single staged mutation for one surrogate row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Staged {

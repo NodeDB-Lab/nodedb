@@ -8,6 +8,12 @@
 //! participant evaluates the list before it votes, so an error refuses the
 //! write. A statement whose list can fail commits as one Calvin transaction.
 //! A list that cannot fail keeps the direct path.
+//!
+//! Calvin takes no write key for a write the direct path orchestrates on the
+//! Control Plane. Such a write whose list can fail runs in an implicit
+//! transaction instead ([`orchestrated_returning_can_fail`]): each row it
+//! writes stages and answers from its staged image, and an error in the list
+//! rolls the whole statement back.
 
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -18,7 +24,7 @@ use nodedb_types::{
 use crate::control::planner::calvin::is_write_plan;
 use crate::control::planner::calvin::tx_class::write_keys::task_write_keys;
 use crate::control::server::shared::returning::{
-    RowFields, plan_carries_returning_contract, tasks_carry_returning_contract,
+    RowFields, plan_carries_returning_contract, returning_can_fail, tasks_carry_returning_contract,
     tasks_returning_can_fail,
 };
 use crate::control::server::shared::session::announced_returning::announced_returning;
@@ -44,6 +50,42 @@ pub(crate) fn returning_commits_through_calvin(
             star_fields(state, tenant_id, plan)
         });
     can_fail && calvin_sequences(tasks)
+}
+
+/// Whether a task of `tasks` is an unexpanded `INSERT ... SELECT`,
+/// `UPDATE ... FROM` or `MERGE` whose `RETURNING` list can fail. The
+/// statement then runs in an implicit transaction. A list that cannot fail
+/// keeps the direct or paged path.
+pub(crate) fn orchestrated_returning_can_fail(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
+    let announced = announced_returning();
+    tasks.iter().any(|task| {
+        expands_in_a_transaction(&task.plan)
+            && returning_can_fail(
+                &task.plan,
+                &state.tuning.network,
+                star_fields(state, task.tenant_id, &task.plan),
+                announced.as_deref(),
+            )
+    })
+}
+
+/// Whether `plan` is a write the direct path orchestrates and a transaction
+/// expands into the point writes it stages.
+fn expands_in_a_transaction(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Document(
+            DocumentOp::InsertSelect { .. }
+                | DocumentOp::UpdateFromJoin {
+                    source_rows: None,
+                    ..
+                }
+                | DocumentOp::Merge {
+                    resolved_inserts: None,
+                    ..
+                }
+        )
+    )
 }
 
 /// What a `*` in `plan`'s list expands to. A list with no `*` never reads
@@ -200,5 +242,31 @@ mod tests {
             !calvin_sequences(&[task(resolving)]),
             "a write the direct path resolves stays there"
         );
+    }
+
+    #[test]
+    fn only_an_unexpanded_orchestrated_write_expands_in_a_transaction() {
+        let copy = PhysicalPlan::Document(DocumentOp::InsertSelect {
+            target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "dst"),
+            source: nodedb_physical::physical_plan::RowSource::whole_collection(
+                QualifiedCollection::new(DatabaseId::DEFAULT, "src"),
+            ),
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        assert!(expands_in_a_transaction(&copy));
+        let insert = PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "items"),
+            document_id: "a".into(),
+            value: Vec::new(),
+            if_absent: false,
+            surrogate: Surrogate::new(1),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: Vec::new(),
+            rls_write_check: RlsWriteCheck::NoPolicyApplies,
+        });
+        assert!(!expands_in_a_transaction(&insert));
     }
 }

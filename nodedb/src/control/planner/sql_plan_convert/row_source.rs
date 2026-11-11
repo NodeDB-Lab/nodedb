@@ -169,6 +169,10 @@ pub(super) fn convert_insert_select(
         plan: PhysicalPlan::Document(DocumentOp::InsertSelect {
             target_collection: qualified_target,
             source: lower_row_source(source, maps, Some(bare_target), tenant_id, ctx)?,
+            // Filled by the statement's `RETURNING` attach step.
+            returning: None,
+            // Filled by RLS injection.
+            rls_filters: Vec::new(),
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

@@ -15,9 +15,7 @@ use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{
-    GraphCollKey, GraphTxnOverlay, MAX_TXN_OVERLAY_BYTES,
-};
+use crate::data::executor::handlers::transaction::overlay::{GraphCollKey, GraphTxnOverlay};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 use nodedb_types::RowIdentity;
@@ -409,9 +407,9 @@ impl CoreLoop {
             .values()
             .map(GraphTxnOverlay::memory_size_estimate)
             .sum();
-        if current.saturating_add(incoming_bytes) > MAX_TXN_OVERLAY_BYTES {
+        if current.saturating_add(incoming_bytes) > self.query_tuning.max_txn_overlay_bytes {
             return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
+                limit: self.query_tuning.max_txn_overlay_bytes,
             });
         }
         Ok(())

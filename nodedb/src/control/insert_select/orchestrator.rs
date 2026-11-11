@@ -14,6 +14,11 @@
 //! document scan is read page by page with no row bound. Any other source is
 //! read once, bounded by the scan byte budget, which fails loudly.
 //!
+//! With a `RETURNING` list that cannot fail, on a node with no response
+//! limit, the copy answers one result set of every copied row in copy
+//! order, as PostgreSQL does (`copy_returning`). Every other copy with
+//! `RETURNING` runs in an implicit transaction instead.
+//!
 //! Each batch is atomic (a violation aborts only that batch); across batches
 //! writes are separate transactions with `BatchInsert`'s usual partial
 //! visibility. Source read and target write are separated by the
@@ -25,6 +30,7 @@
 use nodedb_types::{DatabaseId, Lsn, Surrogate, TenantId};
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
+use crate::control::insert_select::copy_returning::CopyReturning;
 use crate::control::insert_select::copy_rows::{assign_page_rows, resolve_copy_spec};
 use crate::control::orchestrated_write::apply_orchestrated_write;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -42,36 +48,52 @@ pub async fn run_authorized_insert_select(
     let PhysicalPlan::Document(DocumentOp::InsertSelect {
         target_collection,
         source,
+        returning,
+        rls_filters,
     }) = task.plan
     else {
         return Err(crate::Error::BadRequest {
             detail: "authorized task is not INSERT ... SELECT".into(),
         });
     };
-    run_insert_select(
-        state,
-        &identity,
-        task.tenant_id,
-        task.database_id,
-        target_collection.as_str(),
-        &source,
-    )
-    .await
+    let target = CopyTarget {
+        tenant_id: task.tenant_id,
+        database_id: task.database_id,
+        collection: target_collection.as_str(),
+    };
+    let answer = returning
+        .map(|spec| CopyReturning::new(state, spec, rls_filters))
+        .transpose()?;
+    run_insert_select(state, &identity, target, &source, answer).await
 }
 
-/// Drive an `INSERT ... SELECT` from `source` into `target_collection`, the
-/// db-qualified name as it appears in the `DocumentOp::InsertSelect` plan.
+/// The collection a copy writes, the db-qualified name as it appears in the
+/// `DocumentOp::InsertSelect` plan.
+#[derive(Clone, Copy)]
+struct CopyTarget<'a> {
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    collection: &'a str,
+}
+
+/// Drive an `INSERT ... SELECT` from `source` into `target`.
 ///
 /// Returns a `{"inserted": N}` response mirroring the shape the autocommit
-/// dispatch loops shape as an `INSERT` command tag.
+/// dispatch loops shape as an `INSERT` command tag. With `answer`, each page
+/// answers its stored rows, and the response holds every copied row in copy
+/// order.
 async fn run_insert_select(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    target_collection: &str,
+    target: CopyTarget<'_>,
     source: &RowSource,
+    mut answer: Option<CopyReturning>,
 ) -> crate::Result<Response> {
+    let CopyTarget {
+        tenant_id,
+        database_id,
+        collection: target_collection,
+    } = target;
     let spec = resolve_copy_spec(state, tenant_id, database_id, target_collection)?;
     let ctx = SourceReadContext {
         state,
@@ -98,6 +120,9 @@ async fn run_insert_select(
             batch,
         )
         .await?;
+        let (returning, rls_filters) = answer
+            .as_ref()
+            .map_or((None, Vec::new()), CopyReturning::page_returning);
 
         // One atomic batch write per source batch.
         let mut documents: Vec<(String, Vec<u8>)> = Vec::with_capacity(rows.len());
@@ -146,11 +171,10 @@ async fn run_insert_select(
             // as a VALUES row is.
             if_absent: false,
             surrogates,
-            // `INSERT ... SELECT` is batched across many of these writes, so
-            // no single batch owns the statement's answer; the clause is
-            // refused at planning rather than half-answered here.
-            returning: None,
-            rls_filters: Vec::new(),
+            // Each page answers the rows it stores. The pages' rows join
+            // the statement's one result set.
+            returning,
+            rls_filters,
             resolved_sum_targets,
             // Every batch applies on the target's own vShard, so a binding
             // whose target is co-resident folds here; nothing is deferred to
@@ -173,17 +197,23 @@ async fn run_insert_select(
             // rows did not land. Surface the DP error verbatim.
             return Ok(resp);
         }
-        total_inserted += decode_inserted(&resp.payload)?;
+        total_inserted += match answer.as_mut() {
+            Some(answer) => answer.absorb(&resp.payload)?,
+            None => decode_inserted(&resp.payload)?,
+        };
         if resp.watermark_lsn > max_lsn {
             max_lsn = resp.watermark_lsn;
         }
     }
 
-    let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "inserted": total_inserted }))
-        .map_err(|e| crate::Error::Serialization {
+    let payload = match answer {
+        Some(answer) => answer.finish()?,
+        None => nodedb_types::json_to_msgpack(&serde_json::json!({ "inserted": total_inserted }))
+            .map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
             detail: format!("insert-select response: {e}"),
-        })?;
+        })?,
+    };
 
     Ok(Response {
         request_id: crate::types::RequestId::new(0),

@@ -21,6 +21,7 @@ use crate::control::server::response_shape::types::{ShapedRows, StatementTag, Ta
 use crate::control::server::shared::ddl::neutral::maintenance::auto_analyze;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::returning::StagedReturningBudget;
 use crate::control::server::shared::session::{DmlTxnCtx, SessionId};
 use crate::control::server::shared::write_admission::plan_is_write;
 use crate::types::TenantId;
@@ -122,6 +123,9 @@ impl NodeDbPgHandler {
             fire_triggers: true,
         });
         let mut statement_events = StatementEvents::default();
+        // The statement's staged `RETURNING` replies are held to the
+        // response limits. Past one, it fails and its transaction rolls back.
+        let mut staged_budget = StagedReturningBudget::new(&self.state.tuning.network);
 
         for mut task in tasks {
             if task.tenant_id != tenant_id {
@@ -165,6 +169,9 @@ impl NodeDbPgHandler {
                         continue;
                     }
                     StatementTxnOutcome::Returning(returning) => {
+                        for rows in &returning {
+                            staged_budget.admit(rows).map_err(|e| error_to_pg(&e))?;
+                        }
                         for rows in returning {
                             self.shape_task_response(
                                 ShapeTaskParams {

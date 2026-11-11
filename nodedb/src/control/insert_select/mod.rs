@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod copy_returning;
 pub(crate) mod copy_rows;
 pub(crate) mod expand_staged;
 pub mod orchestrator;

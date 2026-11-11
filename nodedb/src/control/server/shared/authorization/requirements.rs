@@ -67,6 +67,8 @@ mod tests {
                     column_map: Vec::new(),
                 },
             ),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         assert_eq!(
@@ -96,6 +98,8 @@ mod tests {
                     column_map: Vec::new(),
                 },
             ),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         assert_eq!(

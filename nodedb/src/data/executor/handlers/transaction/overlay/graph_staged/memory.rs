@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Per-transaction GRAPH overlay memory-footprint accounting, reused by the
-//! staging handlers to enforce `MAX_TXN_OVERLAY_BYTES`.
+//! staging handlers to enforce `[tuning.query] max_txn_overlay_bytes`.
 
 use super::txn_overlay::GraphTxnOverlay;
 use super::types::GraphCollectionOverlay;

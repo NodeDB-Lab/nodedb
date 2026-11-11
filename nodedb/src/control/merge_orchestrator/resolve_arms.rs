@@ -22,15 +22,30 @@
 /// and a join-key rewrite moves value between TWO targets, so the pre-image
 /// join key has to be resolvable on the Control Plane; the post-image alone
 /// cannot express either.
+///
+/// `ordinals` holds each arm row's place in the join's output order, the
+/// order PostgreSQL answers `RETURNING` rows in, one per row of its arm.
 #[derive(Default)]
 pub(crate) struct ResolvedMergeArms {
     pub(crate) updates: Vec<crate::query::ResolvedUpdateRowWire>,
     pub(crate) deletes: Vec<(String, Option<u32>, Vec<u8>)>,
     pub(crate) inserts: Vec<(String, Vec<u8>)>,
+    pub(crate) ordinals: MergeArmOrdinals,
 }
 
-/// Decode the RESOLVE pass payload (a msgpack 3-tuple `(updates, deletes,
-/// inserts)`; see `execute_merge_resolve`) into [`ResolvedMergeArms`].
+/// Each arm row's place in a MERGE join's output order, one per row of the
+/// arm, in the arm's order.
+#[derive(Default)]
+pub(crate) struct MergeArmOrdinals {
+    pub(crate) updates: Vec<u64>,
+    pub(crate) deletes: Vec<u64>,
+    pub(crate) inserts: Vec<u64>,
+}
+
+/// Decode the RESOLVE pass payload (a msgpack 4-tuple `(updates, deletes,
+/// inserts, ordinals)`; see `execute_merge_resolve`) into
+/// [`ResolvedMergeArms`]. An arm whose ordinals do not match its rows in
+/// count is an error.
 pub(crate) fn decode_resolve(payload: &[u8]) -> crate::Result<ResolvedMergeArms> {
     if payload.is_empty() {
         return Ok(ResolvedMergeArms::default());
@@ -39,15 +54,30 @@ pub(crate) fn decode_resolve(payload: &[u8]) -> crate::Result<ResolvedMergeArms>
         Vec<crate::query::ResolvedUpdateRowWire>,
         Vec<(String, Option<u32>, Vec<u8>)>,
         Vec<(String, Vec<u8>)>,
+        (Vec<u64>, Vec<u64>, Vec<u64>),
     );
-    let (updates, deletes, inserts): Wire =
+    let (updates, deletes, inserts, (update_ordinals, delete_ordinals, insert_ordinals)): Wire =
         zerompk::from_msgpack(payload).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
             detail: format!("merge resolve rows: {e}"),
         })?;
+    if update_ordinals.len() != updates.len()
+        || delete_ordinals.len() != deletes.len()
+        || insert_ordinals.len() != inserts.len()
+    {
+        return Err(crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: "merge resolve rows: an arm's ordinals do not match its rows".into(),
+        });
+    }
     Ok(ResolvedMergeArms {
         updates,
         deletes,
         inserts,
+        ordinals: MergeArmOrdinals {
+            updates: update_ordinals,
+            deletes: delete_ordinals,
+            inserts: insert_ordinals,
+        },
     })
 }

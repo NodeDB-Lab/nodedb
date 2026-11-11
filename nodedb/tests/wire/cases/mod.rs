@@ -208,6 +208,8 @@ mod object_literal_array_insert;
 mod object_literal_dml_row_level_security;
 mod object_literal_trailing_clause;
 mod oidc_catalog_provider_boot;
+mod orchestrated_returning_atomic;
+mod orchestrated_returning_paged;
 mod otlp_metrics_export;
 mod permission_tree_database_scope;
 mod permission_tree_fence;

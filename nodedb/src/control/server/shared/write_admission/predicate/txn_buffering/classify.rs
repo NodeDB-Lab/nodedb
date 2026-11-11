@@ -2294,6 +2294,8 @@ mod tests {
                 source: nodedb_physical::physical_plan::RowSource::whole_collection(
                     QualifiedCollection::new(DatabaseId::DEFAULT, "s"),
                 ),
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Document(DocumentOp::Merge {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),

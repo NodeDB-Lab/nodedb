@@ -38,6 +38,10 @@ pub(super) struct ListShape {
     /// Each column or literal item: its output name's bytes and the most
     /// bytes its cell renders to.
     fixed: Vec<(usize, usize)>,
+    /// How many of `fixed` are columns.
+    column_items: usize,
+    /// The summed exact cell bytes of the literals in `fixed`.
+    literal_bytes: usize,
     /// How many `*` items the list holds.
     stars: usize,
 }
@@ -49,6 +53,8 @@ impl ListShape {
             ReturningColumns::Star => {
                 return Some(Self {
                     fixed: Vec::new(),
+                    column_items: 0,
+                    literal_bytes: 0,
                     stars: 1,
                 });
             }
@@ -56,27 +62,92 @@ impl ListShape {
         };
         let mut shape = Self {
             fixed: Vec::with_capacity(items.len()),
+            column_items: 0,
+            literal_bytes: 0,
             stars: 0,
         };
         for item in items {
             match item {
                 ReturningItem::Star => shape.stars += 1,
-                ReturningItem::Column { name, alias } => shape
-                    .fixed
-                    .push((alias.as_ref().unwrap_or(name).len(), column_cell_bytes())),
+                ReturningItem::Column { name, alias } => {
+                    shape.column_items += 1;
+                    shape
+                        .fixed
+                        .push((alias.as_ref().unwrap_or(name).len(), column_cell_bytes()));
+                }
                 // Any other expression can raise an error. An item that does
                 // not decode fails its evaluation.
                 ReturningItem::Computed { expression, name } => {
                     match zerompk::from_msgpack::<SqlExpr>(expression) {
-                        Ok(SqlExpr::Literal(literal)) => shape
-                            .fixed
-                            .push((name.len(), literal_cell_bytes(&literal)?)),
+                        Ok(SqlExpr::Literal(literal)) => {
+                            let cell = literal_cell_bytes(&literal)?;
+                            shape.literal_bytes = shape.literal_bytes.saturating_add(cell);
+                            shape.fixed.push((name.len(), cell));
+                        }
                         Ok(_) | Err(_) => return None,
                     }
                 }
             }
         }
         Some(shape)
+    }
+
+    /// The fields each `*` expands to, with their names' bytes. `None` for a
+    /// `*` over unbounded fields.
+    fn star_expansion(&self, fields: RowFields) -> Option<(usize, usize)> {
+        match (self.stars, fields) {
+            (0, _) => Some((0, 0)),
+            (_, RowFields::Declared { count, name_bytes }) => Some((count, name_bytes)),
+            (_, RowFields::Unbounded) => None,
+        }
+    }
+
+    /// The cells one row renders, where a `*` expands to `fields`. `None`
+    /// for a `*` over unbounded fields, or a count past `usize`.
+    fn width(&self, fields: RowFields) -> Option<usize> {
+        let (star_fields, _) = self.star_expansion(fields)?;
+        self.stars
+            .checked_mul(star_fields)
+            .and_then(|expanded| expanded.checked_add(self.fixed.len()))
+    }
+
+    /// The column cells one row renders: every cell but a literal's. `None`
+    /// as for [`Self::width`].
+    fn column_cells(&self, fields: RowFields) -> Option<usize> {
+        let (star_fields, _) = self.star_expansion(fields)?;
+        self.stars
+            .checked_mul(star_fields)
+            .and_then(|expanded| expanded.checked_add(self.column_items))
+    }
+
+    /// The bytes of the column names a payload of `width` cells carries:
+    /// the `announced` names when given, else the list's own. `None` for a
+    /// `*` over unbounded fields, or announced names of another count.
+    fn name_bytes(
+        &self,
+        fields: RowFields,
+        width: usize,
+        announced: Option<&[AnnouncedColumn]>,
+    ) -> Option<usize> {
+        let (star_fields, star_name_bytes) = self.star_expansion(fields)?;
+        match announced {
+            Some(announced) if announced.len() != width => None,
+            Some(announced) => Some(
+                announced
+                    .iter()
+                    .map(|column| string_bytes(column.name.len()))
+                    .fold(0usize, usize::saturating_add),
+            ),
+            None => Some(
+                self.fixed
+                    .iter()
+                    .map(|(name, _)| string_bytes(*name))
+                    .fold(0usize, usize::saturating_add)
+                    .saturating_add(self.stars.saturating_mul(
+                        star_name_bytes.saturating_add(star_fields.saturating_mul(5)),
+                    )),
+            ),
+        }
     }
 
     /// Whether one row of this shape fits `limits`, where a `*` expands to
@@ -93,51 +164,24 @@ impl ListShape {
         if limits.rows < 1 {
             return false;
         }
-        let (star_fields, star_name_bytes) = match (self.stars, fields) {
-            (0, _) => (0, 0),
-            (_, RowFields::Declared { count, name_bytes }) => (count, name_bytes),
-            (_, RowFields::Unbounded) => {
-                return limits.columns == usize::MAX
-                    && limits.cells == usize::MAX
-                    && limits.payload_bytes == usize::MAX;
-            }
-        };
-        let Some(columns) = self
-            .stars
-            .checked_mul(star_fields)
-            .and_then(|expanded| expanded.checked_add(self.fixed.len()))
+        if self.star_expansion(fields).is_none() {
+            return limits.columns == usize::MAX
+                && limits.cells == usize::MAX
+                && limits.payload_bytes == usize::MAX;
+        }
+        let (Some(columns), Some(column_cells)) = (self.width(fields), self.column_cells(fields))
         else {
             return false;
         };
         if columns > limits.columns || columns > limits.cells {
             return false;
         }
-        let names = match announced {
-            Some(announced) if announced.len() != columns => return false,
-            Some(announced) => announced
-                .iter()
-                .map(|column| string_bytes(column.name.len()))
-                .fold(0usize, usize::saturating_add),
-            None => {
-                self.fixed
-                    .iter()
-                    .map(|(name, _)| string_bytes(*name))
-                    .fold(0usize, usize::saturating_add)
-                    .saturating_add(self.stars.saturating_mul(
-                        star_name_bytes.saturating_add(star_fields.saturating_mul(5)),
-                    ))
-            }
+        let Some(names) = self.name_bytes(fields, columns, announced) else {
+            return false;
         };
         let cells = self
-            .fixed
-            .iter()
-            .map(|(_, cell)| *cell)
-            .fold(0usize, usize::saturating_add)
-            .saturating_add(
-                self.stars
-                    .saturating_mul(star_fields)
-                    .saturating_mul(column_cell_bytes()),
-            );
+            .literal_bytes
+            .saturating_add(column_cells.saturating_mul(column_cell_bytes()));
         envelope_bytes(columns)
             .saturating_add(names)
             .saturating_add(cells)

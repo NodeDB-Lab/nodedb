@@ -131,6 +131,8 @@ mod tests {
         DocumentOp::InsertSelect {
             target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "copy"),
             source,
+            returning: None,
+            rls_filters: Vec::new(),
         }
     }
 

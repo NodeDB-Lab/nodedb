@@ -410,6 +410,12 @@ pub enum DocumentOp {
     InsertSelect {
         target_collection: QualifiedCollection,
         source: RowSource,
+        /// When `Some`, answer the STORED image of every copied row, in copy
+        /// order.
+        returning: Option<ReturningSpec>,
+        /// The target's read policy, which gates the rows `returning`
+        /// answers. See `PointDelete::rls_filters`.
+        rls_filters: Vec<u8>,
     },
 
     /// Upsert: insert or merge. When `on_conflict_updates` is non-empty,

@@ -9,6 +9,7 @@ mod inject;
 mod list_shape;
 mod payload_bound;
 pub(crate) mod precommit;
+mod staged_limits;
 pub(crate) mod transcript;
 
 // Re-export bridge types so callers only import from this module.
@@ -21,6 +22,6 @@ pub use contract::{plan_carries_returning_contract, tasks_carry_returning_contra
 pub use fallibility::{returning_can_fail, tasks_returning_can_fail};
 pub use inject::{
     attach_returning_spec, in_transaction_returning_unsupported, inject_returning_spec,
-    refuse_unprojectable_insert_returning,
 };
 pub use list_shape::RowFields;
+pub(crate) use staged_limits::StagedReturningBudget;

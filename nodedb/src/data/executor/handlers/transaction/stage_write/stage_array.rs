@@ -11,9 +11,7 @@ use nodedb_physical::physical_plan::ArrayOp;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{
-    ArrayTxnOverlay, MAX_TXN_OVERLAY_BYTES, StagedCellPut,
-};
+use crate::data::executor::handlers::transaction::overlay::{ArrayTxnOverlay, StagedCellPut};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 use crate::types::TxnId;
@@ -155,9 +153,9 @@ impl CoreLoop {
             .values()
             .map(ArrayTxnOverlay::memory_size_estimate)
             .sum();
-        if current.saturating_add(incoming_bytes) > MAX_TXN_OVERLAY_BYTES {
+        if current.saturating_add(incoming_bytes) > self.query_tuning.max_txn_overlay_bytes {
             return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
+                limit: self.query_tuning.max_txn_overlay_bytes,
             });
         }
         Ok(())

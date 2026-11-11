@@ -43,6 +43,9 @@ pub(super) fn describe_document(op: &DocumentOp) -> PlanKind {
         | DocumentOp::Merge {
             returning: Some(_), ..
         }
+        | DocumentOp::InsertSelect {
+            returning: Some(_), ..
+        }
         | DocumentOp::Upsert {
             returning: Some(_), ..
         }

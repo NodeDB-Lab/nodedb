@@ -189,18 +189,21 @@ impl NodeDbPgHandler {
 
             // A statement outside a transaction block whose writes fire a
             // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
-            // edge-bearing collection, or an INSERT ... SELECT, UPDATE ... FROM
-            // or MERGE into the source of a cross-shard materialized sum,
-            // runs in an implicit transaction,
-            // ahead of every autocommit route:
-            // its writes stage on their vShards' leaders and commit together
-            // at its end.
+            // edge-bearing collection, an INSERT ... SELECT, UPDATE ... FROM
+            // or MERGE into the source of a cross-shard materialized sum, or
+            // one of those three whose RETURNING list can fail, runs in an
+            // implicit transaction, ahead of every autocommit route: its
+            // writes stage on their vShards' leaders and commit together at
+            // its end. A list's fallibility reads the announced columns.
             let tx_state = self.sessions.transaction_state(session_id);
             if tx_state != TransactionState::InBlock
-                && crate::control::server::shared::txn_route::statement_needs_implicit_txn(
-                    &self.state,
-                    &tasks,
-                )
+                && with_announced_returning(effective_schema, async {
+                    crate::control::server::shared::txn_route::statement_needs_implicit_txn(
+                        &self.state,
+                        &tasks,
+                    )
+                })
+                .await
                 .map_err(|error| sql_error(&error))?
             {
                 if !all_writes_bufferable(&tasks) {

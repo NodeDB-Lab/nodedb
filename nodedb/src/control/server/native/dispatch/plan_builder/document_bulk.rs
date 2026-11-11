@@ -167,5 +167,8 @@ pub(crate) async fn build_insert_select(
             limit,
             column_map: Vec::new(),
         }),
+        // A direct op carries no `RETURNING` clause.
+        returning: None,
+        rls_filters: Vec::new(),
     }))
 }

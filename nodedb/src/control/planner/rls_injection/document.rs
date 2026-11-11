@@ -158,16 +158,20 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
         // Refuse a target write policy: the rows come from a read resolved
         // after this pass, so the plan carries no image to evaluate. Inject
         // the source's read policy: the copy reads only rows a SELECT by the
-        // same identity would return.
+        // same identity would return. The target's read policy gates the
+        // rows `RETURNING` answers.
         DocumentOp::InsertSelect {
             target_collection,
             source,
+            rls_filters,
+            ..
         } => {
             ctx.refuse_if_write_policy(
                 target_collection,
                 "the inserted rows are produced by a read resolved after planning, so the plan \
                  carries no row image",
             )?;
+            ctx.set_post_filters(target_collection, rls_filters)?;
             inject_row_source(ctx, source)
         }
 
@@ -252,6 +256,8 @@ mod tests {
                 "target",
             ),
             source: page_source("source"),
+            returning: None,
+            rls_filters: Vec::new(),
         });
         inject(&mut plan, &store).expect("inject source read policy");
         let PhysicalPlan::Document(DocumentOp::InsertSelect {
@@ -275,6 +281,8 @@ mod tests {
                 "target",
             ),
             source: page_source("source"),
+            returning: None,
+            rls_filters: Vec::new(),
         });
         assert_write_refused(inject(&mut plan, &store), "target");
     }

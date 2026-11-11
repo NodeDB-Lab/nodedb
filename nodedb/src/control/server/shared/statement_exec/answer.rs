@@ -15,6 +15,7 @@ use crate::control::server::response_shape::types::{
     DmlOutcome, FoldedTag, PlanKind, ShapedRows, StatementTag, TaskTagRole, describe_plan,
     payload_to_dml_outcome, staged_dml_outcome,
 };
+use crate::control::server::shared::returning::StagedReturningBudget;
 use crate::control::server::shared::session::staging_gate::{StagedTagKind, StagedWriteOutcome};
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -37,6 +38,9 @@ pub(crate) struct StatementAnswer {
 pub(crate) struct StatementFold {
     rows: Vec<ShapedRows>,
     warnings: Vec<String>,
+    /// What the statement's staged `RETURNING` replies spent of the response
+    /// limits. `None` until the first one.
+    staged_budget: Option<StagedReturningBudget>,
     pub(crate) tag: StatementTag,
     pub(crate) last_lsn: u64,
 }
@@ -49,6 +53,7 @@ impl StatementFold {
         Self {
             rows: Vec::new(),
             warnings: Vec::new(),
+            staged_budget: None,
             tag: StatementTag::for_request(tasks.iter().map(|t| &t.plan)),
             last_lsn: 0,
         }
@@ -116,6 +121,14 @@ impl StatementFold {
         outcome: StagedWriteOutcome,
     ) -> Result<(), StatementError> {
         if !outcome.returning_rows.is_empty() {
+            // The statement's staged replies are held to the response
+            // limits. Past one, it fails and its transaction rolls back.
+            let budget = self
+                .staged_budget
+                .get_or_insert_with(|| StagedReturningBudget::new(&exec.state.tuning.network));
+            for rows in &outcome.returning_rows {
+                budget.admit(rows).map_err(StatementError::Error)?;
+            }
             for rows in &outcome.returning_rows {
                 self.fold_rows(exec, plan, PlanKind::ReturningRows, rows)
                     .await?;
@@ -151,7 +164,10 @@ impl StatementFold {
     ) -> Result<Option<u64>, StatementError> {
         let plan_kind = describe_plan(plan);
         let count_bearing = matches!(plan_kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp);
-        if payload.is_empty() && !count_bearing {
+        // A `RETURNING` write that answered no row still answers its
+        // columns, as PostgreSQL does.
+        let answers_rows = matches!(plan_kind, PlanKind::ReturningRows);
+        if payload.is_empty() && !count_bearing && !answers_rows {
             // Not a count-bearing plan (graph / vector / index write): no
             // count and no verb to report. A count-bearing plan with no
             // payload falls through so the count reader refuses it.

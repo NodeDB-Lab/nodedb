@@ -179,6 +179,8 @@ mod tests {
                 PhysicalPlan::Document(DocumentOp::InsertSelect {
                     target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
                     source: staging(),
+                    returning: None,
+                    rls_filters: Vec::new(),
                 }),
             ),
             (
