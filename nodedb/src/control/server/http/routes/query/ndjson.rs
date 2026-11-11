@@ -18,12 +18,17 @@ use crate::control::server::shared::plan_admission::{
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::{read_consistency, read_scope};
-use crate::control::server::shared::statement_exec::{AtomicStatement, StatementAt, StatementExec};
+use crate::control::server::shared::sql_split::split_sql_statements;
+use crate::control::server::shared::statement_exec::{
+    AtomicStatement, StatementAt, StatementExec, sequential_gate,
+};
 
 use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve_auth_parts};
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
-use super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::atomic_statement::{
+    HttpSequential, RoutedStatement, route_http_statement, run_http_sequential,
+};
 use super::super::ndjson_error::{error_line, statement_error_line};
 use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
@@ -126,6 +131,29 @@ async fn ndjson_at_consistency(
     let scope = request.into_resolved_scope();
     let rate_limit_headers =
         super::super::super::rate_limit_headers::rate_limit_headers(&rate_limit_result);
+
+    // A request of several statements that holds DDL or a statement the DDL
+    // router runs takes the sequential request runner. It answers one
+    // materialized body, as any request of several statements does.
+    let statements = split_sql_statements(sql);
+    if sequential_gate(&statements) {
+        let run = HttpSequential {
+            state: &state.shared,
+            identity: &identity,
+            scope: &scope,
+            query_ctx,
+            database_id,
+            trace_id: crate::types::TraceId::ZERO,
+        };
+        let ndjson = match run_http_sequential(&run, &statements).await {
+            Ok(rows) => rows_to_ndjson(rows),
+            Err(error) => {
+                state.shared.database_metrics.record_error(database_id);
+                statement_error_line(&error.error, error.at, &body.sql)
+            }
+        };
+        return ndjson_response(ndjson, rate_limit_headers);
+    }
 
     // Planning and lease admission run as one retried unit; a denied request never
     // acquires a lease.

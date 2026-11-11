@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod edge_recon;
 pub mod error;
 pub mod route_decision;
+pub mod sequential;
 pub mod statement_map;
 pub mod task_loop;
 
@@ -25,6 +26,7 @@ pub use error::{RequestError, StatementAt};
 pub(crate) use route_decision::{
     AutocommitRoute, ImplicitTxnRoute, autocommit_route, implicit_txn_route,
 };
+pub(crate) use sequential::{SequentialRequest, run_sequential_request, sequential_gate};
 pub use statement_map::StatementMap;
 pub(crate) use task_loop::{
     PlannedStatement, StatementExec, run_implicit_statement, run_statement_loop,

@@ -56,6 +56,10 @@ impl QueryContext {
     /// of one statement is never refused here. A request of no statement
     /// plans no task.
     ///
+    /// The transports send a request that `sequential_gate` accepts to the
+    /// sequential request runner, so it never reaches this planner. Only a
+    /// request the gate declines takes the refusal.
+    ///
     /// A plan error of statement `k` in a request of several statements
     /// carries `k`.
     pub async fn plan_request_with_rls_and_versions(
@@ -155,9 +159,9 @@ pub(super) fn join_cache_eligibility(
     }
 }
 
-/// A statement kind that plans only as a request of its own.
+/// A statement kind the one-set planner plans only as a request of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SoloKind {
+pub(crate) enum SoloKind {
     /// DDL, or another command the DDL router runs.
     Ddl,
     /// `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` and their spellings.
@@ -221,7 +225,7 @@ const DDL_HEADS: &[&str] = &["CREATE", "ALTER", "DROP", "GRANT", "REVOKE"];
 /// The first word is read after whitespace and comments. A statement the
 /// typed DDL parser claims is DDL, whatever its first word. Any other
 /// statement `router::claims` takes is [`SoloKind::Routed`].
-pub(super) fn solo_kind(statement: &str) -> Option<SoloKind> {
+pub(crate) fn solo_kind(statement: &str) -> Option<SoloKind> {
     let head = first_sql_word(statement)
         .map(str::to_ascii_uppercase)
         .unwrap_or_default();

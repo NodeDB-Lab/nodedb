@@ -17,13 +17,16 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::sql_split::split_sql_statements;
 use crate::control::server::shared::statement_exec::{
-    AtomicStatement, RequestError, StatementExec, authorize_one_task,
+    AtomicStatement, RequestError, StatementExec, authorize_one_task, sequential_gate,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
 
-use super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::atomic_statement::{
+    HttpSequential, RoutedStatement, route_http_statement, run_http_sequential,
+};
 
 /// Execute SQL and return result as JSON.
 ///
@@ -69,6 +72,21 @@ pub async fn execute_sql(
         sql,
         request.into_resolved_scope(),
     );
+    // A request of several statements that holds DDL or a statement the DDL
+    // router runs takes the sequential request runner.
+    let statements = split_sql_statements(sql);
+    if sequential_gate(&statements) {
+        let run = HttpSequential {
+            state: shared,
+            identity,
+            scope: &scope,
+            query_ctx,
+            database_id,
+            trace_id,
+        };
+        let rows = run_http_sequential(&run, &statements).await?;
+        return Ok(rows_result(rows));
+    }
     // Planning and lease admission run as one retried unit so a descriptor drain
     // between them is absorbed.
     let admission = plan_authorize_and_admit(PlanAdmissionRequest {

@@ -14,8 +14,10 @@ use crate::control::server::shared::plan_admission::{
 };
 use crate::control::server::shared::session::read_consistency::parse_request_field;
 use crate::control::server::shared::session::read_scope::with_request_consistency;
-use crate::control::server::shared::sql_split::holds_several_statements;
-use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
+use crate::control::server::shared::sql_split::{holds_several_statements, split_sql_statements};
+use crate::control::server::shared::statement_exec::{
+    AtomicStatement, StatementExec, sequential_gate,
+};
 
 use super::super::super::super::auth::{
     ApiError, AppState, build_request_scope, resolve_auth_parts,
@@ -23,7 +25,9 @@ use super::super::super::super::auth::{
 use super::super::super::super::peer::PeerAddr;
 use super::super::super::super::transport::ClientTransport;
 use super::super::super::super::types::{HttpQueryRequest, HttpQueryResponse};
-use super::super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::super::atomic_statement::{
+    HttpSequential, RoutedStatement, route_http_statement, run_http_sequential,
+};
 use super::super::super::result_shape::ddl_results_to_json;
 use super::super::{DatabaseQueryParam, resolve_database_id};
 use super::encode::ddl_error_to_api;
@@ -100,10 +104,36 @@ async fn query_at_consistency(
     let http_scope = crate::control::server::shared::session::DetachedTxnScope::new();
     let txn_ctx = http_scope.ctx();
 
+    // A request of several statements that holds DDL or a statement the DDL
+    // router runs takes the sequential request runner. Each statement runs
+    // in order on one implicit transaction.
+    let statements = split_sql_statements(sql);
+    if sequential_gate(&statements) {
+        state
+            .shared
+            .check_tenant_quota(identity.tenant_id)
+            .map_err(|e| ApiError::RateLimited {
+                message: e.to_string(),
+                retry_after_secs: 1,
+            })?;
+        let run = HttpSequential {
+            state: &state.shared,
+            identity: &identity,
+            scope: &scope,
+            query_ctx: &state.query_ctx,
+            database_id,
+            trace_id: crate::types::TraceId::ZERO,
+        };
+        let rows = run_http_sequential(&run, &statements)
+            .await
+            .map_err(|error| ApiError::from_request(error, sql))?;
+        return Ok((rate_limit_headers, axum::Json(HttpQueryResponse::ok(rows))));
+    }
+
     // Try DDL commands first. Reached only after the admission call above, so
     // `shared::ddl::user_dispatch` must not admit this request a second time.
-    // A request of several statements skips the router: the request planner
-    // plans each statement and refuses DDL beside DML.
+    // A request of several statements the gate declines skips the router:
+    // the request planner plans each statement and refuses DDL beside DML.
     if !holds_several_statements(sql)
         && let Some(result) = crate::control::server::shared::ddl::dispatch(
             &state.shared,

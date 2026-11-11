@@ -9,14 +9,22 @@
 //! and answers as JSON rows. Every other statement comes back for the
 //! route's own per-task loop.
 
+use std::sync::Arc;
+
 use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
+use crate::control::planner::context::QueryContext;
+use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::request_scope::RequestAuthScope;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::types::FoldedTag;
 use crate::control::server::shared::session::DetachedTxnScope;
 use crate::control::server::shared::statement_exec::{
-    AtomicRoute, AtomicStatement, RequestError, StatementAnswer, StatementExec, calvin_answer,
-    route_atomic_statement,
+    AtomicRoute, AtomicStatement, RequestError, SequentialRequest, StatementAnswer, StatementExec,
+    calvin_answer, route_atomic_statement, run_sequential_request,
 };
+use crate::control::state::SharedState;
+use crate::types::{DatabaseId, TraceId};
 
 /// What the shared router did with a statement.
 pub(super) enum RoutedStatement {
@@ -50,6 +58,56 @@ pub(super) async fn route_http_statement(
         await_mirror_sync(exec.state, database).await?;
     }
     Ok(RoutedStatement::Answered(answer_json_rows(answer)))
+}
+
+/// Who runs a request on the sequential request runner over HTTP,
+/// NDJSON or WebSocket RPC.
+pub(super) struct HttpSequential<'a> {
+    pub(super) state: &'a Arc<SharedState>,
+    pub(super) identity: &'a AuthenticatedIdentity,
+    pub(super) scope: &'a RequestAuthScope<'a>,
+    pub(super) query_ctx: &'a QueryContext,
+    pub(super) database_id: DatabaseId,
+    pub(super) trace_id: TraceId,
+}
+
+/// Run a request `sequential_gate` accepted through the sequential request
+/// runner, on a private implicit transaction, and answer it as JSON rows.
+///
+/// These routes carry no session, so the transaction is never the client's
+/// block. The rows are the sum of every statement's answer, as
+/// [`route_http_statement`] answers. An error carries the statement it
+/// stopped.
+pub(super) async fn run_http_sequential(
+    run: &HttpSequential<'_>,
+    statements: &[String],
+) -> Result<Vec<serde_json::Value>, RequestError> {
+    let tenant_id = run.identity.tenant_id;
+    let _request = run.state.tenant_request_guard(tenant_id);
+    let sequences = SessionSequenceAccess::for_session(run.state, None, run.database_id, tenant_id);
+    let exec = StatementExec {
+        state: run.state,
+        identity: run.identity,
+        scope: run.scope,
+        schemas: &[],
+        database_id: run.database_id,
+        sequences: &sequences,
+    };
+    let detached = DetachedTxnScope::new();
+    let answer = run_sequential_request(
+        &SequentialRequest {
+            exec: &exec,
+            query_ctx: run.query_ctx,
+            statements,
+            trace_id: run.trace_id,
+        },
+        &detached.ctx(),
+    )
+    .await?;
+    let answer = answer
+        .summed()
+        .map_err(|error| error.into_request_error(tenant_id))?;
+    Ok(answer_json_rows(answer))
 }
 
 /// A statement's answer as JSON rows, each keyed by its cell keys as
