@@ -40,64 +40,102 @@ impl WalWriter {
             self.buffer.as_slice()
         };
 
-        // Use pwrite to write at the exact offset, retrying on short writes.
-        let fd = self.file.as_raw_fd();
-        let mut remaining = data;
-        let mut write_offset = self.file_offset;
-        while !remaining.is_empty() {
-            let written = unsafe {
-                libc::pwrite(
-                    fd,
-                    remaining.as_ptr() as *const libc::c_void,
-                    remaining.len(),
-                    write_offset as libc::off_t,
-                )
-            };
-            if written < 0 {
-                return Err(write_error(
-                    "WAL segment append",
-                    write_offset,
-                    remaining.len() as u64,
-                ));
-            }
-            let n = written as usize;
-            if n == 0 {
-                // A zero-length write makes no progress; retrying would
-                // spin forever.
-                return Err(WalError::Io(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "WAL pwrite made no progress",
-                )));
-            }
-            remaining = &remaining[n..];
-            write_offset += n as u64;
-        }
-
-        self.file_offset += data.len() as u64;
+        pwrite_all(&self.file, data, self.file_offset)?;
+        let written = data.len() as u64;
         self.buffer.clear();
+        self.note_written(written);
+        Ok(())
+    }
 
-        // The bytes are in the file but only in the page cache. Recorded
-        // before the buffer's contents are forgotten so a later `sync` still
-        // knows an fsync is owed.
+    /// Advance the tail past `len` bytes that reached the file.
+    ///
+    /// The bytes are in the file but only in the page cache, so a later
+    /// `sync` still owes an fsync.
+    pub(super) fn note_written(&mut self, len: u64) {
+        self.file_offset += len;
         self.durability.record_flush();
         self.flush_epoch += 1;
-        Ok(())
     }
 }
 
+/// Write all of `data` at `offset`, retrying on short writes.
+pub(super) fn pwrite_all(file: &std::fs::File, data: &[u8], offset: u64) -> Result<()> {
+    let fd = file.as_raw_fd();
+    let mut remaining = data;
+    let mut write_offset = offset;
+    while !remaining.is_empty() {
+        // SAFETY: `remaining` is a live slice of `remaining.len()` bytes.
+        let written = unsafe {
+            libc::pwrite(
+                fd,
+                remaining.as_ptr() as *const libc::c_void,
+                remaining.len(),
+                write_offset as libc::off_t,
+            )
+        };
+        if written < 0 {
+            return Err(write_error(
+                "WAL segment append",
+                write_offset,
+                remaining.len() as u64,
+            ));
+        }
+        let n = written as usize;
+        if n == 0 {
+            // A zero-length write makes no progress; retrying would
+            // spin forever.
+            return Err(WalError::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "WAL pwrite made no progress",
+            )));
+        }
+        remaining = &remaining[n..];
+        write_offset += n as u64;
+    }
+    Ok(())
+}
+
 /// Classify the current `errno` from a failed WAL write.
+fn write_error(context: &'static str, offset: u64, pending: u64) -> WalError {
+    classify_write_error(std::io::Error::last_os_error(), context, offset, pending)
+}
+
+/// Classify a failed WAL write. Shared by the `pwrite` and io_uring writers.
 ///
 /// A full device is called out separately from generic I/O failure: it is not
 /// transient, retrying cannot succeed, and the caller must stop acknowledging
 /// writes rather than treat it as a passing error. `offset` and `pending` say
 /// where the batch stalled and how much of it never reached the file, which is
 /// what a report needs to describe the write that could not complete.
-fn write_error(context: &'static str, offset: u64, pending: u64) -> WalError {
-    let err = std::io::Error::last_os_error();
+pub(crate) fn classify_write_error(
+    err: std::io::Error,
+    context: &'static str,
+    offset: u64,
+    pending: u64,
+) -> WalError {
     if err.raw_os_error() == Some(libc::ENOSPC) {
         let out_of_space = WalError::OutOfSpace { context };
         crate::diag::out_of_space(&out_of_space, context, offset, pending);
         return out_of_space;
     }
     WalError::Io(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enospc_is_out_of_space_and_other_errors_are_io() {
+        let full = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        assert!(matches!(
+            classify_write_error(full, "test", 0, 1),
+            WalError::OutOfSpace { context: "test" }
+        ));
+        let eio = std::io::Error::from_raw_os_error(libc::EIO);
+        assert!(matches!(
+            classify_write_error(eio, "test", 0, 1),
+            WalError::Io(_)
+        ));
+    }
 }

@@ -155,3 +155,50 @@ fn dwb_direct_mode_write_and_recover() {
         assert_eq!(rec.payload, format!("direct-{lsn}").into_bytes());
     }
 }
+
+/// A crash tears only the padding of the last batch, whose final record ends
+/// mid-block. The reopened io_uring writer resumes on the block boundary and
+/// its next write keeps the record's tail.
+#[test]
+fn uring_resume_after_a_torn_padding_keeps_the_record_tail() {
+    use std::os::unix::fs::FileExt as _;
+
+    let path = target_dir().join("uring_torn_padding.wal");
+    let _ = std::fs::remove_file(&path);
+    let mut writer = match UringWriter::open(&path, direct_io_config()) {
+        Ok(w) => w,
+        Err(_) => return, // O_DIRECT unsupported on this filesystem; skip.
+    };
+    let spanning = vec![0xA5u8; DEFAULT_ALIGNMENT + 1000];
+    let small = b"second".to_vec();
+    for payload in [&spanning, &small] {
+        writer
+            .append(RecordType::Put as u32, 1, 0, 0, payload)
+            .unwrap();
+    }
+    writer.submit_and_sync().unwrap();
+    drop(writer);
+
+    // Zero the padding record's header, as a crash that tears it leaves it.
+    let padding_at = (2 * HEADER_SIZE + spanning.len() + small.len()) as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all_at(&[0u8; HEADER_SIZE], padding_at).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    let mut writer = UringWriter::open(&path, direct_io_config()).unwrap();
+    assert_eq!(writer.next_lsn(), 3);
+    writer
+        .append(RecordType::Put as u32, 1, 0, 0, b"third")
+        .unwrap();
+    writer.submit_and_sync().unwrap();
+    drop(writer);
+
+    let reader = nodedb_wal::reader::WalReader::open(&path, None).unwrap();
+    let payloads: Vec<Vec<u8>> = reader
+        .records()
+        .map(|record| record.map(|record| record.payload))
+        .collect::<nodedb_wal::Result<_>>()
+        .unwrap();
+    assert_eq!(payloads, vec![spanning, small, b"third".to_vec()]);
+}

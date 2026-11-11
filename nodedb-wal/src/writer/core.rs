@@ -11,7 +11,7 @@ use crate::error::{Result, WalError};
 use crate::preamble::SegmentPreamble;
 use crate::record::{HEADER_SIZE, MIN_PADDING_RECORD_SIZE, RecordTarget, WalRecord, WalRecordArgs};
 
-use super::config::{WalWriterConfig, open_dwb_for, resume_offset};
+use super::config::{WalWriterConfig, open_dwb_for, resume_carry, resume_offset};
 use super::durability::{DurabilityState, fsync_and_track};
 
 /// Append-only WAL writer.
@@ -40,12 +40,12 @@ pub struct WalWriter {
     pub(super) config: WalWriterConfig,
 
     /// Optional key ring for payload encryption (supports key rotation).
-    encryption_ring: Option<crate::crypto::KeyRing>,
+    pub(super) encryption_ring: Option<crate::crypto::KeyRing>,
 
     /// Preamble written at the start of this segment (when encryption is active).
     /// Its 16 bytes are included as part of the AAD on every encrypted record,
     /// binding ciphertext to the segment it was written in.
-    segment_preamble: Option<SegmentPreamble>,
+    pub(super) segment_preamble: Option<SegmentPreamble>,
 
     /// Optional double-write buffer for torn write protection.
     /// Records are written here before the WAL for crash recovery.
@@ -81,26 +81,39 @@ impl WalWriter {
     pub fn open(path: &Path, config: WalWriterConfig) -> Result<Self> {
         let file = open_segment_file(path, config.use_direct_io)?;
 
-        let buffer = AlignedBuf::new(config.write_buffer_size, config.alignment)?;
-
         // Scan existing WAL for recovery if the file has data.
-        let (file_offset, next_lsn) = if path.exists() && std::fs::metadata(path)?.len() > 0 {
+        let (file_offset, next_lsn, carry) = if path.exists() && std::fs::metadata(path)?.len() > 0
+        {
             let info = crate::recovery::recover(path)?;
-            (
-                resume_offset(
-                    info.end_offset,
-                    config.use_direct_io,
-                    config.alignment,
-                    path,
-                ),
-                info.next_lsn(),
-            )
+            let resume = resume_offset(
+                info.end_offset,
+                config.use_direct_io,
+                config.alignment,
+                path,
+            );
+            let carry = resume_carry(path, resume, info.end_offset)?;
+            (resume, info.next_lsn(), carry)
         } else {
-            (0, 1)
+            (0, 1, Vec::new())
         };
 
-        let dwb = open_dwb_for(&config, path);
+        let mut writer = Self::assemble(path, file, config, file_offset, next_lsn)?;
+        // The committed bytes of the block the writer resumes in go out again
+        // with its first write.
+        writer.buffer.write(&carry);
+        Ok(writer)
+    }
 
+    /// A writer over the opened segment `file`, resuming at `file_offset`.
+    fn assemble(
+        path: &Path,
+        file: File,
+        config: WalWriterConfig,
+        file_offset: u64,
+        next_lsn: u64,
+    ) -> Result<Self> {
+        let buffer = AlignedBuf::new(config.write_buffer_size, config.alignment)?;
+        let dwb = open_dwb_for(&config, path);
         Ok(Self {
             file,
             buffer,
@@ -142,54 +155,6 @@ impl WalWriter {
         Ok(writer)
     }
 
-    pub(crate) fn can_set_encryption_ring(&self) -> bool {
-        self.file_offset == 0 && self.buffer.is_empty()
-    }
-
-    /// Set the encryption key. When set, all subsequent records will have
-    /// their payloads encrypted with AES-256-GCM.
-    ///
-    /// Writes the 16-byte WAL segment preamble at the current file offset.
-    /// Must be called before the first `append`. Calling it after records
-    /// have already been written to this file returns an error.
-    pub fn set_encryption_key(&mut self, key: crate::crypto::WalEncryptionKey) -> Result<()> {
-        self.set_encryption_ring(crate::crypto::KeyRing::new(key))
-    }
-
-    /// Set the key ring directly (for key rotation with dual-key reads).
-    ///
-    /// Writes the 16-byte WAL segment preamble at the current file offset.
-    /// Must be called before the first `append`. Calling it after records
-    /// have already been written to this file returns an error.
-    pub fn set_encryption_ring(&mut self, ring: crate::crypto::KeyRing) -> Result<()> {
-        if self.file_offset != 0 || !self.buffer.is_empty() {
-            return Err(WalError::EncryptionError {
-                detail: "set_encryption_ring must be called before writing any records".into(),
-            });
-        }
-        let epoch = *ring.current().epoch();
-        let preamble = SegmentPreamble::new_wal(epoch);
-        let preamble_bytes = preamble.to_bytes();
-
-        // Write preamble into the buffer so it gets flushed with the first
-        // record batch (or on the next sync).
-        self.buffer.write(&preamble_bytes);
-
-        self.encryption_ring = Some(ring);
-        self.segment_preamble = Some(preamble);
-        Ok(())
-    }
-
-    /// Access the key ring (for decryption during replay).
-    pub fn encryption_ring(&self) -> Option<&crate::crypto::KeyRing> {
-        self.encryption_ring.as_ref()
-    }
-
-    /// The preamble for this segment, if encryption was enabled.
-    pub fn segment_preamble(&self) -> Option<&SegmentPreamble> {
-        self.segment_preamble.as_ref()
-    }
-
     /// Open a new WAL segment file with a specific starting LSN.
     ///
     /// Used by `SegmentedWal` when rolling to a new segment. The file must
@@ -201,28 +166,7 @@ impl WalWriter {
         start_lsn: u64,
     ) -> Result<Self> {
         let file = open_segment_file(path, config.use_direct_io)?;
-        let buffer = AlignedBuf::new(config.write_buffer_size, config.alignment)?;
-
-        let dwb = open_dwb_for(&config, path);
-
-        Ok(Self {
-            file,
-            buffer,
-            file_offset: 0,
-            next_lsn: AtomicU64::new(start_lsn),
-            sealed: false,
-            durability: DurabilityState::new(),
-            config,
-            encryption_ring: None,
-            segment_preamble: None,
-            double_write: dwb.buffer,
-            dwb_path: dwb.path,
-            dwb_protection: dwb.protection,
-            dwb_unprotected_records: 0,
-            unanchored: false,
-            pending_anchor: None,
-            flush_epoch: 0,
-        })
+        Self::assemble(path, file, config, 0, start_lsn)
     }
 
     /// Open a WAL writer with O_DIRECT disabled, for a test whose subject is
@@ -253,8 +197,9 @@ impl WalWriter {
 
     /// Append a record to the WAL. Returns the assigned LSN.
     ///
-    /// The record is written to the in-memory buffer. Call `sync()` to
-    /// flush to disk and make the write durable.
+    /// The record is written to the in-memory buffer. A record larger than
+    /// the buffer is written to the file at once, after the buffered batch.
+    /// Either way, call `sync()` to make the write durable.
     ///
     /// `database_id` is stored in header bytes 34-41. Pass `0` for the
     /// default database.
@@ -346,30 +291,26 @@ impl WalWriter {
         let total_size = HEADER_SIZE + record.payload.len();
         let reserve = self.padding_reserve() + extra_reserve;
 
-        // If the record cannot fit in an empty buffer alongside its padding,
-        // no amount of flushing will make room.
-        let usable = self.buffer.capacity().saturating_sub(reserve);
-        if total_size > usable {
-            return Err(WalError::PayloadTooLarge {
-                size: record.payload.len(),
-                max: usable.saturating_sub(HEADER_SIZE),
-            });
+        if total_size.saturating_add(reserve) > self.buffer.capacity() {
+            // No flush makes room for this record, so it goes to the file
+            // alone, after the batch ahead of it.
+            self.write_alone(&header_bytes, &record.payload)?;
+        } else {
+            // If this record doesn't fit in the remaining buffer, flush first.
+            // A failed flush propagates before the LSN is committed.
+            if self.buffer.remaining() < total_size + reserve {
+                self.flush_buffer()?;
+            }
+            self.buffer.write(&header_bytes);
+            self.buffer.write(&record.payload);
         }
-
-        // If this record doesn't fit in the remaining buffer, flush first.
-        // A failed flush propagates before the LSN is committed.
-        if self.buffer.remaining() < total_size + reserve {
-            self.flush_buffer()?;
-        }
-
-        self.buffer.write(&header_bytes);
-        self.buffer.write(&record.payload);
 
         // Stage into the double-write buffer (in memory, no disk write) only
-        // once the record is committed to the write buffer. The DWB is keyed
-        // by LSN, so a record that failed to land in the WAL must not leave a
-        // phantom entry behind: this LSN goes to the next append, and torn-
-        // write recovery would then resurrect the wrong record for it.
+        // once the record is committed to the write buffer or the file. The
+        // DWB is keyed by LSN, so a record that failed to land in the WAL
+        // must not leave a phantom entry behind: this LSN goes to the next
+        // append, and torn-write recovery would then resurrect the wrong
+        // record for it.
         //
         // `sync()` writes the surviving staged slots and fsyncs the DWB before
         // the WAL fsync. One batch costs at most `DWB_CAPACITY` slot writes
@@ -455,21 +396,6 @@ impl WalWriter {
     /// Current file size (bytes written to disk).
     pub fn file_offset(&self) -> u64 {
         self.file_offset
-    }
-
-    /// The largest payload one record takes: the write buffer, less the
-    /// padding and anchor reserves, the header and the encryption tag.
-    pub fn max_payload(&self) -> usize {
-        let tag = if self.encryption_ring().is_some() {
-            crate::crypto::AUTH_TAG_SIZE
-        } else {
-            0
-        };
-        self.buffer
-            .capacity()
-            .saturating_sub(self.padding_reserve() + self.anchor_reserve())
-            .saturating_sub(HEADER_SIZE + tag)
-            .min(crate::record::MAX_WAL_PAYLOAD_SIZE)
     }
 }
 
