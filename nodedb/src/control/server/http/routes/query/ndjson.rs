@@ -144,7 +144,6 @@ async fn ndjson_at_consistency(
             state: &state.shared,
             identity: &identity,
             scope: &scope,
-            query_ctx,
             database_id,
             trace_id: crate::types::TraceId::ZERO,
         };

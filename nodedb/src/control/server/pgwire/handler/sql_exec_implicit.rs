@@ -3,13 +3,16 @@
 //! A simple query of several statements runs as one implicit transaction, as in PostgreSQL.
 //!
 //! Rules:
-//! - The implicit block opens lazily at the first statement that is not a read.
+//! - The implicit block opens at the first statement of a run that holds a statement that is
+//!   not a read. A run ends at a transaction-control statement. So every statement of the run
+//!   reads the block's one snapshot, and COMMIT checks its leading reads too.
 //!   A read is a statement whose first word is `SELECT`, `SHOW`, `VALUES` or `TABLE`.
 //!   A `WITH` or `EXPLAIN` statement is a read when no write verb sits outside its literals.
 //!   A request of reads alone opens no block, so it never ends in a commit-time 40001.
 //! - It opens only while the session is `Idle`. An explicit block buffers the statements itself.
 //! - A `BEGIN` inside the implicit block turns it into the explicit block.
-//! - A `COMMIT` or `ROLLBACK` ends it. The next statement that is not a read opens a new one.
+//! - A `COMMIT` or `ROLLBACK` ends it. The next run that holds a statement that is not a read
+//!   opens a new one.
 //! - An error rolls the implicit block back. An explicit block goes `Failed` and stays open.
 //! - The end of the string commits the implicit block. A commit error answers as the last error.
 //! - The implicit block adds no `BEGIN` or `COMMIT` tag.
@@ -72,15 +75,15 @@ impl NodeDbPgHandler {
         let mut all = Vec::new();
         // `true` while this loop owns an open implicit block.
         let mut implicit_open = false;
-        for stmt in statements {
+        for (index, stmt) in statements.iter().enumerate() {
             // Each statement's DDL proposals carry that statement's own text.
-            let _audit = AuditScope::statement(identity, &stmt);
+            let _audit = AuditScope::statement(identity, stmt);
             if let Some(binding) = self.sessions.binding(session_id) {
-                binding.set_statement_text(&stmt);
+                binding.set_statement_text(stmt);
             }
             let control = classify_txn_control(stmt.trim());
             if !implicit_open
-                && opens_implicit_block(&stmt)
+                && run_opens_implicit_block(&statements[index..])
                 && self.sessions.transaction_state(session_id) == TransactionState::Idle
             {
                 // The BEGIN tag of the adapter is dropped: the implicit block answers no tag.
@@ -90,7 +93,7 @@ impl NodeDbPgHandler {
                 implicit_open = true;
             }
             match self
-                .execute_single_sql(identity, session_id, &stmt, requested)
+                .execute_single_sql(identity, session_id, stmt, requested)
                 .await
             {
                 Ok(mut resp) => {
@@ -126,6 +129,20 @@ impl NodeDbPgHandler {
     }
 }
 
+/// Whether the run at the head of `rest` opens the implicit block when none is
+/// open: a statement before the next transaction-control statement opens it.
+fn run_opens_implicit_block(rest: &[String]) -> bool {
+    rest.iter()
+        .take_while(|statement| !is_transaction_control(statement))
+        .any(|statement| opens_implicit_block(statement))
+}
+
+/// Whether the first word of `statement` is a transaction-control word.
+fn is_transaction_control(statement: &str) -> bool {
+    first_sql_word(statement)
+        .is_some_and(|head| TRANSACTION_CONTROL_HEADS.contains(&head.to_ascii_uppercase().as_str()))
+}
+
 /// Whether `statement` opens the implicit block when none is open.
 ///
 /// A read and a transaction-control statement do not open it.
@@ -153,7 +170,33 @@ fn holds_write_verb(statement: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::opens_implicit_block;
+    use super::{opens_implicit_block, run_opens_implicit_block};
+
+    /// The run of `statements` at its head opens the block.
+    fn run_opens(statements: &[&str]) -> bool {
+        let owned: Vec<String> = statements.iter().map(|s| (*s).to_owned()).collect();
+        run_opens_implicit_block(&owned)
+    }
+
+    #[test]
+    fn a_leading_read_opens_the_block_of_its_run() {
+        assert!(run_opens(&["SELECT 1", "UPDATE t SET v = 1"]));
+        assert!(run_opens(&[
+            "SELECT 1",
+            "SHOW x",
+            "INSERT INTO t (id) VALUES ('a')"
+        ]));
+        assert!(!run_opens(&["SELECT 1", "SELECT 2"]));
+    }
+
+    /// A transaction-control statement ends the run, so a write after it
+    /// opens no block for the reads before it.
+    #[test]
+    fn a_run_ends_at_transaction_control() {
+        assert!(!run_opens(&["SELECT 1", "BEGIN", "UPDATE t SET v = 1"]));
+        assert!(!run_opens(&["SELECT 1", "COMMIT", "UPDATE t SET v = 1"]));
+        assert!(!run_opens(&["COMMIT", "UPDATE t SET v = 1"]));
+    }
 
     #[test]
     fn a_write_or_ddl_opens_the_block() {

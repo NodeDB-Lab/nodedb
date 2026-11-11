@@ -67,7 +67,6 @@ pub(super) struct HttpSequential<'a> {
     pub(super) state: &'a Arc<SharedState>,
     pub(super) identity: &'a AuthenticatedIdentity,
     pub(super) scope: &'a RequestAuthScope<'a>,
-    pub(super) query_ctx: &'a QueryContext,
     pub(super) database_id: DatabaseId,
     pub(super) trace_id: TraceId,
 }
@@ -79,6 +78,10 @@ pub(super) struct HttpSequential<'a> {
 /// block. The rows are the sum of every statement's answer, as
 /// [`route_http_statement`] answers. An error carries the statement it
 /// stopped.
+///
+/// `AppState::query_ctx` plans every request of the listener, and the runner
+/// binds the transaction's snapshot on its context. So the request plans on a
+/// context of its own.
 pub(super) async fn run_http_sequential(
     run: &HttpSequential<'_>,
     statements: &[Statement],
@@ -94,11 +97,12 @@ pub(super) async fn run_http_sequential(
         database_id: run.database_id,
         sequences: &sequences,
     };
+    let query_ctx = QueryContext::for_state_with_lease(run.state);
     let detached = DetachedTxnScope::new();
     let answer = run_sequential_request(
         &SequentialRequest {
             exec: &exec,
-            query_ctx: run.query_ctx,
+            query_ctx: &query_ctx,
             statements,
             trace_id: run.trace_id,
         },

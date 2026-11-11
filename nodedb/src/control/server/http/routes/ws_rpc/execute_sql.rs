@@ -82,7 +82,6 @@ pub async fn execute_sql(
             state: shared,
             identity,
             scope: &scope,
-            query_ctx,
             database_id,
             trace_id,
         };

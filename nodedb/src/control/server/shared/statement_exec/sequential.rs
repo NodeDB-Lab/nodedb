@@ -88,6 +88,8 @@ pub(crate) struct SequentialRequest<'a> {
     /// Who runs the request. Its `schemas` are not read: each statement
     /// shapes against the schemas it plans.
     pub(crate) exec: &'a StatementExec<'a>,
+    /// The planning context, private to the request or its connection: the
+    /// runner binds the transaction's snapshot on it.
     pub(crate) query_ctx: &'a QueryContext,
     /// The request text split at top-level semicolons, split once by the
     /// transport.
@@ -101,7 +103,9 @@ pub(crate) struct SequentialRequest<'a> {
 /// session passes a detached one. Outside a transaction block the
 /// statements run on a private implicit transaction: it commits after the
 /// last statement and rolls back on the first error. Inside the client's
-/// block they run on that block, and its COMMIT applies them.
+/// block they run on that block, and its COMMIT applies them. Every
+/// statement reads the transaction's one snapshot, taken at the first
+/// statement.
 ///
 /// The answer holds one part per statement. An error carries the index of
 /// the statement that raised it. An error of the commit carries none.
@@ -111,7 +115,7 @@ pub(crate) async fn run_sequential_request(
 ) -> Result<RequestAnswer, RequestError> {
     let exec = request.exec;
     let count = request.statements.len();
-    with_statement_txn_lifted(
+    let answer = with_statement_txn_lifted(
         exec.state,
         exec.identity,
         client,
@@ -135,7 +139,10 @@ pub(crate) async fn run_sequential_request(
             })
         },
     )
-    .await
+    .await;
+    // The cut ends with the request. A connection's next plan call binds its own.
+    request.query_ctx.set_txn_snapshot(None);
+    answer
 }
 
 /// Run one statement on `txn`. Returns its part and the watermark of its
@@ -149,6 +156,10 @@ async fn run_statement(
     let statement = carried.text.as_str();
     // Each statement's DDL proposals carry that statement's own text.
     let _audit = AuditScope::statement(base.identity, statement);
+    // The first call takes the transaction's snapshot. Each later call
+    // answers the same one, so every statement reads one cut.
+    let snapshot = txn.txn_snapshot(base.state).await?;
+    request.query_ctx.set_txn_snapshot(snapshot);
 
     if router::claims(statement)
         && let Some(result) = crate::control::server::shared::ddl::dispatch(
