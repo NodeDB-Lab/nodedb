@@ -21,10 +21,12 @@ pub(super) fn param_literal(param: &ParamValue, form: Form) -> String {
         (Form::Text, _) => {}
     }
     match param {
-        ParamValue::Null => "NULL".to_owned(),
+        ParamValue::Null | ParamValue::IntNull(_) => "NULL".to_owned(),
         ParamValue::Bool(true) => "TRUE".to_owned(),
         ParamValue::Bool(false) => "FALSE".to_owned(),
         ParamValue::Int64(n) => n.to_string(),
+        ParamValue::Int32(n) => n.to_string(),
+        ParamValue::Int16(n) => n.to_string(),
         ParamValue::Float64(f) => match (form, nodedb_types::value::non_finite_float_text(*f)) {
             // A DSL grammar reads a non-finite float as its quoted text.
             (Form::Text, Some(text)) => quoted(text.to_owned()),

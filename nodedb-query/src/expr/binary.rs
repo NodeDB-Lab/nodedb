@@ -109,7 +109,9 @@ pub(crate) fn eval_binary_op(
     match op {
         // Arithmetic: a Decimal operand keeps exact numeric arithmetic, and a
         // Float operand makes it float8, as PostgreSQL casts numeric to
-        // float8 for a mixed pair. Two integers stay `bigint`.
+        // float8 for a mixed pair. Two integers are checked `i64`
+        // arithmetic. The planner casts a `smallint` or `integer` result to
+        // its width, which checks it there.
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
             let any_decimal =
                 matches!(left, Value::Decimal(_)) || matches!(right, Value::Decimal(_));

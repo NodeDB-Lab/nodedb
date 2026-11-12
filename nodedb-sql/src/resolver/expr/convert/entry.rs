@@ -7,6 +7,7 @@ use sqlparser::ast::Expr;
 use crate::error::{Result, SqlError};
 use crate::resolver::ColumnScope;
 use crate::resolver::expr::functions::convert_function_depth;
+use crate::resolver::expr::int_width::check_at_int_width;
 use crate::types::*;
 
 use super::{builtins, identifier, literals, operators, predicates};
@@ -16,6 +17,10 @@ use super::{builtins, identifier, literals, operators, predicates};
 const MAX_CONVERT_DEPTH: usize = 128;
 
 /// Convert a sqlparser `Expr` to our `SqlExpr`.
+///
+/// An integer operation whose PostgreSQL result type is `smallint` or
+/// `integer` converts to a cast of itself to that type, so its result is
+/// checked at that width.
 pub fn convert_expr(expr: &Expr, scope: &ColumnScope<'_>) -> Result<SqlExpr> {
     convert_expr_depth(expr, &mut 0, scope)
 }
@@ -33,7 +38,8 @@ pub(in crate::resolver::expr) fn convert_expr_depth(
             detail: format!("expression nesting depth exceeds maximum of {MAX_CONVERT_DEPTH}"),
         });
     }
-    let result = convert_expr_inner(expr, depth, scope);
+    let result = convert_expr_inner(expr, depth, scope)
+        .map(|converted| check_at_int_width(converted, scope));
     *depth -= 1;
     result
 }

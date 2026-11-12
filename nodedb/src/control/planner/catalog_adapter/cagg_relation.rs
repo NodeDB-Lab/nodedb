@@ -125,10 +125,21 @@ fn relation_columns(
                 Some(SqlDataType::Float64) => derived(&expr.output_column, SqlDataType::Float64),
                 Some(_) | None => derived(&expr.output_column, SqlDataType::Decimal(None)),
             },
-            // An integer total can pass the 64-bit range and turns exact
-            // decimal there, as PostgreSQL's `sum(bigint)` returns numeric.
-            AggFunction::Sum => match input.map(|c| c.data_type) {
-                Some(SqlDataType::Float64) => derived(&expr.output_column, SqlDataType::Float64),
+            // PostgreSQL's `sum` is bigint over smallint and integer,
+            // numeric over bigint and numeric, float8 over a float. A
+            // bigint total can pass the 64-bit range and turns exact decimal
+            // there.
+            AggFunction::Sum => match input.map(|c| (c.data_type, c.int_width)) {
+                Some((SqlDataType::Float64, _)) => {
+                    derived(&expr.output_column, SqlDataType::Float64)
+                }
+                Some((
+                    SqlDataType::Int64,
+                    Some(
+                        nodedb_types::columnar::IntWidth::I16
+                        | nodedb_types::columnar::IntWidth::I32,
+                    ),
+                )) => derived(&expr.output_column, SqlDataType::Int64),
                 Some(_) | None => derived(&expr.output_column, SqlDataType::Decimal(None)),
             },
             AggFunction::Min | AggFunction::Max | AggFunction::First | AggFunction::Last => {
@@ -226,5 +237,45 @@ mod tests {
             ]
         );
         assert!(!columns[0].nullable);
+    }
+
+    /// SUM over `smallint` or `integer` is `bigint`, over `bigint` numeric.
+    #[test]
+    fn integer_sums_take_the_postgres_type() {
+        use nodedb_types::columnar::IntWidth;
+        let expr = |source: &str, output: &str| AggregateExpr {
+            function: AggFunction::Sum,
+            source_column: source.into(),
+            output_column: output.into(),
+        };
+        let def = ContinuousAggregateDef {
+            name: "n_1m".into(),
+            source: "n".into(),
+            bucket_interval: "1m".into(),
+            bucket_interval_ms: 60_000,
+            aggregates: vec![expr("s", "ss"), expr("i", "si"), expr("b", "sb")],
+            refresh_policy: RefreshPolicy::OnFlush,
+            ..ContinuousAggregateDef::default()
+        };
+        let int = |name: &str, width: IntWidth| ColumnInfo {
+            int_width: Some(width),
+            ..column(name, SqlDataType::Int64)
+        };
+        let source = [
+            column("ts", SqlDataType::Timestamp),
+            int("s", IntWidth::I16),
+            int("i", IntWidth::I32),
+            int("b", IntWidth::I64),
+        ];
+        let columns = relation_columns(&def, &source, Some("ts"));
+        let types: Vec<&SqlDataType> = columns[1..].iter().map(|c| &c.data_type).collect();
+        assert_eq!(
+            types,
+            vec![
+                &SqlDataType::Int64,
+                &SqlDataType::Int64,
+                &SqlDataType::Decimal(None)
+            ]
+        );
     }
 }

@@ -21,8 +21,9 @@
 
 use core::ops::ControlFlow;
 
-use sqlparser::ast::{Expr, Statement, Value, ValueWithSpan, VisitMut, VisitorMut};
+use sqlparser::ast::{Expr, Select, Statement, Value, ValueWithSpan, VisitMut, VisitorMut};
 
+use crate::params_int_width::{returning_items, type_arithmetic_operands, type_output_items};
 use crate::params_typed::placeholder_to_typed;
 
 /// Parameter value for AST substitution.
@@ -32,7 +33,17 @@ use crate::params_typed::placeholder_to_typed;
 pub enum ParamValue {
     Null,
     Bool(bool),
+    /// A `bigint` parameter: a pgwire INT8 parameter, or an integer bound
+    /// with no declared type.
     Int64(i64),
+    /// An `integer` parameter: a pgwire INT4 parameter.
+    Int32(i32),
+    /// A `smallint` parameter: a pgwire INT2 parameter.
+    Int16(i16),
+    /// A NULL integer parameter of a declared width. A Describe plans an
+    /// integer parameter with it, so the statement is typed as Execute
+    /// types it once a value is bound.
+    IntNull(nodedb_query::cast::IntWidth),
     Float64(f64),
     /// Exact arbitrary-precision decimal from a NUMERIC/DECIMAL pgwire parameter.
     Decimal(rust_decimal::Decimal),
@@ -97,12 +108,32 @@ impl VisitorMut for ParamBinder<'_> {
     /// typed string (`UUID '...'`), so the resolver reads the typed value,
     /// never its text. The visitor then descends into the typed string,
     /// whose value holds no placeholder.
+    ///
+    /// An integer parameter that is an operand of integer arithmetic binds
+    /// as a cast to its type (see `params_int_width`).
     fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        type_arithmetic_operands(expr, self.params);
         if let Expr::Value(value) = expr
             && let Value::Placeholder(p) = &value.value
             && let Some(typed) = placeholder_to_typed(p, self.params, value.span)
         {
             *expr = typed;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// An integer parameter that is a SELECT item binds as a cast to its
+    /// type.
+    fn pre_visit_select(&mut self, select: &mut Select) -> ControlFlow<Self::Break> {
+        type_output_items(&mut select.projection, self.params);
+        ControlFlow::Continue(())
+    }
+
+    /// An integer parameter that is a RETURNING item binds as a cast to its
+    /// type.
+    fn pre_visit_statement(&mut self, statement: &mut Statement) -> ControlFlow<Self::Break> {
+        if let Some(items) = returning_items(statement) {
+            type_output_items(items, self.params);
         }
         ControlFlow::Continue(())
     }
@@ -125,10 +156,12 @@ fn placeholder_to_value(placeholder: &str, params: &[ParamValue]) -> Option<Valu
     let idx: usize = idx_str.parse().ok()?;
     let param = params.get(idx.checked_sub(1)?)?;
     Some(match param {
-        ParamValue::Null => Value::Null,
+        ParamValue::Null | ParamValue::IntNull(_) => Value::Null,
         ParamValue::Bool(true) => Value::Boolean(true),
         ParamValue::Bool(false) => Value::Boolean(false),
         ParamValue::Int64(n) => Value::Number(n.to_string(), false),
+        ParamValue::Int32(n) => Value::Number(n.to_string(), false),
+        ParamValue::Int16(n) => Value::Number(n.to_string(), false),
         // An exponent keeps the number a float. A non-finite float is the
         // number text `NaN`, `inf` or `-inf`, which `convert_value` reads as
         // a float. An expression position takes the cast form instead, see
@@ -240,8 +273,10 @@ mod tests {
             "WITH x AS (SELECT $1 AS v) SELECT v FROM x",
             &[ParamValue::Int64(42)],
         );
+        // A SELECT item is a width position: the bigint parameter keeps its
+        // type there, as PostgreSQL types a typed parameter.
         assert!(
-            result.contains("SELECT 42"),
+            result.contains("SELECT CAST(42 AS BIGINT) AS v"),
             "CTE body placeholder not substituted: {result}"
         );
         assert!(!result.contains("$1"), "placeholder survived: {result}");

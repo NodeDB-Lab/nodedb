@@ -4,9 +4,10 @@
 //! parameters, `bind_values` for a native statement's values.
 
 use super::literal::{param_literal, value_literal};
-use super::splice::{bind_tokens, first_word_is, tokenize};
+use super::splice::{Form, bind_tokens, first_word_is, tokenize};
 use crate::error::Result;
 use crate::params::ParamValue;
+use crate::params_int_width::{int_param_cast_text, width_placeholder_positions};
 
 /// SQL text whose prepared-statement `$N` placeholders have been
 /// substituted with concrete literals.
@@ -48,9 +49,26 @@ pub fn bind_dsl(sql: &str, params: &[ParamValue]) -> Result<BoundDslSql> {
     }
     let tokens = tokenize(sql)?;
     let typed = first_word_is(&tokens, "UPSERT");
-    let out = bind_tokens(sql, &tokens, typed, params.len(), |index, form| {
-        params.get(index).map(|param| param_literal(param, form))
-    })?;
+    let width_at = if typed {
+        width_placeholder_positions(sql)
+    } else {
+        Vec::new()
+    };
+    let out = bind_tokens(
+        sql,
+        &tokens,
+        typed,
+        params.len(),
+        &width_at,
+        |index, form, at_width| {
+            params.get(index).map(|param| match (form, at_width) {
+                (Form::Sql, true) => {
+                    int_param_cast_text(param).unwrap_or_else(|| param_literal(param, form))
+                }
+                _ => param_literal(param, form),
+            })
+        },
+    )?;
     Ok(BoundDslSql(out))
 }
 
@@ -74,9 +92,31 @@ pub fn bind_values(sql: &str, values: &[nodedb_types::Value]) -> Result<String> 
     let typed = !["GRAPH", "MATCH", "OPTIONAL", "SEARCH", "CRDT", "CALL"]
         .iter()
         .any(|word| first_word_is(&tokens, word));
-    bind_tokens(sql, &tokens, typed, values.len(), |index, form| {
-        values.get(index).map(|value| value_literal(value, form))
-    })
+    // A native integer carries no declared width, so at a width position
+    // it is `bigint`, as an undeclared pgwire integer is.
+    let width_at = if typed {
+        width_placeholder_positions(sql)
+    } else {
+        Vec::new()
+    };
+    bind_tokens(
+        sql,
+        &tokens,
+        typed,
+        values.len(),
+        &width_at,
+        |index, form, at_width| {
+            values
+                .get(index)
+                .map(|value| match (form, at_width, value) {
+                    (Form::Sql, true, nodedb_types::Value::Integer(i)) => {
+                        int_param_cast_text(&ParamValue::Int64(*i))
+                            .unwrap_or_else(|| value_literal(value, form))
+                    }
+                    _ => value_literal(value, form),
+                })
+        },
+    )
 }
 
 #[cfg(test)]

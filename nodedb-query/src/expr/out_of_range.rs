@@ -11,10 +11,10 @@ pub enum OutOfRange {
     /// float or a numeric.
     #[error("bigint out of range")]
     Bigint,
-    /// A cast to `integer` of a value past the `i32` range.
+    /// An `integer` result past the `i32` range: arithmetic, or a cast.
     #[error("integer out of range")]
     Integer,
-    /// A cast to `smallint` of a value past the `i16` range.
+    /// A `smallint` result past the `i16` range: arithmetic, or a cast.
     #[error("smallint out of range")]
     Smallint,
     /// A numeric result past the range `Decimal` holds.

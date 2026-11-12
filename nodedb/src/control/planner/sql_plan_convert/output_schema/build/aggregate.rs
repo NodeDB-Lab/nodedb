@@ -52,10 +52,11 @@ pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
             TimeseriesAggOutput::GroupColumn { name, .. } => {
                 types.get(name).copied().unwrap_or(DdlColType::Text)
             }
-            TimeseriesAggOutput::Aggregate(index) => scan
-                .aggregates
-                .get(*index)
-                .map_or(DdlColType::Text, |agg| infer_aggregate_type(agg, &types)),
+            TimeseriesAggOutput::Aggregate(index) => {
+                scan.aggregates.get(*index).map_or(DdlColType::Text, |agg| {
+                    gap_filled_type(scan, agg, infer_aggregate_type(agg, &types))
+                })
+            }
         };
         columns.push(OutputColumn {
             lookup_key: if renamed { name.clone() } else { key },
@@ -69,6 +70,31 @@ pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
         cp_computed: Vec::new(),
         declared_key: None,
     })
+}
+
+/// The type of aggregate `agg` of `scan`, typed `ty`, when its buckets are
+/// gap-filled.
+///
+/// A `prev`, `linear` or literal fill writes the neighbouring buckets' AVG,
+/// or the literal, into each value aggregate of a filled bucket. Over an
+/// integer column that AVG is a numeric, so an integer-typed value
+/// aggregate is `Numeric`: an integer cell renders as valid `numeric` text
+/// too. A count stays a count. A `null` fill, or none, keeps `ty`.
+fn gap_filled_type(scan: &TimeseriesScanPlan, agg: &AggregateExpr, ty: DdlColType) -> DdlColType {
+    if matches!(agg.function.as_str(), "count" | "approx_count_distinct") {
+        return ty;
+    }
+    use crate::engine::timeseries::gap_fill::GapFillStrategy;
+    let fills_values = matches!(
+        GapFillStrategy::parse(&scan.gap_fill),
+        Some(GapFillStrategy::Prev | GapFillStrategy::Linear | GapFillStrategy::Literal(_))
+    );
+    match ty {
+        DdlColType::Int2 | DdlColType::Int4 | DdlColType::Int8 if fills_values => {
+            DdlColType::Numeric
+        }
+        other => other,
+    }
 }
 
 /// The columns a native grouped timeseries scan encodes, in its own order:
@@ -311,9 +337,9 @@ mod tests {
         // SUM(float_col) -> Float8.
         assert_eq!(schema.columns[3].display_name, "sum_amount");
         assert_eq!(schema.columns[3].ty, DdlColType::Float8);
-        // SUM(int_col) stays Text (numeric promotion, no regression).
+        // SUM(bigint_col) -> Numeric, as PostgreSQL's sum(int8).
         assert_eq!(schema.columns[4].display_name, "sum_n");
-        assert_eq!(schema.columns[4].ty, DdlColType::Text);
+        assert_eq!(schema.columns[4].ty, DdlColType::Numeric);
     }
 
     fn timeseries_scan(

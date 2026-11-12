@@ -105,8 +105,9 @@ async fn extended_query_constant_and_param_projection() {
         rows[0].len()
     );
 
-    // A constant integer is typed as int8 in the row description.
-    let x: i64 = rows[0].get("x");
+    // A constant integer that fits `integer` is typed int4, as PostgreSQL
+    // types the literal `1`.
+    let x: i32 = rows[0].get("x");
     let y: &str = rows[0].get("y");
     assert_eq!(x, 1);
     assert_eq!(y, "hi");
@@ -136,7 +137,8 @@ async fn extended_query_pure_constant_projection() {
         rows[0].len()
     );
 
-    let x: i64 = rows[0].get("x");
+    // `1` fits `integer`, so it is int4, as in PostgreSQL.
+    let x: i32 = rows[0].get("x");
     let y: &str = rows[0].get("y");
     assert_eq!(x, 1);
     assert_eq!(y, "hi");

@@ -28,12 +28,17 @@ pub(super) fn tokenize(sql: &str) -> Result<Vec<TokenWithSpan>> {
 /// placeholder inside a `{ ... }` object literal takes the object-literal
 /// typed form. A `MATCH` pattern's braces are a Cypher property map, parsed
 /// by its own grammar, so they take plain text.
+///
+/// `width_at` holds the source positions of the placeholders at a width
+/// position (see `params_int_width`). `literal` is told whether its
+/// placeholder sits at one, so an integer there takes its typed cast.
 pub(super) fn bind_tokens(
     sql: &str,
     tokens: &[TokenWithSpan],
     typed: bool,
     count: usize,
-    literal: impl Fn(usize, Form) -> Option<String>,
+    width_at: &[Location],
+    literal: impl Fn(usize, Form, bool) -> Option<String>,
 ) -> Result<String> {
     let object_braces = !first_word_is(tokens, "MATCH") && !first_word_is(tokens, "OPTIONAL");
     let line_starts: Vec<usize> = std::iter::once(0)
@@ -69,7 +74,7 @@ pub(super) fn bind_tokens(
             .strip_prefix('$')
             .and_then(|digits| digits.parse::<usize>().ok())
             .and_then(|n| n.checked_sub(1))
-            .and_then(|index| literal(index, form))
+            .and_then(|index| literal(index, form, width_at.contains(&tok.span.start)))
             .ok_or_else(|| SqlError::Parse {
                 detail: format!(
                     "DSL parameter bind: placeholder {p} has no corresponding \
@@ -264,7 +269,42 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(bound, "SELECT 1,\n  2");
+        // SELECT items are width positions: a native integer there is
+        // `bigint`.
+        assert_eq!(bound, "SELECT CAST(1 AS BIGINT),\n  CAST(2 AS BIGINT)");
+    }
+
+    /// A native integer at a width position binds as `bigint`, as an
+    /// undeclared pgwire integer does. A comparison keeps the literal.
+    #[test]
+    fn a_native_integer_is_bigint_at_a_width_position() {
+        let value = [nodedb_types::Value::Integer(2_147_483_647)];
+        assert_eq!(
+            bind_values("SELECT $1 + 1", &value).unwrap(),
+            "SELECT CAST(2147483647 AS BIGINT) + 1"
+        );
+        assert_eq!(
+            bind_values("SELECT abs($1), mod($1, 2) FROM t", &value).unwrap(),
+            "SELECT abs(CAST(2147483647 AS BIGINT)), mod(CAST(2147483647 AS BIGINT), 2) FROM t"
+        );
+        assert_eq!(
+            bind_values("SELECT id FROM t WHERE id = $1", &value).unwrap(),
+            "SELECT id FROM t WHERE id = 2147483647"
+        );
+        assert_eq!(
+            bind_values(
+                "UPDATE t SET n = $1 WHERE id = 'a' RETURNING $1 AS n",
+                &value
+            )
+            .unwrap(),
+            "UPDATE t SET n = 2147483647 WHERE id = 'a' RETURNING CAST(2147483647 AS BIGINT) AS n"
+        );
+        assert_eq!(
+            bind_dsl("SELECT $1 * 2", &[ParamValue::Int32(5)])
+                .unwrap()
+                .as_str(),
+            "SELECT 5 * 2"
+        );
     }
 
     /// A statement the tokenizer refuses is a parse error, never rewritten.
@@ -310,7 +350,24 @@ mod tests {
                 ]
             )
             .unwrap(),
-            "SELECT 1 -(-5), (-7)::text"
+            "SELECT 1 -CAST(-5 AS BIGINT), (-7)::text"
+        );
+        // Outside a width position the negative literal is parenthesized.
+        assert_eq!(
+            bind_values(
+                "SELECT * FROM t WHERE n = -$1",
+                &[nodedb_types::Value::Integer(-5)]
+            )
+            .unwrap(),
+            "SELECT * FROM t WHERE n = -CAST(-5 AS BIGINT)"
+        );
+        assert_eq!(
+            bind_values(
+                "SELECT * FROM t WHERE n = $1",
+                &[nodedb_types::Value::Integer(-5)]
+            )
+            .unwrap(),
+            "SELECT * FROM t WHERE n = (-5)"
         );
         let bound = bind_dsl(
             "SEARCH v USING VECTOR(ARRAY[1.0], 1 -$1)",

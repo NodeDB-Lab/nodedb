@@ -80,6 +80,21 @@ fn inferred_param_type(inferred: &nodedb_sql::InferredParamType) -> Option<Type>
     }
 }
 
+/// The parameters a Describe plans with: the NULL of each integer
+/// parameter's type, and NULL for every other parameter.
+fn describe_params(param_types: &[Option<Type>]) -> Vec<nodedb_sql::ParamValue> {
+    use nodedb_query::cast::IntWidth;
+    param_types
+        .iter()
+        .map(|ty| match ty {
+            Some(ty) if *ty == Type::INT8 => nodedb_sql::ParamValue::IntNull(IntWidth::Int8),
+            Some(ty) if *ty == Type::INT4 => nodedb_sql::ParamValue::IntNull(IntWidth::Int4),
+            Some(ty) if *ty == Type::INT2 => nodedb_sql::ParamValue::IntNull(IntWidth::Int2),
+            _ => nodedb_sql::ParamValue::Null,
+        })
+        .collect()
+}
+
 /// Implements pgwire's `QueryParser` trait for NodeDB.
 ///
 /// On Parse message: parses SQL via sqlparser, resolves each `$N` placeholder
@@ -287,10 +302,22 @@ impl NodeDbQueryParser {
         // structure, so substitute placeholders with NULL literals
         // for this planning pass. Execution re-plans with real bound
         // values.
-        let sql_for_inference = substitute_placeholders_with_null(&sql_stripped);
-        let plans = match nodedb_sql::plan_sql(&sql_for_inference, catalog) {
+        //
+        // The placeholders bind through the AST binder Execute uses, an
+        // integer parameter as the NULL of its type and every other one as
+        // NULL. A width position then types the parameter as Execute types
+        // it, and each output item takes the name Execute gives it.
+        let describe_params = describe_params(&param_types);
+        let plans = match nodedb_sql::plan_sql_with_params(&sql_stripped, &describe_params, catalog)
+        {
             Ok(p) => p,
-            Err(_) => return (param_types, Vec::new()),
+            Err(_) => {
+                let sql_for_inference = substitute_placeholders_with_null(&sql_stripped);
+                match nodedb_sql::plan_sql(&sql_for_inference, catalog) {
+                    Ok(p) => p,
+                    Err(_) => return (param_types, Vec::new()),
+                }
+            }
         };
 
         // The RETURNING clause resolves against the planned target exactly as

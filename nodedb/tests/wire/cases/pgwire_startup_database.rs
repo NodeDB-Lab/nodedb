@@ -86,7 +86,8 @@ async fn a_known_startup_database_answers_each_statement_with_its_own_reply() {
             .query_one(&format!("SELECT {n} AS v"), &[])
             .await
             .unwrap_or_else(|e| panic!("SELECT {n}: {e}"));
-        assert_eq!(rows.get::<_, i64>(0), n, "statement {n} read another reply");
+        // `SELECT n` is an `integer`, as in PostgreSQL.
+        assert_eq!(rows.get::<_, i32>(0), n, "statement {n} read another reply");
     }
     handle.abort();
 }

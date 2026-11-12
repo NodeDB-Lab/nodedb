@@ -3,7 +3,9 @@
 //! The column namespace an expression converts against.
 
 use crate::error::Result;
+use crate::resolver::column_naming::BareColumn;
 use crate::resolver::columns::TableScope;
+use crate::types::ColumnInfo;
 
 /// The relations an identifier in this expression can name.
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +55,30 @@ impl ColumnScope<'_> {
                 }
             },
         }
+    }
+
+    /// The declared column a converted reference reads, optionally qualified
+    /// by `table_ref`.
+    ///
+    /// A qualifier names one of this scope's relations. A bare name reads
+    /// the relation it resolves to. A bare name that is also an output name
+    /// reads the relation that declares it, so a clause that sees output
+    /// names types it as the SELECT list does. `None` under `Unchecked`, for
+    /// an enclosing query's column, and for a column no relation declares.
+    pub fn declared_column(&self, table_ref: Option<&str>, column: &str) -> Option<&ColumnInfo> {
+        let Self::Relations(scope) = self else {
+            return None;
+        };
+        let col = column.to_lowercase();
+        let table = match table_ref {
+            Some(table) => scope.table_by_ref(table)?,
+            None => match scope.resolve_bare(&col).ok()? {
+                BareColumn::Relation(table) => table,
+                BareColumn::Output => return scope.declared_column(None, &col),
+                BareColumn::Outer => return None,
+            },
+        };
+        table.info.columns.iter().find(|c| c.name == col)
     }
 
     /// Whether an expression here is evaluated once per row of some relation.

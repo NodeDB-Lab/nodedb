@@ -28,10 +28,12 @@ pub fn param_sql_text(param: &ParamValue) -> String {
         return typed;
     }
     match param {
-        ParamValue::Null => "NULL".to_owned(),
+        ParamValue::Null | ParamValue::IntNull(_) => "NULL".to_owned(),
         ParamValue::Bool(true) => "TRUE".to_owned(),
         ParamValue::Bool(false) => "FALSE".to_owned(),
         ParamValue::Int64(n) => n.to_string(),
+        ParamValue::Int32(n) => n.to_string(),
+        ParamValue::Int16(n) => n.to_string(),
         ParamValue::Float64(f) => float_literal_text(*f),
         ParamValue::Decimal(d) => decimal_literal_text(d),
         ParamValue::Text(s) => nodedb_types::sql_quote::quote_literal(s),
@@ -121,9 +123,11 @@ pub fn param_object_literal_text(param: &ParamValue) -> String {
 /// `"-Infinity"`), as `to_json` renders it.
 pub fn param_json_text(param: &ParamValue) -> String {
     match param {
-        ParamValue::Null => "null".to_owned(),
+        ParamValue::Null | ParamValue::IntNull(_) => "null".to_owned(),
         ParamValue::Bool(b) => b.to_string(),
         ParamValue::Int64(n) => n.to_string(),
+        ParamValue::Int32(n) => n.to_string(),
+        ParamValue::Int16(n) => n.to_string(),
         ParamValue::Float64(f) => match nodedb_types::value::non_finite_float_text(*f) {
             Some(text) => json_string(text),
             None => float_literal_text(*f),

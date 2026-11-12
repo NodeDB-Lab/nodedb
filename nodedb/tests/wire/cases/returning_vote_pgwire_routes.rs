@@ -170,3 +170,51 @@ async fn a_list_on_calvin_answers_as_the_direct_path() {
         assert_eq!(row.get("v").map(String::as_str), Some("7"), "{list}");
     }
 }
+
+/// `v * 1` on an `INT` column is `integer`, as in PostgreSQL, so a Calvin
+/// list that computes it answers the same name, type and value as the
+/// direct path's bare `v`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_computed_integer_answers_as_its_column() {
+    let server = TestServer::start().await;
+    create(
+        &server,
+        "CREATE COLLECTION rvp_width (id TEXT PRIMARY KEY, v INT) \
+         WITH (engine='document_strict')",
+    )
+    .await;
+    let direct = "RETURNING id AS k, v";
+    let calvin = "RETURNING id AS k, v * 1 AS v";
+
+    let direct_columns = described(
+        &server,
+        &format!("INSERT INTO rvp_width (id, v) VALUES ('w0', 7) {direct}"),
+    )
+    .await;
+    let calvin_columns = described(
+        &server,
+        &format!("INSERT INTO rvp_width (id, v) VALUES ('w1', 7) {calvin}"),
+    )
+    .await;
+    assert_eq!(
+        calvin_columns, direct_columns,
+        "the computed column answers the column's name and type"
+    );
+    assert_eq!(
+        direct_columns.get(1).map(|(_, ty)| ty.as_str()),
+        Some("int4")
+    );
+
+    for (id, list) in [("w2", direct), ("w3", calvin)] {
+        let rows = server
+            .query_named_rows(&format!(
+                "INSERT INTO rvp_width (id, v) VALUES ('{id}', 7) {list}"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("{list}: {e}"));
+        let [row] = rows.as_slice() else {
+            panic!("{list}: one row, got {rows:?}");
+        };
+        assert_eq!(row.get("v").map(String::as_str), Some("7"), "{list}");
+    }
+}

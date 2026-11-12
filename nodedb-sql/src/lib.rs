@@ -22,6 +22,7 @@ pub mod functions;
 pub mod optimizer;
 pub mod params;
 pub mod params_composite;
+mod params_int_width;
 pub mod params_typed;
 pub mod params_value;
 pub mod parser;

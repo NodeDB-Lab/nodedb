@@ -35,6 +35,9 @@ pub fn typed_param_sql_literal(param: &ParamValue) -> Option<String> {
         ParamValue::Null
         | ParamValue::Bool(_)
         | ParamValue::Int64(_)
+        | ParamValue::Int32(_)
+        | ParamValue::Int16(_)
+        | ParamValue::IntNull(_)
         | ParamValue::Float64(_)
         | ParamValue::Text(_) => None,
     }
@@ -84,6 +87,9 @@ pub(crate) fn placeholder_to_typed(
         ParamValue::Null
         | ParamValue::Bool(_)
         | ParamValue::Int64(_)
+        | ParamValue::Int32(_)
+        | ParamValue::Int16(_)
+        | ParamValue::IntNull(_)
         | ParamValue::Float64(_)
         | ParamValue::Decimal(_)
         | ParamValue::Text(_)
@@ -169,8 +175,10 @@ mod tests {
         let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() else {
             panic!("a select");
         };
-        let sqlparser::ast::SelectItem::UnnamedExpr(expr) = &select.projection[0] else {
-            panic!("an unnamed item");
+        let (sqlparser::ast::SelectItem::UnnamedExpr(expr)
+        | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. }) = &select.projection[0]
+        else {
+            panic!("an expression item");
         };
         convert_expr(expr, &ColumnScope::Unchecked).expect("resolves")
     }
@@ -263,8 +271,10 @@ mod tests {
             .projection
             .iter()
             .map(|item| {
-                let sqlparser::ast::SelectItem::UnnamedExpr(expr) = item else {
-                    panic!("an unnamed item");
+                let (sqlparser::ast::SelectItem::UnnamedExpr(expr)
+                | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. }) = item
+                else {
+                    panic!("an expression item");
                 };
                 match convert_expr(expr, &ColumnScope::Unchecked).expect("resolves") {
                     SqlExpr::Literal(value) => value,

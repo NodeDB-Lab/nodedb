@@ -46,16 +46,20 @@ fn bare_column_type(expr: &SqlExpr, types: &HashMap<String, DdlColType>) -> Opti
 ///
 /// - A bare column reference resolves to its catalog type (default `Text`).
 /// - Comparison / logical / null / membership predicates are `Bool`.
-/// - Numeric literals type as their literal kind; a boolean literal is `Bool`.
+/// - An integer literal is `Int4` when `i32` holds it, else `Int8`, as
+///   PostgreSQL types it. Other numeric literals type as their literal
+///   kind; a boolean literal is `Bool`.
 /// - Arithmetic, math functions and casts take the type the evaluator gives
-///   their result.
+///   their result. The resolver casts an integer operation whose
+///   PostgreSQL result is `smallint` or `integer` to that type, so the cast
+///   carries its width.
 /// - Everything else — string functions, arbitrary functions — defaults to
 ///   `Text`, the safe fallback.
 pub fn infer_computed_expr_type(expr: &SqlExpr, types: &HashMap<String, DdlColType>) -> DdlColType {
     match expr {
         SqlExpr::Column { .. } => bare_column_type(expr, types).unwrap_or(DdlColType::Text),
         SqlExpr::Literal(v) => match v {
-            SqlValue::Int(_) => DdlColType::Int8,
+            SqlValue::Int(i) => int_width_type(nodedb_query::cast::IntWidth::of_literal(*i)),
             SqlValue::Float(_) => DdlColType::Float8,
             SqlValue::Bool(_) => DdlColType::Bool,
             SqlValue::Timestamp(_) => DdlColType::Timestamp,
@@ -168,7 +172,9 @@ fn numeric_class(ty: DdlColType) -> Option<NumericClass> {
 ///
 /// - A float operand makes the result `Float8`, whatever the other: the
 ///   evaluator reads the other operand as a float, or yields NULL.
-/// - Two integers stay `Int8`: `/` and `%` truncate toward zero.
+/// - Two integers are `Int8`: `/` and `%` truncate toward zero. An
+///   operation the resolver typed `smallint` or `integer` reaches here as a
+///   cast to that type, so an uncast one is evaluated as `bigint`.
 /// - A numeric with an integer or a numeric is `Numeric`.
 /// - Any other pair is `Text`.
 fn arithmetic_type(left: DdlColType, right: DdlColType) -> DdlColType {
@@ -242,6 +248,16 @@ fn math_function_type(
     })
 }
 
+/// The wire type of an integer of `width`.
+fn int_width_type(width: nodedb_query::cast::IntWidth) -> DdlColType {
+    use nodedb_query::cast::IntWidth;
+    match width {
+        IntWidth::Int2 => DdlColType::Int2,
+        IntWidth::Int4 => DdlColType::Int4,
+        IntWidth::Int8 => DdlColType::Int8,
+    }
+}
+
 /// The type a `CAST` to `to_type` yields. A name no runtime cast covers is
 /// `Text`.
 pub fn cast_type(to_type: &str) -> DdlColType {
@@ -276,8 +292,11 @@ pub fn time_bucket_type(source: Option<DdlColType>) -> DdlColType {
 /// - `COUNT(...)` is always Postgres `bigint` (`Int8`).
 /// - `MIN`/`MAX` preserve the input type when the argument is a resolvable
 ///   bare column; otherwise `Text`.
-/// - `SUM` promotes a floating-point argument to `Float8`; integer and
-///   numeric sums stay `Text`.
+/// - `SUM` is typed from its argument's inferred type, as PostgreSQL types
+///   it: `Int8` over a `smallint` or `integer`, `Numeric` over a `bigint` or
+///   a numeric, `Float8` over a float. The run-time SUM of integers is an
+///   integer while the total fits `i64`, else a numeric, and both render as
+///   valid `numeric` text. An untyped argument is `Text`.
 /// - `AVG` is typed from its argument's inferred type, as PostgreSQL types
 ///   it: `Float8` over a float argument, `Numeric` over an integer or a
 ///   numeric one. An untyped argument can hold either kind, so its AVG is a
@@ -299,8 +318,14 @@ pub fn infer_aggregate_type(
         // `{item, count, error}` objects.
         "approx_topk" => DdlColType::Json,
         "min" | "max" => arg_bare_type().unwrap_or(DdlColType::Text),
-        "sum" => match arg_bare_type() {
-            Some(DdlColType::Float8) | Some(DdlColType::Float4) => DdlColType::Float8,
+        "sum" => match agg
+            .args
+            .first()
+            .map(|arg| infer_computed_expr_type(arg, types))
+        {
+            Some(DdlColType::Int2 | DdlColType::Int4) => DdlColType::Int8,
+            Some(DdlColType::Int8 | DdlColType::Numeric) => DdlColType::Numeric,
+            Some(DdlColType::Float8 | DdlColType::Float4) => DdlColType::Float8,
             _ => DdlColType::Text,
         },
         // PostgreSQL's `avg` is float8 over a float and numeric over an
@@ -550,6 +575,17 @@ mod tests {
         let t = types_map();
         assert_eq!(
             infer_computed_expr_type(&SqlExpr::Literal(SqlValue::Int(1)), &t),
+            DdlColType::Int4
+        );
+        assert_eq!(
+            infer_computed_expr_type(&SqlExpr::Literal(SqlValue::Int(i64::from(i32::MIN))), &t),
+            DdlColType::Int4
+        );
+        assert_eq!(
+            infer_computed_expr_type(
+                &SqlExpr::Literal(SqlValue::Int(i64::from(i32::MAX) + 1)),
+                &t
+            ),
             DdlColType::Int8
         );
         assert_eq!(
@@ -618,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn sum_of_float_is_float8_sum_of_int_is_text() {
+    fn sum_follows_the_postgres_result_type() {
         let t = types_map();
         assert_eq!(
             infer_aggregate_type(&agg("sum", Some(column("amount"))), &t),
@@ -628,11 +664,35 @@ mod tests {
             infer_aggregate_type(&agg("avg", Some(column("amount"))), &t),
             DdlColType::Float8
         );
-        // SUM over an integer column stays Text. AVG over it is numeric.
+        // SUM over a bigint column is numeric. AVG over it is numeric.
         assert_eq!(
             infer_aggregate_type(&agg("sum", Some(column("n"))), &t),
-            DdlColType::Text
+            DdlColType::Numeric
         );
+        let mut t = t;
+        t.insert("i".to_string(), DdlColType::Int4);
+        t.insert("s".to_string(), DdlColType::Int2);
+        t.insert("price".to_string(), DdlColType::Numeric);
+        for (arg, want) in [
+            (column("i"), DdlColType::Int8),
+            (column("s"), DdlColType::Int8),
+            (column("price"), DdlColType::Numeric),
+            (column("label"), DdlColType::Text),
+            (column("missing"), DdlColType::Text),
+            (
+                SqlExpr::Cast {
+                    expr: Box::new(column("i")),
+                    to_type: "INTEGER".into(),
+                },
+                DdlColType::Int8,
+            ),
+        ] {
+            assert_eq!(
+                infer_aggregate_type(&agg("sum", Some(arg.clone())), &t),
+                want,
+                "{arg:?}"
+            );
+        }
         assert_eq!(
             infer_aggregate_type(&agg("avg", Some(column("n"))), &t),
             DdlColType::Numeric

@@ -86,7 +86,7 @@ pub fn shape_decoded_rows(
             // columns to the last value. Encoders re-derive the same keys via
             // `cell_keys` when reading cells.
             let keys = super::super::project::cell_keys(&display_names);
-            let projected_rows = rows
+            let mut projected_rows: Vec<ShapedRow> = rows
                 .iter()
                 .map(|row| project_row(row, &lookup_keys, &display_names, &keys))
                 .collect();
@@ -96,6 +96,9 @@ pub fn shape_decoded_rows(
             // each cell in that type's PostgreSQL text form; native/http
             // ignore column types entirely.
             let column_types: Vec<DdlColType> = s.columns.iter().map(|c| c.ty).collect();
+            // An integer cell is checked at the width its column announces:
+            // a `SUM` over `integer` past `i64` is "bigint out of range".
+            super::super::int_fit::fit_integer_cells(&keys, &column_types, &mut projected_rows)?;
             Ok(ShapedRows::from_rows(
                 display_names,
                 column_types,

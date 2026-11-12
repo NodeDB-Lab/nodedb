@@ -44,9 +44,11 @@ pub enum SqlPlan {
         columns: Vec<String>,
         values: Vec<SqlValue>,
         /// Per column, the type name its expression casts to when that
-        /// expression is a `CAST`, as the cast spells it; `None` for any
-        /// other expression. A folded `CAST(5 AS SMALLINT)` is the integer
-        /// `5`, and this keeps the `smallint` the column is announced as.
+        /// expression is a `CAST`, as the cast spells it, or the integer
+        /// type an integer expression has (`INTEGER` for `1`, `BIGINT` for
+        /// `1::INT8 * 2`); `None` for any other expression. A folded
+        /// `CAST(5 AS SMALLINT)` is the integer `5`, and this keeps the
+        /// `smallint` the column is announced as.
         cast_types: Vec<Option<String>>,
         /// Whether any projected expression called a `Volatile` function.
         /// The values were evaluated while this plan was built, so a cached

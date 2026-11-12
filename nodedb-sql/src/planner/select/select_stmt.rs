@@ -91,6 +91,14 @@ pub(super) fn plan_select(
                     expr: SqlExpr::Cast { to_type, .. },
                     ..
                 } => Some(to_type.clone()),
+                // An integer expression folds to an `i64`. Its PostgreSQL
+                // width types the column: `SELECT 1` is `integer`, and
+                // `SELECT 1::INT8 * 2` is `bigint`.
+                Projection::Computed { expr, .. } => crate::resolver::expr::int_width_of(
+                    expr,
+                    &crate::resolver::ColumnScope::Relations(&scope),
+                )
+                .map(|width| width.type_name().to_ascii_uppercase()),
                 _ => None,
             });
             match proj {

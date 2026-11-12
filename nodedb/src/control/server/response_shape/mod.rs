@@ -8,6 +8,7 @@ mod calvin_tag;
 pub mod cell;
 pub mod compose;
 pub mod frozen_answer;
+mod int_fit;
 pub mod kv;
 pub mod project;
 pub mod redaction;

@@ -176,9 +176,16 @@ impl NodeDbPgHandler {
             // known only to this statement's plan, so it rides along under the
             // Describe-phase columns: the shaper evaluates it before those
             // columns project, and a computed alias never renders as NULL.
+            //
+            // A Describe-phase column reads the cell of the same position in
+            // this statement's own schema. A column name derives from the
+            // item text, which a bound parameter rewrites (`SELECT $1 + 1`
+            // planned with NULL at Describe and with 5 here), so the
+            // Describe-phase key need not be the key this plan writes. The
+            // Describe-phase name and type stay what the client was told.
             let effective_schema_owned = match shaping.projection {
                 Some(described) => crate::control::server::response_shape::schema::OutputSchema {
-                    columns: described.columns.clone(),
+                    columns: keyed_by_position(&described.columns, &output_schema),
                     is_star: described.is_star,
                     cp_computed: output_schema.cp_computed,
                     declared_key: output_schema.declared_key,
@@ -425,4 +432,29 @@ fn sql_error(error: &crate::Error) -> PgWireError {
         code.to_owned(),
         message,
     )))
+}
+
+/// The Describe-phase `described` columns, each reading the lookup key of
+/// the column at its position in this statement's `planned` schema.
+///
+/// The two schemas come from one statement, so they hold the same columns
+/// in the same order. When either is a star or their lengths differ, the
+/// Describe-phase keys stand.
+fn keyed_by_position(
+    described: &[crate::control::server::response_shape::schema::OutputColumn],
+    planned: &crate::control::server::response_shape::schema::OutputSchema,
+) -> Vec<crate::control::server::response_shape::schema::OutputColumn> {
+    if planned.is_star || planned.columns.len() != described.len() {
+        return described.to_vec();
+    }
+    described
+        .iter()
+        .zip(&planned.columns)
+        .map(
+            |(described, planned)| crate::control::server::response_shape::schema::OutputColumn {
+                lookup_key: planned.lookup_key.clone(),
+                ..described.clone()
+            },
+        )
+        .collect()
 }

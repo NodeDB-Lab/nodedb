@@ -96,10 +96,12 @@ fn convert_binary_param(
         Type::BOOL => {
             decode_binary::<bool>(bytes, pg_type, index).map(nodedb_sql::ParamValue::Bool)
         }
-        Type::INT2 => decode_binary::<i16>(bytes, pg_type, index)
-            .map(|v| nodedb_sql::ParamValue::Int64(v as i64)),
-        Type::INT4 => decode_binary::<i32>(bytes, pg_type, index)
-            .map(|v| nodedb_sql::ParamValue::Int64(v as i64)),
+        Type::INT2 => {
+            decode_binary::<i16>(bytes, pg_type, index).map(nodedb_sql::ParamValue::Int16)
+        }
+        Type::INT4 => {
+            decode_binary::<i32>(bytes, pg_type, index).map(nodedb_sql::ParamValue::Int32)
+        }
         Type::INT8 => {
             decode_binary::<i64>(bytes, pg_type, index).map(nodedb_sql::ParamValue::Int64)
         }
@@ -142,6 +144,34 @@ fn decode_utf8_param(bytes: &[u8], index: usize) -> PgWireResult<&str> {
             "22021",
             format!("invalid UTF-8 in parameter ${}", index + 1),
         )
+    })
+}
+
+/// The parameter an integer `n` of an `INT2`, `INT4` or `INT8` parameter
+/// binds as, at that width. `n` past the width is 22003.
+fn int_param(
+    n: i64,
+    pg_type: &Type,
+    text: &str,
+    index: usize,
+) -> PgWireResult<nodedb_sql::ParamValue> {
+    let out_of_range = |type_name: &str| {
+        pg_error(
+            "22003",
+            format!(
+                "value \"{text}\" is out of range for type {type_name} (parameter ${})",
+                index + 1
+            ),
+        )
+    };
+    Ok(match *pg_type {
+        Type::INT2 => {
+            nodedb_sql::ParamValue::Int16(i16::try_from(n).map_err(|_| out_of_range("smallint"))?)
+        }
+        Type::INT4 => {
+            nodedb_sql::ParamValue::Int32(i32::try_from(n).map_err(|_| out_of_range("integer"))?)
+        }
+        _ => nodedb_sql::ParamValue::Int64(n),
     })
 }
 
@@ -266,13 +296,12 @@ pub(super) fn pgwire_text_to_param(
                 nodedb_sql::ParamValue::Text(text.to_string())
             }
         }
-        Type::INT2 | Type::INT4 | Type::INT8 => {
-            if let Ok(n) = text.parse::<i64>() {
-                nodedb_sql::ParamValue::Int64(n)
-            } else {
-                nodedb_sql::ParamValue::Text(text.to_string())
-            }
-        }
+        // An integer parameter keeps its declared width. Text past that
+        // width is 22003, as PostgreSQL's integer input refuses it.
+        Type::INT2 | Type::INT4 | Type::INT8 => match text.trim().parse::<i64>() {
+            Ok(n) => int_param(n, pg_type, text, index)?,
+            Err(_) => nodedb_sql::ParamValue::Text(text.to_string()),
+        },
         Type::FLOAT4 | Type::FLOAT8 => {
             if let Ok(f) = text.parse::<f64>() {
                 nodedb_sql::ParamValue::Float64(f)
@@ -563,11 +592,48 @@ mod tests {
     }
 
     #[test]
-    fn convert_int2_binary_widens_to_int64() {
+    fn convert_int2_binary_keeps_its_width() {
         let params = vec![Some(Bytes::from((-1i16).to_be_bytes().to_vec()))];
         let types = vec![Some(Type::INT2)];
         let result = convert_portal_params(&params, &types, &binary_format()).unwrap();
-        assert!(matches!(result[0], nodedb_sql::ParamValue::Int64(-1)));
+        assert!(matches!(result[0], nodedb_sql::ParamValue::Int16(-1)));
+    }
+
+    /// Text integer parameters keep their declared width, and text past it
+    /// is 22003.
+    #[test]
+    fn convert_int_text_keeps_its_width() {
+        let convert = |text: &'static [u8], ty: Type| {
+            convert_portal_params(
+                &[Some(Bytes::from_static(text))],
+                &[Some(ty)],
+                &text_format(),
+            )
+        };
+        assert!(matches!(
+            convert(b"7", Type::INT2).unwrap()[0],
+            nodedb_sql::ParamValue::Int16(7)
+        ));
+        assert!(matches!(
+            convert(b"7", Type::INT4).unwrap()[0],
+            nodedb_sql::ParamValue::Int32(7)
+        ));
+        assert!(matches!(
+            convert(b"3000000000", Type::INT8).unwrap()[0],
+            nodedb_sql::ParamValue::Int64(3_000_000_000)
+        ));
+        assert!(
+            convert(b"3000000000", Type::INT4)
+                .unwrap_err()
+                .to_string()
+                .contains("22003")
+        );
+        assert!(
+            convert(b"40000", Type::INT2)
+                .unwrap_err()
+                .to_string()
+                .contains("22003")
+        );
     }
 
     #[test]
@@ -575,7 +641,7 @@ mod tests {
         let params = vec![Some(Bytes::from(42i32.to_be_bytes().to_vec()))];
         let types = vec![Some(Type::INT4)];
         let result = convert_portal_params(&params, &types, &binary_format()).unwrap();
-        assert!(matches!(result[0], nodedb_sql::ParamValue::Int64(42)));
+        assert!(matches!(result[0], nodedb_sql::ParamValue::Int32(42)));
     }
 
     #[test]
