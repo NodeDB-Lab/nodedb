@@ -376,6 +376,7 @@ fn prepare_replicated<'a>(
             passive_vshard,
             tenant_id: _,
             ref values,
+            refused,
         } => {
             // The event's stored row is its durable effect: the entry
             // extends the applied prefix once the row holds it.
@@ -388,6 +389,7 @@ fn prepare_replicated<'a>(
                     position,
                     passive_vshard,
                     values,
+                    refused,
                 },
             ))
         }

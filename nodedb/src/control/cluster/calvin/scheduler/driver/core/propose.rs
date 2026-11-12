@@ -40,8 +40,10 @@ pub struct CalvinReadResultProposal {
     /// The vShard that read the values.
     pub passive_vshard: u32,
     /// The zerompk-encoded `Vec<(PassiveReadKeyId, Value)>` the passive read
-    /// returned.
+    /// returned. Empty when `refused`.
     pub values: Vec<u8>,
+    /// The passive read failed: the active barrier votes abort at once.
+    pub refused: bool,
 }
 
 /// One participant's frozen `RETURNING` sequence changes, for the data
@@ -110,6 +112,7 @@ pub async fn propose_calvin_read_result(
         database_id,
         passive_vshard,
         values,
+        refused,
     } = proposal;
     let entry = ReplicatedEntry::new(
         tenant_id.as_u64(),
@@ -121,6 +124,7 @@ pub async fn propose_calvin_read_result(
             passive_vshard,
             tenant_id: tenant_id.as_u64(),
             values,
+            refused,
         },
     );
     propose_barrier_entry(state, entry, (epoch, position), deadline).await

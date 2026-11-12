@@ -617,12 +617,18 @@ pub enum ReplicatedWrite {
         /// See `ReplicatedWrite::PointPut::rls_filters`.
         rls_filters: Vec<u8>,
     },
+    /// A passive vShard's read of Calvin txn `(epoch, position)`, for the
+    /// dependent-read barrier of an active vShard. `values` is the
+    /// zerompk-encoded `Vec<(PassiveReadKeyId, Value)>` the read returned.
+    /// `refused` marks a read that failed: `values` is empty, and the
+    /// barrier votes abort at once.
     CalvinReadResult {
         epoch: u64,
         position: u32,
         passive_vshard: u32,
         tenant_id: u64,
         values: Vec<u8>,
+        refused: bool,
     },
     DocTruncate {
         collection: String,

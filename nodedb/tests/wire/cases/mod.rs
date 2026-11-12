@@ -36,6 +36,7 @@ mod bitemporal_predicate_writes;
 mod bitemporal_statement_cut;
 mod bitemporal_valid_time_range;
 mod bulk_dml_event_emission;
+mod calvin_dependent_read_refusal;
 mod calvin_multi_part_node_delete;
 mod calvin_request_counts;
 mod calvin_returning_refused_sequences;

@@ -13,6 +13,9 @@
 //!
 //! - complete: the leader checks the values against the ones the coordinator
 //!   read, and stages the active slice or votes `PredictionDrift`;
+//! - refused: a passive vShard's read failed, so the leader votes abort at
+//!   once. Its vote carries no refusal: the passive vShard's own vote
+//!   carries the read's error, and the verdict reports it;
 //! - timed out: the leader votes abort;
 //! - waiting: the barrier stays open, unless an abort verdict is stored.
 //!
@@ -137,6 +140,19 @@ impl Scheduler {
         let log = self.barrier_logs.get(&txn_id).unwrap_or(&empty);
         match log.outcome(&barrier.passive) {
             BarrierOutcome::Complete => self.complete_barrier(txn_id),
+            BarrierOutcome::Refused => {
+                info!(
+                    vshard_id = self.vshard_id,
+                    epoch = txn_id.epoch,
+                    position = txn_id.position,
+                    "calvin: a passive read failed; voting abort"
+                );
+                self.abort_open_barrier(
+                    txn_id,
+                    AbortReason::ParticipantError,
+                    "a passive vShard's dependent read failed".to_owned(),
+                );
+            }
             BarrierOutcome::TimedOut => {
                 let missing = log.missing(&barrier.passive);
                 warn!(
@@ -535,6 +551,41 @@ mod tests {
 
         assert!(!staged_active(&mut data_side, 54));
         assert_eq!(abort_votes(&proposer), vec![AbortReason::PredictionDrift]);
+    }
+
+    /// A passive vShard's refused read ends the barrier at once: the
+    /// leader votes abort with no refusal of its own, stages nothing, and a
+    /// later result of that vShard does not count.
+    #[tokio::test]
+    async fn a_refused_read_votes_abort_at_once() {
+        let (mut scheduler, _dir, mut data_side, proposer, _registry) = scheduler();
+        lead_data_group(&mut scheduler);
+        grant(&mut scheduler, dependent_txn(60, Some(b"v1")));
+        assert!(scheduler.dependent_barrier.contains_key(&TxnId::new(60, 0)));
+
+        buffer(
+            &scheduler,
+            60,
+            BarrierEvent::ReadRefused {
+                passive_vshard: PASSIVE,
+            },
+        );
+        buffer(&scheduler, 60, read(b"v1"));
+        scheduler.drain_read_results();
+
+        assert!(scheduler.dependent_barrier.is_empty());
+        assert!(!staged_active(&mut data_side, 60));
+        let votes: Vec<(AbortReason, bool)> = proposer
+            .accepted()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SequencerEntry::AbortVote {
+                    reason, refusal, ..
+                } => Some((reason, refusal.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(votes, vec![(AbortReason::ParticipantError, false)]);
     }
 
     /// A follower holds the log of a dependent txn its leader committed. The

@@ -13,7 +13,13 @@
 //! - neither: a read-set participant, staged as a static slice.
 //!
 //! A passive-only vShard writes nothing. Its read answer is its vote: a
-//! successful read votes commit, a failed one votes abort.
+//! successful read votes commit, a failed one votes abort with the read's
+//! error as its refusal.
+//!
+//! A failed read also sends its refusal to every active vShard, through the
+//! same log entry a read result travels in. Each active barrier then votes
+//! abort at once: the verdict needs every participant's vote, and the
+//! barrier holds the active vote until its passive reads arrive.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,6 +33,7 @@ use super::deferred::{DispatchOutcome, DispatchStep};
 use super::halt::error_response_text;
 use super::propose::{CalvinReadResultProposal, propose_calvin_read_result};
 use super::scheduler::Scheduler;
+use super::staged_vote::staged_commit_vote;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::driver::types::{CommitState, PendingTxn};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -153,7 +160,9 @@ impl Scheduler {
         };
         let read = response.status == Status::Ok;
         if read {
-            self.propose_read_results(txn_id, response.payload.to_vec());
+            self.propose_read_results(txn_id, response.payload.to_vec(), false);
+        } else {
+            self.propose_read_results(txn_id, Vec::new(), true);
         }
         if !role.active {
             // A passive-only vShard writes nothing: its read answer carries
@@ -161,26 +170,42 @@ impl Scheduler {
             self.resolve_staged_commit(txn_id, response);
             return;
         }
+        // The read's own error is this vShard's refusal. A response no
+        // vote can be read from halts, as a passive-only vShard's does.
+        let cause = if read {
+            None
+        } else {
+            match staged_commit_vote(response) {
+                Ok(vote) => Some(
+                    vote.abort_cause()
+                        .unwrap_or_else(|| AbortReason::ParticipantError.into()),
+                ),
+                Err(_) => {
+                    self.resolve_staged_commit(txn_id, response);
+                    return;
+                }
+            }
+        };
         let Some(pending) = self.pending.remove(&txn_id) else {
             return;
         };
-        if read {
-            self.insert_dependent_barrier(pending.txn, txn_id, pending.lock_owner);
-        } else {
-            self.park_unstaged(
+        match cause {
+            None => self.insert_dependent_barrier(pending.txn, txn_id, pending.lock_owner),
+            Some(cause) => self.park_unstaged_with(
                 pending.txn,
                 txn_id,
                 pending.lock_owner,
-                AbortReason::ParticipantError,
+                cause,
                 error_response_text("passive read", response),
-            );
+            ),
         }
     }
 
-    /// Propose `values`, this vShard's passive read of `txn_id`, to the data
-    /// group of every active vShard of the txn. Each proposal runs on its
-    /// own task until `config.passive_timeout()` passes.
-    fn propose_read_results(&self, txn_id: TxnId, values: Vec<u8>) {
+    /// Propose `values`, this vShard's passive read of `txn_id`, or the
+    /// refusal of a failed read, to the data group of every active vShard of
+    /// the txn. Each proposal runs on its own task until
+    /// `config.passive_timeout()` passes.
+    fn propose_read_results(&self, txn_id: TxnId, values: Vec<u8>, refused: bool) {
         let Some(pending) = self.pending.get(&txn_id) else {
             return;
         };
@@ -212,6 +237,7 @@ impl Scheduler {
                 database_id: tx_class.database_id,
                 passive_vshard: self.vshard_id,
                 values: values.clone(),
+                refused,
             };
             let state = Arc::downgrade(&self.shared);
             #[cfg(feature = "failpoints")]
@@ -398,6 +424,79 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A passive read the core refused with a typed error, as the core
+    /// answers a failed read.
+    fn refused_answer(request_id: crate::types::RequestId) -> Response {
+        let mut response = answer(request_id, Status::Error);
+        response.error_code = Some(Box::new(ErrorCode::DataException {
+            detail: "the stored item does not read".into(),
+        }));
+        response.stage_vote = Some(StageVote::ParticipantError);
+        response
+    }
+
+    /// The `(reason, carries a refusal)` of every abort vote `proposer`
+    /// accepted.
+    fn abort_votes(proposer: &CapturingProposer) -> Vec<(AbortReason, bool)> {
+        proposer
+            .accepted()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SequencerEntry::AbortVote {
+                    reason, refusal, ..
+                } => Some((reason, refusal.is_some())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A passive-only vShard whose read fails votes abort with the read's
+    /// error as its refusal, so the verdict reports it.
+    #[tokio::test]
+    async fn a_failed_passive_read_votes_abort_with_its_error() {
+        let (mut scheduler, _dir, mut data_side, proposer) = leader();
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(passive_only_txn(74))));
+        let txn_id = TxnId::new(74, 0);
+        let request_id = passive_read_request(&mut data_side).expect("the passive read");
+
+        scheduler.handle_completion(txn_id, request_id, Some(refused_answer(request_id)));
+
+        assert_eq!(
+            abort_votes(&proposer),
+            vec![(AbortReason::ParticipantError, true)]
+        );
+    }
+
+    /// A vShard both passive and active whose read fails parks with the
+    /// read's error as its refusal, and opens no barrier.
+    #[tokio::test]
+    async fn a_failed_read_on_a_passive_and_active_vshard_votes_with_its_error() {
+        let (mut scheduler, _dir, mut data_side, proposer) = leader();
+        let mut txn = make_local_write_txn(75, 0);
+        std::sync::Arc::make_mut(&mut txn.tx_class).dependent_reads = Some(DependentReadSpec {
+            passive_reads: BTreeMap::from([(test_coll_vshard(), Vec::new())]),
+            expected: BTreeMap::new(),
+        });
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
+        let txn_id = TxnId::new(75, 0);
+        let request_id = passive_read_request(&mut data_side).expect("the passive read");
+
+        scheduler.handle_completion(txn_id, request_id, Some(refused_answer(request_id)));
+
+        assert!(!scheduler.dependent_barrier.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingVerdict)
+        );
+        assert_eq!(
+            abort_votes(&proposer),
+            vec![(AbortReason::ParticipantError, true)]
+        );
     }
 
     /// A vShard both passive and active opens its barrier once its own read

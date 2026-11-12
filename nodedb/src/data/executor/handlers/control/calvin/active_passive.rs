@@ -55,9 +55,21 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let mut results: Vec<(PassiveReadKeyId, Value)> = Vec::with_capacity(keys_to_read.len());
         for passive_key in keys_to_read {
+            // Fails the read of one collection's rows with a typed error, so
+            // a test can check that the error reaches the client.
+            #[cfg(feature = "failpoints")]
+            if let Some(detail) = crate::fail_point::eval_fail(
+                self.fail_scope,
+                &format!(
+                    "calvin::passive_read::{}",
+                    passive_key.engine_key.collection()
+                ),
+            ) {
+                return self.passive_read_refused(task, ErrorCode::DataException { detail });
+            }
             match self.read_passive_key(database_id, tenant_id, &passive_key.engine_key) {
                 Ok(values) => results.extend(values),
-                Err(code) => return self.response_error(task, code),
+                Err(code) => return self.passive_read_refused(task, code),
             }
         }
 
@@ -74,6 +86,15 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+
+    /// The answer of a passive read that failed with `code`: an abort stage
+    /// vote whose refusal is the error, so the participant's abort vote
+    /// carries it to the client.
+    fn passive_read_refused(&self, task: &ExecutionTask, code: ErrorCode) -> Response {
+        let mut response = self.response_error(task, code);
+        response.stage_vote = Some(StageVote::ParticipantError);
+        response
     }
 
     /// Stage an active-participant dependent-read Calvin txn for commit.
@@ -340,7 +361,8 @@ mod tests {
     }
 
     /// A key set that names no readable row refuses the read, so the
-    /// passive participant votes abort instead of reporting a value.
+    /// passive participant votes abort instead of reporting a value. The
+    /// abort stage vote carries the error as its refusal.
     #[test]
     fn calvin_execute_passive_refuses_a_lock_only_key_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -355,7 +377,7 @@ mod tests {
         let resp = core.execute_calvin_execute_passive(&task, 1, 0, &TenantId::new(1), &keys);
 
         assert_eq!(resp.status, Status::Error);
-        assert_eq!(resp.stage_vote, None);
+        assert_eq!(resp.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             resp.error_code.as_deref(),
             Some(ErrorCode::Unsupported { .. })

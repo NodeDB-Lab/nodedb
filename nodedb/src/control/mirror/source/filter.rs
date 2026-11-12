@@ -154,6 +154,7 @@ mod tests {
                 passive_vshard: 2,
                 tenant_id: 1,
                 values: Vec::new(),
+                refused: false,
             },
         );
         assert!(!data_entry_leaves(&result, DB));

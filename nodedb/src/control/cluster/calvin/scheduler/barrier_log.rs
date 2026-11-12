@@ -4,20 +4,21 @@
 //! order the vShard's data-group log holds them.
 //!
 //! Three kinds of entry reach a barrier through the log: a passive vShard's
-//! read result, another participant's `RETURNING` sequence changes, and the
-//! barrier's timeout. Every replica of the vShard applies the log in one
-//! order, so every replica folds the same events into the same
-//! [`BarrierLog`]:
+//! read result or the refusal of its failed read, another participant's
+//! `RETURNING` sequence changes, and the barrier's timeout. Every replica of
+//! the vShard applies the log in one order, so every replica folds the same
+//! events into the same [`BarrierLog`]:
 //!
 //! - A result below the timeout entry counts. One above it does not.
-//! - The first read result of a passive vShard counts, and the first
-//!   sequence changes of each `(plan, vShard)`. A later copy, from a
+//! - The first read result or refusal of a passive vShard counts, and the
+//!   first sequence changes of each `(plan, vShard)`. A later copy, from a
 //!   re-proposal or a new leader, does not.
 //!
 //! [`BarrierLog::outcome`] is then the same on every replica: the read
-//! barrier completes when every passive vShard's result counts, and it
-//! times out when the timeout entry came first. A `RETURNING` evaluation
-//! reads the counted sequence changes the same way.
+//! barrier completes when every passive vShard's result counts, is refused
+//! when a passive vShard's refusal counts, and times out when the timeout
+//! entry came first. A `RETURNING` evaluation reads the counted sequence
+//! changes the same way.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,6 +44,8 @@ pub enum BarrierEvent {
         passive_vshard: u32,
         values: Vec<(PassiveReadKeyId, Value)>,
     },
+    /// A passive vShard's read failed. Its own vote carries the error.
+    ReadRefused { passive_vshard: u32 },
     /// The sequence changes of plans another participant froze.
     Sequences {
         source_vshard: u32,
@@ -57,6 +60,9 @@ pub enum BarrierEvent {
 pub enum BarrierOutcome {
     /// Every passive vShard's result came before any timeout.
     Complete,
+    /// A passive vShard's refusal came before any timeout: the txn cannot
+    /// commit.
+    Refused,
     /// The timeout came before a passive vShard's result.
     TimedOut,
     /// A passive vShard's result is still missing, and no timeout came.
@@ -67,6 +73,8 @@ pub enum BarrierOutcome {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BarrierLog {
     reads: ReceivedReads,
+    /// The passive vShards whose read failed.
+    refused_reads: BTreeSet<u32>,
     sequences: ReceivedSequences,
     /// The `(plan index, source vShard)` plans whose participant refused.
     refused: BTreeSet<(u32, u32)>,
@@ -82,7 +90,8 @@ impl BarrierLog {
             return false;
         }
         match event {
-            BarrierEvent::Read { passive_vshard, .. } => !self.reads.contains_key(passive_vshard),
+            BarrierEvent::Read { passive_vshard, .. }
+            | BarrierEvent::ReadRefused { passive_vshard } => !self.holds_read(*passive_vshard),
             BarrierEvent::Sequences {
                 source_vshard,
                 plans,
@@ -105,6 +114,9 @@ impl BarrierLog {
             } => {
                 self.reads.insert(passive_vshard, values);
             }
+            BarrierEvent::ReadRefused { passive_vshard } => {
+                self.refused_reads.insert(passive_vshard);
+            }
             BarrierEvent::Sequences {
                 source_vshard,
                 plans,
@@ -115,6 +127,12 @@ impl BarrierLog {
             }
             BarrierEvent::Timeout => self.timed_out = true,
         }
+    }
+
+    /// Whether the log counted the read result or the refusal of
+    /// `passive_vshard`.
+    fn holds_read(&self, passive_vshard: u32) -> bool {
+        self.reads.contains_key(&passive_vshard) || self.refused_reads.contains(&passive_vshard)
     }
 
     /// Whether the log counted the changes or the refusal of `key`.
@@ -141,7 +159,14 @@ impl BarrierLog {
             return;
         }
         for (passive_vshard, values) in later.reads {
-            self.reads.entry(passive_vshard).or_insert(values);
+            if !self.holds_read(passive_vshard) {
+                self.reads.insert(passive_vshard, values);
+            }
+        }
+        for passive_vshard in later.refused_reads {
+            if !self.holds_read(passive_vshard) {
+                self.refused_reads.insert(passive_vshard);
+            }
         }
         for (key, effects) in later.sequences {
             self.note_plan(key, false, effects);
@@ -155,7 +180,11 @@ impl BarrierLog {
     /// The events this log holds: one per counted result, one per counted
     /// plan's sequence changes, one for a timeout.
     pub fn event_count(&self) -> usize {
-        self.reads.len() + self.sequences.len() + self.refused.len() + usize::from(self.timed_out)
+        self.reads.len()
+            + self.refused_reads.len()
+            + self.sequences.len()
+            + self.refused.len()
+            + usize::from(self.timed_out)
     }
 
     /// Whether the timeout entry is in the log: no later result counts.
@@ -185,6 +214,11 @@ impl BarrierLog {
     pub fn outcome(&self, passive: &BTreeSet<u32>) -> BarrierOutcome {
         if passive.iter().all(|vshard| self.reads.contains_key(vshard)) {
             BarrierOutcome::Complete
+        } else if passive
+            .iter()
+            .any(|vshard| self.refused_reads.contains(vshard))
+        {
+            BarrierOutcome::Refused
         } else if self.timed_out {
             BarrierOutcome::TimedOut
         } else {
@@ -197,7 +231,7 @@ impl BarrierLog {
         passive
             .iter()
             .copied()
-            .filter(|vshard| !self.reads.contains_key(vshard))
+            .filter(|vshard| !self.holds_read(*vshard))
             .collect()
     }
 
@@ -219,6 +253,7 @@ impl BarrierLog {
                 .iter()
                 .map(|(vshard, values)| (*vshard, values.clone()))
                 .collect(),
+            refused_reads: self.refused_reads.iter().copied().collect(),
             sequences: self
                 .sequences
                 .iter()
@@ -242,6 +277,7 @@ impl BarrierLog {
             })?;
         Ok(Self {
             reads: stored.reads.into_iter().collect(),
+            refused_reads: stored.refused_reads.into_iter().collect(),
             sequences: stored
                 .sequences
                 .into_iter()
@@ -258,6 +294,8 @@ impl BarrierLog {
 #[msgpack(map)]
 struct StoredBarrierLog {
     reads: Vec<(u32, Vec<(PassiveReadKeyId, Value)>)>,
+    /// Each passive vShard whose read failed.
+    refused_reads: Vec<u32>,
     /// `(plan index, source vShard, changes)`.
     sequences: Vec<(u32, u32, Vec<FrozenSequenceEffect>)>,
     /// `(plan index, source vShard)` of each refused plan.
@@ -313,6 +351,29 @@ mod tests {
         log.note(read(2, 20));
         assert_eq!(log.outcome(&passive(&[1, 2])), BarrierOutcome::TimedOut);
         assert_eq!(log.missing(&passive(&[1, 2])), vec![2]);
+    }
+
+    /// A refused read before the timeout refuses the barrier at once, and
+    /// a later result of the same vShard does not replace it. A refusal
+    /// after the timeout does not count.
+    #[test]
+    fn a_refused_read_refuses_the_barrier_once() {
+        let refused = |passive_vshard| BarrierEvent::ReadRefused { passive_vshard };
+        let mut log = BarrierLog::default();
+        log.note(read(1, 10));
+        log.note(refused(2));
+        assert!(!log.accepts(&read(2, 20)));
+        log.note(read(2, 20));
+        assert_eq!(log.outcome(&passive(&[1, 2])), BarrierOutcome::Refused);
+        assert!(log.missing(&passive(&[1, 2])).is_empty());
+        assert_eq!(log.event_count(), 2);
+        let bytes = log.to_bytes().expect("encode");
+        assert_eq!(BarrierLog::from_bytes(&bytes).expect("decode"), log);
+
+        let mut late = BarrierLog::default();
+        late.note(BarrierEvent::Timeout);
+        late.note(refused(2));
+        assert_eq!(late.outcome(&passive(&[2])), BarrierOutcome::TimedOut);
     }
 
     /// A barrier missing a result with no timeout waits.
