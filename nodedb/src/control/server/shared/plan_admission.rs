@@ -7,7 +7,7 @@
 //! Planning reads the catalog and records a descriptor version; the lease that
 //! pins that version is only acquired afterwards. A descriptor drain that starts
 //! between those two steps fails the acquisition, so both must live inside the
-//! same retry budget or the drain surfaces to the client as a hard error. The
+//! same retried unit or the drain surfaces to the client as a hard error. The
 //! acquisition fails closed before any lease is granted, so a retried attempt
 //! never re-reads data it was not entitled to.
 //!
@@ -26,7 +26,7 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
-use crate::control::server::shared::retry::retry_on_schema_change;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -95,7 +95,7 @@ pub async fn plan_authorize_and_admit_in_txn(
     read_txn: Option<crate::types::TxnId>,
 ) -> crate::Result<PlanAdmission> {
     let request = &request;
-    retry_on_schema_change(&request.state.lease_drain, move || {
+    retry_on_schema_change(DrainWait::of_statement(request.state), move || {
         plan_authorize_and_admit_once(request, read_txn)
     })
     .await

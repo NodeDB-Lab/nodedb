@@ -14,14 +14,13 @@ use super::CrashHarness;
 /// (rendered over pgwire as `40001: schema changed during execution
 /// (<descriptor>); please retry`).
 ///
-/// The server already retries this condition server-side for ~750ms
-/// (`retry_on_schema_change`, `control/server/shared/retry.rs`, 5 attempts,
-/// 50/100/200/400ms backoff) before giving up and surfacing it to the
-/// client. By the server's own contract, a client that still observes this
-/// error is expected to retry the statement — it is not a distinct failure
-/// mode, it is the same descriptor-lease-drain race the server's retry loop
-/// exists to absorb, just unlucky enough to still be running when the
-/// server's budget ran out. A harness that panics on it instead of retrying
+/// The server already waits this condition out server-side until the
+/// statement deadline (`retry_on_schema_change`,
+/// `control/server/shared/retry.rs`). It also surfaces it at once when the
+/// connection itself keeps a hold the drain waits for. By the server's own
+/// contract, a client that still observes this error is expected to retry
+/// the statement — it is not a distinct failure mode, it is the same
+/// descriptor-lease-drain race the server's retry loop exists to absorb. A harness that panics on it instead of retrying
 /// is a worse client than any real pgwire driver would be. This budget is
 /// separate from and on top of the server's own, and is deliberately short:
 /// it exists to cover the rare case where the drain outlives the server's

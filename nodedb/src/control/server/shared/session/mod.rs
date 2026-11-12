@@ -21,6 +21,7 @@ pub mod deadline;
 pub mod ephemeral_sequence;
 pub mod expand_pages;
 pub mod expander_stage;
+pub mod hold_owner;
 mod hot_key;
 mod leader_forward;
 pub mod lifecycle;

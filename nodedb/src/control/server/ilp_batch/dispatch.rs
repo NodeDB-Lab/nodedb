@@ -21,7 +21,8 @@ use crate::control::server::ilp_auth::AuthenticatedIlpContext;
 use crate::control::server::shared::authorization::authorize_task_set;
 use crate::control::server::shared::clone_write::write_lease;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
-use crate::control::server::shared::retry::retry_through_drain;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
+use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::TimeseriesOp;
@@ -311,9 +312,8 @@ async fn acquire_batch_write_leases(
     state: &SharedState,
     tasks: &[PhysicalTask],
 ) -> crate::Result<Vec<QueryLeaseScope>> {
-    retry_through_drain(
-        &state.lease_drain,
-        DEFAULT_DRAIN_TIMEOUT,
+    retry_on_schema_change(
+        DrainWait::until(state, StatementDeadline::after(DEFAULT_DRAIN_TIMEOUT)),
         move || async move {
             let mut leases = Vec::with_capacity(tasks.len());
             for task in tasks {

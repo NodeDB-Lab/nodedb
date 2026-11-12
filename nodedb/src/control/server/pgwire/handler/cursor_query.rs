@@ -6,7 +6,7 @@
 use pgwire::error::{PgWireError, PgWireResult};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::retry::retry_on_schema_change;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
 use crate::control::server::shared::session::SessionId;
 use crate::types::TraceId;
 
@@ -68,7 +68,7 @@ impl NodeDbPgHandler {
         // rejected cursor declaration consumes no descriptor lease. The scope
         // remains live while every cursor-materialization task is dispatched.
         let (tasks, _lease_scope) =
-            retry_on_schema_change(&self.state.lease_drain, move || async move {
+            retry_on_schema_change(DrainWait::of_statement(&self.state), move || async move {
                 crate::control::security::auth_fence::admit_permission_view(&self.state, tenant_id)
                     .await
                     .map_err(StatementSetupError::from)?;

@@ -22,7 +22,7 @@
 //! the version we read, `acquire_descriptor_lease` returns
 //! `Err::RetryableSchemaChanged`. We surface that as
 //! `SqlCatalogError::RetryableSchemaChanged`, which the statement
-//! entry points catch and retry (up to the retry budget) together
+//! entry points catch and retry (until the statement deadline) together
 //! with the post-planning lease acquisition, which can observe the
 //! same drain. On any other lease-acquire failure we log and
 //! proceed with the descriptor we read — lease acquisition is

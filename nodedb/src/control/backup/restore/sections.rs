@@ -20,6 +20,7 @@ use crate::control::state::SharedState;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot};
 
 use super::databases::DatabaseMap;
+use super::unchanged::leaves_row_unchanged;
 
 /// Merge every data section and the surrogate-pk section into one
 /// `TenantDataSnapshot` per source database, keyed by source database id.
@@ -227,11 +228,23 @@ pub(super) async fn apply_metadata_sections(
                     // Restored rows arrive as new writes in the row's mode. An
                     // existing collection keeps its conversion generation, so
                     // its replicas stay in step with it. A new one has none.
-                    coll.storage_conversion = state
-                        .credentials
-                        .catalog()
-                        .get_collection(coll.database_id, coll.tenant_id, &coll.name)?
-                        .and_then(|existing| existing.storage_conversion);
+                    let existing = state.credentials.catalog().get_committed_collection(
+                        coll.database_id,
+                        coll.tenant_id,
+                        &coll.name,
+                    )?;
+                    coll.storage_conversion = existing
+                        .as_ref()
+                        .and_then(|existing| existing.storage_conversion.clone());
+                    // A row the destination already holds as is needs no
+                    // put. Skipping it skips the version bump and the drain
+                    // that would stall concurrent writes on the collection.
+                    if let Some(existing) = existing
+                        && leaves_row_unchanged(&existing, &coll)?
+                    {
+                        restored.push(existing);
+                        continue;
+                    }
                     // Propose the collection so every node's applier
                     // (`catalog_entry::apply::collection::put`) writes the
                     // row — mirroring CREATE COLLECTION and DROP COLLECTION.

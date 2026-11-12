@@ -41,6 +41,9 @@ pub(super) struct ConnScope {
     /// The session the running statement reads its consistency from (see
     /// [`super::read_scope`]). `None` outside a statement scope.
     pub(super) read_session: RefCell<Option<ReadSession>>,
+    /// The connection the descriptor lease holds taken on this task belong
+    /// to (see [`super::hold_owner`]).
+    pub(super) hold_owner: u64,
 }
 
 impl ConnScope {
@@ -53,6 +56,7 @@ impl ConnScope {
             statement_notices: RefCell::new(Vec::new()),
             pending_shard_reads: RefCell::new(Vec::new()),
             read_session: RefCell::new(None),
+            hold_owner: super::hold_owner::fresh(),
         }
     }
 }
@@ -76,14 +80,21 @@ pub fn scoped<F: Future>(future: F) -> impl Future<Output = F::Output> {
 ///
 /// The body owns its DDL buffer, so its COMMIT or ROLLBACK never drains the
 /// transaction of a connection it runs inside. It keeps that connection's
-/// statement deadline and audit context.
+/// statement deadline, audit context and lease hold owner.
 pub fn scoped_system_txn<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    let (deadline, audit) = with_scope((None, None), |scope| {
-        (scope.statement_deadline.get(), scope.audit.borrow().clone())
+    let (deadline, audit, owner) = with_scope((None, None, None), |scope| {
+        (
+            scope.statement_deadline.get(),
+            scope.audit.borrow().clone(),
+            Some(scope.hold_owner),
+        )
     });
-    let slots = ConnScope::empty();
+    let mut slots = ConnScope::empty();
     slots.statement_deadline.set(deadline);
     *slots.audit.borrow_mut() = audit;
+    if let Some(owner) = owner {
+        slots.hold_owner = owner;
+    }
     CONN_SCOPE.scope(slots, future)
 }
 

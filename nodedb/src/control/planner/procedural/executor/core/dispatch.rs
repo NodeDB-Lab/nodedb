@@ -143,7 +143,7 @@ impl<'a> StatementExecutor<'a> {
         let read_txn = self.read_txn().await?;
         let (tasks, planned, lease_scope, sum_target_reads) =
             crate::control::server::shared::retry::retry_on_schema_change(
-                &self.state.lease_drain,
+                crate::control::server::shared::retry::DrainWait::of_statement(self.state),
                 move || async move {
                     let (mut tasks, _output_schema, versions, _) = ctx
                         .plan_sql_with_rls_and_versions(

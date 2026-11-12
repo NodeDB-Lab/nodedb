@@ -82,6 +82,9 @@ struct HoldersInner {
     next_key: u64,
     total: usize,
     by_descriptor: HashMap<DescriptorId, HashMap<u64, Arc<LeaseRevocation>>>,
+    /// The exact `(descriptor, version)` holds of each ticket with an owner,
+    /// by owner, then by ticket key.
+    by_owner: HashMap<u64, HashMap<u64, Vec<(DescriptorId, u64)>>>,
 }
 
 /// Every in-flight query hold on this node, keyed by descriptor.
@@ -95,6 +98,7 @@ pub struct LeaseHolders {
 pub struct HolderTicket {
     key: u64,
     descriptors: Vec<DescriptorId>,
+    owner: Option<u64>,
     revocation: Arc<LeaseRevocation>,
 }
 
@@ -109,9 +113,21 @@ impl LeaseHolders {
         Self::default()
     }
 
-    /// Register one query holding `descriptors`. Fails with a retryable
+    /// Register one query holding the exact `(descriptor, version)` pairs in
+    /// `holds`. `owner` is the connection the query runs on, `None` outside
+    /// a connection (see `session::hold_owner`). Fails with a retryable
     /// error when the node already tracks [`MAX_TRACKED_LEASE_HOLDS`] holds.
-    pub fn register(&self, descriptors: Vec<DescriptorId>) -> Result<HolderTicket, Error> {
+    pub fn register(
+        &self,
+        holds: &[(DescriptorId, u64)],
+        owner: Option<u64>,
+    ) -> Result<HolderTicket, Error> {
+        let mut seen = std::collections::HashSet::with_capacity(holds.len());
+        let descriptors: Vec<DescriptorId> = holds
+            .iter()
+            .filter(|(id, _)| seen.insert(id))
+            .map(|(id, _)| id.clone())
+            .collect();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner.total.saturating_add(descriptors.len()) > MAX_TRACKED_LEASE_HOLDS {
             return Err(Error::RetryableSchemaChanged {
@@ -132,9 +148,17 @@ impl LeaseHolders {
                 .insert(key, Arc::clone(&revocation));
         }
         inner.total = inner.total.saturating_add(descriptors.len());
+        if let Some(owner) = owner {
+            inner
+                .by_owner
+                .entry(owner)
+                .or_default()
+                .insert(key, holds.to_vec());
+        }
         Ok(HolderTicket {
             key,
             descriptors,
+            owner,
             revocation,
         })
     }
@@ -154,6 +178,27 @@ impl LeaseHolders {
             }
         }
         inner.total = inner.total.saturating_sub(removed);
+        if let Some(owner) = ticket.owner
+            && let Some(tickets) = inner.by_owner.get_mut(&owner)
+        {
+            tickets.remove(&ticket.key);
+            if tickets.is_empty() {
+                inner.by_owner.remove(&owner);
+            }
+        }
+    }
+
+    /// Whether a hold that `owner` keeps is at a version an active drain in
+    /// `drains` covers. Such a drain waits for that hold, so a statement on
+    /// the same connection cannot wait for the drain to end.
+    pub fn owner_blocks_drain(&self, owner: u64, drains: &super::DescriptorDrainTracker) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.by_owner.get(&owner).is_some_and(|tickets| {
+            tickets
+                .values()
+                .flatten()
+                .any(|(id, version)| drains.is_draining(id, *version))
+        })
     }
 
     /// Revoke every hold on any of `descriptors`. Returns how many queries
@@ -251,8 +296,12 @@ mod tests {
     #[test]
     fn revoke_reaches_only_holders_of_that_descriptor() {
         let holders = LeaseHolders::new();
-        let orders = holders.register(vec![id("orders")]).expect("register");
-        let users = holders.register(vec![id("users")]).expect("register");
+        let orders = holders
+            .register(&[(id("orders"), 1)], None)
+            .expect("register");
+        let users = holders
+            .register(&[(id("users"), 1)], None)
+            .expect("register");
 
         assert_eq!(holders.revoke(&[id("orders")]), 1);
         assert!(matches!(
@@ -266,7 +315,7 @@ mod tests {
     fn deregistered_holds_are_not_revoked() {
         let holders = LeaseHolders::new();
         let ticket = holders
-            .register(vec![id("orders"), id("users")])
+            .register(&[(id("orders"), 1), (id("users"), 1)], None)
             .expect("register");
         assert_eq!(holders.tracked(), 2);
         holders.deregister(&ticket);
@@ -274,15 +323,57 @@ mod tests {
         assert_eq!(holders.revoke_all(), 0);
     }
 
+    /// Only a hold its owner keeps at a drained version blocks that owner,
+    /// and a deregistered hold blocks nothing.
+    #[test]
+    fn owner_blocks_drain_only_for_its_own_drained_holds() {
+        use nodedb_cluster::DrainOwner;
+
+        let holders = LeaseHolders::new();
+        let drains = super::super::DescriptorDrainTracker::new();
+        let mine = holders
+            .register(&[(id("orders"), 1)], Some(7))
+            .expect("register");
+        let _other = holders
+            .register(&[(id("users"), 1)], Some(8))
+            .expect("register");
+        assert!(!holders.owner_blocks_drain(7, &drains), "no drain yet");
+
+        drains.install_start(id("orders"), DrainOwner::Ddl, 1, nodedb_types::Hlc::ZERO, 1);
+        assert!(holders.owner_blocks_drain(7, &drains));
+        assert!(
+            !holders.owner_blocks_drain(8, &drains),
+            "8 holds users only"
+        );
+        assert!(!holders.owner_blocks_drain(9, &drains), "9 holds nothing");
+
+        holders.deregister(&mine);
+        assert!(!holders.owner_blocks_drain(7, &drains));
+    }
+
+    /// A hold at a version past the drain's range does not block its owner.
+    #[test]
+    fn a_newer_hold_does_not_block_an_older_drain() {
+        use nodedb_cluster::DrainOwner;
+
+        let holders = LeaseHolders::new();
+        let drains = super::super::DescriptorDrainTracker::new();
+        let _ticket = holders
+            .register(&[(id("orders"), 2)], Some(7))
+            .expect("register");
+        drains.install_start(id("orders"), DrainOwner::Ddl, 1, nodedb_types::Hlc::ZERO, 1);
+        assert!(!holders.owner_blocks_drain(7, &drains));
+    }
+
     #[test]
     fn registration_is_bounded() {
         let holders = LeaseHolders::new();
-        let many: Vec<DescriptorId> = (0..MAX_TRACKED_LEASE_HOLDS)
-            .map(|i| id(&format!("c{i}")))
+        let many: Vec<(DescriptorId, u64)> = (0..MAX_TRACKED_LEASE_HOLDS)
+            .map(|i| (id(&format!("c{i}")), 1))
             .collect();
-        let _full = holders.register(many).expect("fill to the cap");
+        let _full = holders.register(&many, None).expect("fill to the cap");
         assert!(matches!(
-            holders.register(vec![id("one_more")]),
+            holders.register(&[(id("one_more"), 1)], None),
             Err(Error::RetryableSchemaChanged { .. })
         ));
     }
@@ -290,7 +381,9 @@ mod tests {
     #[tokio::test]
     async fn revoked_future_resolves_on_revoke() {
         let holders = Arc::new(LeaseHolders::new());
-        let ticket = holders.register(vec![id("orders")]).expect("register");
+        let ticket = holders
+            .register(&[(id("orders"), 1)], None)
+            .expect("register");
         let revocation = Arc::clone(ticket.revocation());
         let waiter = tokio::spawn(async move { revocation.revoked().await });
         tokio::task::yield_now().await;
@@ -373,7 +466,7 @@ mod tests {
         let ticket = state
             .lease_runtime
             .holders
-            .register(vec![id("orders")])
+            .register(&[(id("orders"), 1)], None)
             .expect("register");
 
         revoke_if_fenced(&state);

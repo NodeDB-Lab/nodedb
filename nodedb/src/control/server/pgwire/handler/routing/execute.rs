@@ -26,7 +26,7 @@ use super::super::core::NodeDbPgHandler;
 use super::dispatch_loop::DispatchTaskContext;
 use super::result_shaping::ResultShaping;
 use super::setup_error::StatementSetupError;
-use crate::control::server::shared::retry::retry_on_schema_change;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
 
 impl NodeDbPgHandler {
     pub(super) async fn execute_planned_sql_inner(
@@ -51,7 +51,7 @@ impl NodeDbPgHandler {
             .get_current_database(session_id)
             .unwrap_or(crate::types::DatabaseId::DEFAULT);
         let (tasks, output_schema, auth_ctx, plan_lease_scope, sum_target_reads) =
-            retry_on_schema_change(&self.state.lease_drain, move || async move {
+            retry_on_schema_change(DrainWait::of_statement(&self.state), move || async move {
                 let (mut tasks, output_schema, versions, auth_ctx) = self
                     .plan_statement_to_tasks(identity, sql, tenant_id, session_id, params)
                     .await?;
