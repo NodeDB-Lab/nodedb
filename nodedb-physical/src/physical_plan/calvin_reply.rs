@@ -54,8 +54,8 @@ pub struct CalvinInstall {
     pub mirror: bool,
 }
 
-/// The answer of `MetaOp::CalvinResolve`: the slice's resolved redo record
-/// and the reply its stage decided.
+/// The answer of `MetaOp::CalvinResolve`: one part of the slice's resolved
+/// redo, and on part `0` the reply its stage decided.
 #[derive(
     Debug,
     Clone,
@@ -65,10 +65,10 @@ pub struct CalvinInstall {
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
-pub struct CalvinResolved {
-    /// The zerompk-encoded redo record.
-    pub redo: Vec<u8>,
-    pub reply: CalvinReplySpec,
+pub struct CalvinResolvedPart {
+    pub part: super::ResolvedTxnPart,
+    /// Set on part `0` alone.
+    pub reply: Option<CalvinReplySpec>,
 }
 
 #[cfg(test)]
@@ -82,12 +82,17 @@ mod tests {
             CalvinReplySpec::Rows(vec![0x90]),
             CalvinReplySpec::Frozen,
         ] {
-            let resolved = CalvinResolved {
-                redo: vec![1, 2, 3],
-                reply,
+            let resolved = CalvinResolvedPart {
+                part: super::super::ResolvedTxnPart {
+                    index: 0,
+                    bytes: vec![1, 2, 3],
+                    done: true,
+                    opened: None,
+                },
+                reply: Some(reply),
             };
             let bytes = zerompk::to_msgpack_vec(&resolved).expect("encode");
-            let decoded: CalvinResolved = zerompk::from_msgpack(&bytes).expect("decode");
+            let decoded: CalvinResolvedPart = zerompk::from_msgpack(&bytes).expect("decode");
             assert_eq!(decoded, resolved);
         }
     }

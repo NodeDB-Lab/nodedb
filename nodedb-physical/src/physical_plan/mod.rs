@@ -48,7 +48,7 @@ pub use aggregate_functions::{
     AggregateParam, GENERIC_AGGREGATE_FUNCTIONS, PARAMETERIZED_AGGREGATE_FUNCTIONS,
 };
 pub use array::{ArrayBinaryOp, ArrayOp, ArrayReducer};
-pub use calvin_reply::{CalvinInstall, CalvinReplySpec, CalvinResolved};
+pub use calvin_reply::{CalvinInstall, CalvinReplySpec, CalvinResolvedPart};
 pub use cluster_array::ClusterArrayOp;
 pub use cluster_event::{ClusterEventOp, MAX_REMOTE_CDC_COMMITTED_OFFSETS};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};

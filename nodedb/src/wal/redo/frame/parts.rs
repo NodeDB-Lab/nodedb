@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use super::codec::{RedoFrameTag, push_frame};
+use super::codec::{RedoFrameTag, RedoFrames, decode_frame, push_frame};
 use crate::wal::{RedoRowChange, RedoRowSource, RedoSubRecord};
 
 /// Where a [`RedoPartWriter`] puts each part it closes. The writer reuses
@@ -115,9 +115,42 @@ pub fn frame_resolved_lists(
     Ok(writer.finish()?.0)
 }
 
+/// The record a run of resolved-list frames holds: its row sources,
+/// sub-records and row changes, with every header field empty. A frame of
+/// another kind is refused.
+pub fn lists_record(bytes: &[u8]) -> crate::Result<crate::wal::RedoRecord> {
+    let mut record = crate::wal::RedoRecord {
+        version: 1,
+        ops: Vec::new(),
+        calvin_stamp: None,
+        cross_shard_applied: None,
+        row_sources: Vec::new(),
+        publishes: Vec::new(),
+        row_changes: Vec::new(),
+        user_roles: Vec::new(),
+    };
+    for frame in RedoFrames::new(bytes) {
+        let (tag, body) = frame?;
+        match tag {
+            RedoFrameTag::RowSource => record.row_sources.push(decode_frame(tag, body)?),
+            RedoFrameTag::Op => record.ops.push(decode_frame(tag, body)?),
+            RedoFrameTag::RowChange => record.row_changes.push(decode_frame(tag, body)?),
+            RedoFrameTag::Header
+            | RedoFrameTag::Publish
+            | RedoFrameTag::Identity
+            | RedoFrameTag::Read => {
+                return Err(crate::Error::Serialization {
+                    format: "redo frame".into(),
+                    detail: format!("a resolved-list run holds a {tag:?} record"),
+                });
+            }
+        }
+    }
+    Ok(record)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::codec::{RedoFrames, decode_frame};
     use super::*;
 
     fn op(byte: u8, len: usize) -> RedoSubRecord {

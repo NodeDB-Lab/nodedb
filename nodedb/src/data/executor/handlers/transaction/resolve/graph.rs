@@ -3,9 +3,10 @@
 //! Graph serializer for transaction resolve. Turns staged edge post-images
 //! into the same WAL sub-record shapes the autocommit path produces. Each
 //! edge put and delete carries its two endpoint surrogates, which the overlay
-//! does not hold (`entry.rs` collects them from the plan nodes). Overlay entries
-//! are `HashMap`/`HashSet`-keyed, so they're sorted before emitting so
-//! replicas produce identical ops.
+//! does not hold (`entry.rs` collects them from the plan nodes). Edges and
+//! label deltas emit in the overlay's merged encoded-key order, a function
+//! of the staged state alone, so replicas produce identical ops. A label
+//! set is a `HashSet`, so it is sorted before it encodes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,7 +15,7 @@ use nodedb_wal::record::RecordType;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{
-    EdgeValidTime, GraphCollKey, GraphTxnOverlay, NodeLabelDelta,
+    EdgeValidTime, GraphCollKey, GraphTxnOverlay, StagedEdge,
 };
 use crate::wal::{NodeLabelRedo, RedoSubRecord};
 
@@ -27,11 +28,12 @@ use super::sink::OpSink;
 pub(super) type EdgeIdentityKey = (String, String, String, String);
 
 /// Append the redo sub-records for every graph edge post-image staged in
-/// `overlay` for `coll_key` to `ops`, in deterministic edge-identity order.
-/// `edge_surrogates` maps identity to the `(src, dst)` surrogate pair
-/// `entry.rs` collected from the plan nodes — the overlay carries none. A
-/// staged edge with no bound pair is refused. `ordinals` names each
-/// version's system-time ordinal.
+/// `overlay` for `coll_key` to `ops`: every put, then every delete, each in
+/// the overlay's encoded edge-key order. `edge_surrogates` maps identity to
+/// the `(src, dst)` surrogate pair `entry.rs` collected from the plan nodes —
+/// the overlay carries none. A staged edge with no bound pair is refused.
+/// `ordinals` names each version's system-time ordinal. Each pass streams
+/// the overlay and holds no edge it has passed.
 pub(super) fn serialize_graph_collection(
     overlay: &GraphTxnOverlay,
     coll_key: &GraphCollKey,
@@ -40,79 +42,113 @@ pub(super) fn serialize_graph_collection(
     ordinals: &EdgeOrdinals<'_>,
     ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut puts: BTreeMap<(String, String, String), (Vec<u8>, EdgeValidTime)> = BTreeMap::new();
-    for (src, label, dst, properties, valid) in overlay.staged_edges_for_collection(coll_key)? {
-        puts.insert((src, label, dst), (properties, valid));
-    }
-
-    let deletes: BTreeSet<(String, String, String)> = overlay
-        .staged_tombstones_for_collection(coll_key)?
-        .into_iter()
-        .collect();
-
-    for ((src, label, dst), (properties, valid)) in puts {
-        let identity_key = (
-            collection.to_string(),
-            src.clone(),
-            label.clone(),
-            dst.clone(),
-        );
-        let (src_surrogate, dst_surrogate) =
-            bound_endpoints(edge_surrogates, &identity_key, "put")?;
-        let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
-        let payload = zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
-            collection: collection.to_string(),
-            src_id: src,
+    for edge in overlay.iter_staged_edges(coll_key) {
+        let StagedEdge::Put {
+            src,
             label,
-            dst_id: dst,
+            dst,
             properties,
-            src_surrogate,
-            dst_surrogate,
-            system_from: Some(stamp.system_from),
-            applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
-            valid_from_ms: valid.valid_from_ms,
-            valid_until_ms: valid.valid_until_ms,
-        })
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("graph resolve edge put: {e}"),
-        })?;
-        ops.push(RedoSubRecord {
-            record_type: RecordType::Put as u32,
-            payload,
-        });
+            valid,
+        } = edge?
+        else {
+            continue;
+        };
+        ops.push(edge_put_record(
+            collection,
+            (src, label, dst),
+            properties,
+            valid,
+            edge_surrogates,
+            ordinals,
+        )?);
     }
-
-    for (src, label, dst) in deletes {
-        let identity_key = (
-            collection.to_string(),
-            src.clone(),
-            label.clone(),
-            dst.clone(),
-        );
-        let (src_surrogate, dst_surrogate) =
-            bound_endpoints(edge_surrogates, &identity_key, "delete")?;
-        let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
-        let payload = zerompk::to_msgpack_vec(&crate::wal::EdgeDeleteRedo {
-            collection: collection.to_string(),
-            src_id: src,
-            label,
-            dst_id: dst,
-            src_surrogate,
-            dst_surrogate,
-            system_from: Some(stamp.system_from),
-            applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
-        })
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("graph resolve edge delete: {e}"),
-        })?;
-        ops.push(RedoSubRecord {
-            record_type: RecordType::Delete as u32,
-            payload,
-        });
+    for edge in overlay.iter_staged_edges(coll_key) {
+        let StagedEdge::Tombstone { src, label, dst } = edge? else {
+            continue;
+        };
+        ops.push(edge_delete_record(
+            collection,
+            (src, label, dst),
+            edge_surrogates,
+            ordinals,
+        )?);
     }
     Ok(())
+}
+
+/// The redo `Put` of one staged edge.
+fn edge_put_record(
+    collection: &str,
+    (src, label, dst): (String, String, String),
+    properties: Vec<u8>,
+    valid: EdgeValidTime,
+    edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
+    ordinals: &EdgeOrdinals<'_>,
+) -> crate::Result<RedoSubRecord> {
+    let identity_key = (
+        collection.to_string(),
+        src.clone(),
+        label.clone(),
+        dst.clone(),
+    );
+    let (src_surrogate, dst_surrogate) = bound_endpoints(edge_surrogates, &identity_key, "put")?;
+    let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
+    let payload = zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
+        collection: collection.to_string(),
+        src_id: src,
+        label,
+        dst_id: dst,
+        properties,
+        src_surrogate,
+        dst_surrogate,
+        system_from: Some(stamp.system_from),
+        applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
+        valid_from_ms: valid.valid_from_ms,
+        valid_until_ms: valid.valid_until_ms,
+    })
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("graph resolve edge put: {e}"),
+    })?;
+    Ok(RedoSubRecord {
+        record_type: RecordType::Put as u32,
+        payload,
+    })
+}
+
+/// The redo `Delete` of one staged edge tombstone.
+fn edge_delete_record(
+    collection: &str,
+    (src, label, dst): (String, String, String),
+    edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
+    ordinals: &EdgeOrdinals<'_>,
+) -> crate::Result<RedoSubRecord> {
+    let identity_key = (
+        collection.to_string(),
+        src.clone(),
+        label.clone(),
+        dst.clone(),
+    );
+    let (src_surrogate, dst_surrogate) = bound_endpoints(edge_surrogates, &identity_key, "delete")?;
+    let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
+    let payload = zerompk::to_msgpack_vec(&crate::wal::EdgeDeleteRedo {
+        collection: collection.to_string(),
+        src_id: src,
+        label,
+        dst_id: dst,
+        src_surrogate,
+        dst_surrogate,
+        system_from: Some(stamp.system_from),
+        applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
+    })
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("graph resolve edge delete: {e}"),
+    })?;
+    Ok(RedoSubRecord {
+        record_type: RecordType::Delete as u32,
+        payload,
+    })
 }
 
 /// The bound `(src, dst)` surrogate pair of a staged edge. Refuses an edge the
@@ -143,7 +179,8 @@ fn bound_endpoints(
 }
 
 /// Append the redo sub-records for every staged node-label delta in
-/// `overlay` under `label_coll_key`, in deterministic node-id order.
+/// `overlay` under `label_coll_key`, in the overlay's encoded node-id order.
+/// The walk holds no delta it has passed.
 /// `added`/`removed` are disjoint by construction. Each `HashSet` is sorted
 /// into a `Vec` first, so replicas produce byte-identical payloads. Every
 /// sub-record of a node carries `ordinal_of(node)` as its `system_from`, so
@@ -154,13 +191,8 @@ pub(super) fn serialize_node_label_deltas(
     ordinal_of: impl Fn(&str) -> crate::Result<i64>,
     ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut deltas: BTreeMap<String, NodeLabelDelta> = BTreeMap::new();
     for item in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
         let (node_id, delta) = item?;
-        deltas.insert(node_id, delta);
-    }
-
-    for (node_id, delta) in deltas {
         let system_from = Some(ordinal_of(&node_id)?);
         let parts = [
             (RecordType::GraphNodeLabelSet, &delta.added),

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::control::state::SharedState;
 use crate::control::wal_replication::encode::{
     RedoChunkSlot, RedoEntryTarget, chunk_count, chunk_entry, chunk_room, chunked_final_entry,
-    final_entry_stream,
+    chunks_complete, chunks_overrun, final_entry_stream,
 };
 use crate::control::wal_replication::propose_replicated_entry;
 use crate::control::wal_replication::{AppliedOutput, AsyncRaftProposer, ReplicatedEntry};
@@ -106,7 +106,7 @@ impl<'s> RedoStreamProposal<'s> {
             );
         }
         let carried = bytes.len() as u64;
-        if self.proposed.saturating_add(carried) > self.len {
+        if chunks_overrun(self.proposed, carried, self.len) {
             return Err(self.length_error(self.proposed.saturating_add(carried)));
         }
         let entry = chunk_entry(
@@ -145,7 +145,7 @@ impl<'s> RedoStreamProposal<'s> {
             self.abandon().await;
             return Err(error);
         }
-        if self.proposed != self.len || self.next_index != self.count {
+        if !chunks_complete(self.proposed, self.next_index, self.len, self.count) {
             let error = self.length_error(self.proposed);
             self.abandon().await;
             return Err(error);

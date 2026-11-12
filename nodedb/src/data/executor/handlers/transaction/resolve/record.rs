@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The whole-record answer of a resolve, and the guard check a session
-//! commit runs before it resolves.
+//! The guard check a session commit runs before it resolves, and the
+//! whole-record answer of a resolve that resolve tests read.
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::TxnId;
-use crate::wal::RedoRecord;
-
-use super::entry::ResolvedLists;
 
 impl CoreLoop {
     /// Check a committing session transaction's guards against the state it
@@ -32,20 +27,22 @@ impl CoreLoop {
             other => other,
         }
     }
+}
 
-    /// Resolve a committing transaction's staged writes into a
-    /// [`RedoRecord`] and return its encoded bytes in the response payload.
-    /// A Calvin slice resolves here, and so does every resolve test. A
-    /// session commit reads the same resolve in parts
-    /// (`execute_resolve_txn_part`).
+#[cfg(test)]
+impl CoreLoop {
+    /// Resolve a committing transaction's staged writes into a `RedoRecord`
+    /// in memory and return its encoded bytes in the response payload. Every
+    /// commit reads the same resolve in parts (`execute_resolve_txn_part`,
+    /// `CalvinResolve`).
     pub(in crate::data::executor) fn execute_resolve_txn(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
-        txn_id: TxnId,
+        txn_id: crate::types::TxnId,
         plans: &[PhysicalPlan],
-    ) -> Response {
-        let ResolvedLists {
+    ) -> crate::bridge::envelope::Response {
+        let super::entry::ResolvedLists {
             ops,
             row_changes,
             row_sources,
@@ -53,7 +50,7 @@ impl CoreLoop {
             Ok(resolved) => resolved,
             Err(e) => return self.response_error(task, e),
         };
-        let record = RedoRecord {
+        let record = crate::wal::RedoRecord {
             version: 1,
             ops,
             calvin_stamp: None,

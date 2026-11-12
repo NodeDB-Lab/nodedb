@@ -15,7 +15,8 @@ use crate::control::server::dispatch_utils::{
 use crate::control::state::SharedState;
 use crate::control::surrogate::bind_carried_identities;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
-use crate::wal::{PublishPosition, RedoPublish};
+use crate::wal::redo::RedoEntryAt;
+use crate::wal::{PublishPosition, RedoPublish, RedoStreamRef};
 
 use super::payload::TransactionRedoPayload;
 
@@ -82,19 +83,35 @@ pub(crate) async fn enqueue_transaction_redo(
         &payload.identities,
     )?;
     let plan = match change_position {
-        Some(position) if !payload.redo.publishes.is_empty() => {
-            let mut stamped = payload.clone();
-            RedoPublish::stamp_all(
-                &mut stamped.redo.publishes,
-                PublishPosition {
-                    partition: target.vshard_id.as_u32(),
-                    epoch: position.epoch,
-                    index: position.log_index,
-                },
-            );
-            stamped.apply_plan()?
+        Some(position) => {
+            let at = PublishPosition {
+                partition: target.vshard_id.as_u32(),
+                epoch: position.epoch,
+                index: position.log_index,
+            };
+            // A stream marker's messages sit in its chunks: the reference
+            // carries the position every one of them takes, and the entry
+            // whose change events a restart stages again.
+            match RedoStreamRef::of_marker(&payload.redo)? {
+                Some(mut reference) => {
+                    let mut stamped = payload.clone();
+                    reference.publish_position = Some(at);
+                    reference.entry = Some(RedoEntryAt {
+                        group_id: position.group_id,
+                        log_index: position.log_index,
+                    });
+                    reference.store_in(&mut stamped.redo)?;
+                    stamped.apply_plan()?
+                }
+                None if !payload.redo.publishes.is_empty() => {
+                    let mut stamped = payload.clone();
+                    RedoPublish::stamp_all(&mut stamped.redo.publishes, at);
+                    stamped.apply_plan()?
+                }
+                None => payload.apply_plan()?,
+            }
         }
-        _ => payload.apply_plan()?,
+        None => payload.apply_plan()?,
     };
     enqueue_write(
         state,

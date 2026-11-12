@@ -17,14 +17,13 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::stage_write::GRAPH_LABEL_COLL_KEY;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
-use crate::wal::{RedoRowChange, RedoSubRecord};
 
 use super::classify::{classify_document_op, classify_kv_op};
 use super::columnar_image::{ColumnarCollectionImages, ColumnarCollections};
 use super::doc_ordinal::DocOrdinals;
 use super::edge_ordinal::{EdgeOrdinals, StoredEdges};
 use super::graph::EdgeIdentityKey;
-use super::sink::{OpSink, RedoSink, SinkOutput};
+use super::sink::{OpSink, RedoSink};
 use super::vector_primary::VectorPrimaryCollections;
 use super::{
     array, columnar_image, crdt, document, document_truncate, graph, kv, spatial, text, vector,
@@ -100,6 +99,7 @@ impl CoreLoop {
     }
 
     /// [`Self::resolve_txn_into`] into memory: every list of the redo.
+    #[cfg(test)]
     pub(super) fn resolve_txn_lists(
         &mut self,
         task: &ExecutionTask,
@@ -110,8 +110,8 @@ impl CoreLoop {
         let mut sink = RedoSink::memory();
         self.resolve_txn_into(task, tid, txn_id, plans, &mut sink)?;
         match sink.finish()?.output {
-            SinkOutput::Memory(lists) => Ok(lists),
-            SinkOutput::Spill { path, .. } => Err(crate::Error::Internal {
+            super::sink::SinkOutput::Memory(lists) => Ok(lists),
+            super::sink::SinkOutput::Spill { path, .. } => Err(crate::Error::Internal {
                 detail: format!(
                     "a memory resolve sink finished into the spill file {}",
                     path.display()
@@ -442,10 +442,12 @@ impl CoreLoop {
     }
 }
 
-/// The row-sized lists of one resolved redo.
+/// The row-sized lists of one resolved redo, as a memory sink collects
+/// them.
+#[cfg(test)]
 pub(super) struct ResolvedLists {
-    pub(super) ops: Vec<RedoSubRecord>,
-    pub(super) row_changes: Vec<RedoRowChange>,
+    pub(super) ops: Vec<crate::wal::RedoSubRecord>,
+    pub(super) row_changes: Vec<crate::wal::RedoRowChange>,
     pub(super) row_sources: Vec<crate::wal::RedoRowSource>,
 }
 

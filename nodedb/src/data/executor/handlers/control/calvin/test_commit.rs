@@ -4,9 +4,7 @@
 //! plans, resolve them into the redo record, and install the record as the
 //! slice's stamped `ApplyTransactionRedo`.
 
-use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinResolved, MetaOp, PhysicalPlan, RedoOrigin,
-};
+use nodedb_physical::physical_plan::{CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin};
 
 use crate::bridge::envelope::{Response, Status};
 use crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets;
@@ -93,20 +91,9 @@ impl CoreLoop {
         (epoch, epoch_system_ms): (u64, i64),
         lsn: u64,
     ) -> Response {
-        let resolved = self.execute_calvin_resolve(task, epoch, 0);
-        if resolved.status != Status::Ok {
-            return resolved;
-        }
-        let answer = match zerompk::from_msgpack::<CalvinResolved>(resolved.payload.as_bytes()) {
+        let answer = match self.calvin_resolve_whole(task, epoch, 0) {
             Ok(answer) => answer,
-            Err(error) => {
-                return self.response_error(
-                    task,
-                    crate::bridge::envelope::ErrorCode::Internal {
-                        detail: format!("decode the resolved answer: {error}"),
-                    },
-                );
-            }
+            Err(code) => return self.response_error(task, code),
         };
         let install = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
             redo: answer.redo,

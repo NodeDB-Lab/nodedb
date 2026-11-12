@@ -18,7 +18,7 @@ use nodedb::types::*;
 use nodedb::wal::{RedoRecord, RedoSubRecord};
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinReplySpec, CalvinResolved, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
+    CalvinInstall, CalvinReplySpec, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
 };
 use nodedb_types::{OrdinalClock, QualifiedCollection};
 
@@ -34,12 +34,14 @@ fn make_core() -> (
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        Arc::new(OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            Arc::new(OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx, dir)
@@ -149,11 +151,11 @@ fn stage_and_resolve(
         core,
         tx,
         rx,
-        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+        nodedb_test_support::calvin_resolve::whole_calvin_resolve(epoch, 0),
     );
-    let answer: CalvinResolved = zerompk::from_msgpack(&redo).expect("decode resolved answer");
-    let record = RedoRecord::from_bytes(&answer.redo).expect("decode resolved redo");
-    (record, answer.reply)
+    let (redo, reply) = nodedb_test_support::calvin_resolve::decode_whole_calvin_resolve(&redo);
+    let record = RedoRecord::from_bytes(&redo).expect("decode resolved redo");
+    (record, reply)
 }
 
 /// Install `redo` as the stamped slice at `(epoch, 0)` with its record at

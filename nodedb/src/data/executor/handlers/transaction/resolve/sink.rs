@@ -3,10 +3,10 @@
 //! Where a resolve puts what it produces, as it produces it.
 //!
 //! Every serializer pushes each sub-record, row change and row source into a
-//! sink and keeps none. A whole-record resolve (a Calvin slice, every resolve
-//! test) collects them in memory. A session commit's resolve frames them
-//! into parts and appends each part to the transaction's resolve spill file,
-//! so the core holds one part at a time.
+//! sink and keeps none. A commit's resolve, a session's or a Calvin slice's,
+//! frames them into parts and appends each part to the transaction's resolve
+//! spill file, so the core holds one part at a time. A resolve test collects
+//! them in memory.
 //!
 //! A sink push does not fail. The first error a sink meets stops every
 //! later write, and [`RedoSink::finish`] returns it, so a resolve whose sink
@@ -20,6 +20,7 @@ use crate::engine::timeseries::resolved_rejections::resolved_rejection;
 use crate::wal::redo::frame::{PartOut, RedoFrameTag, RedoPartWriter};
 use crate::wal::{RedoRowChange, RedoRowSource, RedoSubRecord};
 
+#[cfg(test)]
 use super::entry::ResolvedLists;
 
 /// Takes the sub-records a serializer produces, in order.
@@ -56,6 +57,7 @@ impl PartOut for PartFile {
 }
 
 enum Target {
+    #[cfg(test)]
     Memory(ResolvedLists),
     Spill(RedoPartWriter<PartFile>),
 }
@@ -71,6 +73,7 @@ pub(super) struct RedoSink {
 /// What a finished sink holds.
 pub(super) enum SinkOutput {
     /// Every list, in memory.
+    #[cfg(test)]
     Memory(ResolvedLists),
     /// The resolve spill file: one row per part.
     Spill {
@@ -93,6 +96,7 @@ pub(super) struct FinishedSink {
 
 impl RedoSink {
     /// A sink that collects every list in memory.
+    #[cfg(test)]
     pub(super) fn memory() -> Self {
         Self::with_target(Target::Memory(ResolvedLists {
             ops: Vec::new(),
@@ -132,6 +136,7 @@ impl RedoSink {
     /// Take one row source.
     pub(super) fn push_source(&mut self, source: RedoRowSource) {
         self.record(|target| match target {
+            #[cfg(test)]
             Target::Memory(lists) => {
                 lists.row_sources.push(source);
                 Ok(())
@@ -146,6 +151,7 @@ impl RedoSink {
             return Err(e);
         }
         let output = match self.target {
+            #[cfg(test)]
             Target::Memory(lists) => SinkOutput::Memory(lists),
             Target::Spill(writer) => {
                 let (file, len, parts) = writer.finish()?;
@@ -174,6 +180,7 @@ impl OpSink for RedoSink {
             *self.rejected.entry(collection).or_default() += lines;
         }
         self.record(|target| match target {
+            #[cfg(test)]
             Target::Memory(lists) => {
                 lists.ops.push(op);
                 Ok(())
@@ -186,6 +193,7 @@ impl OpSink for RedoSink {
 impl ChangeSink for RedoSink {
     fn push(&mut self, change: RedoRowChange) {
         self.record(|target| match target {
+            #[cfg(test)]
             Target::Memory(lists) => {
                 lists.row_changes.push(change);
                 Ok(())

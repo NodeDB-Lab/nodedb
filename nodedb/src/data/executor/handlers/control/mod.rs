@@ -8,7 +8,7 @@ mod calvin_overlay_stage_bulk;
 mod calvin_overlay_stage_bulk_dispatch;
 mod calvin_passive_read;
 pub mod calvin_reply;
-mod calvin_resolve;
+pub(in crate::data::executor) mod calvin_resolve;
 mod calvin_txn_id;
 mod checkpoint_crdt;
 mod checkpoint_durable_lsn;

@@ -43,16 +43,24 @@ pub struct ChunkedRedo {
 }
 
 impl ChunkedRedo {
-    /// The payload of the stream's assembled `content`.
-    pub fn payload(&self, content: RedoContent) -> TransactionRedoPayload {
-        payload_of(
-            content,
-            &self.collections,
-            self.event_source,
-            self.origin,
-            self.calvin.clone(),
-            self.snapshot_ordinal,
-        )
+    /// The payload of the stream's marker `redo`: a record whose only
+    /// sub-record names the stream, so the content stays in the chunk
+    /// records. Every replica bound the content's identities before it, and
+    /// the install reads the sum targets and reads from the content.
+    pub fn marker_payload(&self, redo: crate::wal::RedoRecord) -> TransactionRedoPayload {
+        TransactionRedoPayload {
+            redo,
+            collections: self.collections.clone(),
+            incarnation_names: Vec::new(),
+            sum_targets: Vec::new(),
+            identities: Vec::new(),
+            event_source: self.event_source.into(),
+            origin: self.origin,
+            calvin: self.calvin.clone(),
+            reads: Vec::new(),
+            snapshot_ordinal: self.snapshot_ordinal,
+            adds_storage: false,
+        }
     }
 
     /// Every collection the transaction wrote.
@@ -348,14 +356,31 @@ mod tests {
                 other => panic!("expected a chunk, got {other:?}"),
             })
             .collect();
-        let rebuilt = chunked.payload(RedoContent::from_framed(&joined).expect("content"));
-        assert_eq!(rebuilt.redo, original.redo);
-        assert_eq!(rebuilt.sum_targets, original.sum_targets);
-        assert_eq!(rebuilt.identities, original.identities);
-        assert_eq!(rebuilt.event_source, EventSource::Trigger);
-        assert_eq!(rebuilt.origin, RedoOrigin::Restore);
-        assert_eq!(rebuilt.reads, original.reads);
-        assert_eq!(rebuilt.snapshot_ordinal, original.snapshot_ordinal);
+        let content = RedoContent::from_framed(&joined).expect("content");
+        assert_eq!(content.redo, original.redo);
+        assert_eq!(content.sum_targets, original.sum_targets);
+        assert_eq!(
+            content
+                .identities
+                .iter()
+                .map(|i| (i.collection.clone(), i.pk_bytes.clone(), i.surrogate))
+                .collect::<Vec<_>>(),
+            original
+                .identities
+                .iter()
+                .map(|i| (
+                    i.collection.clone(),
+                    i.pk_bytes.clone(),
+                    i.surrogate.as_u32()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(content.reads, original.reads);
+        // The final entry's own fields travel on the marker payload.
+        let marker = chunked.marker_payload(content.redo);
+        assert_eq!(marker.event_source, EventSource::Trigger);
+        assert_eq!(marker.origin, RedoOrigin::Restore);
+        assert_eq!(marker.snapshot_ordinal, original.snapshot_ordinal);
     }
 
     #[test]

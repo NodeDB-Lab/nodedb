@@ -92,6 +92,23 @@ pub(super) enum EdgeSlot {
     Tombstone,
 }
 
+/// One staged edge of a collection, as a resolve reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedEdge {
+    Put {
+        src: String,
+        label: String,
+        dst: String,
+        properties: Vec<u8>,
+        valid: EdgeValidTime,
+    },
+    Tombstone {
+        src: String,
+        label: String,
+        dst: String,
+    },
+}
+
 /// A put spills as `[bin properties, valid]`, a tombstone as `nil`.
 impl ToMessagePack for EdgeSlot {
     fn write<W: Write>(&self, writer: &mut W) -> zerompk::Result<()> {

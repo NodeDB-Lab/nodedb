@@ -4,6 +4,7 @@
 
 pub mod array_sync;
 pub mod booted_state;
+pub mod calvin_resolve;
 pub mod catalog_fixtures;
 pub mod cluster_harness;
 pub mod core_loop_runner;

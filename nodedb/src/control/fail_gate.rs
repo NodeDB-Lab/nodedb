@@ -126,6 +126,23 @@ pub(crate) fn holds_redo_propose(node_id: u64, collections: &[String]) -> bool {
     })
 }
 
+/// The Calvin scheduler's stream gate on node `node_id`: a committed
+/// slice's streamed redo proposed its first chunk and has not proposed its
+/// second. Named per collection, `calvin::before_second_chunk::<collection>`.
+///
+/// Like [`holds_redo_propose`], the gate answers without waiting: `true`
+/// while the file armed for one of `collections` is absent. The scheduler
+/// keeps the stream where it stopped and asks again on its next stall tick.
+/// On its first hold the gate creates `<path>.parked`.
+pub(crate) fn holds_redo_stream(node_id: u64, collections: &[String]) -> bool {
+    collections.iter().any(|collection| {
+        holds(
+            FailScope::Node(node_id),
+            &format!("calvin::before_second_chunk::{collection}"),
+        )
+    })
+}
+
 /// The Calvin install gate on node `node_id`: after a stamped redo's install
 /// is durable and before its `RedoApplied` event reaches the vShard's
 /// scheduler. Named per collection,

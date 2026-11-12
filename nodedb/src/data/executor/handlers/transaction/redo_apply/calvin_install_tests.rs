@@ -4,8 +4,8 @@
 //! `ApplyTransactionRedo` plan with a `CalvinInstall`.
 
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinReplySpec, CalvinResolved, DocumentOp, MetaOp, PhysicalPlan, RedoOrigin,
-    RedoSumTargets, ReturningColumns, ReturningSpec,
+    CalvinInstall, CalvinReplySpec, DocumentOp, MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets,
+    ReturningColumns, ReturningSpec,
 };
 use nodedb_types::{QualifiedCollection, StorageKey, Surrogate};
 
@@ -56,7 +56,10 @@ fn returning_insert(document_id: &str, surrogate: u32) -> PhysicalPlan {
 }
 
 /// Stage `plans` as the leader does at `(1, 0)` and resolve them.
-fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResolved {
+fn stage_and_resolve(
+    core: &mut CoreLoop,
+    plans: &[PhysicalPlan],
+) -> crate::data::executor::handlers::control::calvin_resolve::WholeResolved {
     let task = make_default_task();
     let ctx = CalvinExecCtx {
         epoch: 1,
@@ -72,9 +75,8 @@ fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResol
         &[],
     );
     assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
-    let resolved = core.execute_calvin_resolve(&task, 1, 0);
-    assert_eq!(resolved.status, Status::Ok, "{:?}", resolved.error_code);
-    zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer")
+    core.calvin_resolve_whole(&task, 1, 0)
+        .expect("resolve the staged slice")
 }
 
 /// The stamped install of `redo` as the slice at `(epoch, 0)`.

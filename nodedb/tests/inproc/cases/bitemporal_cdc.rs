@@ -39,7 +39,8 @@ fn write_event(seq: u64, op: WriteOp, payload_bytes: Vec<u8>, is_delete: bool) -
     let (system_time_ms, valid_time_ms) = extract_stamps(Some(&arc));
     WriteEvent {
         sequence: seq,
-        collection: Arc::from("users"),
+        // A write event names its collection qualified by its database.
+        collection: Arc::from("7/users"),
         op,
         row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("u-1")),
         lsn: Lsn::new(seq * 10),

@@ -47,12 +47,14 @@ fn open_core() -> (
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(128);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(128);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx, dir)

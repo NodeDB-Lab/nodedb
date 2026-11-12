@@ -4,7 +4,7 @@
 //! in, held on every replica until the stream's final entry.
 //!
 //! - [`store`]: the node's open streams, leader admission, and stream close.
-//! - [`stream`]: one open stream and its assembly.
+//! - [`stream`]: one open stream and the chunk references it holds.
 //! - [`rebuild`]: boot rebuild from the WAL.
 //! - [`carry`]: the open streams a group snapshot carries.
 //! - [`leave`]: the drop of a left group's streams.

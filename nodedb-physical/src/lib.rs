@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Shared physical-plan layer for NodeDB.
 //!
 //! Owns the `PhysicalTask` IR and the `SqlPlan → PhysicalPlan` converter.

@@ -369,9 +369,20 @@ impl CoreLoop {
             // The resolve of `ResolveTxnPart` above, but sourced from Calvin's own
             // staging state (`commit_pending` + the synthetic-`TxnId` overlay)
             // instead of a session transaction's.
-            MetaOp::CalvinResolve { epoch, position } => {
-                self.execute_calvin_resolve(task, *epoch, *position)
-            }
+            MetaOp::CalvinResolve {
+                epoch,
+                position,
+                part,
+                max_part_bytes,
+            } => self.execute_calvin_resolve(
+                task,
+                crate::data::executor::handlers::control::calvin_resolve::CalvinPartRequest {
+                    epoch: *epoch,
+                    position: *position,
+                    part: *part,
+                    max_part_bytes: *max_part_bytes,
+                },
+            ),
 
             // Install a committed transaction's redo record through the WAL
             // replay arms, on every replica, in Raft log order. A committed

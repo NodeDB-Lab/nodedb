@@ -44,16 +44,7 @@ impl CoreLoop {
         let answer = if request.part == 0 {
             self.open_resolve_cursor(task, tid, request, plans)
         } else {
-            let now = self.hlc.peek();
-            self.resolve_cursors
-                .read(request.txn_id, request.part, now)
-                .map(|(bytes, done)| ResolvedTxnPart {
-                    index: request.part,
-                    bytes,
-                    done,
-                    opened: None,
-                })
-                .map_err(ErrorCode::from)
+            self.read_resolve_part(request.txn_id, request.part)
         };
         let encoded = answer.and_then(|part| {
             zerompk::to_msgpack_vec(&part).map_err(|e| {
@@ -69,10 +60,8 @@ impl CoreLoop {
         }
     }
 
-    /// Check the guards, resolve into the transaction's resolve spill file,
-    /// open the cursor over it, and read its part `0`. A refused guard asks
-    /// for a retry. The resolve holds one part at a time, and every check
-    /// runs before the answer, so a failure leaves no cursor and no file.
+    /// Check the guards, then resolve into the transaction's resolve spill
+    /// file and read its part `0`. A refused guard asks for a retry.
     fn open_resolve_cursor(
         &mut self,
         task: &ExecutionTask,
@@ -80,14 +69,50 @@ impl CoreLoop {
         request: PartRequest,
         plans: &[PhysicalPlan],
     ) -> Result<ResolvedTxnPart, ErrorCode> {
-        let txn_id = request.txn_id;
         // A repeated part 0 resolves again, so a failed resolve leaves no
         // cursor of an earlier one.
-        if let Some(earlier) = self.resolve_cursors.close(txn_id) {
+        if let Some(earlier) = self.resolve_cursors.close(request.txn_id) {
             remove_resolve_path(&earlier)?;
         }
         if !self.session_guards_hold(task, tid, plans)? {
             return Err(ErrorCode::OllpRetryRequired);
+        }
+        self.resolve_into_cursor(task, tid, request, plans)
+    }
+
+    /// Part `request.part` of `txn_id`'s open cursor.
+    pub(in crate::data::executor) fn read_resolve_part(
+        &mut self,
+        txn_id: TxnId,
+        part: u32,
+    ) -> Result<ResolvedTxnPart, ErrorCode> {
+        let now = self.hlc.peek();
+        self.resolve_cursors
+            .read(txn_id, part, now)
+            .map(|(bytes, done)| ResolvedTxnPart {
+                index: part,
+                bytes,
+                done,
+                opened: None,
+            })
+            .map_err(ErrorCode::from)
+    }
+
+    /// Resolve `plans`, staged under `request.txn_id`, into the
+    /// transaction's resolve spill file, open the cursor over it, and read
+    /// its part `0`. Any earlier cursor of the transaction is closed first.
+    /// The resolve holds one part at a time, and every check runs before
+    /// the answer, so a failure leaves no cursor and no file.
+    pub(in crate::data::executor) fn resolve_into_cursor(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        request: PartRequest,
+        plans: &[PhysicalPlan],
+    ) -> Result<ResolvedTxnPart, ErrorCode> {
+        let txn_id = request.txn_id;
+        if let Some(earlier) = self.resolve_cursors.close(txn_id) {
+            remove_resolve_path(&earlier)?;
         }
         let dir = txn_spill_dir(&self.data_dir, self.core_id, txn_id);
         std::fs::create_dir_all(&dir).map_err(|source| {
@@ -121,11 +146,15 @@ impl CoreLoop {
                 return Err(error.into());
             }
         };
-        let SinkOutput::Spill { path, len, parts } = output else {
-            return Err(crate::Error::Internal {
-                detail: format!("{txn_id}: a spill resolve sink finished in memory"),
+        let (path, len, parts) = match output {
+            SinkOutput::Spill { path, len, parts } => (path, len, parts),
+            #[cfg(test)]
+            SinkOutput::Memory(_) => {
+                return Err(crate::Error::Internal {
+                    detail: format!("{txn_id}: a spill resolve sink finished in memory"),
+                }
+                .into());
             }
-            .into());
         };
         let now = self.hlc.peek();
         self.resolve_cursors.open(txn_id, path, parts, now)?;

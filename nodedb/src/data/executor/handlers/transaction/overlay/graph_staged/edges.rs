@@ -10,7 +10,8 @@ use std::borrow::Cow;
 
 use super::txn_overlay::GraphTxnOverlay;
 use super::types::{
-    CollectionEdgePut, EdgeKey, EdgeRef, EdgeSlot, EdgeValidTime, GraphCollKey, StagedEdgePut,
+    CollectionEdgePut, EdgeKey, EdgeRef, EdgeSlot, EdgeValidTime, GraphCollKey, StagedEdge,
+    StagedEdgePut,
 };
 use crate::data::executor::handlers::spill::tiered::ScanBounds;
 use crate::data::executor::handlers::spill::tiered::map::encode_key;
@@ -334,6 +335,37 @@ impl GraphTxnOverlay {
             out.extend(self.staged_tombstones_for_collection(coll_key)?);
         }
         Ok(out)
+    }
+
+    /// Every staged edge of one collection, merged across the hot tier and
+    /// the runs, in encoded-key order. The walk holds no edge it has passed.
+    pub fn iter_staged_edges<'a>(
+        &'a self,
+        coll_key: &GraphCollKey,
+    ) -> impl Iterator<Item = crate::Result<StagedEdge>> + 'a {
+        let poisoned = self.guard().err();
+        let scan = match poisoned {
+            Some(_) => None,
+            None => self
+                .collections
+                .get(coll_key)
+                .map(|overlay| overlay.edges.iter()),
+        };
+        poisoned
+            .map(Err)
+            .into_iter()
+            .chain(scan.into_iter().flatten().map(|item| {
+                item.map(|((src, label, dst), slot)| match slot.into_owned() {
+                    EdgeSlot::Put { properties, valid } => StagedEdge::Put {
+                        src,
+                        label,
+                        dst,
+                        properties,
+                        valid,
+                    },
+                    EdgeSlot::Tombstone => StagedEdge::Tombstone { src, label, dst },
+                })
+            }))
     }
 
     /// Every staged edge put of one collection: `(src, label, dst, props,

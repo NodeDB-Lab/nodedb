@@ -27,6 +27,7 @@ fn lite_handshake_frame_roundtrips() {
         lite_id: String::new(),
         epoch: 0,
         wire_version: SYNC_WIRE_VERSION,
+        last_server_watermark: 0,
     };
 
     let frame = SyncFrame::new_msgpack(SyncMessageType::Handshake, &msg).unwrap();

@@ -910,8 +910,8 @@ pub enum ReplicatedWrite {
     /// Every replica, the proposer included, appends the body's redo to its
     /// own WAL and applies it through the WAL replay arms, in Raft log order.
     /// The record is resolved once, on the proposer; no replica re-derives
-    /// it. A chunked body assembles from the `RedoChunk` entries of its
-    /// stream.
+    /// it. A chunked body travels as the `RedoChunk` entries of its stream,
+    /// and its final entry applies a marker that names them.
     TransactionRedo {
         body: RedoBody,
         /// Every collection the transaction wrote, for the collection write

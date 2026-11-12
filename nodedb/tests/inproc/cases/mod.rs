@@ -8,6 +8,7 @@ mod catalog_integrity_helpers;
 mod snapshot_rt_common;
 #[path = "../../support/mod.rs"]
 mod support;
+mod sync_push_support;
 
 mod agent_memory_reads;
 mod alert_rule_replication_apply;
@@ -98,6 +99,7 @@ mod enforcement_materialized_sum_point;
 mod engine_surface_timeseries;
 mod event_cdc;
 mod event_cross_shard;
+mod event_plane_non_default_database;
 mod event_restart_watermark_catchup;
 mod event_scheduler;
 mod event_scheduler_concurrency;
@@ -219,6 +221,9 @@ mod surrogate_round_trip;
 mod surrogate_wal_recovery;
 mod sync_compat;
 mod sync_handshake_jwt_auth;
+mod sync_purge_catch_up;
+mod sync_push_gating;
+mod sync_row_push_authorization;
 mod sync_shape_read_authorization;
 mod sync_state_transition_by_role;
 mod system_task_call_sites;

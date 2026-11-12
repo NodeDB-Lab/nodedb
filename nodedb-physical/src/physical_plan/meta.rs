@@ -637,22 +637,30 @@ pub enum MetaOp {
         max_part_bytes: u64,
     },
 
-    /// Resolve a staged Calvin transaction's write plans into ONE replayable
-    /// redo record, WITHOUT mutating base.
+    /// Read one part of a staged Calvin slice's resolved redo, WITHOUT
+    /// mutating base.
     ///
-    /// Mirrors the resolve of `ResolveTxnPart`, but reads Calvin's own staging state
-    /// instead of a session transaction's: the plans buffered in the core's
-    /// `commit_pending` under `(epoch, position, vshard)` and the per-core
-    /// staging overlay written under the corresponding synthetic `TxnId`
-    /// (see `calvin_synthetic_txn_id`). Dispatched by the scheduler once the
-    /// global verdict is commit. The scheduler proposes the record this op
-    /// returns as a stamped `TransactionRedo` entry, and
-    /// `ApplyTransactionRedo` installs it. No base engine is touched during
-    /// resolve.
+    /// The resolve of `ResolveTxnPart`, sourced from Calvin's own staging
+    /// state instead of a session transaction's: the plans buffered in the
+    /// core's `commit_pending` under `(epoch, position, vshard)` and the
+    /// per-core staging overlay written under the corresponding synthetic
+    /// `TxnId` (see `calvin_synthetic_txn_id`). Dispatched by the scheduler
+    /// once the global verdict is commit. Part `0` resolves the slice into
+    /// its resolve spill file and opens its cursor. A later request names
+    /// the next part. A repeated part `0` resolves again: the staged state
+    /// stays until the install consumes it, and the resolve is deterministic,
+    /// so every attempt reads the same parts. The scheduler proposes the
+    /// parts as a stamped `TransactionRedo` stream, and
+    /// `ApplyTransactionRedo` installs it.
     ///
-    /// The response payload is a zerompk-encoded [`super::CalvinResolved`]:
-    /// the redo record and the reply the staged plans decided.
-    CalvinResolve { epoch: u64, position: u32 },
+    /// The response payload is a zerompk-encoded
+    /// [`super::CalvinResolvedPart`].
+    CalvinResolve {
+        epoch: u64,
+        position: u32,
+        part: u32,
+        max_part_bytes: u64,
+    },
 
     /// Apply one committed transaction's resolved redo record on the core that
     /// owns its vShard.

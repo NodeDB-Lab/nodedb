@@ -14,18 +14,10 @@ use nodedb_types::calvin::VersionedReadEntry;
 
 use super::redo_chunk_wire::RedoContent;
 use super::transaction_redo_wire::ReplicatedIdentity;
-use crate::wal::redo::frame::{RedoFrameTag, RedoFrames, decode_frame, push_frame};
-use crate::wal::{CalvinStamp, CrossShardAppliedKey, RedoRecord};
-
-/// The fields of a redo that are not row-sized lists.
-#[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct RedoContentHeader {
-    version: u16,
-    calvin_stamp: Option<CalvinStamp>,
-    cross_shard_applied: Option<CrossShardAppliedKey>,
-    user_roles: Vec<String>,
-    sum_targets: Vec<RedoSumTargets>,
-}
+use crate::wal::RedoRecord;
+use crate::wal::redo::frame::{
+    RedoContentHeader, RedoFrameTag, RedoFrames, decode_frame, push_frame,
+};
 
 fn malformed(detail: String) -> crate::Error {
     crate::Error::Serialization {
@@ -163,6 +155,7 @@ impl RedoContent {
 mod tests {
     use super::*;
     use crate::control::wal_replication::types::ReplicatedIdentity;
+    use crate::wal::CalvinStamp;
     use crate::wal::redo::frame::frame_resolved_lists;
     use crate::wal::{RedoPublish, RedoRowChange, RedoRowKind, RedoRowSource, RedoSubRecord};
 
