@@ -16,6 +16,10 @@
 //! - timed out: the leader votes abort;
 //! - waiting: the barrier stays open, unless an abort verdict is stored.
 //!
+//! The same log carries the `RETURNING` sequence changes of the plans a
+//! local plan follows (see `returning_eval::rounds`). A staged txn whose
+//! evaluation waits for them takes its next step on each drain.
+//!
 //! A follower keeps the log of each dependent txn it holds. A promotion
 //! opens the barrier from it and reaches the decision the earlier leader
 //! reached.
@@ -43,6 +47,7 @@ impl Scheduler {
         for (txn_id, events) in taken {
             if self.absorb(txn_id, events) {
                 self.decide_barrier(txn_id);
+                self.advance_returning(txn_id);
             }
         }
     }
@@ -96,14 +101,19 @@ impl Scheduler {
         true
     }
 
-    /// Whether `txn_id` is a dependent txn this scheduler holds: at a
-    /// barrier, or in `pending`.
+    /// Whether `txn_id` is a txn with barrier entries this scheduler
+    /// holds: at a barrier, or in `pending` as a dependent-read txn or one
+    /// whose `RETURNING` plans follow other plans' sequence changes.
     fn holds_barrier_txn(&self, txn_id: TxnId) -> bool {
         self.dependent_barrier.contains_key(&txn_id)
-            || self
-                .pending
-                .get(&txn_id)
-                .is_some_and(|pending| pending.txn.tx_class.dependent_reads.is_some())
+            || self.pending.get(&txn_id).is_some_and(|pending| {
+                let tx_class = &pending.txn.tx_class;
+                tx_class.dependent_reads.is_some()
+                    || tx_class
+                        .returning
+                        .as_ref()
+                        .is_some_and(|contract| contract.orders_sequences())
+            })
     }
 
     /// Open `barrier` for `txn_id` and decide it from the entries the log

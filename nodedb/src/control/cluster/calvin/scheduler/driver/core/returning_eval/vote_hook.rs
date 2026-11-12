@@ -3,133 +3,131 @@
 //! Hold a staged txn's commit vote for its `RETURNING` evaluation.
 //!
 //! A slice that would vote commit and holds a plan its contract names runs
-//! the evaluation first. The evaluation can wait on a sequence range
-//! reservation, so it runs on a blocking thread, and the scheduler loop
-//! goes on meanwhile. The txn stays `Staged` with its locks until the
-//! result returns, so a later txn that needs one of its keys still waits
-//! behind it. A failed evaluation votes abort with its refusal. A finished
-//! one is proposed as the slice's frozen-reply entry, and the leader votes
-//! commit once a copy of the txn's reply is stored (see
-//! [`super::frozen_entry`]).
+//! the evaluation first, in rounds (see [`super::rounds`]). The evaluation
+//! can wait on a sequence range reservation, so it runs on a blocking
+//! thread, and the scheduler loop goes on meanwhile. The txn stays `Staged`
+//! with its locks until the last round is stored, so a later txn that
+//! needs one of its keys still waits behind it. A failed evaluation votes
+//! abort with its refusal. A finished round is proposed as the slice's
+//! frozen-reply entry (see [`super::frozen_entry`]). Once the stored reply
+//! holds the round, the leader sends its sequence changes on and starts the
+//! next round, or votes commit after the last.
 //!
-//! A slice whose txn already has a stored reply, from an earlier stage or an
-//! earlier leader, votes commit at once and evaluates nothing.
-
-use std::collections::BTreeMap;
-use std::sync::Arc;
+//! A slice whose stored reply already holds every local plan, from an
+//! earlier stage or an earlier leader, sends its changes and votes commit
+//! at once. It evaluates nothing.
 
 use super::super::scheduler::Scheduler;
 use super::super::staged_vote::StagedVote;
 use super::evals::Evaluated;
-use super::evaluate::{ReturningJob, ReturningRefusal, evaluate};
+use super::evaluate::{ReturningRefusal, evaluate};
+use super::rounds::{ReturningGate, Round};
 use crate::control::cluster::calvin::refusal::encode_refusal_with_sequences;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
-use crate::control::cluster::calvin::scheduler::frozen_replies;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-
-/// What a commit vote waits for.
-enum ReturningGate {
-    /// Nothing: the slice holds no plan its contract names.
-    Open,
-    /// Nothing more: the txn's frozen reply is stored.
-    Stored,
-    /// The evaluation of `job`.
-    Evaluate(ReturningJob),
-    /// Nothing more: the slice cannot commit.
-    Refuse(ReturningRefusal),
-}
 
 impl Scheduler {
     /// Hold `txn_id`'s commit vote for its `RETURNING` evaluation.
     ///
     /// Returns `false` when the vote waits for nothing. Returns `true` once
-    /// this method owns the vote: the evaluation runs, or the slice already
-    /// voted abort because its images cannot be read.
+    /// this method owns the vote: the evaluation runs or waits, or the slice
+    /// already voted.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn hold_vote_for_returning(
         &mut self,
         txn_id: TxnId,
     ) -> bool {
-        match self.returning_gate(txn_id) {
-            ReturningGate::Open => false,
-            ReturningGate::Stored => {
-                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
-                true
-            }
-            ReturningGate::Refuse(refusal) => {
-                self.vote_refused(txn_id, refusal);
-                true
-            }
-            ReturningGate::Evaluate(job) => {
-                self.spawn_returning_eval(txn_id, job);
-                true
-            }
+        let gate = self.returning_gate(txn_id);
+        if matches!(gate, ReturningGate::Open) {
+            return false;
         }
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.returning.holds_vote = true;
+        }
+        self.act_on_gate(txn_id, gate);
+        true
     }
 
-    /// What `txn_id`'s commit vote waits for.
-    fn returning_gate(&mut self, txn_id: TxnId) -> ReturningGate {
-        let vshard_id = self.vshard_id;
-        let Some(pending) = self.pending.get_mut(&txn_id) else {
-            return ReturningGate::Open;
-        };
-        if let Some(failed) = &pending.returning.failed {
-            return ReturningGate::Refuse(ReturningRefusal::internal(failed.clone()));
+    /// Take the next step of `txn_id`'s evaluation, when its vote waits for
+    /// one: no round in flight and no round's entry owed. Runs after a
+    /// round is stored, and after the barrier log took entries of the txn.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn advance_returning(
+        &mut self,
+        txn_id: TxnId,
+    ) {
+        let awaits = self.pending.get(&txn_id).is_some_and(|pending| {
+            pending.commit_state == CommitState::Staged
+                && pending.returning.holds_vote
+                && pending.returning.evaluating.is_none()
+                && pending.returning.frozen_entry.is_none()
+        });
+        if !awaits {
+            return;
         }
-        let Some(contract) = pending.txn.tx_class.returning.as_ref() else {
-            return ReturningGate::Open;
-        };
-        if !contract
-            .plans
-            .iter()
-            .any(|plan| pending.returning.plan_indexes.contains(&plan.plan_index))
-        {
-            return ReturningGate::Open;
-        }
-        match frozen_replies::holds(self.shared.credentials.catalog(), vshard_id, txn_id) {
-            Ok(true) => return ReturningGate::Stored,
-            Ok(false) => {}
-            Err(error) => {
-                crate::diag::calvin_frozen_reply_store_failed(
-                    vshard_id,
-                    Some((txn_id.epoch, txn_id.position)),
-                    "load",
-                    &error,
-                );
-                return ReturningGate::Refuse(ReturningRefusal::internal(format!(
-                    "calvin RETURNING: the stored frozen reply does not read: {error}"
-                )));
-            }
-        }
-        let mut plans = BTreeMap::new();
-        let mut taken_rows = 0;
-        for plan in &contract.plans {
-            if !pending.returning.plan_indexes.contains(&plan.plan_index) {
-                continue;
-            }
-            let Some(rows) = pending.returning.images.remove(&plan.plan_index) else {
-                return ReturningGate::Refuse(ReturningRefusal::internal(format!(
-                    "calvin RETURNING: the stage answered no images for plan {}",
-                    plan.plan_index
-                )));
-            };
-            taken_rows += rows.len();
-            plans.insert(plan.plan_index, rows);
-        }
-        pending.returning.taken_rows += taken_rows;
-        if plans.is_empty() {
-            return ReturningGate::Open;
-        }
-        ReturningGate::Evaluate(ReturningJob {
-            shared: Arc::clone(&self.shared),
-            tx_class: Arc::clone(&pending.txn.tx_class),
-            plans,
-            transcripts: Arc::clone(&pending.returning.transcripts),
+        let gate = self.returning_gate(txn_id);
+        self.act_on_gate(txn_id, gate);
+    }
+
+    /// Whether `txn_id`'s vote waits for another participant's sequence
+    /// changes.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn waits_for_sequences(
+        &self,
+        txn_id: TxnId,
+    ) -> bool {
+        self.pending.get(&txn_id).is_some_and(|pending| {
+            pending.commit_state == CommitState::Staged
+                && pending.returning.holds_vote
+                && pending.returning.wait_due.is_some()
         })
     }
 
-    /// Run `job` on a blocking thread. Its result returns to the loop as an
-    /// [`Evaluated`].
-    fn spawn_returning_eval(&mut self, txn_id: TxnId, job: ReturningJob) {
+    /// Act on `gate`, what `txn_id`'s held vote waits for.
+    fn act_on_gate(&mut self, txn_id: TxnId, gate: ReturningGate) {
+        match gate {
+            // Nothing more holds the vote.
+            ReturningGate::Open => {
+                self.clear_wait(txn_id);
+                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
+            }
+            ReturningGate::Stored(stored) => {
+                self.clear_wait(txn_id);
+                self.send_sequence_effects(txn_id, &stored);
+                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
+            }
+            ReturningGate::Evaluate(round) => {
+                self.clear_wait(txn_id);
+                if let Some(stored) = &round.stored {
+                    self.send_sequence_effects(txn_id, stored);
+                }
+                self.spawn_returning_eval(txn_id, round);
+            }
+            ReturningGate::Wait { stored } => {
+                if let Some(stored) = &stored {
+                    self.send_sequence_effects(txn_id, stored);
+                }
+                let due = self.config.passive_timeout();
+                if let Some(pending) = self.pending.get_mut(&txn_id) {
+                    // no-determinism: the leader's clock decides only when it proposes the timeout entry.
+                    let now = std::time::Instant::now();
+                    pending.returning.wait_due.get_or_insert(now + due);
+                }
+            }
+            ReturningGate::Refuse(refusal) => {
+                self.clear_wait(txn_id);
+                self.vote_refused(txn_id, refusal);
+            }
+        }
+    }
+
+    fn clear_wait(&mut self, txn_id: TxnId) {
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.returning.wait_due = None;
+        }
+    }
+
+    /// Run `round` on a blocking thread. Its result returns to the loop as
+    /// an [`Evaluated`].
+    fn spawn_returning_eval(&mut self, txn_id: TxnId, round: Round) {
+        let Round { job, stored, plans } = round;
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             self.vote_refused(
                 txn_id,
@@ -143,6 +141,11 @@ impl Scheduler {
         if let Some(pending) = self.pending.get_mut(&txn_id) {
             pending.returning.evaluating = Some(seq);
         }
+        let base: std::collections::BTreeSet<u32> = stored
+            .iter()
+            .flat_map(|reply| &reply.plans)
+            .map(|plan| plan.plan_index)
+            .collect();
         let sender = self.returning_evals.sender();
         let vshard_id = self.vshard_id;
         handle.spawn(async move {
@@ -157,6 +160,8 @@ impl Scheduler {
                     txn_id,
                     seq,
                     outcome,
+                    base,
+                    round: plans,
                 })
                 .is_err()
             {
@@ -181,6 +186,8 @@ impl Scheduler {
             txn_id,
             seq,
             outcome,
+            base,
+            round,
         } = evaluated;
         let Some(pending) = self.pending.get_mut(&txn_id) else {
             return;
@@ -193,7 +200,7 @@ impl Scheduler {
         match outcome {
             Ok(frozen) => {
                 pending.returning.frozen = frozen;
-                self.propose_frozen_reply(txn_id);
+                self.propose_frozen_reply(txn_id, base, round);
             }
             Err(refusal) => self.vote_refused(txn_id, refusal),
         }
@@ -210,18 +217,22 @@ impl Scheduler {
             detail = %refusal.detail,
             "calvin: the RETURNING evaluation refuses the slice; voting abort"
         );
-        let encoded = match encode_refusal_with_sequences(&refusal.code, refusal.sequences.as_ref())
-        {
-            Ok(bytes) => Some(bytes),
-            Err(error) => {
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    %error,
-                    "calvin: the RETURNING refusal has no wire form; voting abort without it"
-                );
-                None
+        let encoded = if !refusal.reported {
+            // The verdict reports the cause this refusal follows.
+            None
+        } else {
+            match encode_refusal_with_sequences(&refusal.code, refusal.sequences.as_ref()) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    tracing::warn!(
+                        vshard_id = self.vshard_id,
+                        epoch = txn_id.epoch,
+                        position = txn_id.position,
+                        %error,
+                        "calvin: the RETURNING refusal has no wire form; voting abort without it"
+                    );
+                    None
+                }
             }
         };
         self.cast_staged_vote(
@@ -421,12 +432,7 @@ mod tests {
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
         crate::control::cluster::calvin::scheduler::frozen_replies::store(
             scheduler.shared.credentials.catalog(),
-            &crate::control::wal_replication::types::CalvinFrozenReply {
-                epoch: 3,
-                position: 0,
-                vshard: test_coll_vshard(),
-                plans: Vec::new(),
-            },
+            &super::super::fixtures::stored_plan_zero(test_coll_vshard(), txn_id),
         )
         .expect("store");
 

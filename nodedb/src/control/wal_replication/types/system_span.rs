@@ -109,6 +109,7 @@ impl ReplicatedWrite {
             Self::CalvinReadResult { .. }
             | Self::CalvinReadTimeout { .. }
             | Self::CalvinFrozenReply { .. }
+            | Self::CalvinSequenceEffects { .. }
             | Self::CutBarrier { .. }
             | Self::MirrorSeal { .. }
             | Self::TopicPublish { .. }

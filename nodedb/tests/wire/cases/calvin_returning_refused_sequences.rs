@@ -7,7 +7,8 @@
 //! A write of a cross-shard sum source commits through Calvin on several
 //! vShards, so its participant evaluates the list before it votes. One
 //! request's writes on two vShards commit as one Calvin txn, so each
-//! participant evaluates its own list.
+//! participant evaluates its own list, in statement order when a later list
+//! reads a sequence an earlier one changes.
 
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use nodedb_types::Value;
@@ -79,12 +80,13 @@ async fn a_refused_returning_list_keeps_the_values_it_drew() {
     );
 }
 
-/// Two writes of one request refuse on two participants, and each draws
-/// one value first. The verdict reports one refusal, and the session keeps
-/// both values: its `currval` is one of them, and the next `nextval`
-/// continues after both.
+/// Two writes of one request on two participants each draw `nextval('s')`
+/// and then divide by zero. The second list follows the first one's draw,
+/// so it never evaluates: the first refusal ends the txn, as the first
+/// failed statement ends a PostgreSQL request. The session keeps the one
+/// value the first list drew.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn every_refusing_participant_keeps_the_values_it_drew() {
+async fn the_first_refusing_statement_ends_the_request_with_its_draws() {
     let server = TestServer::start_multicores(2).await;
     let two = two();
     for collection in [ONE, two.as_str()] {
@@ -116,12 +118,9 @@ async fn every_refusing_participant_keeps_the_values_it_drew() {
     assert_eq!(error.code, "22012", "{}", error.message);
 
     let currval = only_value(send_sql(&mut stream, 3, "SELECT currval('s')").await);
-    assert!(
-        matches!(currval, Value::Integer(1 | 2)),
-        "currval is a drawn value: {currval:?}"
-    );
+    assert_eq!(currval, Value::Integer(1), "the first list drew 1");
     let next = only_value(send_sql(&mut stream, 4, "SELECT nextval('s')").await);
-    assert_eq!(next, Value::Integer(3), "both drawn values stand");
+    assert_eq!(next, Value::Integer(2), "the second list drew nothing");
     for collection in [ONE, two.as_str()] {
         assert_eq!(
             server

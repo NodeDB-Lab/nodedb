@@ -82,9 +82,32 @@ pub struct FrozenPlanReply {
     /// The lines the plan rejected, for a timeseries ingest that rejected
     /// any.
     pub rejected: Option<FrozenRejection>,
-    /// The columns the coordinator answers: each a `currval` an earlier
-    /// plan's sequence changes decide. The plan answers them as NULL.
-    pub deferred_currval: Vec<nodedb_cluster::calvin::types::DeferredCurrval>,
+}
+
+/// The sequence changes one frozen plan made, or its refusal, as a
+/// participant sends them to a participant whose evaluation follows the
+/// plan.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct PlanSequenceEffects {
+    /// The plan's index in the class's plan batch.
+    pub plan_index: u32,
+    /// The plan's `nextval` and `setval` results, in invocation order.
+    /// Empty when `refused`.
+    pub effects: Vec<FrozenSequenceEffect>,
+    /// Whether the participant voted abort before the plan was stored. A
+    /// participant that follows the plan then votes abort at once: the txn
+    /// cannot commit.
+    pub refused: bool,
 }
 
 /// The frozen replies of every local `RETURNING` plan of Calvin txn
@@ -122,6 +145,29 @@ impl CalvinFrozenReply {
             format: "msgpack".into(),
             detail: format!("calvin frozen reply: {e}"),
         })
+    }
+
+    /// Whether this reply holds a plan at `plan_index`.
+    pub fn holds_plan(&self, plan_index: u32) -> bool {
+        self.plans.iter().any(|plan| plan.plan_index == plan_index)
+    }
+
+    /// The reply a stored row holds once `later`, another copy of this
+    /// txn's reply on this vShard, applies over this one. A leader that
+    /// evaluates its plans in rounds proposes each round's copy with every
+    /// stored plan in it. `later` extends the row when it holds every plan
+    /// the row holds, unchanged, and more. Any other copy changes nothing:
+    /// `None`. Every replica applies the copies in log order, so every
+    /// replica keeps the same row.
+    pub fn extended_by(&self, later: &Self) -> Option<Self> {
+        let same_txn =
+            (self.epoch, self.position, self.vshard) == (later.epoch, later.position, later.vshard);
+        let keeps_every_plan = self
+            .plans
+            .iter()
+            .all(|held| later.plans.iter().any(|plan| plan == held));
+        (same_txn && keeps_every_plan && later.plans.len() > self.plans.len())
+            .then(|| later.clone())
     }
 
     /// The union of `replies`, the frozen replies of one txn's participants:
@@ -172,7 +218,6 @@ mod tests {
                         value: 3,
                     }],
                     rejected: None,
-                    deferred_currval: Vec::new(),
                 },
                 FrozenPlanReply {
                     plan_index: 3,
@@ -186,10 +231,33 @@ mod tests {
                         collection: "metrics".into(),
                         lines: 2,
                     }),
-                    deferred_currval: Vec::new(),
                 },
             ],
         }
+    }
+
+    /// A copy that keeps every stored plan and adds one extends the row. A
+    /// copy that changes a stored plan, adds none, or names another txn
+    /// does not.
+    #[test]
+    fn a_later_round_extends_the_stored_reply() {
+        let full = reply();
+        let first = CalvinFrozenReply {
+            plans: vec![full.plans[0].clone()],
+            ..full.clone()
+        };
+        assert_eq!(first.extended_by(&full), Some(full.clone()));
+        assert_eq!(full.extended_by(&full), None, "no new plan");
+        assert_eq!(full.extended_by(&first), None, "a shorter copy");
+        let mut changed = full.clone();
+        changed.plans[0].payload = vec![0x91];
+        assert_eq!(first.extended_by(&changed), None, "a changed plan");
+        let other = CalvinFrozenReply {
+            position: 9,
+            ..full.clone()
+        };
+        assert_eq!(first.extended_by(&other), None, "another txn");
+        assert!(full.holds_plan(3) && !first.holds_plan(3));
     }
 
     #[test]

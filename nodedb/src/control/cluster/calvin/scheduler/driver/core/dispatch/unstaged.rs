@@ -100,6 +100,9 @@ impl Scheduler {
                 abort: Some(reason.into()),
             },
         );
+        // A participant that follows this slice's `RETURNING` plans waits
+        // for their sequence changes.
+        self.send_sequence_refusal(txn_id);
         // The verdict can be stored already: on replay, or when a peer's
         // vote completed the tally first.
         if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(

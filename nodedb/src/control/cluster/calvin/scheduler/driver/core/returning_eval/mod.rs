@@ -9,6 +9,8 @@ mod evaluate;
 mod fixtures;
 mod frozen_cleanup;
 mod frozen_entry;
+mod rounds;
+mod sequence_send;
 mod vote_hook;
 
 pub(in crate::control::cluster::calvin::scheduler::driver::core) use evals::ReturningEvals;

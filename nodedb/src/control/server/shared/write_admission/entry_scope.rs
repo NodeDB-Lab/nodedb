@@ -29,6 +29,7 @@ pub(super) fn entry_scope(
         ReplicatedWrite::CalvinReadResult { .. }
         | ReplicatedWrite::CalvinReadTimeout { .. }
         | ReplicatedWrite::CalvinFrozenReply { .. }
+        | ReplicatedWrite::CalvinSequenceEffects { .. }
         | ReplicatedWrite::CutBarrier { .. }
         | ReplicatedWrite::MirrorSeal { .. }
         | ReplicatedWrite::TopicPublish { .. }

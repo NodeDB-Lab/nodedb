@@ -29,12 +29,14 @@ impl Scheduler {
         // The vote stays owed until the tally holds it, so a refused or dropped proposal is
         // proposed again rather than lost. A promoted leader's vote for a
         // txn whose vote applied already changes nothing: the first counts.
-        self.propose_sequencer_entry(
-            txn_id,
-            SchedulerProposal::Vote {
-                abort: vote.abort_cause(),
-            },
-        );
+        let abort = vote.abort_cause();
+        let aborts = abort.is_some();
+        self.propose_sequencer_entry(txn_id, SchedulerProposal::Vote { abort });
+        // A participant that follows this slice's `RETURNING` plans waits
+        // for their sequence changes: an abort sends their refusal.
+        if aborts {
+            self.send_sequence_refusal(txn_id);
+        }
 
         if vote == StagedVote::SerializationConflict {
             // The staged slice's read-set was no longer current: observe it on
@@ -58,31 +60,6 @@ impl Scheduler {
         // restages the txn.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
-                // The frozen `RETURNING` replies stay on the txn while it
-                // parks: `pending.returning.frozen`, keyed by plan index.
-                let frozen = &pending.returning.frozen;
-                if !frozen.is_empty() {
-                    tracing::debug!(
-                        vshard_id = self.vshard_id,
-                        epoch = txn_id.epoch,
-                        position = txn_id.position,
-                        plans = frozen.len(),
-                        image_rows = pending.returning.row_count(),
-                        rows = frozen
-                            .values()
-                            .map(|reply| reply.shaped.rows.len())
-                            .sum::<usize>(),
-                        payload_bytes = frozen
-                            .values()
-                            .map(|reply| reply.payload.len())
-                            .sum::<usize>(),
-                        sequence_effects = frozen
-                            .values()
-                            .map(|reply| reply.sequence_effects.len())
-                            .sum::<usize>(),
-                        "calvin: frozen RETURNING replies held for the verdict"
-                    );
-                }
                 pending.commit_state = CommitState::AwaitingVerdict;
                 pending.stage_error = stage_error;
                 // no-determinism: local stall-warning deadline only; the global replicated verdict, not this wall-clock, decides commit/abort.

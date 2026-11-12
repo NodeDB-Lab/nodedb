@@ -39,6 +39,7 @@ mod bulk_dml_event_emission;
 mod calvin_multi_part_node_delete;
 mod calvin_request_counts;
 mod calvin_returning_refused_sequences;
+mod calvin_returning_sequence_order;
 mod calvin_sql_routing;
 mod calvin_txn_edge_update;
 mod calvin_txn_predicate_writes;

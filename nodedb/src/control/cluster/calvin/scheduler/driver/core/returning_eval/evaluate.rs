@@ -2,10 +2,12 @@
 
 //! Evaluate the `RETURNING` lists of a staged slice before its leader votes.
 //!
-//! Every input comes from the txn's contract and the stage's images, so the
-//! evaluation reads nothing the coordinator did not fix. Sequence calls go
-//! through the txn's transcripts: a later evaluation of the same txn replays
-//! the first one's results.
+//! Every input comes from the txn's contract, the stage's images, and the
+//! sequence changes of earlier plans: this slice's stored plans, and the
+//! changes other participants sent through the vShard's log. So the
+//! evaluation reads nothing the log did not fix. Sequence calls go through
+//! the txn's transcripts: a later evaluation of the same txn replays the
+//! first one's results.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,10 +34,22 @@ pub(super) struct ReturningJob {
     pub shared: Arc<SharedState>,
     /// The txn's class, which holds its contract.
     pub tx_class: Arc<TxClass>,
-    /// The images of each local plan the contract names, keyed by the
-    /// plan's index in the class's plan batch.
+    /// What the evaluation does, in order.
+    pub steps: Vec<EvalStep>,
+    /// The images of each plan `steps` evaluates, keyed by the plan's index
+    /// in the class's plan batch.
     pub plans: BTreeMap<u32, Vec<PreparedReturningRow>>,
     pub transcripts: Arc<TxnTranscripts>,
+}
+
+/// One step of an evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum EvalStep {
+    /// Give the session the sequence changes of an earlier plan, in order:
+    /// each sets the `currval` of its sequence.
+    Seed(Vec<FrozenSequenceEffect>),
+    /// Evaluate the list of the plan at this index.
+    Plan(u32),
 }
 
 /// Why an evaluation refuses its slice: the code the abort vote carries,
@@ -49,6 +63,10 @@ pub(super) struct ReturningRefusal {
     pub detail: String,
     /// `None` for a refusal raised before any plan evaluated.
     pub sequences: Option<RefusedSequences>,
+    /// Whether the abort vote carries the refusal to the client. A slice
+    /// that refuses because another participant refused or timed out
+    /// carries none, so the verdict reports the cause.
+    pub reported: bool,
 }
 
 impl ReturningRefusal {
@@ -60,6 +78,16 @@ impl ReturningRefusal {
             }),
             detail,
             sequences: None,
+            reported: true,
+        }
+    }
+
+    /// A refusal that follows another participant's refusal or the
+    /// barrier's timeout. Its vote carries no refusal.
+    pub(super) fn follows(detail: String) -> Self {
+        Self {
+            reported: false,
+            ..Self::internal(detail)
         }
     }
 
@@ -72,6 +100,7 @@ impl ReturningRefusal {
             code: Box::new(ErrorCode::from(error)),
             detail,
             sequences: Some(sequences),
+            reported: true,
         }
     }
 }
@@ -99,16 +128,19 @@ pub(super) fn frozen_effects(effects: &[SequenceEffect]) -> Vec<FrozenSequenceEf
 /// refusal of the first plan that failed.
 pub(super) type ReturningOutcome = Result<BTreeMap<u32, FrozenReturningReply>, ReturningRefusal>;
 
-/// Evaluate every plan of `job` in contract order.
+/// Run the steps of `job` in order.
 ///
-/// The plans share one statement-local session, seeded with the `currval`
-/// snapshot the contract carries. The evaluation holds the txn's
-/// transcripts for its whole run. A `nextval` can wait on a range
-/// reservation, so this runs on a blocking thread.
+/// The steps share one statement-local session, seeded with the `currval`
+/// snapshot the contract carries, then with each seed step's changes. A
+/// refusal carries every change the session took, the seeds included, so
+/// the writer's session ends where the failed statement left it. The
+/// evaluation holds the txn's transcripts for its whole run. A `nextval`
+/// can wait on a range reservation, so this runs on a blocking thread.
 pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
     let ReturningJob {
         shared,
         tx_class,
+        steps,
         mut plans,
         transcripts,
     } = job;
@@ -137,18 +169,33 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
     }
     let sequences = SessionSequenceAccess::new(
         &shared.sequence_registry,
-        Some(session),
+        Some(Arc::clone(&session)),
         database_id,
         tenant_id,
     );
     let crs_set = crate::control::crs_context::crs_set_for(&shared);
     let mut frozen = BTreeMap::new();
-    // The sequence results of the plans evaluated so far. A refusal carries
-    // them with the failed plan's own.
+    // The sequence changes the session took so far. A refusal carries them
+    // with the failed plan's own.
     let mut drawn = Vec::new();
-    for plan in &contract.plans {
-        let Some(rows) = plans.remove(&plan.plan_index) else {
-            continue;
+    for step in steps {
+        let index = match step {
+            EvalStep::Seed(effects) => {
+                record_all(&session, &tx_class, &effects);
+                drawn.extend(effects);
+                continue;
+            }
+            EvalStep::Plan(index) => index,
+        };
+        let Some(plan) = contract.plan(index) else {
+            return Err(ReturningRefusal::internal(format!(
+                "calvin RETURNING: plan {index} has no contract entry"
+            )));
+        };
+        let Some(rows) = plans.remove(&index) else {
+            return Err(ReturningRefusal::internal(format!(
+                "calvin RETURNING: plan {index} has no images"
+            )));
         };
         let redaction =
             shared
@@ -182,10 +229,32 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
                 return Err(ReturningRefusal::of_plan(plan.plan_index, error, refused));
             }
         };
-        drawn.extend(frozen_effects(&reply.sequence_effects));
+        let effects = frozen_effects(&reply.sequence_effects);
+        // A replayed transcript answers without the session, so the session
+        // takes the plan's changes here: a later plan reads them either way.
+        record_all(&session, &tx_class, &effects);
+        drawn.extend(effects);
         frozen.insert(plan.plan_index, reply);
     }
     Ok(frozen)
+}
+
+/// Give `session` every change of `effects`, in order, in `tx_class`'s
+/// database and tenant.
+fn record_all(
+    session: &SessionSequenceValues,
+    tx_class: &TxClass,
+    effects: &[FrozenSequenceEffect],
+) {
+    for effect in effects {
+        let (name, value) = effect.name_value();
+        session.record(
+            tx_class.database_id.as_u64(),
+            tx_class.tenant_id.as_u64(),
+            name,
+            value,
+        );
+    }
 }
 
 /// The output schema `columns`, the columns plan `plan_index`'s statement
@@ -239,9 +308,155 @@ mod tests {
         ReturningJob {
             shared: Arc::clone(shared),
             tx_class,
+            steps: vec![EvalStep::Plan(0)],
             plans: BTreeMap::from([(0, image_rows(rows))]),
             transcripts: Arc::clone(transcripts),
         }
+    }
+
+    /// `job` for plan 0 after an earlier plan's `effects`.
+    fn seeded(
+        shared: &Arc<SharedState>,
+        tx_class: Arc<TxClass>,
+        effects: Vec<FrozenSequenceEffect>,
+    ) -> ReturningJob {
+        let mut seeded = job(shared, tx_class, 1, &Arc::default());
+        seeded.steps.insert(0, EvalStep::Seed(effects));
+        seeded
+    }
+
+    fn currval_plus_one(sequence: &str) -> nodedb_types::ReturningItem {
+        use nodedb_query::expr::{BinaryOp, SqlExpr};
+        nodedb_types::ReturningItem::Computed {
+            name: "n".into(),
+            expression: zerompk::to_msgpack_vec(&SqlExpr::BinaryOp {
+                left: Box::new(SqlExpr::Function {
+                    name: "currval".into(),
+                    args: vec![SqlExpr::Literal(Value::String(sequence.into()))],
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(SqlExpr::Literal(Value::Integer(1))),
+            })
+            .expect("encode expression"),
+        }
+    }
+
+    /// An earlier plan's `nextval`, seeded into the session, is the
+    /// `currval` a later list reads inside an expression. A later `setval`
+    /// seed replaces it.
+    #[tokio::test]
+    async fn a_seeded_change_is_the_currval_a_later_list_reads() {
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let tx_class = txn_class(contract(vec![currval_plus_one("s")], 10));
+        let nextval_7 = FrozenSequenceEffect::Nextval {
+            name: "s".into(),
+            value: 7,
+        };
+        let frozen = evaluate(seeded(
+            &scheduler.shared,
+            Arc::clone(&tx_class),
+            vec![nextval_7.clone()],
+        ))
+        .expect("evaluation");
+        assert_eq!(frozen[&0].shaped.rows[0]["n"], Value::Integer(8));
+
+        let setval_40 = FrozenSequenceEffect::Setval {
+            name: "s".into(),
+            value: 40,
+        };
+        let frozen = evaluate(seeded(
+            &scheduler.shared,
+            tx_class,
+            vec![nextval_7, setval_40],
+        ))
+        .expect("evaluation");
+        assert_eq!(frozen[&0].shaped.rows[0]["n"], Value::Integer(41));
+    }
+
+    /// A `setval` item sets the value and the session's `currval`, and its
+    /// result is a change the reply carries.
+    #[tokio::test]
+    async fn a_setval_item_changes_the_sequence_and_the_currval() {
+        use nodedb_query::expr::SqlExpr;
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let setval = nodedb_types::ReturningItem::Computed {
+            name: "set".into(),
+            expression: zerompk::to_msgpack_vec(&SqlExpr::Function {
+                name: "setval".into(),
+                args: vec![
+                    SqlExpr::Literal(Value::String("s".into())),
+                    SqlExpr::Literal(Value::Integer(40)),
+                ],
+            })
+            .expect("encode expression"),
+        };
+        let tx_class = txn_class(contract(vec![setval, currval_plus_one("s")], 10));
+        let frozen =
+            evaluate(job(&scheduler.shared, tx_class, 1, &Arc::default())).expect("evaluation");
+        let row = &frozen[&0].shaped.rows[0];
+        assert_eq!(row["set"], Value::Integer(40));
+        assert_eq!(row["n"], Value::Integer(41));
+        assert_eq!(
+            frozen_effects(&frozen[&0].sequence_effects),
+            vec![FrozenSequenceEffect::Setval {
+                name: "s".into(),
+                value: 40,
+            }]
+        );
+        assert_eq!(
+            sequence_next(&scheduler.shared, "s"),
+            41,
+            "setval positioned s"
+        );
+    }
+
+    /// With no seed and no snapshot value, `currval` refuses with SQLSTATE
+    /// 55000 before the vote, as PostgreSQL does in a fresh session.
+    #[tokio::test]
+    async fn a_currval_with_no_value_refuses_as_not_yet_defined() {
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let tx_class = txn_class(contract(vec![currval_plus_one("s")], 10));
+        let refusal = evaluate(seeded(&scheduler.shared, tx_class, Vec::new()))
+            .expect_err("currval is not yet defined");
+        assert!(
+            matches!(
+                *refusal.code,
+                ErrorCode::ObjectNotInPrerequisiteState { .. }
+            ),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            refusal.sequences.map(|sequences| sequences.effects),
+            Some(Vec::new())
+        );
+    }
+
+    /// A refusal carries the seeded changes before the failed plan's own,
+    /// so the writer's session ends where the statements left it.
+    #[tokio::test]
+    async fn a_refusal_carries_the_seeds_before_its_own_draws() {
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let tx_class = txn_class(contract(vec![nextval("s"), division_by_zero()], 10));
+        let seed = FrozenSequenceEffect::Setval {
+            name: "s".into(),
+            value: 20,
+        };
+        let refusal = evaluate(seeded(&scheduler.shared, tx_class, vec![seed.clone()]))
+            .expect_err("the division refuses");
+        assert_eq!(
+            refusal.sequences.map(|sequences| sequences.effects),
+            Some(vec![
+                seed,
+                FrozenSequenceEffect::Nextval {
+                    name: "s".into(),
+                    value: 1,
+                },
+            ])
+        );
     }
 
     #[tokio::test]

@@ -28,9 +28,9 @@
 //!   collects.
 //! - [`barrier_prefold`]: folds the barrier entries of a waiting lane ahead
 //!   of their turn.
-//! - [`calvin_read_result`]: folds a committed `CalvinReadResult` or
-//!   `CalvinReadTimeout` entry into its txn's stored barrier row and its
-//!   vShard's read-result buffer.
+//! - [`calvin_read_result`]: folds a committed `CalvinReadResult`,
+//!   `CalvinSequenceEffects` or `CalvinReadTimeout` entry into its txn's
+//!   stored barrier row and its vShard's read-result buffer.
 //! - [`calvin_answer`]: the answer an installed slice of a `RETURNING`
 //!   contract gives its coordinator.
 //! - [`calvin_frozen_reply`]: stores a committed `CalvinFrozenReply` entry as
@@ -57,6 +57,7 @@
 //!   one its proposer planned it against.
 //! - [`mirror_hold`]: holds a mirror's entry until the metadata log decides
 //!   its cut, and applies a mirror's seal.
+//! - [`array_op_prepare`]: prepares an array op entry for its apply.
 //! - [`array_cell_route`]: routes an array cell write to the incarnation its
 //!   proposer wrote against.
 //! - [`collection_route`]: applies a collection write only while each
@@ -64,6 +65,7 @@
 
 mod aggregate_image;
 mod array_cell_route;
+mod array_op_prepare;
 mod barrier_prefold;
 mod bookkeeping;
 mod calvin_answer;

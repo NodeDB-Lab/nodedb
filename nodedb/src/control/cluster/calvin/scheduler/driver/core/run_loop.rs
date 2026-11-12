@@ -250,6 +250,9 @@ impl Scheduler {
                     self.retry_redo_proposals();
                     // Propose again every frozen-reply entry not in the log.
                     self.retry_frozen_proposals();
+                    // Send again the stored sequence changes of every txn
+                    // this leader holds after its vote.
+                    self.resend_stored_sequence_effects();
                     // A barrier entry the apply loop buffered after the
                     // scheduler finished its txn is spent.
                     let ledger = Arc::clone(&self.ledger);

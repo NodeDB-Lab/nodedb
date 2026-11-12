@@ -5,7 +5,8 @@
 //!
 //! The row is the entry's durable effect: the entry extends the applied
 //! prefix once the row commits. The first stored copy of a txn's reply
-//! stays, so a later copy changes nothing. A reply of a txn this replica
+//! stays, unless a later copy extends it with more plans: any other copy
+//! changes nothing. A reply of a txn this replica
 //! finished is spent, and is not stored. A row write that fails breaks the
 //! applied prefix: a restart delivers the entry again.
 //!
@@ -153,7 +154,6 @@ mod tests {
                 column_types: Vec::new(),
                 sequence_effects: Vec::new(),
                 rejected: None,
-                deferred_currval: Vec::new(),
             }],
         }
     }

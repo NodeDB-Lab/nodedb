@@ -43,6 +43,7 @@ pub fn data_entry_leaves(data: &[u8], database: u64) -> bool {
         ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
             | ReplicatedWrite::CalvinFrozenReply { .. }
+            | ReplicatedWrite::CalvinSequenceEffects { .. }
             | ReplicatedWrite::MirrorSeal { .. }
             | ReplicatedWrite::TimeseriesAggregateImage { .. }
     );

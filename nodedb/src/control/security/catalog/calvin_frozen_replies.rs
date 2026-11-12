@@ -10,12 +10,11 @@
 //! answers after a restart. Each store commits durably, so no floor covers
 //! an entry whose row a crash loses.
 //!
-//! The first stored copy of a txn's reply stays: a later copy of the entry,
-//! from a re-proposal or a new leader, writes nothing. Every replica applies
-//! the log in one order, so every replica keeps the same copy.
+//! A row changes only as its fold decides, and every replica applies the
+//! log in one order, so every replica keeps the same row.
 //!
 //! Each row holds the encoded reply. This module stores the bytes and never
-//! decodes them.
+//! decodes them: the caller's fold does.
 
 use std::collections::BTreeSet;
 
@@ -53,27 +52,45 @@ impl SystemCatalog {
         position: u32,
         reply: &[u8],
     ) -> crate::Result<bool> {
+        self.fold_calvin_frozen_reply(vshard_id, epoch, position, |held| {
+            Ok(held.is_none().then(|| reply.to_vec()))
+        })
+    }
+
+    /// Fold the row of `(vshard_id, epoch, position)`: `fold` takes the
+    /// stored bytes, `None` when no row is stored, and returns the bytes to
+    /// store, or `None` to keep the row as it is. Returns whether this call
+    /// wrote. The commit is durable when this returns.
+    pub fn fold_calvin_frozen_reply(
+        &self,
+        vshard_id: u32,
+        epoch: u64,
+        position: u32,
+        fold: impl FnOnce(Option<&[u8]>) -> crate::Result<Option<Vec<u8>>>,
+    ) -> crate::Result<bool> {
         let mut write_txn = self
             .db
             .begin_write()
-            .map_err(|e| catalog_err("store_calvin_frozen_reply txn", e))?;
+            .map_err(|e| catalog_err("fold_calvin_frozen_reply txn", e))?;
         write_txn
             .set_durability(Durability::Immediate)
-            .map_err(|e| catalog_err("store_calvin_frozen_reply durability", e))?;
+            .map_err(|e| catalog_err("fold_calvin_frozen_reply durability", e))?;
         {
             let mut table = write_txn
                 .open_table(CALVIN_FROZEN_REPLIES)
                 .map_err(|e| catalog_err("open calvin_frozen_replies", e))?;
             let key = (vshard_id, epoch, position);
-            let held = table
-                .get(key)
-                .map_err(|e| catalog_err("get calvin_frozen_replies", e))?
-                .is_some();
-            if held {
+            let folded = {
+                let held = table
+                    .get(key)
+                    .map_err(|e| catalog_err("get calvin_frozen_replies", e))?;
+                fold(held.as_ref().map(|row| row.value()))?
+            };
+            let Some(folded) = folded else {
                 return Ok(false);
-            }
+            };
             table
-                .insert(key, reply)
+                .insert(key, folded.as_slice())
                 .map_err(|e| catalog_err("insert calvin_frozen_replies", e))?;
         }
         write_txn

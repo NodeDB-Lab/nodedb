@@ -77,7 +77,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn contract(
                 payload_bytes: 1 << 20,
             },
             announced: None,
-            deferred_currval: Vec::new(),
+            vshards: Vec::new(),
+            sequence_after: Vec::new(),
         }],
         roles: Vec::new(),
         sequence_values: Vec::new(),
@@ -247,4 +248,28 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn stores_froze
         txn,
     )
     .expect("holds")
+}
+
+/// A stored reply of `txn` on `vshard` that holds plan 0 with no rows, as
+/// an earlier leader's evaluation of the fixture contract stores it.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn stored_plan_zero(
+    vshard: u32,
+    txn: crate::control::cluster::calvin::scheduler::lock_manager::TxnId,
+) -> crate::control::wal_replication::types::CalvinFrozenReply {
+    crate::control::wal_replication::types::CalvinFrozenReply {
+        epoch: txn.epoch,
+        position: txn.position,
+        vshard,
+        plans: vec![crate::control::wal_replication::types::FrozenPlanReply {
+            plan_index: 0,
+            payload: zerompk::to_msgpack_vec(&crate::data::executor::response_codec::RowsPayload {
+                columns: vec!["n".into()],
+                rows: Vec::new(),
+            })
+            .expect("encode rows"),
+            column_types: vec!["int8".into()],
+            sequence_effects: Vec::new(),
+            rejected: None,
+        }],
+    }
 }

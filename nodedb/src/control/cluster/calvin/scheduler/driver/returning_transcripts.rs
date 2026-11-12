@@ -31,6 +31,16 @@ impl TxnTranscripts {
         Arc::clone(plans.entry(index).or_default())
     }
 
+    /// Drop the transcript of the plan at `index`. A later evaluation of
+    /// the plan draws again: its stored inputs changed, so the recorded
+    /// results no longer answer it.
+    pub(super) fn reset(&self, index: u32) {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&index);
+    }
+
     /// Hold the txn's transcripts for one evaluation.
     pub(super) fn evaluation(&self) -> MutexGuard<'_, ()> {
         self.evaluation

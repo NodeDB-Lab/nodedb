@@ -57,6 +57,13 @@ impl Scheduler {
             );
             return;
         }
+        // An abort verdict ends a `RETURNING` evaluation that waits for
+        // another participant's sequence changes: they never come. The
+        // slice votes abort, and the vote's probe drops it.
+        if !committed && self.waits_for_sequences(txn_id) {
+            self.advance_returning(txn_id);
+            return;
+        }
         let Some((state, writes)) = self
             .pending
             .get(&txn_id)

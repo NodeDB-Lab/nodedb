@@ -5,7 +5,8 @@
 //! The coordinator fixes everything the response evaluation reads, so every
 //! replica that evaluates it reads the same inputs: the full item list, the
 //! source field order, the roles of the writer, the `currval` of the
-//! sequences the list names, and the response limits.
+//! sequences the list names, the response limits, and the order the
+//! participants evaluate in when one plan's sequence changes reach another.
 
 use nodedb_types::ReturningSpec;
 use serde::{Deserialize, Serialize};
@@ -26,29 +27,6 @@ pub struct SequenceValue {
     pub name: String,
     /// The value `nextval` last handed the writer's session.
     pub value: i64,
-}
-
-/// One list item whose `currval` the coordinator answers. The item is a
-/// bare `currval` of `sequence`, an earlier plan of the transaction changes
-/// that sequence, and this plan does not. The participant evaluates the item
-/// as NULL. The coordinator answers it from the sequence values the earlier
-/// plans' replies carry, so a later statement sees an earlier one's
-/// `nextval` whichever participant ran it.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-pub struct DeferredCurrval {
-    /// The item's position in the list, which is its column's position.
-    pub item: u32,
-    /// The bare sequence name.
-    pub sequence: String,
 }
 
 /// The hard response limits of one `RETURNING` evaluation.
@@ -125,8 +103,16 @@ pub struct PlanReturning {
     /// type. `None` when the statement announced none: a star, or a
     /// statement with no announced columns.
     pub announced: Option<Vec<AnnouncedColumn>>,
-    /// The items whose `currval` the coordinator answers, ascending by item.
-    pub deferred_currval: Vec<DeferredCurrval>,
+    /// The vShards that evaluate this plan's rows, ascending. Each is one
+    /// participant of the plan.
+    pub vshards: Vec<u32>,
+    /// The plans whose sequence changes this plan's evaluation follows,
+    /// ascending by plan index: each earlier plan that changes a sequence
+    /// this plan's list reads or changes, and every plan those follow. The
+    /// plan's own index is present when its participants evaluate one after
+    /// another: a participant follows every participant of the plan on a
+    /// lower vShard.
+    pub sequence_after: Vec<u32>,
 }
 
 /// What a participant needs to evaluate the `RETURNING` lists of a
@@ -197,10 +183,8 @@ pub(crate) fn sample_contract() -> ReturningContract {
                         ty: "int8".into(),
                     },
                 ]),
-                deferred_currval: vec![DeferredCurrval {
-                    item: 1,
-                    sequence: "orders_seq".into(),
-                }],
+                vshards: vec![3, 9],
+                sequence_after: vec![0],
             },
             PlanReturning {
                 plan_index: 2,
@@ -212,7 +196,8 @@ pub(crate) fn sample_contract() -> ReturningContract {
                 source_columns: vec!["id".into()],
                 limits,
                 announced: None,
-                deferred_currval: Vec::new(),
+                vshards: vec![4],
+                sequence_after: vec![0],
             },
         ],
         roles: vec!["reader".into(), "writer".into()],

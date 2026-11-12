@@ -18,7 +18,46 @@ pub(crate) enum AccessorInvocation {
     Setval(String, i64),
 }
 
-pub(crate) type AccessorResult = Result<i64, nodedb_types::NodeDbError>;
+pub(crate) type AccessorResult = Result<i64, AccessorError>;
+
+/// The error one sequence invocation raised, kept so a replay raises the
+/// error the first call raised, under the same SQLSTATE.
+#[derive(Debug, Clone)]
+pub(crate) enum AccessorError {
+    /// The sequence does not exist: `42704`.
+    Undefined { kind: &'static str, name: String },
+    /// `currval` before the session obtained a value: `55000`.
+    NotYetDefined { object: String, detail: String },
+    /// Any other error, in its public form.
+    Other(nodedb_types::NodeDbError),
+}
+
+impl AccessorError {
+    fn of(error: crate::Error) -> Self {
+        match error {
+            crate::Error::UndefinedObject { kind, name } => Self::Undefined { kind, name },
+            crate::Error::ObjectNotInPrerequisiteState { object, detail } => {
+                Self::NotYetDefined { object, detail }
+            }
+            other => Self::Other(nodedb_types::NodeDbError::from(other)),
+        }
+    }
+
+    fn to_error(&self) -> crate::Error {
+        match self {
+            Self::Undefined { kind, name } => crate::Error::UndefinedObject {
+                kind,
+                name: name.clone(),
+            },
+            Self::NotYetDefined { object, detail } => crate::Error::ObjectNotInPrerequisiteState {
+                object: object.clone(),
+                detail: detail.clone(),
+            },
+            Self::Other(error) => crate::Error::from(error.clone()),
+        }
+    }
+}
+
 /// Position of an expression within the bound prepared input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AccessorOccurrence {
@@ -130,19 +169,19 @@ impl TranscriptAccess<'_> {
                 return Err(crate::Error::CalvinSerializationConflict);
             }
             self.cursor.set(index + 1);
-            return result.clone().map_err(crate::Error::from);
+            return result.clone().map_err(|error| error.to_error());
         }
         let result = match &invocation {
             AccessorInvocation::Nextval(name) => self.access.nextval(name),
             AccessorInvocation::Currval(name) => self.access.currval(name),
             AccessorInvocation::Setval(name, value) => self.access.setval(name, *value),
         };
-        let result = result.map_err(nodedb_types::NodeDbError::from);
+        let result = result.map_err(AccessorError::of);
         self.transcript
             .lock_entries()
             .push((self.occurrence.get(), invocation, result.clone()));
         self.cursor.set(index + 1);
-        result.map_err(crate::Error::from)
+        result.map_err(|error| error.to_error())
     }
 
     pub(super) fn finish(&self) -> crate::Result<()> {
@@ -208,6 +247,48 @@ mod tests {
                 (AccessorInvocation::Setval("s".into(), 40), 40),
             ]
         );
+    }
+
+    struct Fresh;
+    impl SequenceAccess for Fresh {
+        fn nextval(&self, name: &str) -> crate::Result<i64> {
+            Err(crate::Error::UndefinedObject {
+                kind: "sequence",
+                name: name.into(),
+            })
+        }
+        fn currval(&self, name: &str) -> crate::Result<i64> {
+            Err(crate::Error::ObjectNotInPrerequisiteState {
+                object: name.into(),
+                detail: format!(
+                    "currval of sequence \"{name}\" is not yet defined in this session"
+                ),
+            })
+        }
+        fn setval(&self, _: &str, value: i64) -> crate::Result<i64> {
+            Ok(value)
+        }
+    }
+
+    /// An accessor error keeps its type, on the first call and on a
+    /// replay, so a refusal keeps SQLSTATE 55000 or 42704.
+    #[test]
+    fn accessor_errors_keep_their_type_on_replay() {
+        let transcript = AccessorTranscript::default();
+        for _ in 0..2 {
+            let access = transcript.begin(&Fresh);
+            assert!(matches!(
+                access.currval("s"),
+                Err(crate::Error::ObjectNotInPrerequisiteState { .. })
+            ));
+            assert!(matches!(
+                access.nextval("gone"),
+                Err(crate::Error::UndefinedObject {
+                    kind: "sequence",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

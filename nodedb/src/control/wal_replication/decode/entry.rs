@@ -238,6 +238,10 @@ fn to_physical_plan(
             detail: "CalvinFrozenReply reached to_physical_plan (should have been intercepted)"
                 .into(),
         }),
+        ReplicatedWrite::CalvinSequenceEffects { .. } => Err(crate::Error::Internal {
+            detail: "CalvinSequenceEffects reached to_physical_plan (should have been intercepted)"
+                .into(),
+        }),
         // The apply loop applies these through `transaction_redo`, which stamps
         // the redo with the entry's Raft coordinates.
         ReplicatedWrite::TransactionRedo { .. } => Err(crate::Error::Internal {

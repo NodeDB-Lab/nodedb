@@ -1,31 +1,38 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The frozen-reply entry a leader proposes before its commit vote.
+//! The frozen-reply entry a leader proposes for each round of its
+//! evaluation, before its commit vote.
 //!
-//! A finished evaluation's replies travel as one
-//! `ReplicatedWrite::CalvinFrozenReply` entry in the vShard's data-group log.
-//! The leader proposes straight to its group, as it proposes a redo: the
-//! write gate exempts the entry, which writes no row. The leader votes
-//! commit only once the apply loop stored a copy of the txn's reply on this
-//! node. So the reply is durable on a quorum before any COMMIT verdict, and
-//! it precedes the slice's redo in the log on every replica.
+//! A finished round's replies travel as one
+//! `ReplicatedWrite::CalvinFrozenReply` entry in the vShard's data-group log,
+//! with every plan the stored reply held when the round started. The
+//! leader proposes straight to its group, as it proposes a redo: the write
+//! gate exempts the entry, which writes no row. The next round, or the
+//! commit vote after the last, waits until the apply loop stored the
+//! round's plans on this node. So each plan is durable on a quorum before
+//! any participant reads its sequence changes, and before any COMMIT
+//! verdict, and the reply precedes the slice's redo in the log on every
+//! replica.
 //!
 //! | Outcome | Action |
 //! |---|---|
 //! | `NotLeader` | Demote. The next leader stages the txn again and reads the stored reply. |
-//! | Proposed, then the group applied past the entry with no reply stored | Propose again. |
+//! | The stored reply holds the round | Start the next round, or vote commit. |
+//! | Another copy extended the stored reply first | Drop the round, and evaluate again from the stored reply. |
+//! | Proposed, then the group applied past the entry with no change stored | Propose again. |
 //! | A transient refusal | Propose again on the stall tick. |
 //! | The entry cannot be built | Vote abort. |
 //!
-//! The first stored copy of a txn's reply stays on every replica, so a
-//! later copy changes nothing. `frozen_cleanup` removes the rows of finished
-//! txns.
+//! A stored reply changes only when a later copy extends it (see
+//! `CalvinFrozenReply::extended_by`), so every replica keeps the same
+//! row. `frozen_cleanup` removes the rows of finished txns.
+
+use std::collections::BTreeSet;
 
 use nodedb_cluster::ClusterError;
 use nodedb_raft::RaftError;
 
 use super::super::scheduler::Scheduler;
-use super::super::staged_vote::StagedVote;
 use super::evaluate::{ReturningRefusal, frozen_effects};
 use crate::control::cluster::calvin::scheduler::driver::staged_returning::OwedFrozenEntry;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
@@ -34,11 +41,28 @@ use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::wal_replication::types::{CalvinFrozenReply, FrozenPlanReply};
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
+/// Where a stored reply stands against a round's owed entry.
+enum RoundStore {
+    /// The stored reply holds the round's plans.
+    Held,
+    /// Another copy changed the stored reply, and it lacks the round: the
+    /// owed entry no longer extends it.
+    Superseded,
+    /// The stored reply is as the round found it.
+    Waiting,
+}
+
 impl Scheduler {
-    /// Propose `txn_id`'s frozen replies, which its evaluation left on the
-    /// txn, and vote commit once a copy is stored.
-    pub(super) fn propose_frozen_reply(&mut self, txn_id: TxnId) {
-        let bytes = match self.frozen_entry_bytes(txn_id) {
+    /// Propose `txn_id`'s frozen replies of `round`, which its evaluation
+    /// left on the txn, after the stored plans `base`. The next step waits
+    /// until the stored reply holds the round.
+    pub(super) fn propose_frozen_reply(
+        &mut self,
+        txn_id: TxnId,
+        base: BTreeSet<u32>,
+        round: BTreeSet<u32>,
+    ) {
+        let bytes = match self.frozen_entry_bytes(txn_id, &base) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return,
             Err(error) => {
@@ -55,25 +79,39 @@ impl Scheduler {
             pending.returning.frozen_entry = Some(OwedFrozenEntry {
                 bytes,
                 proposed: None,
+                base,
+                round,
             });
         }
         self.send_frozen_entry(txn_id);
         // An earlier leader's copy can be stored already.
-        self.vote_on_stored_frozen(txn_id);
+        self.advance_on_stored_frozen(txn_id);
     }
 
-    /// The encoded entry of `txn_id`'s frozen replies. `None` for a txn
-    /// this scheduler does not hold.
-    fn frozen_entry_bytes(&self, txn_id: TxnId) -> crate::Result<Option<Vec<u8>>> {
+    /// The encoded entry of `txn_id`'s stored plans `base` and the frozen
+    /// replies its round left on the txn. `None` for a txn this scheduler
+    /// does not hold.
+    fn frozen_entry_bytes(
+        &self,
+        txn_id: TxnId,
+        base: &BTreeSet<u32>,
+    ) -> crate::Result<Option<Vec<u8>>> {
         let Some(pending) = self.pending.get(&txn_id) else {
             return Ok(None);
         };
         let tx_class = &pending.txn.tx_class;
-        let plans = pending
-            .returning
-            .frozen
-            .iter()
-            .map(|(plan_index, reply)| FrozenPlanReply {
+        let mut plans: Vec<FrozenPlanReply> = if base.is_empty() {
+            Vec::new()
+        } else {
+            frozen_replies::load(self.shared.credentials.catalog(), self.vshard_id, txn_id)?
+                .map(|stored| stored.plans)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|plan| base.contains(&plan.plan_index))
+                .collect()
+        };
+        plans.extend(pending.returning.frozen.iter().map(|(plan_index, reply)| {
+            FrozenPlanReply {
                 plan_index: *plan_index,
                 payload: reply.payload.clone(),
                 column_types: reply
@@ -84,20 +122,9 @@ impl Scheduler {
                     .collect(),
                 sequence_effects: frozen_effects(&reply.sequence_effects),
                 rejected: pending.returning.rejections.get(plan_index).cloned(),
-                // The coordinator answers the items the contract deferred.
-                deferred_currval: tx_class
-                    .returning
-                    .as_ref()
-                    .and_then(|contract| {
-                        contract
-                            .plans
-                            .iter()
-                            .find(|plan| plan.plan_index == *plan_index)
-                    })
-                    .map(|plan| plan.deferred_currval.clone())
-                    .unwrap_or_default(),
-            })
-            .collect();
+            }
+        }));
+        plans.sort_by_key(|plan| plan.plan_index);
         let entry = ReplicatedEntry::new(
             tx_class.tenant_id.as_u64(),
             tx_class.database_id.as_u64(),
@@ -150,7 +177,8 @@ impl Scheduler {
         }
     }
 
-    /// Vote commit for every staged txn whose frozen reply is now stored.
+    /// Take the next step of every staged txn whose owed round the stored
+    /// reply holds, or can no longer extend.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn vote_stored_frozen_replies(
         &mut self,
     ) {
@@ -164,43 +192,80 @@ impl Scheduler {
             .map(|(txn_id, _)| *txn_id)
             .collect();
         for txn_id in waiting {
-            self.vote_on_stored_frozen(txn_id);
+            self.advance_on_stored_frozen(txn_id);
         }
     }
 
-    /// Vote commit for `txn_id` once a copy of its frozen reply is stored.
-    fn vote_on_stored_frozen(&mut self, txn_id: TxnId) {
-        let awaits = self.pending.get(&txn_id).is_some_and(|pending| {
-            pending.commit_state == CommitState::Staged && pending.returning.frozen_entry.is_some()
-        });
-        if !awaits {
+    /// Take the next step of `txn_id` once the stored reply holds its owed
+    /// round: the next round, or the commit vote. A round another copy
+    /// superseded is dropped with its transcripts, and the txn evaluates
+    /// again from the stored reply.
+    fn advance_on_stored_frozen(&mut self, txn_id: TxnId) {
+        let Some(owed) = self
+            .pending
+            .get(&txn_id)
+            .filter(|pending| pending.commit_state == CommitState::Staged)
+            .and_then(|pending| pending.returning.frozen_entry.as_ref())
+        else {
             return;
-        }
-        match frozen_replies::holds(self.shared.credentials.catalog(), self.vshard_id, txn_id) {
-            Ok(true) => {
-                if let Some(pending) = self.pending.get_mut(&txn_id) {
-                    pending.returning.frozen_entry = None;
+        };
+        let (base, round) = (owed.base.clone(), owed.round.clone());
+        let stored =
+            match frozen_replies::load(self.shared.credentials.catalog(), self.vshard_id, txn_id) {
+                Ok(stored) => stored,
+                Err(error) => {
+                    // The step waits: the next pass reads the row again.
+                    tracing::warn!(
+                        vshard_id = self.vshard_id,
+                        epoch = txn_id.epoch,
+                        position = txn_id.position,
+                        %error,
+                        "calvin: the stored frozen reply does not read; the vote waits"
+                    );
+                    crate::diag::calvin_frozen_reply_store_failed(
+                        self.vshard_id,
+                        Some((txn_id.epoch, txn_id.position)),
+                        "load",
+                        &error,
+                    );
+                    return;
                 }
-                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
-            }
-            Ok(false) => {}
-            Err(error) => {
-                // The vote waits: the next pass reads the row again.
-                tracing::warn!(
+            };
+        let held: BTreeSet<u32> = stored
+            .iter()
+            .flat_map(|reply| &reply.plans)
+            .map(|plan| plan.plan_index)
+            .collect();
+        let standing = if round.iter().all(|plan| held.contains(plan)) {
+            RoundStore::Held
+        } else if held != base {
+            RoundStore::Superseded
+        } else {
+            RoundStore::Waiting
+        };
+        match standing {
+            RoundStore::Waiting => return,
+            RoundStore::Held => {}
+            RoundStore::Superseded => {
+                tracing::info!(
                     vshard_id = self.vshard_id,
                     epoch = txn_id.epoch,
                     position = txn_id.position,
-                    %error,
-                    "calvin: the stored frozen reply does not read; the vote waits"
+                    "calvin: another copy extended the stored frozen reply first; evaluating \
+                     the round again from it"
                 );
-                crate::diag::calvin_frozen_reply_store_failed(
-                    self.vshard_id,
-                    Some((txn_id.epoch, txn_id.position)),
-                    "load",
-                    &error,
-                );
+                if let Some(pending) = self.pending.get(&txn_id) {
+                    for plan in &round {
+                        pending.returning.transcripts.reset(*plan);
+                    }
+                }
             }
         }
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.returning.frozen_entry = None;
+            pending.returning.frozen.clear();
+        }
+        self.advance_returning(txn_id);
     }
 
     /// Propose again every owed frozen-reply entry that is not in the log:
@@ -247,7 +312,8 @@ mod tests {
     use nodedb_cluster::calvin::{CalvinCompletionRegistry, VerdictOutcome};
 
     use super::super::fixtures::{
-        FROZEN_TXN as TXN, frozen_leader as leader, image_rows, sequence_next, stores_frozen_reply,
+        FROZEN_TXN as TXN, frozen_leader as leader, image_rows, sequence_next, stored_plan_zero,
+        stores_frozen_reply,
     };
     use super::*;
     use crate::bridge::envelope::{ErrorCode, StageVote, Status};
@@ -277,12 +343,7 @@ mod tests {
         let (mut scheduler, _dir, _data_side) = leader(&registry);
         frozen_replies::store(
             scheduler.shared.credentials.catalog(),
-            &CalvinFrozenReply {
-                epoch: TXN.epoch,
-                position: TXN.position,
-                vshard: test_coll_vshard(),
-                plans: Vec::new(),
-            },
+            &stored_plan_zero(test_coll_vshard(), TXN),
         )
         .expect("an earlier leader's reply is stored");
         scheduler.resolve_staged_commit(

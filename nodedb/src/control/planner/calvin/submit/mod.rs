@@ -41,7 +41,7 @@ pub mod prepare;
 pub mod reported_results;
 mod returning_answer;
 mod returning_contract;
-mod returning_deferral;
+mod returning_order;
 pub mod routed;
 pub mod stream;
 pub mod submit_gate;

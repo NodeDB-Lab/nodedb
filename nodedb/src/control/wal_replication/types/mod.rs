@@ -36,7 +36,7 @@ pub use aliases::{
     RaftAppliedIndexSink, RaftCompactor, RaftProposer,
 };
 pub use calvin_frozen_reply::{
-    CalvinFrozenReply, FrozenPlanReply, FrozenRejection, FrozenSequenceEffect,
+    CalvinFrozenReply, FrozenPlanReply, FrozenRejection, FrozenSequenceEffect, PlanSequenceEffects,
 };
 pub use redo_chunk_wire::{RedoBody, RedoContent};
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};

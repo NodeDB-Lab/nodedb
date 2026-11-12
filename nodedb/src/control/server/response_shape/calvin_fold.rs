@@ -370,7 +370,6 @@ mod tests {
             column_types: vec!["text".into(), "int8".into()],
             sequence_effects,
             rejected: None,
-            deferred_currval: Vec::new(),
         }
     }
 

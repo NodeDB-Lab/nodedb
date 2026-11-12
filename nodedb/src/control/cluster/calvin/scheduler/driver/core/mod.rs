@@ -14,7 +14,7 @@
 //! All bookkeeping uses `BTreeMap`/`BTreeSet` — never `HashMap`/`HashSet` —
 //! and dispatch order is `(epoch, position)` order. `Instant::now()` is used
 //! only for lock-wait latency metrics, the instant a leader proposes a
-//! dependent-read barrier's timeout entry, and the restage backoff, all off
+//! barrier's timeout entry, and the restage backoff, all off
 //! the WAL-influencing path; every call site carries a `// no-determinism:`
 //! marker.
 

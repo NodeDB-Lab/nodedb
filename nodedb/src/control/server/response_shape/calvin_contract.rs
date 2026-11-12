@@ -8,14 +8,13 @@
 //! vote, stored in the participant's log. They are the final typed rows.
 //! The coordinator's answer is the union of every participant's reply, in
 //! statement order. It answers the rows as they are and makes no sequence
-//! call. It gives the writer's session the `nextval` and `setval` results
-//! the evaluation drew, and raises the rejected-lines notice of an ingest
-//! that rejected lines.
-
-use std::collections::BTreeMap;
+//! call: each participant evaluated its plans after the sequence changes of
+//! every earlier plan they read. It gives the writer's session the
+//! `nextval` and `setval` results the evaluation drew, and raises the
+//! rejected-lines notice of an ingest that rejected lines.
 
 use nodedb_physical::physical_plan::PhysicalPlan;
-use nodedb_types::{ReturningColumns, ReturningItem, Value};
+use nodedb_types::{ReturningColumns, ReturningItem};
 
 use super::calvin_fold::CalvinFoldCtx;
 use super::project::cell_keys;
@@ -43,7 +42,7 @@ pub(super) fn contract_rows(
     ctx: &CalvinFoldCtx<'_>,
 ) -> crate::Result<Vec<ShapedRows>> {
     let reply = CalvinFrozenReply::from_bytes(payload)?;
-    let sets = reply_sets(&reply, ctx);
+    let sets = reply_sets(&reply);
     record_sequence_effects(&reply, ctx.session);
     let sets = sets?;
     if sets.is_empty() {
@@ -52,74 +51,18 @@ pub(super) fn contract_rows(
     Ok(sets)
 }
 
-/// One result set per plan index of `reply`, each deferred `currval`
-/// answered from the changes of the plans before it.
-fn reply_sets(
-    reply: &CalvinFrozenReply,
-    ctx: &CalvinFoldCtx<'_>,
-) -> crate::Result<Vec<ShapedRows>> {
-    // The value each sequence holds after the plans folded so far.
-    let mut changed: BTreeMap<&str, i64> = BTreeMap::new();
+/// One result set per plan index of `reply`, in statement order. A plan
+/// that spans vShards answers each one's rows in its one set.
+fn reply_sets(reply: &CalvinFrozenReply) -> crate::Result<Vec<ShapedRows>> {
     let mut sets: Vec<(u32, ShapedRows)> = Vec::with_capacity(reply.plans.len());
     for plan in &reply.plans {
-        let mut rows = frozen_rows(plan)?;
-        answer_deferred(plan, &mut rows, &changed, ctx.session)?;
-        for effect in &plan.sequence_effects {
-            let (name, value) = effect.name_value();
-            changed.insert(name, value);
-        }
+        let rows = frozen_rows(plan)?;
         match sets.last_mut() {
             Some((index, held)) if *index == plan.plan_index => held.append(rows),
             _ => sets.push((plan.plan_index, rows)),
         }
     }
     Ok(sets.into_iter().map(|(_, rows)| rows).collect())
-}
-
-/// Fill each column `plan` deferred with the `currval` its sequence holds
-/// after the earlier plans: their last change, else the session's value
-/// from before the request.
-fn answer_deferred(
-    plan: &FrozenPlanReply,
-    rows: &mut ShapedRows,
-    changed: &BTreeMap<&str, i64>,
-    session: &dyn SequenceRecorder,
-) -> crate::Result<()> {
-    if plan.deferred_currval.is_empty() {
-        return Ok(());
-    }
-    let keys = rows.cell_keys();
-    for deferred in &plan.deferred_currval {
-        let sequence = deferred.sequence.as_str();
-        let value = changed
-            .get(sequence)
-            .copied()
-            .or_else(|| session.obtained(sequence))
-            .ok_or_else(|| crate::Error::ObjectNotInPrerequisiteState {
-                object: sequence.to_owned(),
-                detail: format!(
-                    "currval of sequence \"{sequence}\" is not yet defined in this session"
-                ),
-            })?;
-        let column = usize::try_from(deferred.item)
-            .ok()
-            .filter(|column| *column < keys.len())
-            .ok_or_else(|| crate::Error::Internal {
-                detail: format!(
-                    "calvin RETURNING: plan {} defers column {} of {}",
-                    plan.plan_index,
-                    deferred.item,
-                    keys.len()
-                ),
-            })?;
-        for row in &mut rows.rows {
-            row.insert(keys[column].clone(), Value::Integer(value));
-        }
-        if let Some(ty) = rows.column_types.get_mut(column) {
-            *ty = DdlColType::Int8;
-        }
-    }
-    Ok(())
 }
 
 /// The empty result set of `plan`'s list: one column per named item. A star
@@ -234,7 +177,6 @@ mod tests {
             column_types: vec!["text".into(), "int8".into()],
             sequence_effects: Vec::new(),
             rejected: None,
-            deferred_currval: Vec::new(),
         }
     }
 
@@ -312,75 +254,6 @@ mod tests {
             deferred_sum_targets: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
-    }
-
-    /// A deferred `currval` answers the last change an earlier plan made,
-    /// else the session's value from before the request. With neither it
-    /// fails as `currval` does.
-    #[test]
-    fn a_deferred_currval_answers_the_earlier_plans_change() {
-        #[derive(Default)]
-        struct Before(Option<i64>);
-        impl SequenceRecorder for Before {
-            fn record_obtained(&self, _name: &str, _value: i64) {}
-            fn obtained(&self, _name: &str) -> Option<i64> {
-                self.0
-            }
-        }
-        let mut drawing = plan(vec![vec![Value::String("a".into()), Value::Integer(7)]]);
-        drawing.sequence_effects = vec![FrozenSequenceEffect::Nextval {
-            name: "s".into(),
-            value: 7,
-        }];
-        let mut reading = FrozenPlanReply {
-            plan_index: 1,
-            ..plan(vec![vec![Value::String("b".into()), Value::Null]])
-        };
-        reading.deferred_currval = vec![nodedb_cluster::calvin::types::DeferredCurrval {
-            item: 1,
-            sequence: "s".into(),
-        }];
-        let reply = |plans| {
-            CalvinFrozenReply {
-                epoch: 1,
-                position: 0,
-                vshard: 0,
-                plans,
-            }
-            .to_bytes()
-            .expect("encode")
-        };
-        let n_of = |sets: &[ShapedRows]| {
-            let set = &sets[sets.len() - 1];
-            let key = &set.cell_keys()[1];
-            (set.rows[0][key].clone(), set.column_types[1])
-        };
-
-        let before = Before(Some(3));
-        let sets = contract_rows(
-            Some(&star_insert()),
-            &reply(vec![drawing, reading.clone()]),
-            &ctx(&before),
-        )
-        .expect("rows");
-        assert_eq!(n_of(sets.as_slice()), (Value::Integer(7), DdlColType::Int8));
-
-        let sets = contract_rows(
-            Some(&star_insert()),
-            &reply(vec![reading.clone()]),
-            &ctx(&before),
-        )
-        .expect("rows");
-        assert_eq!(n_of(sets.as_slice()).0, Value::Integer(3));
-
-        assert!(matches!(
-            contract_rows(
-                Some(&star_insert()),
-                &reply(vec![reading]),
-                &ctx(&Before(None))
-            ),
-            Err(crate::Error::ObjectNotInPrerequisiteState { .. })
-        ));
     }
 
     /// A reply with no plan answers one empty set under the list's names.

@@ -5,9 +5,10 @@
 //! The data-group apply loop stores each `CalvinFrozenReply` entry in
 //! `_system.calvin_frozen_replies` before the entry counts as applied, then
 //! wakes the vShard's scheduler. The first stored copy of a txn's reply
-//! stays.
+//! stays, unless a later copy extends it with more plans.
 //!
-//! - The slice's leader votes commit only once its txn's row is stored.
+//! - The slice's leader votes commit only once its txn's row holds every
+//!   local plan.
 //! - The slice's install answers the row on every replica. No replica
 //!   reads a leader's in-memory evaluation.
 //! - The scheduler removes a txn's row once the txn finished, and
@@ -36,11 +37,20 @@ use crate::control::state::SharedState;
 use crate::control::wal_replication::types::CalvinFrozenReply;
 use crate::types::CutFrozenReply;
 
-/// Store `reply` unless a copy of its txn's reply is stored. Returns whether
-/// this call stored it. The row is durable when this returns.
+/// Store `reply` when no copy of its txn's reply is stored, or when it
+/// extends the stored copy (see [`CalvinFrozenReply::extended_by`]). Any
+/// other copy writes nothing. Returns whether this call stored it. The row
+/// is durable when this returns.
 pub fn store(catalog: &SystemCatalog, reply: &CalvinFrozenReply) -> crate::Result<bool> {
-    let bytes = reply.to_bytes()?;
-    catalog.store_calvin_frozen_reply(reply.vshard, reply.epoch, reply.position, &bytes)
+    catalog.fold_calvin_frozen_reply(reply.vshard, reply.epoch, reply.position, |held| {
+        let Some(held) = held else {
+            return reply.to_bytes().map(Some);
+        };
+        CalvinFrozenReply::from_bytes(held)?
+            .extended_by(reply)
+            .map(|extended| extended.to_bytes())
+            .transpose()
+    })
 }
 
 /// The stored reply of `txn` on `vshard_id`, when one is stored.

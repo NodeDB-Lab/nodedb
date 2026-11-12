@@ -3,7 +3,7 @@
 //! The `RETURNING` evaluations a leader runs off its scheduler loop, and the
 //! transcripts it keeps for every txn that carries a contract.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
@@ -20,6 +20,10 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) struct Evaluate
     /// for casts its vote.
     pub(super) seq: u64,
     pub(super) outcome: ReturningOutcome,
+    /// The plans of the stored reply the round followed.
+    pub(super) base: BTreeSet<u32>,
+    /// The plans the round evaluated.
+    pub(super) round: BTreeSet<u32>,
 }
 
 /// The evaluations of one scheduler.

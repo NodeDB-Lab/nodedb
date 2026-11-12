@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The data-group leader proposes the timeout entry of a dependent-read
-//! barrier that waited too long.
+//! The data-group leader proposes the timeout entry of a barrier that
+//! waited too long: a dependent-read barrier, or a `RETURNING` evaluation
+//! that waits for another participant's sequence changes.
 //!
 //! The leader's own clock decides only when it proposes
 //! `ReplicatedWrite::CalvinReadTimeout`. The entry's place in the vShard's
@@ -20,6 +21,7 @@ use nodedb_cluster::ClusterError;
 use nodedb_raft::RaftError;
 
 use super::scheduler::Scheduler;
+use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
@@ -37,17 +39,26 @@ impl Scheduler {
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_due_read_timeouts(
         &mut self,
     ) {
-        if !self.role.is_leader() || self.dependent_barrier.is_empty() {
+        if !self.role.is_leader() {
             return;
         }
         // no-determinism: the leader's clock decides only when it proposes the timeout entry; the entry's place in the log decides the barrier.
         let now = Instant::now();
-        let due: Vec<TxnId> = self
+        let mut due: Vec<TxnId> = self
             .dependent_barrier
             .iter()
             .filter(|(_, barrier)| barrier.timeout_due <= now)
             .map(|(txn_id, _)| *txn_id)
             .collect();
+        due.extend(
+            self.pending
+                .iter()
+                .filter(|(_, pending)| {
+                    pending.commit_state == CommitState::Staged
+                        && pending.returning.wait_due.is_some_and(|at| at <= now)
+                })
+                .map(|(txn_id, _)| *txn_id),
+        );
         for txn_id in due {
             match self.propose_read_timeout(txn_id) {
                 Ok(()) => {}
@@ -63,8 +74,16 @@ impl Scheduler {
                     "calvin: barrier timeout entry not proposed; proposing it again later"
                 ),
             }
+            let rearmed = now + self.config.passive_timeout();
             if let Some(barrier) = self.dependent_barrier.get_mut(&txn_id) {
-                barrier.timeout_due = now + self.config.passive_timeout();
+                barrier.timeout_due = rearmed;
+            }
+            if let Some(due) = self
+                .pending
+                .get_mut(&txn_id)
+                .and_then(|pending| pending.returning.wait_due.as_mut())
+            {
+                *due = rearmed;
             }
         }
     }
@@ -77,22 +96,32 @@ impl Scheduler {
         if !self.role.is_leader() {
             return None;
         }
+        let sequence_waits = self
+            .pending
+            .values()
+            .filter(|pending| pending.commit_state == CommitState::Staged)
+            .filter_map(|pending| pending.returning.wait_due);
         self.dependent_barrier
             .values()
             .map(|barrier| barrier.timeout_due)
+            .chain(sequence_waits)
             .min()
     }
 
     /// Append the timeout entry of `txn_id`'s barrier to this vShard's
     /// data-group log.
     fn propose_read_timeout(&self, txn_id: TxnId) -> Result<(), TimeoutRefusal> {
-        let Some(barrier) = self.dependent_barrier.get(&txn_id) else {
-            return Ok(());
+        let tx_class = match self.dependent_barrier.get(&txn_id) {
+            Some(barrier) => &barrier.txn.tx_class,
+            None => match self.pending.get(&txn_id) {
+                Some(pending) => &pending.txn.tx_class,
+                None => return Ok(()),
+            },
         };
-        let tenant_id = barrier.txn.tx_class.tenant_id.as_u64();
+        let tenant_id = tx_class.tenant_id.as_u64();
         let entry = ReplicatedEntry::new(
             tenant_id,
-            barrier.txn.tx_class.database_id.as_u64(),
+            tx_class.database_id.as_u64(),
             self.vshard_id,
             ReplicatedWrite::CalvinReadTimeout {
                 epoch: txn_id.epoch,
@@ -110,8 +139,7 @@ impl Scheduler {
                     vshard_id = self.vshard_id,
                     epoch = txn_id.epoch,
                     position = txn_id.position,
-                    "calvin: dependent-read barrier waited past its timeout; proposed the \
-                     timeout entry"
+                    "calvin: a barrier waited past its timeout; proposed the timeout entry"
                 );
                 Ok(())
             }

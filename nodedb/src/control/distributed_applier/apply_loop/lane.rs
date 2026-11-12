@@ -71,6 +71,7 @@ impl QueuedEntry {
                     | ReplicatedWrite::CalvinReadResult { .. }
                     | ReplicatedWrite::CalvinReadTimeout { .. }
                     | ReplicatedWrite::CalvinFrozenReply { .. }
+                    | ReplicatedWrite::CalvinSequenceEffects { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
@@ -108,6 +109,7 @@ impl QueuedEntry {
             | ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
             | ReplicatedWrite::CalvinFrozenReply { .. }
+            | ReplicatedWrite::CalvinSequenceEffects { .. }
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,

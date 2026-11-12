@@ -1057,6 +1057,19 @@ pub enum ReplicatedWrite {
     CalvinFrozenReply {
         reply: super::calvin_frozen_reply::CalvinFrozenReply,
     },
+    /// The sequence changes the frozen `RETURNING` plans of Calvin txn
+    /// `(epoch, position)` on `source_vshard` made, for the data group of a
+    /// vShard whose evaluation follows them. The source's data-group leader
+    /// proposes it once its frozen reply is stored, before its commit vote.
+    /// Every replica folds it into the txn's barrier log in log order: a
+    /// plan's first copy below the barrier's timeout entry counts.
+    CalvinSequenceEffects {
+        epoch: u64,
+        position: u32,
+        source_vshard: u32,
+        tenant_id: u64,
+        plans: Vec<super::calvin_frozen_reply::PlanSequenceEffects>,
+    },
 }
 
 #[cfg(test)]
@@ -1256,6 +1269,22 @@ mod tests {
                     vshard: 0,
                     plans: Vec::new(),
                 },
+            },
+            ReplicatedWrite::CalvinSequenceEffects {
+                epoch: 2,
+                position: 1,
+                source_vshard: 3,
+                tenant_id: 1,
+                plans: vec![super::super::calvin_frozen_reply::PlanSequenceEffects {
+                    plan_index: 0,
+                    effects: vec![
+                        super::super::calvin_frozen_reply::FrozenSequenceEffect::Nextval {
+                            name: "s".into(),
+                            value: 4,
+                        },
+                    ],
+                    refused: false,
+                }],
             },
         ];
 

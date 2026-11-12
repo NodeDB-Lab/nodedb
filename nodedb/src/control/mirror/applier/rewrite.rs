@@ -50,6 +50,9 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         ReplicatedWrite::CalvinFrozenReply { .. } => {
             WriteClass::Refused("a Calvin frozen RETURNING reply")
         }
+        ReplicatedWrite::CalvinSequenceEffects { .. } => {
+            WriteClass::Refused("a Calvin RETURNING sequence change")
+        }
         ReplicatedWrite::MirrorSeal { .. } => WriteClass::Refused("another mirror's seal"),
         ReplicatedWrite::TimeseriesAggregateImage { .. } => {
             WriteClass::Refused("another mirror's aggregate image")

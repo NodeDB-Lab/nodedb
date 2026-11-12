@@ -4,8 +4,9 @@
 //! leader: the stage's images and the frozen replies, keyed by plan index,
 //! and the txn's sequence transcripts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
 
@@ -43,14 +44,24 @@ pub(super) struct StagedReturning {
     /// The rows of the images an evaluation took. `images` is empty after
     /// that, so [`Self::row_count`] reads this too.
     pub taken_rows: usize,
-    /// The frozen reply of each local `RETURNING` plan the contract names,
-    /// keyed by its index in the class's plan batch. Only the leader that
-    /// evaluated holds it: every replica reads the stored entry instead.
+    /// The frozen reply of each plan of the round in flight, keyed by its
+    /// index in the class's plan batch. Only the leader that evaluated
+    /// holds it: every replica reads the stored entry instead.
     pub frozen: BTreeMap<u32, FrozenReturningReply>,
-    /// The `CalvinFrozenReply` entry this leader proposed for the frozen
-    /// replies. The commit vote waits until a copy of the txn's reply is
-    /// stored.
+    /// The `CalvinFrozenReply` entry this leader proposed for the round in
+    /// flight. The next round, or the commit vote, waits until the stored
+    /// reply holds the round's plans.
     pub frozen_entry: Option<OwedFrozenEntry>,
+    /// Whether the `RETURNING` evaluation holds the slice's commit vote:
+    /// it casts the vote once every local plan is stored.
+    pub holds_vote: bool,
+    /// When this leader proposes the barrier's timeout entry while a local
+    /// plan waits for another participant's sequence changes. `None` while
+    /// no plan waits.
+    pub wait_due: Option<Instant>,
+    /// The local plans whose sequence changes this leader sent to every
+    /// participant that follows them.
+    pub sent: BTreeSet<u32>,
 }
 
 /// A frozen-reply entry, kept while the vote waits for its apply.
@@ -61,6 +72,11 @@ pub(super) struct OwedFrozenEntry {
     /// The `(group_id, log_index)` of the last proposal, `None` while no
     /// proposal is in the log.
     pub proposed: Option<(u64, u64)>,
+    /// The plans the stored reply held when the entry was built. The entry
+    /// carries them unchanged.
+    pub base: BTreeSet<u32>,
+    /// The plans the entry adds to them: the round's.
+    pub round: BTreeSet<u32>,
 }
 
 impl StagedReturning {
@@ -111,9 +127,13 @@ impl StagedReturning {
         self.taken_rows = 0;
         self.frozen.clear();
         self.frozen_entry = None;
+        self.holds_vote = false;
+        self.wait_due = None;
+        self.sent.clear();
     }
 
     /// The rows every plan holds.
+    #[cfg(test)]
     pub(super) fn row_count(&self) -> usize {
         self.taken_rows + self.images.values().map(Vec::len).sum::<usize>()
     }
