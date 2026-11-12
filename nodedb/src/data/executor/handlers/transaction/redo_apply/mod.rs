@@ -5,7 +5,8 @@
 //!
 //! - [`entry`]: the `MetaOp::ApplyTransactionRedo` handler.
 //! - [`calvin_install`]: the install of a committed Calvin slice.
-//! - [`validate`]: commit-boundary checks that run before any write.
+//! - [`validate`]: commit-boundary checks that run before any write. The
+//!   Calvin stage runs the same checks on its staged images.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
 //! - [`document`]: document rows written while the apply scope is open.
@@ -22,6 +23,7 @@
 //! - [`cross_shard_fold_tests`]: a record never folds a cross-shard sum
 //!   target on the source's core.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
+//! - [`retention_instant_tests`]: retention judged at the entry's instant.
 
 #[cfg(test)]
 pub(in crate::data::executor) mod calvin_fold_tests;
@@ -38,10 +40,13 @@ mod events;
 mod install_refusal_tests;
 mod installed_document;
 mod passes;
+#[cfg(test)]
+mod retention_instant_tests;
 mod settle;
 mod snapshot_check;
 mod state;
 mod sub_ops;
+mod sum_fold_check;
 #[cfg(test)]
 mod sync_refusal_tests;
 #[cfg(test)]
@@ -54,3 +59,5 @@ mod write_keys;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
 pub(in crate::data::executor) use state::{RedoApplyPass, RedoApplyState, TsInstalled};
+pub(in crate::data::executor) use sub_ops::{RedoDocOp, RedoKvOp, document_ops, kv_ops};
+pub(in crate::data::executor) use validate::CommitBoundary;

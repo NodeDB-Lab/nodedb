@@ -96,6 +96,9 @@ impl CoreLoop {
                 // Test-only fault boundary after a potentially-mutating stage.
                 crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
+            // A committed slice cannot abort: every check its install runs
+            // runs here, so a refusal is this slice's abort vote.
+            self.check_calvin_commit_boundary(task, synthetic_txn_id, *tenant_id, plans)?;
             self.finish_calvin_staging(synthetic_txn_id, tenant_id.as_u64(), staging)
         }));
         self.apply_scope.calvin_txn_ordinal = None;
@@ -346,10 +349,22 @@ mod tests {
         let drifted = stage_at(&mut core, 35, &[resolved_delete(vec![5])]);
         assert_drift_stages_nothing(&core, &drifted, 35);
 
+        // The covered delete folds into target row `a1`, which the install
+        // reads, so the row is stored.
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         configure_sum(&mut core);
         source_row(&mut core, 6, "a1");
+        core.sparse
+            .put(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(4242)),
+                &doc_format::encode_to_msgpack(&serde_json::json!({"id": "a1", "balance": "100"})),
+                core.bitemporal_ordinal(),
+            )
+            .expect("seed target row");
         let covered = stage_at(&mut core, 36, &[resolved_delete(vec![6])]);
         assert_eq!(covered.status, Status::Ok, "{:?}", covered.error_code);
     }

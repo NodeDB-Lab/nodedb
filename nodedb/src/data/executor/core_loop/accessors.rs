@@ -301,6 +301,18 @@ impl CoreLoop {
             .unwrap_or_else(crate::engine::kv::current_ms)
     }
 
+    /// The instant a time-bound write rule (retention) is judged at, in ms
+    /// since the Unix epoch. A Calvin stage judges at its epoch instant,
+    /// which its install judges at too. A logged write judges at the
+    /// system-time ordinal its record carries, which every replica applies
+    /// alike. Only a write with neither reads the wall clock.
+    pub(in crate::data::executor) fn enforcement_instant_ms(&self) -> i64 {
+        crate::data::executor::enforcement::retention::judged_instant_ms(
+            self.epoch_system_ms,
+            self.apply_scope.replicated_ordinal,
+        )
+    }
+
     /// Write a raw segment blob directly into the FTS LSM segment store of a
     /// collection's whole-document index.
     ///

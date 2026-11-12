@@ -84,30 +84,17 @@ pub(super) fn serialize_document_collection(
     strict_schema: Option<&StrictSchema>,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<&RowIdentity, (u32, &Staged)> = BTreeMap::new();
-    for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        let surrogate = overlay
-            .surrogate_for_doc_id(coll_key, doc_id)
-            .ok_or_else(|| crate::Error::Internal {
-                detail: format!(
-                    "document resolve: staged doc-id '{doc_id}' has no bound surrogate"
-                ),
-            })?;
-        entries.insert(doc_id, (surrogate, staged));
-    }
-
-    for (doc_id, (surrogate, staged)) in entries {
-        match staged {
-            Staged::Put(body) => {
-                let value = redo_put_value(body, strict_schema, doc_id)?;
+    for row in staged_document_rows(overlay, coll_key, strict_schema)? {
+        let stamp = pinned_stamp(overlay, coll_key, row.doc_id, row.surrogate)?;
+        match row.value {
+            Some(value) => {
                 let prov: Option<SyncProvenance> = None;
-                let stamp = pinned_stamp(overlay, coll_key, doc_id, surrogate)?;
                 let payload = zerompk::to_msgpack_vec(&(
                     collection,
-                    doc_id.as_str(),
+                    row.doc_id.as_str(),
                     value,
                     prov,
-                    surrogate,
+                    row.surrogate,
                     stamp.sys_from,
                     stamp.valid_from_ms,
                     stamp.valid_until_ms,
@@ -121,15 +108,60 @@ pub(super) fn serialize_document_collection(
                     payload,
                 });
             }
-            Staged::Tombstone => ops.push(delete_sub_record(
+            None => ops.push(delete_sub_record(
                 collection,
-                doc_id,
-                surrogate,
-                pinned_stamp(overlay, coll_key, doc_id, surrogate)?.sys_from,
+                row.doc_id,
+                row.surrogate,
+                stamp.sys_from,
             )?),
         }
     }
     Ok(())
+}
+
+/// One document row a transaction staged for `coll_key`, as its redo entry
+/// writes it.
+pub(super) struct StagedDocumentRow<'a> {
+    pub doc_id: &'a RowIdentity,
+    pub surrogate: u32,
+    /// The redo `value` of a put. `None` for a delete.
+    pub value: Option<Vec<u8>>,
+}
+
+/// Every document row staged in `overlay` for `coll_key`, in deterministic
+/// doc-id order, with the value its redo put carries. The resolve
+/// serializes these rows, and the Calvin stage judges them at its commit
+/// boundary.
+pub(super) fn staged_document_rows<'a>(
+    overlay: &'a TxnOverlay,
+    coll_key: &(DatabaseId, TenantId, String),
+    strict_schema: Option<&StrictSchema>,
+) -> crate::Result<Vec<StagedDocumentRow<'a>>> {
+    let mut entries: BTreeMap<&RowIdentity, (u32, &Staged)> = BTreeMap::new();
+    for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
+        let surrogate = overlay
+            .surrogate_for_doc_id(coll_key, doc_id)
+            .ok_or_else(|| crate::Error::Internal {
+                detail: format!(
+                    "document resolve: staged doc-id '{doc_id}' has no bound surrogate"
+                ),
+            })?;
+        entries.insert(doc_id, (surrogate, staged));
+    }
+    entries
+        .into_iter()
+        .map(|(doc_id, (surrogate, staged))| {
+            let value = match staged {
+                Staged::Put(body) => Some(redo_put_value(body, strict_schema, doc_id)?),
+                Staged::Tombstone => None,
+            };
+            Ok(StagedDocumentRow {
+                doc_id,
+                surrogate,
+                value,
+            })
+        })
+        .collect()
 }
 
 /// The redo `value` of the staged put `body` of row `doc_id`: the body a

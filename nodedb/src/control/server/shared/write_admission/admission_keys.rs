@@ -12,6 +12,8 @@
 //!   an array write, a KV predicate write, and a CRDT snapshot import.
 //! - A document write that claims a UNIQUE value locks that value
 //!   `Exclusive`.
+//! - A document write locks each materialized-sum target row it folds on
+//!   its own vShard `Exclusive`.
 //!
 //! An append differs from its Calvin keys: a timeseries ingest or a columnar
 //! insert locks the rows it names `Exclusive` and its collection `Intent`.
@@ -53,6 +55,7 @@ use crate::control::cluster::calvin::scheduler::driver::helpers::{
     expand_write_key_sets, vshard_key,
 };
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockMode};
+use crate::control::planner::calvin::submit::sum_target_rows::catalog_sum_target_sets;
 use crate::control::planner::calvin::submit::unique_claims::catalog_unique_claim_sets;
 use crate::control::planner::calvin::tx_class::write_keys::{WriteKeys, add_plan_write_keys};
 use crate::control::planner::calvin::write_class::is_write_plan;
@@ -89,6 +92,15 @@ pub(crate) fn plan_admission_keys(
             std::slice::from_ref(plan),
         )?);
     }
+    // The target rows its install folds on this vShard, which a Calvin
+    // transaction of the same plan locks too. A Calvin slice judges its folds
+    // at its stage, so no fold lands on those rows before its install.
+    sets.extend(catalog_sum_target_sets(
+        shared,
+        database_id,
+        tenant_id.as_u64(),
+        std::slice::from_ref(plan),
+    )?);
     Ok(AdmissionKeys {
         keys: with_vshard_intent(expand_write_key_sets(&sets)),
         sequenced,

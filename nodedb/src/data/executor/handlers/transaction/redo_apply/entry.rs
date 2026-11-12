@@ -23,7 +23,7 @@
 //! 1. commit-boundary checks and the validate pass, before any write (see
 //!    `validate` and `passes`);
 //! 2. materialized-sum folds and hash-chain links on document rows, through
-//!    the open [`RedoApplyScope`];
+//!    the open [`RedoApplyScope`](super::state::RedoApplyScope);
 //! 3. a write note for every collection written;
 //! 4. the record's events, sent once the post-install work succeeded, with
 //!    one publish event per message its transaction published (see
@@ -46,8 +46,9 @@ use crate::types::TenantId;
 use crate::wal::RedoRecord;
 
 use super::passes::{RedoTarget, final_refusal};
-use super::state::{DeferredNoteKind, RedoApplyPass, RedoApplyScope, TsInstalled};
+use super::state::{DeferredNoteKind, TsInstalled};
 use super::sub_ops::{document_ops, kv_ops, label_ops};
+use super::validate::CommitBoundary;
 use crate::engine::timeseries::install_counts::TsInstallCounts;
 
 /// The `MetaOp::ApplyTransactionRedo` fields the handler reads.
@@ -69,6 +70,17 @@ pub(in crate::data::executor) struct RedoSnapshot<'a> {
 struct RedoInstallBoundary<'a> {
     snapshot: Option<RedoSnapshot<'a>>,
     permit: Option<RootJournalPermit>,
+    /// The instant the commit boundary judges retention at, in ms since the
+    /// Unix epoch. A Calvin slice names its epoch instant, which its stage
+    /// judged at. `None` judges at the request's system-time ordinal.
+    judged_at_ms: Option<i64>,
+}
+
+/// What a committed Calvin slice's install carries to its commit boundary.
+pub(super) struct CalvinBoundary {
+    pub permit: Option<RootJournalPermit>,
+    /// The slice's epoch instant, which its stage judged retention at.
+    pub epoch_system_ms: i64,
 }
 
 impl CoreLoop {
@@ -87,16 +99,17 @@ impl CoreLoop {
     /// [`Self::install_redo_authorized`] for a committed record from `origin` that also
     /// hands back what each resolved timeseries batch of the record stored,
     /// in `ts_installs`.
-    pub(in crate::data::executor) fn install_committed_redo_into(
+    pub(super) fn install_committed_redo_into(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
-        permit: Option<RootJournalPermit>,
+        calvin: CalvinBoundary,
     ) -> Response {
-        // A Calvin slice's stage vote validated its snapshot.
+        // A Calvin slice's stage vote validated its snapshot, and its stage
+        // judged its commit boundary at the epoch instant.
         self.install_redo_into(
             task,
             tid,
@@ -105,7 +118,8 @@ impl CoreLoop {
             ts_installs,
             RedoInstallBoundary {
                 snapshot: None,
-                permit,
+                permit: calvin.permit,
+                judged_at_ms: Some(calvin.epoch_system_ms),
             },
         )
     }
@@ -157,7 +171,11 @@ impl CoreLoop {
             committed,
             origin,
             &mut Vec::new(),
-            RedoInstallBoundary { snapshot, permit },
+            RedoInstallBoundary {
+                snapshot,
+                permit,
+                judged_at_ms: None,
+            },
         )
     }
 
@@ -173,7 +191,11 @@ impl CoreLoop {
         ts_installs: &mut Vec<TsInstalled>,
         boundary: RedoInstallBoundary<'_>,
     ) -> Response {
-        let RedoInstallBoundary { snapshot, permit } = boundary;
+        let RedoInstallBoundary {
+            snapshot,
+            permit,
+            judged_at_ms,
+        } = boundary;
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
                 task,
@@ -208,23 +230,26 @@ impl CoreLoop {
                 }
             };
         // Nothing is written when a check refuses the record, so the refusal
-        // is final on every replica.
-        let check_scope =
-            RedoApplyScope::new(RedoApplyPass::Validate, committed.sum_targets.to_vec());
-        // A role-guarded transition is judged against the roles the record
-        // carries, so every replica reaches the same verdict.
-        if let Err(error) = self.validate_redo_document_ops(
+        // is final on every replica. A role-guarded transition is judged
+        // against the roles the record carries. Retention is judged at an
+        // instant the entry carries: a Calvin slice's epoch instant, else the
+        // system-time ordinal the entry's leader assigned. So every replica
+        // reaches the same verdict. Only a write with neither reads the wall
+        // clock.
+        let kv_writes = kv_ops(&redo.ops);
+        if let Err(error) = self.check_commit_boundary(&CommitBoundary {
             database_id,
             tid,
-            &doc_ops,
-            &check_scope,
+            documents: &doc_ops,
+            kv: &kv_writes,
+            sum_targets: committed.sum_targets,
             origin,
-            &redo.user_roles,
-        ) {
-            return self.response_error(task, error);
-        }
-        let kv_writes = kv_ops(&redo.ops);
-        if let Err(error) = super::validate::check_redo_kv_row_images(&kv_writes) {
+            user_roles: &redo.user_roles,
+            judged_at_ms: crate::data::executor::enforcement::retention::judged_instant_ms(
+                judged_at_ms,
+                task.request.system_ordinal,
+            ),
+        }) {
             return self.response_error(task, error);
         }
         let kv_images = self.kv_prior_images(database_id, tid, kv_writes);

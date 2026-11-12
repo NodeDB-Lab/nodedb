@@ -25,7 +25,7 @@ use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::task::ExecutionTask;
 
-use super::entry::CommittedRedo;
+use super::entry::{CalvinBoundary, CommittedRedo};
 
 impl CoreLoop {
     /// Install the committed Calvin slice `install` names from its redo
@@ -80,7 +80,10 @@ impl CoreLoop {
             committed,
             origin,
             &mut ts_installs,
-            permit,
+            CalvinBoundary {
+                permit,
+                epoch_system_ms,
+            },
         );
         self.kv_engine.close_write_scope(kv_scope);
         if response.status != Status::Ok {

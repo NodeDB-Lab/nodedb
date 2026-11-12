@@ -86,7 +86,7 @@ impl CoreLoop {
 
     /// Resolve the slice staged at `(epoch, 0)` and install its redo record
     /// at `lsn`. Returns the first refusal, or the install's answer.
-    fn calvin_install_staged_for_test(
+    pub(in crate::data::executor) fn calvin_install_staged_for_test(
         &mut self,
         task: &ExecutionTask,
         plans: &[PhysicalPlan],
@@ -112,7 +112,7 @@ impl CoreLoop {
             redo: answer.redo,
             collections: written_collections(plans),
             sum_targets: redo_sum_targets(plans),
-            origin: RedoOrigin::Commit,
+            origin: RedoOrigin::of_plans(plans),
             calvin: Some(CalvinInstall {
                 epoch,
                 position: 0,

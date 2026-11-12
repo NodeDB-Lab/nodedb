@@ -48,7 +48,7 @@ impl CoreLoop {
     /// `apply_point_put`'s encoding pipeline (generated columns, `_rowid`
     /// injection, schemaless canonicalization, strict Binary Tuple, bitemporal
     /// slots).
-    pub(super) fn stage_encode_put_body(
+    pub(in crate::data::executor) fn stage_encode_put_body(
         &self,
         database_id: u64,
         tid: u64,

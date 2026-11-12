@@ -271,7 +271,9 @@ fn resolved_target(
 /// the second would have to observe the first — which is the whole reason the
 /// plain read goes through the caller's transaction. Summing first makes the
 /// question moot for deltas produced by a single fold.
-fn coalesce(deltas: Vec<super::delta::SumDelta>) -> Vec<(String, Decimal)> {
+pub(in crate::data::executor) fn coalesce(
+    deltas: Vec<super::delta::SumDelta>,
+) -> Vec<(String, Decimal)> {
     let mut totals: Vec<(String, Decimal)> = Vec::with_capacity(deltas.len());
     for delta in deltas {
         match totals

@@ -36,6 +36,7 @@ mod chain_heads;
 pub mod edge_slices;
 pub mod local;
 pub mod parts;
+mod period_lock_reads;
 pub mod prepare;
 pub mod reported_results;
 mod returning_answer;
@@ -44,6 +45,7 @@ mod returning_deferral;
 pub mod routed;
 pub mod stream;
 pub mod submit_gate;
+pub mod sum_target_rows;
 pub mod unique_claims;
 pub mod wait;
 

@@ -34,7 +34,7 @@ impl CoreLoop {
 
     /// `ops` without the clone copies the apply skips: a copy whose row
     /// already holds a version writes nothing, so no check judges it.
-    pub(super) fn without_skipped_clone_copies(
+    pub(in crate::data::executor) fn without_skipped_clone_copies(
         &self,
         database_id: u64,
         tid: u64,

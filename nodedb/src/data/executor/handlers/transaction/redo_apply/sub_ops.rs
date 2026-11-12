@@ -15,7 +15,7 @@ use nodedb_wal::record::RecordType;
 use crate::wal::{DocumentDeleteRedo, DocumentPutRedo, RedoSubRecord};
 
 /// A document write inside a redo record.
-pub(super) enum RedoDocOp {
+pub(in crate::data::executor) enum RedoDocOp {
     Put {
         collection: String,
         /// The post-image as MessagePack.
@@ -31,13 +31,13 @@ pub(super) enum RedoDocOp {
 }
 
 impl RedoDocOp {
-    pub(super) fn collection(&self) -> &str {
+    pub(in crate::data::executor) fn collection(&self) -> &str {
         match self {
             Self::Put { collection, .. } | Self::Delete { collection, .. } => collection,
         }
     }
 
-    pub(super) fn surrogate(&self) -> u32 {
+    pub(in crate::data::executor) fn surrogate(&self) -> u32 {
         match self {
             Self::Put { surrogate, .. } | Self::Delete { surrogate, .. } => *surrogate,
         }
@@ -45,7 +45,7 @@ impl RedoDocOp {
 }
 
 /// The document writes in `ops`, in record order.
-pub(super) fn document_ops(ops: &[RedoSubRecord]) -> Vec<RedoDocOp> {
+pub(in crate::data::executor) fn document_ops(ops: &[RedoSubRecord]) -> Vec<RedoDocOp> {
     ops.iter().filter_map(document_op).collect()
 }
 
@@ -68,7 +68,7 @@ fn document_op(sub: &RedoSubRecord) -> Option<RedoDocOp> {
 }
 
 /// A KV write inside a redo record.
-pub(super) enum RedoKvOp {
+pub(in crate::data::executor) enum RedoKvOp {
     Put {
         collection: String,
         key: Vec<u8>,
@@ -85,7 +85,7 @@ type KvDelete = (String, String, Vec<Vec<u8>>);
 
 /// The KV point writes in `ops`, in record order. A `kv_truncate` carries no
 /// per-key identity and is not listed.
-pub(super) fn kv_ops(ops: &[RedoSubRecord]) -> Vec<RedoKvOp> {
+pub(in crate::data::executor) fn kv_ops(ops: &[RedoSubRecord]) -> Vec<RedoKvOp> {
     ops.iter().filter_map(kv_op).collect()
 }
 

@@ -100,11 +100,7 @@ pub(super) fn serialize_truncated_base_rows(
         declared_primary_key,
         tombstone_sys_from,
     } = params;
-    let mut entries: BTreeMap<RowIdentity, u32> = BTreeMap::new();
-    for (key, body) in rows {
-        let identity = stored_row_identity(body, strict_schema, declared_primary_key, *key);
-        entries.insert(identity, key.surrogate().as_u32());
-    }
+    let entries = truncated_row_entries(rows, strict_schema, declared_primary_key);
     for (doc_id, surrogate) in &entries {
         let sys_from =
             tombstone_sys_from
@@ -119,4 +115,23 @@ pub(super) fn serialize_truncated_base_rows(
         ops.push(delete_sub_record(collection, doc_id, *surrogate, sys_from)?);
     }
     Ok(())
+}
+
+/// The identity and surrogate of every base row in `rows`, in
+/// deterministic doc-id order: the rows a staged TRUNCATE removes. The
+/// resolve writes a delete for each, and the Calvin stage judges each at its
+/// commit boundary.
+pub(super) fn truncated_row_entries(
+    rows: &[(StorageKey, Vec<u8>)],
+    strict_schema: Option<&StrictSchema>,
+    declared_primary_key: Option<&str>,
+) -> BTreeMap<RowIdentity, u32> {
+    rows.iter()
+        .map(|(key, body)| {
+            (
+                stored_row_identity(body, strict_schema, declared_primary_key, *key),
+                key.surrogate().as_u32(),
+            )
+        })
+        .collect()
 }

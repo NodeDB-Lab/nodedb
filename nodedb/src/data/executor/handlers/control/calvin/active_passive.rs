@@ -145,6 +145,9 @@ impl CoreLoop {
             for plan in plans {
                 self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut staging)?;
             }
+            // A committed slice cannot abort: every check its install runs
+            // runs here, so a refusal is this slice's abort vote.
+            self.check_calvin_commit_boundary(task, synthetic_txn_id, *tenant_id, plans)?;
             self.finish_calvin_staging(synthetic_txn_id, tenant_id.as_u64(), staging)
         }));
         self.apply_scope.calvin_txn_ordinal = None;

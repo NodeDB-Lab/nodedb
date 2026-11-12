@@ -22,7 +22,7 @@
 //! transaction's ordinal.
 
 use nodedb_physical::physical_plan::{
-    MetaOp, PhysicalPlan, RestoredEdgeVersion, RestoredNodeLabels,
+    MetaOp, PhysicalPlan, RestoredEdgeVersion, RestoredNodeLabels, RestoredRedo,
 };
 use nodedb_wal::record::RecordType;
 
@@ -51,25 +51,11 @@ impl CoreLoop {
             let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan else {
                 continue;
             };
-            let applied =
-                self.apply_scope
-                    .calvin_txn_ordinal
-                    .ok_or_else(|| crate::Error::Internal {
-                        detail: "a RESTORE batch resolved outside a Calvin transaction".into(),
-                    })?;
-            let scope = RestoreScope {
-                database_id,
-                tid,
-                applied,
-                cut: batch.restore_cut,
-            };
-            if !batch.rows_redo.is_empty() {
-                let rows = RedoRecord::from_bytes(&batch.rows_redo)?;
-                let mut changes = RestoreChanges::default();
-                ops.extend(self.reassert_restored_rows(scope, rows.ops, &mut changes)?);
-                row_changes.extend(rows.row_changes);
-                row_changes.extend(changes.into_changes());
-            }
+            let scope = self.restore_scope(database_id, tid, batch)?;
+            let applied = scope.applied;
+            let (rows, changes) = self.restored_row_ops(scope, batch)?;
+            ops.extend(rows);
+            row_changes.extend(changes);
             for edge in &batch.edges {
                 ops.push(restored_edge(edge, scope.edge_apply())?);
             }
@@ -82,6 +68,49 @@ impl CoreLoop {
             }
         }
         Ok(())
+    }
+}
+
+impl CoreLoop {
+    /// The scope a RESTORE batch resolves in: the transaction's ordinal and
+    /// the batch's cut.
+    pub(super) fn restore_scope(
+        &self,
+        database_id: DatabaseId,
+        tid: u64,
+        batch: &RestoredRedo,
+    ) -> crate::Result<RestoreScope> {
+        let applied =
+            self.apply_scope
+                .calvin_txn_ordinal
+                .ok_or_else(|| crate::Error::Internal {
+                    detail: "a RESTORE batch resolved outside a Calvin transaction".into(),
+                })?;
+        Ok(RestoreScope {
+            database_id,
+            tid,
+            applied,
+            cut: batch.restore_cut,
+        })
+    }
+
+    /// The row sub-records of the RESTORE batch `batch` and their change
+    /// events. The resolve writes these rows, and the Calvin stage judges
+    /// them at its commit boundary.
+    pub(super) fn restored_row_ops(
+        &self,
+        scope: RestoreScope,
+        batch: &RestoredRedo,
+    ) -> crate::Result<(Vec<RedoSubRecord>, Vec<RedoRowChange>)> {
+        if batch.rows_redo.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let rows = RedoRecord::from_bytes(&batch.rows_redo)?;
+        let mut changes = RestoreChanges::default();
+        let ops = self.reassert_restored_rows(scope, rows.ops, &mut changes)?;
+        let mut row_changes = rows.row_changes;
+        row_changes.extend(changes.into_changes());
+        Ok((ops, row_changes))
     }
 }
 

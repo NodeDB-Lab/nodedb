@@ -157,12 +157,15 @@ impl CoreLoop {
             {
                 run_delete_enforcement(
                     self,
-                    database_id,
-                    tid,
-                    collection,
-                    config,
-                    slot.predecessor.as_deref(),
-                    resolved_targets,
+                    DeleteEnforcement {
+                        database_id,
+                        tid,
+                        collection,
+                        config,
+                        old_value: slot.predecessor.as_deref(),
+                        resolved_targets,
+                        judged_at_ms: self.enforcement_instant_ms(),
+                    },
                 )?;
             }
             return self.apply_history_delete(
@@ -193,12 +196,15 @@ impl CoreLoop {
         {
             run_delete_enforcement(
                 self,
-                database_id,
-                tid,
-                collection,
-                config,
-                prior.as_deref(),
-                resolved_targets,
+                DeleteEnforcement {
+                    database_id,
+                    tid,
+                    collection,
+                    config,
+                    old_value: prior.as_deref(),
+                    resolved_targets,
+                    judged_at_ms: self.enforcement_instant_ms(),
+                },
             )?;
         }
         let mut version_sys_from: Option<i64> = None;
@@ -367,19 +373,37 @@ impl CoreLoop {
     }
 }
 
+/// The delete being admitted, and the pre-image it is judged against.
+pub(in crate::data::executor) struct DeleteEnforcement<'a> {
+    pub database_id: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub config: &'a crate::engine::document::store::CollectionConfig,
+    /// The row as currently stored, when one exists.
+    pub old_value: Option<&'a [u8]>,
+    /// Read by period-lock enforcement to find its reference row.
+    pub resolved_targets: &'a [ResolvedSumTarget],
+    /// The instant retention is judged at, in ms since the Unix epoch.
+    pub judged_at_ms: i64,
+}
+
 /// Stateless DELETE enforcement, unified across the autocommit
 /// (`apply_point_delete`) and transactional (`tx_point_delete`) paths.
 /// These checks have no persistent side effect, so a violation here
 /// simply aborts before the write.
 pub(in crate::data::executor) fn run_delete_enforcement(
     core: &CoreLoop,
-    database_id: u64,
-    tid: u64,
-    collection: &str,
-    config: &crate::engine::document::store::CollectionConfig,
-    old_value: Option<&[u8]>,
-    resolved_targets: &[ResolvedSumTarget],
+    p: DeleteEnforcement<'_>,
 ) -> crate::Result<()> {
+    let DeleteEnforcement {
+        database_id,
+        tid,
+        collection,
+        config,
+        old_value,
+        resolved_targets,
+        judged_at_ms,
+    } = p;
     append_only::check_point_delete(collection, &config.enforcement)
         .map_err(map_enforcement_error)?;
     if let Some(ref pl) = config.enforcement.period_lock
@@ -396,7 +420,7 @@ pub(in crate::data::executor) fn run_delete_enforcement(
         .map_err(map_enforcement_error)?;
     }
     let created_at = old_value.and_then(retention::extract_created_at_secs);
-    retention::check_delete_allowed(collection, &config.enforcement, created_at)
+    retention::check_delete_allowed(collection, &config.enforcement, created_at, judged_at_ms)
         .map_err(map_enforcement_error)?;
     Ok(())
 }

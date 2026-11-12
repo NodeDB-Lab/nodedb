@@ -2,6 +2,7 @@
 
 mod admit;
 mod array;
+mod boundary;
 mod classify;
 mod columnar_image;
 mod columnar_ordinal;

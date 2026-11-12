@@ -284,7 +284,7 @@ impl CoreLoop {
     /// Refuse `installed` when its accepted or stored body is over the row
     /// image limit, or its stored body has a map key that is not a string.
     /// The refusal names the row by the identity INSERT mints.
-    fn check_installed_image_size(
+    pub(in crate::data::executor) fn check_installed_image_size(
         &self,
         database_id: u64,
         tid: u64,

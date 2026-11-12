@@ -73,6 +73,18 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     RedoProposeFailed,
     /// The vShard's data group applied a committed slice's redo and refused
     /// it for good. Every replica refuses the same entry.
+    ///
+    /// No client input reaches it. The stage judges the slice's commit
+    /// boundary with the check the install runs (`check_commit_boundary`):
+    /// row image limits, the stateless PUT and DELETE rules, BALANCED,
+    /// UNIQUE and the materialized-sum folds. A refusal there votes abort.
+    /// The stage reads the writes the redo record carries, from the overlay
+    /// through the resolve's own helpers. It holds every key the checks
+    /// read, granted in sequence order: the rows, the UNIQUE values, the fold
+    /// target rows and the period-lock reference rows. It judges retention
+    /// at the epoch instant the install judges at. So a slice that staged
+    /// cleanly passes the install. What remains is a resolve or a replay arm
+    /// that breaks its own invariant.
     RedoInstallRefused,
     /// A committed slice's redo did not become durable on this replica.
     RedoApplyFailed,
