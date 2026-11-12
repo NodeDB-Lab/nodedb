@@ -24,6 +24,7 @@ mod util;
 // being fully `pub` (matching `dispatch_authorized_to_data_plane` and friends,
 // which integration tests call directly) does not weaken the guarantee: the
 // type can still only be constructed by `intercept_and_authorize`.
+pub(crate) use entry::refuse_clone_write_on_settled_route;
 pub(in crate::control::server) use entry::{
     CloneWriteOutcome, TxnCloneWriteOutcome, maybe_intercept_clone_write,
     maybe_intercept_clone_write_in_txn,

@@ -24,6 +24,7 @@ use crate::control::planner::calvin::{
     classify_dispatch, read_vshards_of, submit_calvin_routed,
 };
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
+use crate::control::server::shared::clone_write::refuse_clone_write_on_settled_route;
 use crate::control::server::shared::session::read_set::{ReadSetEntry, read_snapshot_ordinal};
 use crate::control::state::SharedState;
 use crate::event::EventSource;
@@ -228,6 +229,8 @@ pub async fn dispatch_authorized_tasks_to_calvin(
         DispatchClass::SingleShard { .. }
             if !reads.is_empty() && position == TxnDispatchPosition::Autocommit =>
         {
+            // This route skips the per-task clone copy-on-write.
+            refuse_clone_write_on_settled_route(state, &tasks, tenant_id)?;
             dispatch_strict_atomic_tasks_to_calvin(
                 state,
                 &tasks,

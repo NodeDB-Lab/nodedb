@@ -12,8 +12,9 @@ use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
-use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
+use crate::control::planner::calvin::{DispatchClass, classify_dispatch, is_edge_recon_plan};
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::clone_write::refuse_clone_write_on_settled_route;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::control::server::shared::write_admission::{all_writes_bufferable, plan_is_write};
 use crate::types::TenantId;
@@ -298,6 +299,12 @@ impl NodeDbPgHandler {
                     // A zero-net settlement is the exception: it ships no task,
                     // and only Calvin checks its reads.
                     if tx_state != TransactionState::InBlock && !sum_target_reads.is_empty() {
+                        // The coordinator skips the per-task clone
+                        // copy-on-write. The static route refuses on its own.
+                        if tasks.iter().any(|task| is_edge_recon_plan(&task.plan)) {
+                            refuse_clone_write_on_settled_route(&self.state, &tasks, tenant_id)
+                                .map_err(|error| sql_error(&error))?;
+                        }
                         return self
                             .dispatch_calvin_multishard(
                                 tasks,
