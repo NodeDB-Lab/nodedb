@@ -152,9 +152,9 @@ async fn a_third_row_over_the_row_limit_writes_nothing() {
     assert!(rows_of(&server, "SELECT id FROM sa_big").await.is_empty());
 }
 
-/// An `UPDATE` of several keys plans one write per key. The second key's
-/// claim on the value the first key takes is a unique violation, and the
-/// first key keeps its value.
+/// An `UPDATE` of several keys lowers to one predicate write that judges
+/// every matched row before the first write. The second key's claim on the
+/// value the first key takes is a unique violation, and no key changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_several_key_update_that_violates_unique_writes_nothing() {
     let server = TestServer::start().await;
@@ -240,11 +240,10 @@ async fn a_multi_row_columnar_or_timeseries_write_writes_nothing() {
 }
 
 /// A single-row insert keeps the direct path: no Calvin transaction commits
-/// it. A `DELETE` of several keys plans one point delete per key, and the
-/// deletes commit as one Calvin transaction. (A several-key `UPDATE` lowers
-/// to one predicate write, so it keeps the direct path.)
+/// it. A `DELETE` of several keys in one vShard lowers to one predicate
+/// delete, so it keeps the direct path too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_write_keeps_the_direct_path_and_several_commit_once() {
+async fn one_write_and_a_several_key_delete_keep_the_direct_path() {
     let server = TestServer::start().await;
     create(
         &server,
@@ -268,11 +267,36 @@ async fn one_write_keeps_the_direct_path_and_several_commit_once() {
     create(&server, "DELETE FROM sa_direct WHERE id IN ('a', 'b')").await;
     assert_eq!(
         admitted_txns(&server).await,
-        before + 1,
-        "the point deletes of a several-key delete commit as one Calvin transaction"
+        before,
+        "a several-key delete is one task and admits no Calvin transaction"
     );
     assert_eq!(
         rows_of(&server, "SELECT id, n FROM sa_direct").await,
         ["c\t1"]
     );
+}
+
+/// A statement that emits several tasks commits as one Calvin transaction.
+/// A `DELETE` of several keys on a collection with implicit edges removes
+/// its rows and their mirrored edges, so it takes the Calvin route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_statement_with_several_tasks_commits_as_one_calvin_transaction() {
+    let server = TestServer::start().await;
+    create(&server, "CREATE COLLECTION sa_calvin").await;
+    for sql in [
+        "INSERT INTO sa_calvin { id: 'e1', _from: 'a', _to: 'b', _type: 'l' }",
+        "INSERT INTO sa_calvin { id: 'e2', _from: 'b', _to: 'c', _type: 'l' }",
+        "INSERT INTO sa_calvin { id: 'e3', _from: 'c', _to: 'd', _type: 'l' }",
+    ] {
+        create(&server, sql).await;
+    }
+
+    let before = admitted_txns(&server).await;
+    create(&server, "DELETE FROM sa_calvin WHERE id IN ('e1', 'e2')").await;
+    assert_eq!(
+        admitted_txns(&server).await,
+        before + 1,
+        "a row delete plus its edge deletes commit as one Calvin transaction"
+    );
+    assert_eq!(rows_of(&server, "SELECT id FROM sa_calvin").await, ["e3"]);
 }

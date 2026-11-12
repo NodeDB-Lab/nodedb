@@ -279,6 +279,7 @@ mod session_kill_resp_ilp;
 mod session_plan_cache_permission_tree_revoke;
 mod session_plan_cache_rls_revoke;
 mod session_statement_timeout;
+mod several_key_delete;
 mod slow_catalog_ddl_apply;
 mod sorted_index_authorization;
 mod spatial_cp_dp_query;

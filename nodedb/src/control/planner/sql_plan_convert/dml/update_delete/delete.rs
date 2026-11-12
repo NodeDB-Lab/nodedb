@@ -14,7 +14,8 @@ use crate::control::planner::sql_plan_convert::value::{sql_value_to_bytes, sql_v
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::shared::{
-    delete_effective_filter, document_collection_is_edge_bearing, pk_effective_filter,
+    delete_effective_filter, document_collection_is_edge_bearing,
+    document_collection_is_shadowed_clone, pk_effective_filter,
 };
 
 pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
@@ -136,10 +137,21 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
     // Edge-bearing gate: a PK-equality delete on a collection with implicit
     // edges must not lower to a static `PointDelete` — that bypasses OLLP
     // and leaks the edge. Route as `BulkDelete` instead so the edge-bearing
-    // gate sends it through the Calvin/OLLP coordinator. Non-edge-bearing
-    // collections keep the fast `PointDelete` path below.
-    if !is_crdt && !target_keys.is_empty() && document_collection_is_edge_bearing(ctx, collection)?
-    {
+    // gate sends it through the Calvin/OLLP coordinator.
+    //
+    // A DELETE naming several keys is one unit that removes all its rows or
+    // none, so it lowers to one `BulkDelete` over the key set: one task in
+    // one vShard, which takes the direct path. A clone that reads through to
+    // its source copies rows up one point write at a time, so its DELETE
+    // keeps one `PointDelete` per key. A CRDT collection has no batch delete
+    // op and keeps one `DocDelete` per key.
+    let edge_bearing = !is_crdt
+        && !target_keys.is_empty()
+        && document_collection_is_edge_bearing(ctx, collection)?;
+    let multi_key = !is_crdt
+        && target_keys.len() > 1
+        && !document_collection_is_shadowed_clone(ctx, collection)?;
+    if edge_bearing || multi_key {
         let effective_filter = delete_effective_filter(filters, target_keys)?;
         return Ok(vec![PhysicalTask {
             tenant_id,
@@ -334,6 +346,55 @@ mod tests {
                 PhysicalPlan::Document(DocumentOp::PointDelete { .. })
             ),
             "non-edge-bearing PK delete must remain a PointDelete"
+        );
+    }
+
+    #[test]
+    fn several_key_delete_routes_one_bulk_delete() {
+        let (ctx, _dir) = ctx_with_catalog();
+        let keys = vec![
+            SqlValue::String("a".to_string()),
+            SqlValue::String("b".to_string()),
+        ];
+        let tasks = convert_delete(
+            "plain",
+            &EngineType::DocumentSchemaless,
+            &[],
+            &keys,
+            TenantId::new(0),
+            &ctx,
+        )
+        .expect("convert_delete");
+        assert_eq!(tasks.len(), 1, "one task carries the whole key set");
+        match &tasks[0].plan {
+            PhysicalPlan::Document(DocumentOp::BulkDelete { filters, .. }) => {
+                assert!(!filters.is_empty(), "the key set rides in the filter");
+            }
+            other => panic!("expected BulkDelete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn several_key_delete_on_crdt_keeps_one_doc_delete_per_key() {
+        let (ctx, _dir) = ctx_with_catalog();
+        let keys = vec![
+            SqlValue::String("a".to_string()),
+            SqlValue::String("b".to_string()),
+        ];
+        let tasks = convert_delete(
+            "crdt_coll",
+            &EngineType::DocumentSchemaless,
+            &[],
+            &keys,
+            TenantId::new(0),
+            &ctx,
+        )
+        .expect("convert_delete");
+        assert_eq!(tasks.len(), 2);
+        assert!(
+            tasks
+                .iter()
+                .all(|t| matches!(&t.plan, PhysicalPlan::Crdt(CrdtOp::DocDelete { .. })))
         );
     }
 
