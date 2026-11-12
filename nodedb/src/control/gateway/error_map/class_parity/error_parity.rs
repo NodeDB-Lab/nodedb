@@ -87,6 +87,11 @@ fn classified_sqlstates() -> Vec<(usize, &'static str)> {
         (32, sqlstate::ACTIVE_SQL_TRANSACTION),
         (34, sqlstate::QUERY_CANCELED.0),
         (44, sqlstate::QUOTA_OVERCOMMIT),
+        // A metadata group with no leader proposed nothing. The client
+        // retries once a leader takes the proposal.
+        (60, sqlstate::LOCK_NOT_AVAILABLE),
+        // A superseded DDL changed nothing. The client retries the statement.
+        (122, sqlstate::SERIALIZATION_FAILURE),
         (62, sqlstate::PROGRAM_LIMIT_EXCEEDED),
         (63, sqlstate::SYNTAX_ERROR),
         // A CRDT constraint violation renders its constraint's class, never

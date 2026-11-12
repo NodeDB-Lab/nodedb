@@ -240,10 +240,12 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::CommittedResultUnavailable { .. }
         | Error::ProposalOutcomeUnknown { .. }
         | Error::MetadataGroupGone { .. } => NodeDbError::internal(e.to_string()),
-        Error::MetadataLeaderUnavailable => NodeDbError::dispatch(
-            "metadata raft group has no reachable leader; retry exhausted".to_string(),
+        // The code renders `40001`, the SQLSTATE pgwire gives the variant.
+        // The DDL changed nothing, so the client retries the statement.
+        Error::MetadataDdlSuperseded { .. } => NodeDbError::from_wire(
+            nodedb_types::error::ErrorCode::WRITE_CONFLICT,
+            e.to_string(),
         ),
-        Error::MetadataDdlSuperseded { .. } => NodeDbError::dispatch(e.to_string()),
         // The code renders `55P03`, the SQLSTATE pgwire gives the variant, so
         // the class survives a node hop as a bare numeric code.
         Error::AuthorizationStateBehind { .. } | Error::LinearizableReadRefused { .. } => {
@@ -252,11 +254,13 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
                 e.to_string(),
             )
         }
-        // The code renders `55P03`, the SQLSTATE pgwire gives both variants.
-        // Nothing was applied, and a retry succeeds once a majority answers.
+        // The code renders `55P03`, the SQLSTATE pgwire gives each variant.
+        // Nothing was applied, and a retry succeeds once a leader with a
+        // majority answers.
         Error::GroupQuorumUnavailable { .. }
         | Error::GroupMarksUnavailable { .. }
-        | Error::BackupCaptureMoved { .. } => {
+        | Error::BackupCaptureMoved { .. }
+        | Error::MetadataLeaderUnavailable => {
             NodeDbError::from_wire(nodedb_types::error::ErrorCode::NO_LEADER, e.to_string())
         }
         // A resource limit, `54000` as PostgreSQL reports one.
@@ -533,6 +537,12 @@ mod tests {
             refused_by: vec![2],
         };
         assert_eq!(classify(&marks).code(), ErrorCode::NO_LEADER);
+        assert_eq!(
+            classify(&Error::MetadataLeaderUnavailable).code(),
+            ErrorCode::NO_LEADER
+        );
+        let superseded = Error::MetadataDdlSuperseded { log_index: 7 };
+        assert_eq!(classify(&superseded).code(), ErrorCode::WRITE_CONFLICT);
         let behind = Error::AuthorizationStateBehind {
             detail: "roles".to_owned(),
         };

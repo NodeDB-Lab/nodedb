@@ -272,13 +272,15 @@ impl From<crate::Error> for ErrorCode {
                 let detail = crate::Error::RoleInUse { role, dependents }.to_string();
                 Self::DependentObjectsExist { object, detail }
             }
-            crate::Error::CrdtAdmissionRetriesExhausted { .. } => Self::ConflictRetry,
+            crate::Error::CrdtAdmissionRetriesExhausted { .. }
+            | crate::Error::MetadataDdlSuperseded { .. } => Self::ConflictRetry,
             // Retryable refusals whose class (`55P03`) no Data-Plane code has.
             // The retry contract survives: nothing was applied.
             e @ (crate::Error::NoLeader { .. }
             | crate::Error::GroupQuorumUnavailable { .. }
             | crate::Error::GroupMarksUnavailable { .. }
             | crate::Error::BackupCaptureMoved { .. }
+            | crate::Error::MetadataLeaderUnavailable
             | crate::Error::AuthorizationStateBehind { .. }
             | crate::Error::LinearizableReadRefused { .. }
             | crate::Error::StaleReadNotLeader { .. }) => Self::RetryableRefusal {
@@ -356,9 +358,7 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::RetryableLeaderChange { .. }
             | crate::Error::CommittedResultUnavailable { .. }
             | crate::Error::ProposalOutcomeUnknown { .. }
-            | crate::Error::MetadataLeaderUnavailable
             | crate::Error::MetadataGroupGone { .. }
-            | crate::Error::MetadataDdlSuperseded { .. }
             | crate::Error::Wal(_)
             | crate::Error::Dispatch { .. }
             | crate::Error::Storage { .. }

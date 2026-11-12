@@ -415,6 +415,19 @@ mod tests {
         assert_eq!(e.code, ErrorCode::NO_LEADER);
         assert!(e.message.starts_with("metadata propose: "), "{}", e.message);
 
+        // A metadata group with no leader proposed nothing. The client sees
+        // the retryable leader class, never an internal error.
+        let leaderless = crate::Error::MetadataLeaderUnavailable;
+        let e = DdlError::from_error_in_context("metadata propose", &leaderless);
+        assert_eq!(e.sqlstate, sqlstate::LOCK_NOT_AVAILABLE);
+        assert_eq!(e.code, ErrorCode::NO_LEADER);
+
+        // A superseded DDL changed nothing. The client retries the statement.
+        let superseded = crate::Error::MetadataDdlSuperseded { log_index: 9 };
+        let e = DdlError::from_error_in_context("metadata propose", &superseded);
+        assert_eq!(e.sqlstate, sqlstate::SERIALIZATION_FAILURE);
+        assert_eq!(e.code, ErrorCode::WRITE_CONFLICT);
+
         let denied = crate::Error::RejectedAuthz {
             tenant_id: crate::types::TenantId::new(1),
             resource: "orders".into(),

@@ -238,6 +238,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::GroupQuorumUnavailable { .. } => {
             ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
         }
+        // Nothing was proposed, and a retry succeeds once the metadata group
+        // has a leader that takes the proposal.
+        crate::Error::MetadataLeaderUnavailable => {
+            ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
+        }
         // Nothing was restored, and a retry succeeds once a replica of the
         // group answers.
         crate::Error::GroupMarksUnavailable { .. } => {
@@ -271,6 +276,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         // retries ran out. The client retries the statement, so it takes
         // SERIALIZATION_FAILURE (40001), the SQLSTATE drivers retry on.
         crate::Error::RetryableSchemaChanged { .. } => {
+            ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
+        }
+        // Another owner took the DDL preparation lease first, so the DDL
+        // changed nothing. The client retries the statement.
+        crate::Error::MetadataDdlSuperseded { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }
         // The session's bearer token expired. The client re-authenticates.
@@ -446,8 +456,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         // of them, and their public codes are internal classes.
         crate::Error::MaterializedSumResolutionMissing { .. }
         | crate::Error::RetryableLeaderChange { .. }
-        | crate::Error::MetadataLeaderUnavailable
-        | crate::Error::MetadataDdlSuperseded { .. }
         | crate::Error::Wal(_)
         | crate::Error::Dispatch { .. }
         | crate::Error::Storage { .. }
