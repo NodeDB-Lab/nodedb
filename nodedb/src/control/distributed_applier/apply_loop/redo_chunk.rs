@@ -278,7 +278,7 @@ pub(super) fn prepare_chunked_final<'a>(
             };
         }
     };
-    match RedoContent::from_bytes(&bytes) {
+    match RedoContent::from_framed(&bytes) {
         Ok(content) => Prepared::Enqueue(enqueue_payload(
             ctx,
             pos,

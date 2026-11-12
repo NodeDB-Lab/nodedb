@@ -19,6 +19,7 @@ use crate::data::executor::handlers::transaction::overlay::{
 use crate::wal::{NodeLabelRedo, RedoSubRecord};
 
 use super::edge_ordinal::EdgeOrdinals;
+use super::sink::OpSink;
 
 /// Edge identity key: `(collection, src_id, label, dst_id)`. Scoped by
 /// collection because `entry.rs` collects surrogates for every touched
@@ -37,7 +38,7 @@ pub(super) fn serialize_graph_collection(
     collection: &str,
     edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
     ordinals: &EdgeOrdinals<'_>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
     let mut puts: BTreeMap<(String, String, String), (Vec<u8>, EdgeValidTime)> = BTreeMap::new();
     for (src, label, dst, properties, valid) in overlay.staged_edges_for_collection(coll_key)? {
@@ -151,7 +152,7 @@ pub(super) fn serialize_node_label_deltas(
     overlay: &GraphTxnOverlay,
     label_coll_key: &GraphCollKey,
     ordinal_of: impl Fn(&str) -> crate::Result<i64>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
     let mut deltas: BTreeMap<String, NodeLabelDelta> = BTreeMap::new();
     for item in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
@@ -326,7 +327,7 @@ pub(super) fn classify_graph_op(
 
         // A guard writes nothing. A Calvin transaction checks it when it
         // stages, and a session COMMIT checks it before its resolve
-        // (`execute_resolve_session_txn`).
+        // (`session_guards_hold`).
         GraphOp::NodeEdgeGuard { .. } | GraphOp::NodePresenceGuard { .. } => Ok(()),
 
         // Stages nothing: `serialize_truncated_edges` writes the share's cut.
@@ -346,7 +347,7 @@ impl CoreLoop {
     pub(super) fn serialize_truncated_edges(
         &self,
         plans: &[PhysicalPlan],
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         for plan in plans {
             let PhysicalPlan::Graph(GraphOp::TruncateEdges { collection, .. }) = plan else {
@@ -416,7 +417,7 @@ mod tests {
             (10u32, 20u32),
         );
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -449,7 +450,7 @@ mod tests {
             .unwrap();
 
         let surrogates = BTreeMap::new();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         let result = serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -481,7 +482,7 @@ mod tests {
             ),
             (10u32, 20u32),
         );
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -526,7 +527,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::from([(key.clone(), (10u32, 0u32))]),
         ] {
-            let mut ops = Vec::new();
+            let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
             let result = serialize_graph_collection(
                 &overlay,
                 &coll_key("g"),
@@ -565,7 +566,7 @@ mod tests {
             );
         }
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -593,7 +594,7 @@ mod tests {
             .stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()])
             .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(ops.len(), 1);
@@ -616,7 +617,7 @@ mod tests {
             .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
             .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(ops.len(), 1);
@@ -638,7 +639,7 @@ mod tests {
             .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
             .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(
@@ -674,10 +675,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut ops_a = Vec::new();
+        let mut ops_a: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay_a, &coll_key("g"), |_| Ok(123), &mut ops_a)
             .expect("serialize a");
-        let mut ops_b = Vec::new();
+        let mut ops_b: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay_b, &coll_key("g"), |_| Ok(123), &mut ops_b)
             .expect("serialize b");
 
@@ -692,7 +693,7 @@ mod tests {
     #[test]
     fn no_staged_labels_emits_nothing() {
         let overlay = GraphTxnOverlay::new();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert!(ops.is_empty());

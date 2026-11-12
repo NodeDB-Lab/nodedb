@@ -6,35 +6,21 @@
 //! Each row is named once, by the identity its autocommit event carries, with
 //! the net kind of every write the transaction made to it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use nodedb_physical::physical_plan::{CrdtOp, PhysicalPlan};
 use nodedb_types::{RowIdentity, StorageKey, Surrogate};
 
+use super::super::sink::ChangeSink;
 use super::super::vector_primary::VectorPrimaryCollections;
 use super::entry::ResolveScope;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{Staged, TxnOverlay};
+use crate::data::executor::handlers::transaction::overlay::{Staged, StagedSlot};
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::{EVERY_ROW, RedoRowChange, RedoRowKind};
 
 type CollKey = (DatabaseId, TenantId, String);
-
-/// One collection's staged rows and whether a TRUNCATE hid its base.
-struct StagedCollection {
-    truncated: bool,
-    rows: BTreeMap<RowIdentity, RowState>,
-}
-
-/// A staged row's final state.
-#[derive(Clone, Copy)]
-enum RowState {
-    /// A value or a tombstone, staged under this surrogate.
-    Written { surrogate: u32, holds_value: bool },
-    /// Only a TTL delta on a committed KV row.
-    TtlOnly,
-}
 
 impl CoreLoop {
     /// Document rows. A bitemporal collection's row existed when it has a
@@ -43,7 +29,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collections: &BTreeSet<String>,
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         for collection in collections {
             self.overlay_document_changes(scope, collection, changes)?;
@@ -59,7 +45,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         plans: &[PhysicalPlan],
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let mut staged_collections = BTreeSet::new();
         let mut list_rows: BTreeSet<(String, String)> = BTreeSet::new();
@@ -97,19 +83,26 @@ impl CoreLoop {
                 _ => {}
             }
         }
-        let mut named: BTreeSet<(String, String)> = BTreeSet::new();
         for collection in &staged_collections {
-            let first = changes.len();
             self.overlay_document_changes(scope, collection, changes)?;
-            for change in &changes[first..] {
-                named.insert((change.collection.clone(), change.row.clone()));
-            }
         }
-        for row in list_rows {
-            if !named.contains(&row) {
+        // A list row a staged upsert or delete of its collection already
+        // named takes no second entry.
+        let overlay = self.txn_overlays.get(&scope.txn_id);
+        for (collection, document_id) in list_rows {
+            let named = match overlay {
+                Some(overlay) if staged_collections.contains(&collection) => overlay
+                    .get_by_doc_id(
+                        &coll_key(scope, &collection),
+                        &RowIdentity::from_user_key(document_id.as_str()),
+                    )?
+                    .is_some(),
+                Some(_) | None => false,
+            };
+            if !named {
                 changes.push(RedoRowChange {
-                    collection: row.0,
-                    row: row.1,
+                    collection,
+                    row: document_id,
                     kind: RedoRowKind::Update,
                 });
             }
@@ -130,20 +123,22 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collections: &BTreeSet<String>,
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
             return Ok(());
         };
         let now_ms = self.kv_read_now_ms();
         for collection in collections {
-            let staged = staged_collection(overlay, &coll_key(scope, collection))?;
-            push_truncate(collection, staged.truncated, changes);
-            for (identity, state) in &staged.rows {
+            let coll = coll_key(scope, collection);
+            let truncated = overlay.is_truncated(&coll);
+            push_truncate(collection, truncated, changes);
+            for slot in overlay.iter_slots_for_collection(&coll, !truncated) {
+                let (identity, slot) = slot?;
                 let key = unhex_key(identity.as_str()).ok_or_else(|| crate::Error::Internal {
                     detail: format!("kv resolve: overlay row '{identity}' is not valid hex"),
                 })?;
-                let existed = !staged.truncated
+                let existed = !truncated
                     && self
                         .kv_engine
                         .get(
@@ -154,10 +149,12 @@ impl CoreLoop {
                             now_ms,
                         )
                         .is_some();
-                let kind = match *state {
-                    RowState::Written { holds_value, .. } => RedoRowKind::net(existed, holds_value),
-                    RowState::TtlOnly if existed => RedoRowKind::Update,
-                    RowState::TtlOnly => RedoRowKind::NoChange,
+                let kind = match slot {
+                    StagedSlot::Written { staged, .. } => {
+                        RedoRowKind::net(existed, matches!(&*staged, Staged::Put(_)))
+                    }
+                    StagedSlot::TtlOnly(_) if existed => RedoRowKind::Update,
+                    StagedSlot::TtlOnly(_) => RedoRowKind::NoChange,
                 };
                 changes.push(RedoRowChange {
                     collection: collection.clone(),
@@ -175,7 +172,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collections: &VectorPrimaryCollections,
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
             return Ok(());
@@ -190,13 +187,10 @@ impl CoreLoop {
                 collection,
                 &writes.field,
             );
-            let rows: BTreeMap<u32, bool> = overlay
-                .iter_for_collection(&key)
-                .map(|item| {
-                    item.map(|(surrogate, staged)| (surrogate, matches!(&*staged, Staged::Put(_))))
-                })
-                .collect::<crate::Result<_>>()?;
-            for (surrogate, holds_value) in rows {
+            // The scan yields ascending surrogates.
+            for item in overlay.iter_for_collection(&key) {
+                let (surrogate, staged) = item?;
+                let holds_value = matches!(&*staged, Staged::Put(_));
                 let surrogate = Surrogate::new(surrogate);
                 let existed =
                     !truncated && self.vector_direct_node(&index_key, surrogate).is_some();
@@ -219,22 +213,21 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collection: &str,
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
             return Ok(());
         };
-        let staged = staged_collection(overlay, &coll_key(scope, collection))?;
-        push_truncate(collection, staged.truncated, changes);
-        for (identity, state) in &staged.rows {
-            let RowState::Written {
-                surrogate,
-                holds_value,
-            } = *state
-            else {
+        let key = coll_key(scope, collection);
+        let truncated = overlay.is_truncated(&key);
+        push_truncate(collection, truncated, changes);
+        for slot in overlay.iter_slots_for_collection(&key, false) {
+            let (identity, slot) = slot?;
+            let StagedSlot::Written { surrogate, staged } = slot else {
                 continue;
             };
-            let existed = !staged.truncated
+            let holds_value = matches!(&*staged, Staged::Put(_));
+            let existed = !truncated
                 && self.document_exists(
                     scope.database_id.as_u64(),
                     scope.tid,
@@ -275,7 +268,7 @@ fn coll_key(scope: ResolveScope, collection: &str) -> CollKey {
 }
 
 /// Append the whole-collection delete a staged TRUNCATE makes.
-pub(super) fn push_truncate(collection: &str, truncated: bool, changes: &mut Vec<RedoRowChange>) {
+pub(super) fn push_truncate(collection: &str, truncated: bool, changes: &mut dyn ChangeSink) {
     if truncated {
         changes.push(RedoRowChange {
             collection: collection.to_owned(),
@@ -283,28 +276,4 @@ pub(super) fn push_truncate(collection: &str, truncated: bool, changes: &mut Vec
             kind: RedoRowKind::Delete,
         });
     }
-}
-
-/// The rows `overlay` staged under `key`, by identity.
-fn staged_collection(overlay: &TxnOverlay, key: &CollKey) -> crate::Result<StagedCollection> {
-    let truncated = overlay.is_truncated(key);
-    let mut rows = BTreeMap::new();
-    for item in overlay.iter_staged_bindings_for_collection(key) {
-        let (identity, surrogate, staged) = item?;
-        let holds_value = matches!(&*staged, Staged::Put(_));
-        rows.insert(
-            identity,
-            RowState::Written {
-                surrogate,
-                holds_value,
-            },
-        );
-    }
-    if !truncated {
-        for item in overlay.iter_ttl_only_for_collection(key) {
-            let (identity, _ttl) = item?;
-            rows.insert(identity, RowState::TtlOnly);
-        }
-    }
-    Ok(StagedCollection { truncated, rows })
 }

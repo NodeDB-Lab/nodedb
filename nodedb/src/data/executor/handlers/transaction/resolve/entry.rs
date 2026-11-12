@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `MetaOp::ResolveTxn`: turns a committing transaction's staged post-images
-//! into one replayable [`RedoRecord`], without mutating base. Overlay-driven
-//! serializers (KV, Document, Graph, Columnar, vector-primary) read the
+//! The resolve of a committing transaction: turns its staged post-images
+//! into the lists of one replayable `RedoRecord`, without mutating base.
+//! Overlay-driven serializers (KV, Document, Graph, Columnar,
+//! vector-primary) read the
 //! post-image the transaction was shown from the staging overlay, so replay
 //! installs it verbatim. Plan-driven serializers (HNSW Vector, Array,
 //! Timeseries, Spatial, CRDT, Text) carry absolute or append-only writes and
@@ -12,56 +13,28 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::stage_write::GRAPH_LABEL_COLL_KEY;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
-use crate::wal::{RedoRecord, RedoRowChange, RedoSubRecord};
+use crate::wal::{RedoRowChange, RedoSubRecord};
 
 use super::classify::{classify_document_op, classify_kv_op};
 use super::columnar_image::{ColumnarCollectionImages, ColumnarCollections};
+use super::doc_ordinal::DocOrdinals;
 use super::edge_ordinal::{EdgeOrdinals, StoredEdges};
 use super::graph::EdgeIdentityKey;
+use super::sink::{OpSink, RedoSink, SinkOutput};
 use super::vector_primary::VectorPrimaryCollections;
 use super::{
     array, columnar_image, crdt, document, document_truncate, graph, kv, spatial, text, vector,
 };
 
 impl CoreLoop {
-    /// Resolve a committing session transaction: check its guards against
-    /// the state it commits on, then resolve it as
-    /// [`Self::execute_resolve_txn`] does.
-    ///
-    /// A session transaction staged its guards at statement time and holds
-    /// no lock since, so a node's edges or a document's presence can change
-    /// before COMMIT. A changed state answers `OllpRetryRequired`, and the
-    /// transaction writes nothing.
-    pub(in crate::data::executor) fn execute_resolve_session_txn(
-        &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        txn_id: TxnId,
-        plans: &[PhysicalPlan],
-    ) -> Response {
-        let guards_hold = match self.node_edge_guards_hold(task, tid, plans) {
-            Ok(true) => self.node_presence_guards_hold(task, plans),
-            other => other,
-        };
-        match guards_hold {
-            Ok(true) => self.execute_resolve_txn(task, tid, txn_id, plans),
-            Ok(false) => {
-                self.response_error(task, crate::bridge::envelope::ErrorCode::OllpRetryRequired)
-            }
-            Err(e) => self.response_error(task, e),
-        }
-    }
-
-    /// Resolve a committing transaction's staged writes into a
-    /// [`RedoRecord`] and return its encoded bytes in the response payload.
-    /// Reads the overlay by `&` and never mutates any base engine. A session
-    /// transaction and a Calvin transaction stage the same way, so both
-    /// resolve here.
+    /// Resolve a committing transaction's staged writes into the row-sized
+    /// lists of its redo. Reads the overlay by `&` and never mutates any
+    /// base engine. A session transaction and a Calvin transaction stage
+    /// the same way, so both resolve here.
     ///
     /// It checks no guard. A Calvin transaction checks its guards when it
     /// stages, once its locks are granted, and it holds them until its
@@ -79,17 +52,18 @@ impl CoreLoop {
     /// this flush. A resolve check also sees the transaction's own
     /// writes: another participant on the same core can flush its edge
     /// deletes first, and one edge store holds both homes of an edge.
-    pub(in crate::data::executor) fn execute_resolve_txn(
+    ///
+    /// Every sub-record, row change and row source goes into `sink` as it
+    /// is made, and the resolve keeps none of them.
+    pub(super) fn resolve_txn_into(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
         txn_id: TxnId,
         plans: &[PhysicalPlan],
-    ) -> Response {
-        let (ops, row_changes) = match self.resolve_txn_ops(task, tid, txn_id, plans) {
-            Ok(resolved) => resolved,
-            Err(e) => return self.response_error(task, e),
-        };
+        sink: &mut RedoSink,
+    ) -> crate::Result<()> {
+        self.resolve_txn_ops(task, tid, txn_id, plans, sink)?;
         // Rows only a trigger body staged commit under `Trigger`, so they fire
         // no trigger. A transaction no client wrote lists none.
         // A row is named as its event names it: the overlay keys a KV row by
@@ -104,6 +78,7 @@ impl CoreLoop {
             .get(&txn_id)
             .map(|overlay| overlay.body_writes(task.request.database_id, TenantId::new(tid)))
             .unwrap_or_default();
+        let trigger = crate::event::EventSource::Trigger;
         let body_rows = body.rows.into_iter().map(|(collection, row)| {
             let row = if kv_collections.contains(collection.as_str()) {
                 crate::data::executor::handlers::transaction::stage_write::unhex_key(&row)
@@ -114,29 +89,34 @@ impl CoreLoop {
             };
             (collection, row)
         });
-        let record = RedoRecord {
-            version: 1,
-            ops,
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: {
-                use crate::wal::redo::row_sources::{group_rows, whole_collections};
-                let trigger = crate::event::EventSource::Trigger;
-                let mut groups = whole_collections(trigger, body.collections);
-                groups.extend(group_rows(trigger, body_rows));
-                groups
-            },
-            // The commit attaches the transaction's publishes to the
-            // record it resolves here.
-            publishes: Vec::new(),
-            row_changes,
-            // The commit stamps the committing identity's roles on the
-            // record it resolves here.
-            user_roles: Vec::new(),
-        };
-        match record.to_bytes() {
-            Ok(bytes) => self.response_with_payload(task, bytes),
-            Err(e) => self.response_error(task, e),
+        use crate::wal::redo::row_sources::{group_rows, whole_collections};
+        for group in whole_collections(trigger, body.collections) {
+            sink.push_source(group);
+        }
+        for group in group_rows(trigger, body_rows) {
+            sink.push_source(group);
+        }
+        Ok(())
+    }
+
+    /// [`Self::resolve_txn_into`] into memory: every list of the redo.
+    pub(super) fn resolve_txn_lists(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        plans: &[PhysicalPlan],
+    ) -> crate::Result<ResolvedLists> {
+        let mut sink = RedoSink::memory();
+        self.resolve_txn_into(task, tid, txn_id, plans, &mut sink)?;
+        match sink.finish()?.output {
+            SinkOutput::Memory(lists) => Ok(lists),
+            SinkOutput::Spill { path, .. } => Err(crate::Error::Internal {
+                detail: format!(
+                    "a memory resolve sink finished into the spill file {}",
+                    path.display()
+                ),
+            }),
         }
     }
 
@@ -150,7 +130,8 @@ impl CoreLoop {
         tid: u64,
         txn_id: TxnId,
         plans: &[PhysicalPlan],
-    ) -> crate::Result<(Vec<RedoSubRecord>, Vec<RedoRowChange>)> {
+        ops: &mut RedoSink,
+    ) -> crate::Result<()> {
         let mut kv_collections: BTreeSet<String> = BTreeSet::new();
         let mut doc_collections: BTreeSet<String> = BTreeSet::new();
         let mut graph_collections: BTreeSet<String> = BTreeSet::new();
@@ -160,15 +141,16 @@ impl CoreLoop {
 
         // Plan-driven serializers emit into `ops` during this walk; overlay-driven
         // serializers only collect collections here, serialized in phase two below.
-        let mut ops: Vec<RedoSubRecord> = Vec::new();
         // The declared primary key of each truncated document collection,
         // from the plan: names every removed base row in its redo entry.
         let truncate_primary_keys = document_truncate::truncate_declared_primary_keys(plans);
-        // Unkeyed timeseries ingests seen per collection and the schema each
-        // collection's last ingest resolved to, in plan order.
-        let mut timeseries_state = super::timeseries::TimeseriesResolveState::default();
+        // Unkeyed timeseries ingests seen per collection, the schema each
+        // collection's last ingest resolved to, and each collection's last
+        // truncate, in plan order.
+        let mut timeseries_state = super::timeseries::TimeseriesResolveState::for_plans(plans);
 
-        for plan in plans {
+        for (index, plan) in plans.iter().enumerate() {
+            timeseries_state.plan_index = index;
             match plan {
                 // KV: overlay-backed serializer. Read ops stage nothing and are
                 // skipped; row-level writes contribute their collection.
@@ -186,11 +168,11 @@ impl CoreLoop {
 
                 // Plan-driven: a CRDT write resolves to the intent record its
                 // autocommit form journals.
-                PhysicalPlan::Crdt(op) => crdt::serialize_crdt_op(op, &mut ops)?,
+                PhysicalPlan::Crdt(op) => crdt::serialize_crdt_op(op, ops)?,
 
                 // Plan-driven: an FTS write resolves to the posting record its
                 // autocommit form journals.
-                PhysicalPlan::Text(op) => text::serialize_text_op(op, &mut ops)?,
+                PhysicalPlan::Text(op) => text::serialize_text_op(op, ops)?,
 
                 // Read-only families: scans, joins, aggregates, exchange, and
                 // maintenance ops carry no persisted post-image. A RESTORE
@@ -201,17 +183,12 @@ impl CoreLoop {
                 // errors. A vector-primary direct write only registers its
                 // collection; its staged row is serialized from the overlay.
                 PhysicalPlan::Vector(op) => {
-                    vector::serialize_vector_op(op, &mut ops, &mut vector_primary_collections)?
+                    vector::serialize_vector_op(op, ops, &mut vector_primary_collections)?
                 }
-                PhysicalPlan::Array(op) => array::serialize_array_op(op, &mut ops)?,
-                PhysicalPlan::Timeseries(op) => self.serialize_timeseries_op(
-                    task,
-                    tid,
-                    txn_id,
-                    op,
-                    &mut timeseries_state,
-                    &mut ops,
-                )?,
+                PhysicalPlan::Array(op) => array::serialize_array_op(op, ops)?,
+                PhysicalPlan::Timeseries(op) => {
+                    self.serialize_timeseries_op(task, tid, txn_id, op, &mut timeseries_state, ops)?
+                }
 
                 // Columnar: every write is staged per surrogate, so the image
                 // the transaction was shown is serialized from the overlay.
@@ -221,7 +198,7 @@ impl CoreLoop {
 
                 // Spatial `Insert`/`Delete` plan nodes carry the complete absolute
                 // post-image, so they serialize from the plan node, not an overlay.
-                PhysicalPlan::Spatial(op) => spatial::serialize_spatial_op(op, &mut ops)?,
+                PhysicalPlan::Spatial(op) => spatial::serialize_spatial_op(op, ops)?,
 
                 // Coordinator-only op; never legal on the Data Plane.
                 PhysicalPlan::ClusterArray(_) | PhysicalPlan::ClusterEvent(_) => {
@@ -254,13 +231,10 @@ impl CoreLoop {
             }
         }
 
-        // Pin the resolve-time bitemporal stamp of every staged document
-        // version (see `doc_ordinal`).
+        // Every staged document version takes the resolve-time stamp (see
+        // `doc_ordinal`).
         let txn_ordinal = self.txn_system_ordinal(txn_id);
         let database_id = task.request.database_id;
-        for collection in &doc_collections {
-            self.pin_doc_stamps(database_id, tid, txn_id, collection, txn_ordinal)?;
-        }
 
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
             for collection in &kv_collections {
@@ -270,9 +244,9 @@ impl CoreLoop {
                     collection.clone(),
                 );
                 if overlay.is_truncated(&coll_key) {
-                    kv::serialize_kv_truncate(collection, &mut ops)?;
+                    kv::serialize_kv_truncate(collection, ops)?;
                 }
-                kv::serialize_kv_collection(overlay, &coll_key, collection, &mut ops)?;
+                kv::serialize_kv_collection(overlay, &coll_key, collection, ops)?;
             }
             for collection in &doc_collections {
                 let coll_key = (
@@ -284,35 +258,35 @@ impl CoreLoop {
                 // once so the serializer can decode them back to MessagePack.
                 let strict_schema =
                     self.resolve_strict_schema(task.request.database_id.as_u64(), tid, collection);
+                let ordinals = DocOrdinals::new(
+                    &self.sparse,
+                    database_id.as_u64(),
+                    tid,
+                    collection,
+                    txn_ordinal,
+                );
                 if overlay.is_truncated(&coll_key) {
-                    let rows =
-                        self.truncated_base_rows(task, tid, collection, overlay, &coll_key)?;
-                    let tombstones = self.truncated_row_ordinals(
-                        database_id,
-                        tid,
-                        collection,
-                        &rows,
-                        txn_ordinal,
-                    )?;
-                    document_truncate::serialize_truncated_base_rows(
-                        document_truncate::TruncatedBaseRows {
-                            collection,
-                            rows: &rows,
+                    self.serialize_truncated_base_rows(
+                        document_truncate::TruncatedCollection {
+                            overlay,
+                            coll_key: &coll_key,
                             strict_schema: strict_schema.as_ref(),
                             declared_primary_key: truncate_primary_keys
                                 .get(collection.as_str())
                                 .and_then(|pk| pk.as_deref()),
-                            tombstone_sys_from: &tombstones,
+                            ordinals: &ordinals,
                         },
-                        &mut ops,
+                        ops,
                     )?;
                 }
                 document::serialize_document_collection(
-                    overlay,
-                    &coll_key,
-                    collection,
-                    strict_schema.as_ref(),
-                    &mut ops,
+                    document::StagedDocuments {
+                        overlay,
+                        coll_key: &coll_key,
+                        strict_schema: strict_schema.as_ref(),
+                    },
+                    &mut |surrogate| ordinals.for_staged_row(surrogate),
+                    ops,
                 )?;
             }
         }
@@ -325,7 +299,7 @@ impl CoreLoop {
             },
             &columnar_collections,
             &vector_primary_collections,
-            &mut ops,
+            ops,
         )?;
         if let Some(graph_overlay) = self.graph_txn_overlays.get(&txn_id) {
             // Freeze temporal identity independently from the overlay's lease
@@ -357,7 +331,7 @@ impl CoreLoop {
                     collection,
                     &edge_surrogates,
                     &ordinals,
-                    &mut ops,
+                    ops,
                 )?;
             }
             // Node-label deltas live under the fixed sentinel key, not
@@ -376,15 +350,10 @@ impl CoreLoop {
                     txn_ordinal,
                 )
             };
-            graph::serialize_node_label_deltas(
-                graph_overlay,
-                &label_coll_key,
-                label_ordinal,
-                &mut ops,
-            )?;
+            graph::serialize_node_label_deltas(graph_overlay, &label_coll_key, label_ordinal, ops)?;
         }
-        self.serialize_truncated_edges(plans, &mut ops)?;
-        let mut row_changes = self.resolve_row_changes(
+        self.serialize_truncated_edges(plans, ops)?;
+        self.resolve_row_changes(
             task.request.database_id,
             tid,
             txn_id,
@@ -395,18 +364,13 @@ impl CoreLoop {
                 vector_primary: &vector_primary_collections,
                 plans,
             },
+            ops,
         )?;
         // A RESTORE batch stages nothing: its rows and edge versions come
         // from the plan, after every staged write of the transaction.
         self.open_restored_arrays(plans)?;
-        self.serialize_restored_batches(
-            task.request.database_id,
-            tid,
-            plans,
-            &mut ops,
-            &mut row_changes,
-        )?;
-        Ok((ops, row_changes))
+        self.serialize_restored_batches(task.request.database_id, tid, plans, ops)?;
+        Ok(())
     }
 
     /// Refuse a session resolve whose writes live in a staging overlay this
@@ -440,7 +404,7 @@ impl CoreLoop {
         txn: ResolvingTxn,
         columnar: &ColumnarCollections,
         vector_primary: &VectorPrimaryCollections,
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         let ResolvingTxn {
             id: txn_id,
@@ -476,6 +440,13 @@ impl CoreLoop {
         }
         Ok(())
     }
+}
+
+/// The row-sized lists of one resolved redo.
+pub(super) struct ResolvedLists {
+    pub(super) ops: Vec<RedoSubRecord>,
+    pub(super) row_changes: Vec<RedoRowChange>,
+    pub(super) row_sources: Vec<crate::wal::RedoRowSource>,
 }
 
 /// The transaction a resolve serializes, and the system-time ordinal its

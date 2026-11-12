@@ -16,6 +16,7 @@
 
 use nodedb_physical::physical_plan::CrdtOp;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::encode_crdt_op_record;
 use crate::wal::RedoSubRecord;
 
@@ -32,7 +33,7 @@ pub(super) fn refuse_crdt_op(op: &CrdtOp) -> crate::Result<()> {
 }
 
 /// Append the redo sub-record for a single CRDT plan op to `ops`.
-pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut dyn OpSink) -> crate::Result<()> {
     refuse_crdt_op(op)?;
     if let Some((kind, payload)) = encode_crdt_op_record(op)? {
         ops.push(RedoSubRecord {
@@ -68,7 +69,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_crdt_op(&op, &mut ops).expect("resolve crdt doc upsert");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::CrdtDocOp as u32);
@@ -87,7 +88,7 @@ mod tests {
             constraint_version_required: 0,
             expected_frontier_digest: None,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         assert!(serialize_crdt_op(&op, &mut ops).is_err());
         assert!(ops.is_empty());
     }

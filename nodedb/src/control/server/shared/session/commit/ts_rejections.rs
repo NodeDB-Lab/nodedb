@@ -19,10 +19,6 @@ use std::collections::BTreeMap;
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 use nodedb_physical::physical_task::PhysicalTask;
-use nodedb_wal::record::RecordType;
-
-use crate::engine::timeseries::resolved_ingest::{RESOLVED_INGEST_FORMAT, ResolvedTsBatch};
-use crate::wal::RedoRecord;
 
 /// Rejected line counts, by collection.
 pub(in crate::control::server::shared::session) type RejectedByCollection = BTreeMap<String, u64>;
@@ -62,29 +58,14 @@ pub(in crate::control::server::shared::session) fn tasks_rejected_by_collection(
     Ok(out)
 }
 
-/// The lines the resolve behind every `ts-resolved` sub-record of `redo`
-/// rejected, by collection.
-pub(in crate::control::server::shared::session) fn redo_rejected_by_collection(
-    redo: &RedoRecord,
+/// The lines a resolve reported rejected, by collection.
+pub(in crate::control::server::shared::session) fn resolved_rejected_by_collection(
+    rejected: Vec<nodedb_physical::physical_plan::RejectedLines>,
 ) -> RejectedByCollection {
-    let mut out = RejectedByCollection::new();
-    for op in &redo.ops {
-        if op.record_type != RecordType::TimeseriesBatch as u32 {
-            continue;
-        }
-        let Ok(record) = crate::wal::decode_batch_record(&op.payload) else {
-            continue;
-        };
-        if record.format.as_deref() != Some(RESOLVED_INGEST_FORMAT) {
-            continue;
-        }
-        if let Ok(batch) = ResolvedTsBatch::from_bytes(&record.payload)
-            && batch.rejected > 0
-        {
-            *out.entry(record.collection).or_default() += batch.rejected;
-        }
-    }
-    out
+    rejected
+        .into_iter()
+        .map(|entry| (entry.collection, entry.lines))
+        .collect()
 }
 
 /// The lines and rows the timeseries installs an applied answer reports
@@ -153,6 +134,7 @@ pub(in crate::control::server::shared::session) fn raise_commit_rejections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::timeseries::resolved_ingest::{RESOLVED_INGEST_FORMAT, ResolvedTsBatch};
 
     fn counts(entries: &[(&str, u64)]) -> RejectedByCollection {
         entries

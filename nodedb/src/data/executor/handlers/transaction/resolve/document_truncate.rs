@@ -15,7 +15,9 @@ use crate::data::executor::handlers::transaction::overlay::TxnOverlay;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId};
-use crate::wal::RedoSubRecord;
+
+use super::doc_ordinal::DocOrdinals;
+use super::sink::OpSink;
 
 impl CoreLoop {
     /// The base rows a staged TRUNCATE of `collection` removes at COMMIT:
@@ -85,55 +87,60 @@ pub(super) fn truncate_declared_primary_keys(
         .collect()
 }
 
-/// The base rows a staged TRUNCATE removes at COMMIT, with what names each
-/// one in its redo entry.
-pub(super) struct TruncatedBaseRows<'a> {
-    pub collection: &'a str,
-    /// `(storage key, stored body)` of every base row with no overlay entry.
-    pub rows: &'a [(StorageKey, Vec<u8>)],
+/// A document collection a staged TRUNCATE wipes, with what names each
+/// removed base row in its redo entry.
+pub(super) struct TruncatedCollection<'a> {
+    pub overlay: &'a TxnOverlay,
+    pub coll_key: &'a (DatabaseId, TenantId, String),
     pub strict_schema: Option<&'a StrictSchema>,
     /// The collection's declared `PRIMARY KEY` column, from the plan.
     pub declared_primary_key: Option<&'a str>,
-    /// Each removed row's tombstone ordinal, keyed by surrogate.
-    pub tombstone_sys_from: &'a BTreeMap<u32, i64>,
+    /// The stamp of each removed row's tombstone.
+    pub ordinals: &'a DocOrdinals<'a>,
 }
 
-/// Append one `RecordType::Delete` redo sub-record per base row a staged
-/// TRUNCATE removes, in deterministic doc-id order. Every replica removes the
-/// same rows from the record, and a WAL-only restart does not replay a
-/// removed row's original `Put` and resurrect it or its HNSW vector.
-pub(super) fn serialize_truncated_base_rows(
-    params: TruncatedBaseRows<'_>,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
-    let TruncatedBaseRows {
-        collection,
-        rows,
-        strict_schema,
-        declared_primary_key,
-        tombstone_sys_from,
-    } = params;
-    let entries = truncated_row_entries(rows, strict_schema, declared_primary_key);
-    for (doc_id, surrogate) in &entries {
-        let sys_from =
-            tombstone_sys_from
-                .get(surrogate)
-                .copied()
-                .ok_or_else(|| crate::Error::Internal {
-                    detail: format!(
-                        "document resolve: truncated row '{doc_id}' of '{collection}' has no \
-                     tombstone ordinal"
-                    ),
-                })?;
-        ops.push(delete_sub_record(collection, doc_id, *surrogate, sys_from)?);
+impl CoreLoop {
+    /// Append one `RecordType::Delete` redo sub-record per base row a staged
+    /// TRUNCATE removes: every base row with no overlay entry, in storage-key
+    /// order. Every replica removes the same rows from the record, and a
+    /// WAL-only restart does not replay a removed row's original `Put` and
+    /// resurrect it or its HNSW vector. The scan streams the base rows and
+    /// holds none it has passed. Read-only against base.
+    pub(super) fn serialize_truncated_base_rows(
+        &self,
+        truncated: TruncatedCollection<'_>,
+        ops: &mut dyn OpSink,
+    ) -> crate::Result<()> {
+        let TruncatedCollection {
+            overlay,
+            coll_key,
+            strict_schema,
+            declared_primary_key,
+            ordinals,
+        } = truncated;
+        let collection = coll_key.2.as_str();
+        self.sparse.scan_documents_for_each(
+            coll_key.0.as_u64(),
+            coll_key.1.as_u64(),
+            collection,
+            usize::MAX,
+            |key, body| {
+                let surrogate = key.surrogate().as_u32();
+                if overlay.get(coll_key, surrogate)?.is_some() {
+                    return Ok(());
+                }
+                let doc_id = stored_row_identity(body, strict_schema, declared_primary_key, *key);
+                let sys_from = ordinals.for_row(key)?;
+                ops.push(delete_sub_record(collection, &doc_id, surrogate, sys_from)?);
+                Ok(())
+            },
+        )
     }
-    Ok(())
 }
 
 /// The identity and surrogate of every base row in `rows`, in
 /// deterministic doc-id order: the rows a staged TRUNCATE removes. The
-/// resolve writes a delete for each, and the Calvin stage judges each at its
-/// commit boundary.
+/// Calvin stage judges each at its commit boundary.
 pub(super) fn truncated_row_entries(
     rows: &[(StorageKey, Vec<u8>)],
     strict_schema: Option<&StrictSchema>,

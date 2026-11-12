@@ -5,7 +5,7 @@
 //!
 //! Single-shard COMMIT journals the transaction as one replayable
 //! `TransactionRedo` WAL record (built overlay-driven from the transaction's
-//! staged post-images by `MetaOp::ResolveTxn`), not the non-replayable
+//! staged post-images by `MetaOp::ResolveTxnPart`), not the non-replayable
 //! `Transaction` placeholder. On a WAL-only restart (no vector checkpoint), the
 //! base document/KV rows survive via redb, but the in-memory secondary indexes
 //! (HNSW vector graph, FTS postings) have no other durable backing — they are

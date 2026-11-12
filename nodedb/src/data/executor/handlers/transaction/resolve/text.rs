@@ -12,11 +12,12 @@
 
 use nodedb_physical::physical_plan::TextOp;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::encode_text_op_record;
 use crate::wal::RedoSubRecord;
 
 /// Append the redo sub-record for a single text plan op to `ops`.
-pub(super) fn serialize_text_op(op: &TextOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+pub(super) fn serialize_text_op(op: &TextOp, ops: &mut dyn OpSink) -> crate::Result<()> {
     if let Some((record_type, payload)) = encode_text_op_record(op)? {
         ops.push(RedoSubRecord {
             record_type: record_type as u32,
@@ -40,7 +41,7 @@ mod tests {
             fields: vec![("body".to_string(), "hello world".to_string())],
             provenance: None,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_text_op(&op, &mut ops).expect("resolve fts index");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::FtsIndex as u32);

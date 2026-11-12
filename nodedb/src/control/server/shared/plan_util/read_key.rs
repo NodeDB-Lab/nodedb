@@ -345,7 +345,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::ResolveTxn { .. }
+        | MetaOp::ResolveTxnPart { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_) => ReadKey::Predicate,

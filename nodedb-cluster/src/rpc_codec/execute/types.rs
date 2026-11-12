@@ -41,7 +41,7 @@ pub struct ExecuteRequest {
     /// staging overlay for the id on the remote node.
     pub txn_id: Option<TxnId>,
     /// The vShard whose owning core runs a vShard-scoped plan (a transaction
-    /// meta-op such as `StageWrite` or `ResolveTxn`). The receiver sends such a
+    /// meta-op such as `StageWrite` or `ResolveTxnPart`). The receiver sends such a
     /// plan to that one core. `None` for every other plan, which fans across
     /// all local cores. Every vShard id is valid, so absence is `None`, never
     /// a sentinel id.

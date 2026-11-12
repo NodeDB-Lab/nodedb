@@ -4,9 +4,10 @@
 //! write plans into ONE replayable [`RedoRecord`][crate::wal::RedoRecord],
 //! WITHOUT mutating base.
 //!
-//! Mirrors `MetaOp::ResolveTxn`'s `CoreLoop::execute_resolve_txn` exactly, but
-//! sources its plans and tenant scope from Calvin's own staging state instead
-//! of a session transaction's: the plans buffered in `commit_pending` under
+//! Resolves through `CoreLoop::execute_resolve_txn`, as the session
+//! resolve of `MetaOp::ResolveTxnPart` does, but sources its plans and
+//! tenant scope from Calvin's own staging state instead of a session
+//! transaction's: the plans buffered in `commit_pending` under
 //! `(epoch, position, vshard)` (by [`CoreLoop::execute_calvin_execute_static`])
 //! and the per-core `txn_overlays` / `graph_txn_overlays` entries staged under
 //! the corresponding synthetic `TxnId` (by

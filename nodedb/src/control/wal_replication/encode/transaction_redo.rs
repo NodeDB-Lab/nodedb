@@ -10,9 +10,10 @@
 
 use super::super::transaction_redo::TransactionRedoPayload;
 use super::super::types::{
-    CollectionIncarnation, RedoBody, RedoContent, ReplicatedEntry, ReplicatedEventSource,
-    ReplicatedIdentity, ReplicatedWrite,
+    CollectionIncarnation, RedoBody, RedoContent, RedoContentView, ReplicatedEntry,
+    ReplicatedEventSource, ReplicatedIdentity, ReplicatedWrite,
 };
+use crate::control::surrogate::CarriedIdentity;
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoStreamId;
 
@@ -53,16 +54,29 @@ fn content_of(payload: &TransactionRedoPayload) -> RedoContent {
     RedoContent {
         redo: payload.redo.clone(),
         sum_targets: payload.sum_targets.clone(),
-        identities: payload
-            .identities
-            .iter()
-            .map(|identity| ReplicatedIdentity {
-                collection: identity.collection.clone(),
-                pk_bytes: identity.pk_bytes.clone(),
-                surrogate: identity.surrogate.as_u32(),
-            })
-            .collect(),
+        identities: payload.identities.iter().map(replicated_identity).collect(),
         reads: payload.reads.clone(),
+    }
+}
+
+/// The identity every replica binds, as a redo entry carries it.
+fn replicated_identity(identity: &CarriedIdentity) -> ReplicatedIdentity {
+    ReplicatedIdentity {
+        collection: identity.collection.clone(),
+        pk_bytes: identity.pk_bytes.clone(),
+        surrogate: identity.surrogate.as_u32(),
+    }
+}
+
+/// The content of `payload` as a framer reads it, by reference.
+fn view_of(
+    payload: &TransactionRedoPayload,
+) -> RedoContentView<'_, impl Iterator<Item = ReplicatedIdentity> + '_> {
+    RedoContentView {
+        redo: &payload.redo,
+        sum_targets: &payload.sum_targets,
+        identities: payload.identities.iter().map(replicated_identity),
+        reads: &payload.reads,
     }
 }
 
@@ -180,8 +194,46 @@ fn redo_proposal(
     max_entry_bytes: usize,
     stream_of: impl FnOnce(&ReplicatedEntry) -> RedoStreamId,
 ) -> crate::Result<RedoProposal> {
-    let content = content_of(payload);
-    let bytes = content.to_bytes()?;
+    // The framer reads the payload by reference. Only a redo that fits one
+    // entry is copied, into that entry.
+    let bytes = view_of(payload).to_framed()?;
+    if fits_inline(payload, bytes.len() as u64, max_entry_bytes) {
+        return Ok(RedoProposal::Inline(redo_entry(
+            target,
+            payload,
+            RedoBody::Inline(Box::new(content_of(payload))),
+        )));
+    }
+    let count = chunk_count(bytes.len() as u64, max_entry_bytes)?;
+    let last = chunked_final_entry(target, payload, count, bytes.len() as u64, stream_of);
+    let stream = final_entry_stream(&last)?;
+    let room = chunk_room(max_entry_bytes)?;
+    let len = bytes.len() as u64;
+    let chunks = (0u32..)
+        .zip(bytes.chunks(room))
+        .map(|(index, part)| {
+            chunk_entry(
+                target,
+                RedoChunkSlot { stream, index, len },
+                part.to_vec(),
+                payload.event_source,
+            )
+        })
+        .collect();
+    Ok(RedoProposal::Chunked {
+        stream,
+        chunks,
+        last,
+    })
+}
+
+/// Whether a redo whose framed content holds `content_len` bytes travels
+/// inline in one entry of at most `max_entry_bytes`.
+pub fn fits_inline(
+    payload: &TransactionRedoPayload,
+    content_len: u64,
+    max_entry_bytes: usize,
+) -> bool {
     // The entry around the content: the collections the write names, the
     // names it carries with their incarnations, and the fixed fields.
     let named_bytes = payload
@@ -197,54 +249,63 @@ fn redo_proposal(
     let envelope = named_bytes
         .saturating_add(named_count.saturating_mul(COLLECTION_ENTRY_BYTES))
         .saturating_add(ENTRY_STAMP_BYTES);
-    let mut last = redo_entry(target, payload, RedoBody::Inline(Box::new(content)));
-    if bytes.len().saturating_add(envelope) <= max_entry_bytes {
-        return Ok(RedoProposal::Inline(last));
-    }
-    let stream = stream_of(&last);
-    let chunks = chunk_entries(
-        target,
-        stream,
-        &bytes,
-        max_entry_bytes,
-        payload.event_source,
-    )?;
-    let count = u32::try_from(chunks.len()).map_err(|_| crate::Error::Internal {
-        detail: format!(
-            "a redo of {} bytes splits into too many chunks",
-            bytes.len()
-        ),
-    })?;
-    last.write = ReplicatedWrite::TransactionRedo {
-        body: RedoBody::Chunked {
-            stream,
-            count,
-            len: bytes.len() as u64,
-        },
-        collections: payload.collections.clone(),
-        event_source: ReplicatedEventSource::from(payload.event_source),
-        origin: payload.origin,
-        calvin: payload.calvin.clone(),
-        snapshot_ordinal: payload.snapshot_ordinal,
-        adds_storage: payload.adds_storage,
-    };
-    Ok(RedoProposal::Chunked {
-        stream,
-        chunks,
-        last,
-    })
+    content_len.saturating_add(envelope as u64) <= max_entry_bytes as u64
 }
 
-/// The `RedoChunk` entries that carry `bytes` under `stream`, each encoded
-/// within `max_entry_bytes`.
-pub fn chunk_entries(
+/// The header frames of `payload`: the first bytes of its framed content,
+/// ahead of the resolved lists.
+pub fn redo_header_frames(payload: &TransactionRedoPayload) -> crate::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    view_of(payload).push_header_frames(&mut out)?;
+    Ok(out)
+}
+
+/// The final entry of a chunked redo of `count` chunks and `len` bytes,
+/// under the stream `stream_of` names for it.
+pub fn chunked_final_entry(
     target: RedoEntryTarget,
-    stream: RedoStreamId,
-    bytes: &[u8],
-    max_entry_bytes: usize,
-    event_source: crate::event::EventSource,
-) -> crate::Result<Vec<ReplicatedEntry>> {
-    let room = max_entry_bytes
+    payload: &TransactionRedoPayload,
+    count: u32,
+    len: u64,
+    stream_of: impl FnOnce(&ReplicatedEntry) -> RedoStreamId,
+) -> ReplicatedEntry {
+    // The stream can name the final entry's own idempotency key, so the
+    // entry exists before its body names the stream.
+    let mut last = redo_entry(
+        target,
+        payload,
+        RedoBody::Chunked {
+            stream: RedoStreamId::Session {
+                vshard: target.vshard_id.as_u32(),
+                idempotency_key: 0,
+            },
+            count,
+            len,
+        },
+    );
+    let stream = stream_of(&last);
+    if let ReplicatedWrite::TransactionRedo { body, .. } = &mut last.write {
+        *body = RedoBody::Chunked { stream, count, len };
+    }
+    last
+}
+
+/// The stream the body of `last` names.
+pub fn final_entry_stream(last: &ReplicatedEntry) -> crate::Result<RedoStreamId> {
+    match &last.write {
+        ReplicatedWrite::TransactionRedo {
+            body: RedoBody::Chunked { stream, .. },
+            ..
+        } => Ok(*stream),
+        other => Err(crate::Error::Internal {
+            detail: format!("a chunked redo's final entry carries {other:?}, not a chunked body"),
+        }),
+    }
+}
+
+/// Bytes a chunk entry of `max_entry_bytes` carries beside its envelope.
+pub fn chunk_room(max_entry_bytes: usize) -> crate::Result<usize> {
+    max_entry_bytes
         .checked_sub(CHUNK_ENTRY_ENVELOPE_BYTES)
         .filter(|room| *room > 0)
         .ok_or_else(|| crate::Error::Config {
@@ -252,25 +313,49 @@ pub fn chunk_entries(
                 "tuning.calvin.max_redo_entry_bytes {max_entry_bytes} leaves no room for a \
                  redo chunk beside its {CHUNK_ENTRY_ENVELOPE_BYTES}-byte envelope"
             ),
-        })?;
-    let len = bytes.len() as u64;
-    Ok((0u32..)
-        .zip(bytes.chunks(room))
-        .map(|(index, part)| {
-            ReplicatedEntry::new(
-                target.tenant_id.as_u64(),
-                target.database_id.as_u64(),
-                target.vshard_id.as_u32(),
-                ReplicatedWrite::RedoChunk {
-                    stream,
-                    index,
-                    len,
-                    bytes: part.to_vec(),
-                },
-            )
-            .with_event_source(event_source)
         })
-        .collect())
+}
+
+/// How many chunk entries of `max_entry_bytes` carry `len` bytes: every
+/// chunk but the last is full.
+pub fn chunk_count(len: u64, max_entry_bytes: usize) -> crate::Result<u32> {
+    let room = chunk_room(max_entry_bytes)? as u64;
+    u32::try_from(len.div_ceil(room)).map_err(|_| crate::Error::Internal {
+        detail: format!(
+            "a redo of {len} bytes splits into more than {} chunks",
+            u32::MAX
+        ),
+    })
+}
+
+/// Where one chunk sits in its stream.
+#[derive(Debug, Clone, Copy)]
+pub struct RedoChunkSlot {
+    pub stream: RedoStreamId,
+    pub index: u32,
+    /// The byte length of the whole stream.
+    pub len: u64,
+}
+
+/// The `RedoChunk` entry that carries `bytes` at `slot`.
+pub fn chunk_entry(
+    target: RedoEntryTarget,
+    slot: RedoChunkSlot,
+    bytes: Vec<u8>,
+    event_source: crate::event::EventSource,
+) -> ReplicatedEntry {
+    ReplicatedEntry::new(
+        target.tenant_id.as_u64(),
+        target.database_id.as_u64(),
+        target.vshard_id.as_u32(),
+        ReplicatedWrite::RedoChunk {
+            stream: slot.stream,
+            index: slot.index,
+            len: slot.len,
+            bytes,
+        },
+    )
+    .with_event_source(event_source)
 }
 
 /// The entry that drops `stream` on every replica.
@@ -493,7 +578,7 @@ mod tests {
             .collect();
         assert_eq!(joined.len() as u64, len);
         assert_eq!(
-            RedoContent::from_bytes(&joined).expect("content").redo,
+            RedoContent::from_framed(&joined).expect("content").redo,
             payload(300_000).redo
         );
     }

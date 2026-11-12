@@ -38,6 +38,7 @@
 use nodedb_physical::physical_plan::SpatialOp;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::{
     encode_spatial_delete_payload, encode_spatial_put_payload,
 };
@@ -47,10 +48,7 @@ use crate::wal::RedoSubRecord;
 ///
 /// `Insert` / `Delete` serialize to their engine-native `SpatialPut` /
 /// `SpatialDelete` shape. `Scan` emits nothing.
-pub(super) fn serialize_spatial_op(
-    op: &SpatialOp,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
+pub(super) fn serialize_spatial_op(op: &SpatialOp, ops: &mut dyn OpSink) -> crate::Result<()> {
     match op {
         SpatialOp::Insert {
             collection,
@@ -127,7 +125,7 @@ mod tests {
             geometry: point(10.0, 20.0),
             provenance: Some(prov(1)),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize insert");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::SpatialPut as u32);
@@ -149,7 +147,7 @@ mod tests {
             surrogate: Some(Surrogate::new(7)),
             provenance: Some(prov(2)),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize delete");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::SpatialDelete as u32);
@@ -175,7 +173,7 @@ mod tests {
             prefilter: None,
             system_time: nodedb_types::SystemTimeScope::Current,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize scan");
         assert!(ops.is_empty(), "read-only scan emits no sub-record");
     }
@@ -191,7 +189,7 @@ mod tests {
             geometry: point(1.0, 1.0),
             provenance: None,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize insert");
         assert_eq!(ops.len(), 1, "the insert is never dropped");
         assert_eq!(ops[0].record_type, RecordType::SpatialPut as u32);
@@ -210,7 +208,7 @@ mod tests {
             surrogate: Some(Surrogate::new(1)),
             provenance: None,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize delete");
         assert_eq!(ops.len(), 1, "the delete is never dropped");
         assert_eq!(ops[0].record_type, RecordType::SpatialDelete as u32);

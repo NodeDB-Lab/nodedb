@@ -6,6 +6,7 @@ pub mod chunk;
 pub mod columnar_restore;
 pub mod continuation;
 pub mod document;
+pub mod frame;
 pub mod group;
 pub mod installed_document;
 pub mod kv_restore;

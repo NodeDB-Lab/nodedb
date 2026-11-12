@@ -198,6 +198,7 @@ impl CoreLoop {
             graph_txn_overlays: HashMap::new(),
             array_txn_overlays: HashMap::new(),
             txn_savepoints: HashMap::new(),
+            resolve_cursors: Default::default(),
             txn_created_columnar_engines: HashMap::new(),
             ts_resolve_holds: HashMap::new(),
             record_stamps: super::write_note::RecordStamps::default(),

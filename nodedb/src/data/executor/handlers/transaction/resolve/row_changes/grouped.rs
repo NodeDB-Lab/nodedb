@@ -14,6 +14,7 @@ use nodedb_array::types::ArrayId;
 use nodedb_physical::physical_plan::{ArrayOp, PhysicalPlan, TimeseriesOp};
 
 use super::super::columnar_image::ColumnarCollections;
+use super::super::sink::ChangeSink;
 use super::entry::ResolveScope;
 use super::keyed::push_truncate;
 use crate::data::executor::core_loop::CoreLoop;
@@ -41,7 +42,7 @@ impl KindsPresent {
     }
 
     /// One `*` entry per kind present, in insert, update, delete order.
-    fn push(self, collection: &str, changes: &mut Vec<RedoRowChange>) {
+    fn push(self, collection: &str, changes: &mut dyn ChangeSink) {
         let kinds = [
             (self.insert, RedoRowKind::Insert),
             (self.update, RedoRowKind::Update),
@@ -66,7 +67,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collections: &ColumnarCollections,
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
             return Ok(());
@@ -103,7 +104,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         plans: &[PhysicalPlan],
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let mut arrays: BTreeMap<String, &ArrayId> = BTreeMap::new();
         for plan in plans {
@@ -155,7 +156,7 @@ impl CoreLoop {
 /// inserts rows and never updates or deletes one, so every ingest is an
 /// insert. A TRUNCATE deletes every row. Entries follow plan order, one per
 /// collection and kind.
-pub(super) fn timeseries_row_changes(plans: &[PhysicalPlan], changes: &mut Vec<RedoRowChange>) {
+pub(super) fn timeseries_row_changes(plans: &[PhysicalPlan], changes: &mut dyn ChangeSink) {
     let mut seen: Vec<(String, RedoRowKind)> = Vec::new();
     for plan in plans {
         let (collection, kind) = match plan {

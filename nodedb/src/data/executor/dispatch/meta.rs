@@ -347,14 +347,26 @@ impl CoreLoop {
                 self.execute_calvin_drop(task, *epoch, *position)
             }
 
-            // Resolve a committing transaction's staged post-images into one
-            // `RedoRecord` and return its bytes. Reads the overlay by `&`; never
-            // mutates base (the redo record is installed separately).
-            MetaOp::ResolveTxn { txn_id, plans } => {
-                self.execute_resolve_session_txn(task, tid, *txn_id, plans)
-            }
+            // Read one part of a committing transaction's resolved redo. Part
+            // 0 resolves it and opens its cursor. Reads the overlay by `&`;
+            // never mutates base (the redo record is installed separately).
+            MetaOp::ResolveTxnPart {
+                txn_id,
+                plans,
+                part,
+                max_part_bytes,
+            } => self.execute_resolve_txn_part(
+                task,
+                tid,
+                crate::data::executor::handlers::transaction::resolve::PartRequest {
+                    txn_id: *txn_id,
+                    part: *part,
+                    max_part_bytes: *max_part_bytes,
+                },
+                plans,
+            ),
 
-            // Same shape as `ResolveTxn` above, but sourced from Calvin's own
+            // The resolve of `ResolveTxnPart` above, but sourced from Calvin's own
             // staging state (`commit_pending` + the synthetic-`TxnId` overlay)
             // instead of a session transaction's.
             MetaOp::CalvinResolve { epoch, position } => {

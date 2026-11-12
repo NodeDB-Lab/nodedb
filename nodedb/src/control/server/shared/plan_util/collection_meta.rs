@@ -85,7 +85,7 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::CalvinExecuteStatic { .. }
         | MetaOp::CalvinExecutePassive { .. }
         | MetaOp::CalvinExecuteActive { .. }
-        | MetaOp::ResolveTxn { .. }
+        | MetaOp::ResolveTxnPart { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_) => None,
         // Tenant-wide: every collection of the tenant.

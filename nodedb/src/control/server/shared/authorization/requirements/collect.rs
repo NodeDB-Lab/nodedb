@@ -122,7 +122,7 @@ fn collect_requirements(plan: &PhysicalPlan, out: &mut Vec<AuthorizationRequirem
                 | MetaOp::QueryCollectionSize { name, .. },
             ) => add_collection_requirement(name, required_permission(plan), out),
             PhysicalPlan::Meta(MetaOp::TransactionBatch { plans, .. })
-            | PhysicalPlan::Meta(MetaOp::ResolveTxn { plans, .. })
+            | PhysicalPlan::Meta(MetaOp::ResolveTxnPart { plans, .. })
             | PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic { plans, .. })
             | PhysicalPlan::Meta(MetaOp::CalvinExecuteActive { plans, .. }) => {
                 for nested in plans {
@@ -285,7 +285,7 @@ fn requires_tenant_fallback(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => inputs.is_empty(),
         PhysicalPlan::Meta(
             MetaOp::TransactionBatch { plans, .. }
-            | MetaOp::ResolveTxn { plans, .. }
+            | MetaOp::ResolveTxnPart { plans, .. }
             | MetaOp::CalvinExecuteStatic { plans, .. }
             | MetaOp::CalvinExecuteActive { plans, .. },
         ) => plans.is_empty(),

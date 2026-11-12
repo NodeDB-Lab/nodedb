@@ -31,7 +31,7 @@ use super::super::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 use super::super::read_set::ReadSetEntry;
 use super::super::reservation_release;
 use super::super::store::SessionStore;
-use super::run::compensate_finalized_ddl;
+use super::ddl_steps::compensate_finalized_ddl;
 use super::single_shard::{SingleShardCommit, dispatch_single_shard};
 use super::ts_rejections::RejectedByCollection;
 

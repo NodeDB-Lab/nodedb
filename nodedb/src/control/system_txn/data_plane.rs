@@ -16,7 +16,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 /// that owns their vShard.
 ///
 /// The gateway must NOT be used here: commit-time tasks carry `MetaOp` plans
-/// (`ResolveTxn`, `ApplyTransactionRedo`) with no named collection, so the
+/// (`ResolveTxnPart`, `ApplyTransactionRedo`) with no named collection, so the
 /// gateway's router cannot derive a route for them and falls back to vShard 0,
 /// durably applying the commit on the wrong core.
 pub(super) struct SystemTxnDataPlane<'a> {

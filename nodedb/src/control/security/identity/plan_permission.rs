@@ -300,10 +300,10 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             MetaOp::StageWrite { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::ResolveTxn { .. },
+            | MetaOp::ResolveTxnPart { .. },
         ) => Permission::Write,
 
-        // Mirrors `ResolveTxn`: Calvin scheduler's commit path, treated as Write though it doesn't mutate base state.
+        // Mirrors `ResolveTxnPart`: Calvin scheduler's commit path, treated as Write though it doesn't mutate base state.
         PhysicalPlan::Meta(MetaOp::CalvinResolve { .. }) => Permission::Write,
 
         // Installs a committed transaction's post-images into base state.

@@ -28,7 +28,6 @@ impl TxnOverlay {
                 o.by_surrogate.run_heap_bytes()
                     + o.doc_id_to_surrogate.run_heap_bytes()
                     + o.ttl_by_surrogate.run_heap_bytes()
-                    + o.bitemporal_by_surrogate.run_heap_bytes()
                     + o.base_pk_by_surrogate.run_heap_bytes()
             })
             .sum::<usize>()
@@ -70,7 +69,8 @@ mod tests {
     use nodedb_types::RowIdentity;
 
     use super::super::staged::{Staged, TouchedSlot};
-    use super::super::staged_sidecar::{BitemporalStamp, StagedTtl};
+    use super::super::staged_sidecar::StagedTtl;
+    use super::super::staged_slots::StagedSlot;
     use super::*;
     use crate::data::executor::handlers::spill::tiered::SpillSpace;
     use crate::types::{DatabaseId, TenantId};
@@ -231,12 +231,6 @@ mod tests {
         overlay
             .set_ttl(cache.clone(), 4, &id(4), StagedTtl::ExpireAt(9))
             .unwrap();
-        let stamp = BitemporalStamp {
-            sys_from: 1,
-            valid_from_ms: 2,
-            valid_until_ms: 3,
-        };
-        overlay.set_bitemporal(&cache, 4, stamp).unwrap();
         overlay.note_base_pk(&cache, 4, vec![0xa1, 0x61]).unwrap();
         overlay.note_base_pk(&cache, 4, vec![0xa1, 0x62]).unwrap();
 
@@ -244,13 +238,25 @@ mod tests {
             overlay.get_ttl_by_doc_id(&cache, &id(4)).unwrap(),
             Some(StagedTtl::ExpireAt(9))
         );
-        assert_eq!(overlay.get_bitemporal(&cache, 4).unwrap(), Some(stamp));
         assert_eq!(overlay.base_pk(&cache, 4).unwrap(), Some(vec![0xa1, 0x61]));
         let ttl_only: Vec<_> = overlay
-            .iter_ttl_only_for_collection(&cache)
+            .iter_slots_for_collection(&cache, true)
+            .map(|slot| {
+                slot.map(|(doc_id, slot)| match slot {
+                    StagedSlot::TtlOnly(ttl) => (doc_id, ttl),
+                    StagedSlot::Written { surrogate, .. } => {
+                        panic!("row {surrogate} stages no value")
+                    }
+                })
+            })
             .collect::<crate::Result<_>>()
             .unwrap();
         assert_eq!(ttl_only, vec![(id(4), StagedTtl::ExpireAt(9))]);
+        assert_eq!(
+            overlay.iter_slots_for_collection(&cache, false).count(),
+            0,
+            "a pass without TTL-only rows yields none"
+        );
     }
 
     #[test]

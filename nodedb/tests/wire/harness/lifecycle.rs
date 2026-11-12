@@ -241,6 +241,42 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_with_max_redo_entry_bytes`] with a staging overlay that
+    /// spills past `overlay_bytes`, so a large commit resolves a spilled
+    /// overlay into a chunked redo.
+    pub async fn start_with_redo_and_overlay_bytes(
+        redo_bytes: usize,
+        overlay_bytes: usize,
+    ) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides {
+                max_redo_entry_bytes: Some(redo_bytes),
+                max_txn_overlay_bytes: Some(overlay_bytes),
+                ..TuningOverrides::default()
+            },
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// [`Self::start_with_max_redo_entry_bytes`] with `NODEDB_FAILPOINTS=spec`
+    /// set on the server (see [`Self::start_with_failpoints`]).
+    #[cfg(feature = "failpoints")]
+    pub async fn start_with_max_redo_entry_bytes_and_failpoints(bytes: usize, spec: &str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn_with_failpoints(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_redo_entry_bytes(bytes),
+            1,
+            Some(spec),
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Reopen `dir` with the lowered redo entry limit a server started by
     /// [`Self::start_with_max_redo_entry_bytes`] used.
     pub async fn open_on_path_with_max_redo_entry_bytes(

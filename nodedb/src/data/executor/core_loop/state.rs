@@ -429,14 +429,11 @@ pub struct CoreLoop {
     /// handlers that need "current time" (KV TTL expire_at, timeseries system_ms) call
     /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that single-shard (non-Calvin)
     /// paths read the wall clock. A bitemporal document or columnar stamp reads
-    /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`).
-    ///
-    /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded per core, and staging
-    /// never recurses into another Calvin execute.
+    /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`). `CoreLoop` is
+    /// `!Send` and single-threaded, and staging never recurses into another Calvin execute.
     pub(in crate::data::executor) epoch_system_ms: Option<i64>,
 
-    /// Per-transaction staging overlay: not-yet-durable writes for each
-    /// in-flight transaction on this core, keyed by `TxnId`. Populated by
+    /// Per-transaction staging overlay of each in-flight transaction on this core. Populated by
     /// `MetaOp::StageWrite`, released by `MetaOp::DropTxnOverlay`.
     pub(in crate::data::executor) txn_overlays: HashMap<
         crate::types::TxnId,
@@ -461,6 +458,9 @@ pub struct CoreLoop {
         crate::types::TxnId,
         crate::data::executor::handlers::transaction::savepoint_marks::TxnSavepoints,
     >,
+    /// The open resolve cursor of each committing transaction on this core.
+    pub(in crate::data::executor) resolve_cursors:
+        crate::data::executor::handlers::transaction::resolve::ResolveCursors,
     /// Columnar engines THIS txn newly created while staging; `DropTxnOverlay`
     /// drops still-empty entries (rollback) and leaves filled ones (commit).
     pub(in crate::data::executor) txn_created_columnar_engines:

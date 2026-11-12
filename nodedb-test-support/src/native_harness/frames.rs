@@ -133,18 +133,24 @@ pub async fn read_frame(stream: &mut TcpStream) -> Option<Vec<u8>> {
 /// any test driving a direct-op opcode (`PointGet`, `RangeScan`,
 /// `VectorSearch`, `KvBatchPut`, ...) directly rather than through SQL text.
 ///
-/// Waits at most [`RESPONSE_BOUND`] for the response.
+/// Waits at most [`response_bound`] for the response.
 pub async fn send_request(
     stream: &mut TcpStream,
     seq: u64,
     op: OpCode,
     fields: TextFields,
 ) -> NativeResponse {
-    send_request_within(stream, seq, op, fields, Some(RESPONSE_BOUND)).await
+    send_request_within(stream, seq, op, fields, Some(response_bound())).await
 }
 
-/// How long [`send_request`] waits for a response.
-pub const RESPONSE_BOUND: Duration = Duration::from_secs(5);
+/// How long [`send_request`] waits for a response: the server's default
+/// statement deadline. The server answers every request by then, with its
+/// result or a deadline error, so a missing answer is a hang.
+pub fn response_bound() -> Duration {
+    Duration::from_secs(
+        nodedb_types::config::tuning::NetworkTuning::default().default_deadline_secs,
+    )
+}
 
 /// [`send_request`] waiting at most `bound` for the response, or without
 /// limit when `bound` is `None`. A caller that parks the server on purpose
@@ -175,7 +181,7 @@ pub enum FrameEncoding {
 /// `fields` reaches the server with its exact type. The session's first
 /// frame must be MessagePack too, so authenticate with this as well.
 ///
-/// Waits at most [`RESPONSE_BOUND`] for the response.
+/// Waits at most [`response_bound`] for the response.
 pub async fn send_request_msgpack(
     stream: &mut TcpStream,
     seq: u64,
@@ -187,7 +193,7 @@ pub async fn send_request_msgpack(
         seq,
         op,
         fields,
-        Some(RESPONSE_BOUND),
+        Some(response_bound()),
         FrameEncoding::MessagePack,
     )
     .await

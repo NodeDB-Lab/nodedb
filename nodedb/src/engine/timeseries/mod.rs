@@ -33,6 +33,7 @@ pub mod query_cache;
 pub mod reader;
 pub mod recent_cache;
 pub mod resolved_ingest;
+pub mod resolved_rejections;
 pub mod retention_policy;
 pub mod row_cells;
 pub mod s3_archive;

@@ -32,6 +32,7 @@ use nodedb_physical::physical_plan::VectorResolvedMutation;
 use nodedb_types::{PayloadIndexKind, Surrogate, VectorQuantization, VectorStorageDtype};
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::{
     VectorResolvedDirectWritePayload, encode_vector_direct_truncate_payload,
     encode_vector_resolved_direct_write_payload,
@@ -97,7 +98,7 @@ impl CoreLoop {
         overlay: &TxnOverlay,
         coll_key: &(DatabaseId, TenantId, String),
         writes: &VectorPrimaryWrites,
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         let (database_id, tid, collection) =
             (coll_key.0.as_u64(), coll_key.1.as_u64(), &coll_key.2);

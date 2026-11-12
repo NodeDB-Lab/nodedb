@@ -288,7 +288,7 @@ macro_rules! match_returning_slot {
                 | MetaOp::MarkSavepoint { .. }
                 | MetaOp::RollbackToSavepoint { .. }
                 | MetaOp::CalvinDrop { .. }
-                | MetaOp::ResolveTxn { .. }
+                | MetaOp::ResolveTxnPart { .. }
                 | MetaOp::CalvinResolve { .. }
                 | MetaOp::ApplyTransactionRedo { .. }
                 | MetaOp::RestoreRedo(_),

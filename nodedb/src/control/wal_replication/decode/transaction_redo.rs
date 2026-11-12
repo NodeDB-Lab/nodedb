@@ -348,7 +348,7 @@ mod tests {
                 other => panic!("expected a chunk, got {other:?}"),
             })
             .collect();
-        let rebuilt = chunked.payload(RedoContent::from_bytes(&joined).expect("content"));
+        let rebuilt = chunked.payload(RedoContent::from_framed(&joined).expect("content"));
         assert_eq!(rebuilt.redo, original.redo);
         assert_eq!(rebuilt.sum_targets, original.sum_targets);
         assert_eq!(rebuilt.identities, original.identities);

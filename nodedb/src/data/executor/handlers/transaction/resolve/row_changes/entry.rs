@@ -17,9 +17,9 @@
 //!   as a whole, one entry per kind of net change it holds
 //!   ([`super::grouped`]).
 //!
-//! Entries follow engine order, then collection order, then row order, so
-//! every replica that resolves the same transaction records the same
-//! entries.
+//! Entries follow engine order, then collection order, then the overlay's
+//! row order, so every replica that resolves the same transaction records
+//! the same entries. Each entry goes into the resolve's sink as it is made.
 //!
 //! [`RedoRowKind::net`]: crate::wal::RedoRowKind::net
 
@@ -28,10 +28,10 @@ use std::collections::BTreeSet;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::super::columnar_image::ColumnarCollections;
+use super::super::sink::ChangeSink;
 use super::super::vector_primary::VectorPrimaryCollections;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, TxnId};
-use crate::wal::RedoRowChange;
 
 /// The collections a transaction staged rows in, and its plans.
 pub(in crate::data::executor::handlers::transaction::resolve) struct StagedRowCollections<'a> {
@@ -53,27 +53,27 @@ pub(in crate::data::executor) struct ResolveScope {
 }
 
 impl CoreLoop {
-    /// The net change of every row `txn_id` wrote.
+    /// Push the net change of every row `txn_id` wrote into `changes`.
     pub(in crate::data::executor::handlers::transaction::resolve) fn resolve_row_changes(
         &self,
         database_id: DatabaseId,
         tid: u64,
         txn_id: TxnId,
         collections: &StagedRowCollections<'_>,
-    ) -> crate::Result<Vec<RedoRowChange>> {
+        changes: &mut dyn ChangeSink,
+    ) -> crate::Result<()> {
         let scope = ResolveScope {
             database_id,
             tid,
             txn_id,
         };
-        let mut changes = Vec::new();
-        self.document_row_changes(scope, collections.documents, &mut changes)?;
-        self.crdt_row_changes(scope, collections.plans, &mut changes)?;
-        self.kv_row_changes(scope, collections.kv, &mut changes)?;
-        self.vector_primary_row_changes(scope, collections.vector_primary, &mut changes)?;
-        self.columnar_row_changes(scope, collections.columnar, &mut changes)?;
-        self.array_row_changes(scope, collections.plans, &mut changes)?;
-        super::grouped::timeseries_row_changes(collections.plans, &mut changes);
-        Ok(changes)
+        self.document_row_changes(scope, collections.documents, changes)?;
+        self.crdt_row_changes(scope, collections.plans, changes)?;
+        self.kv_row_changes(scope, collections.kv, changes)?;
+        self.vector_primary_row_changes(scope, collections.vector_primary, changes)?;
+        self.columnar_row_changes(scope, collections.columnar, changes)?;
+        self.array_row_changes(scope, collections.plans, changes)?;
+        super::grouped::timeseries_row_changes(collections.plans, changes);
+        Ok(())
     }
 }

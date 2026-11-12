@@ -5,7 +5,7 @@
 //! (see `calvin_txn_id.rs`).
 //!
 //! Staging is the producer side for `CalvinResolve`, which reads the overlay
-//! the same way `MetaOp::ResolveTxn` does for session transactions
+//! the same way `MetaOp::ResolveTxnPart` does for session transactions
 //! (`resolve/entry.rs`). The redo record it builds is what the stamped redo
 //! entry installs.
 

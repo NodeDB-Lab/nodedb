@@ -25,7 +25,8 @@ mod vector;
 
 pub use entry::to_replicated_entry;
 pub use transaction_redo::{
-    CHUNK_ENTRY_ENVELOPE_BYTES, CalvinEntryStamps, RedoEntryTarget, RedoProposal,
-    calvin_redo_proposal, chunk_entries, redo_abandon_entry, session_redo_proposal,
+    CHUNK_ENTRY_ENVELOPE_BYTES, CalvinEntryStamps, RedoChunkSlot, RedoEntryTarget, RedoProposal,
+    calvin_redo_proposal, chunk_count, chunk_entry, chunk_room, chunked_final_entry,
+    final_entry_stream, fits_inline, redo_abandon_entry, redo_header_frames, session_redo_proposal,
     transaction_redo_entry,
 };

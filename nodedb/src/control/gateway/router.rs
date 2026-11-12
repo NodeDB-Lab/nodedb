@@ -300,7 +300,7 @@ pub fn is_task_vshard_scoped(plan: &PhysicalPlan) -> bool {
                 | MetaOp::MarkSavepoint { .. }
                 | MetaOp::RollbackToSavepoint { .. }
                 | MetaOp::DropTxnOverlay { .. }
-                | MetaOp::ResolveTxn { .. }
+                | MetaOp::ResolveTxnPart { .. }
                 | MetaOp::TransactionBatch { .. }
                 | MetaOp::ApplyTransactionRedo { .. }
         )
@@ -528,9 +528,11 @@ mod tests {
                 plans: vec![],
                 txn_id: None,
             }),
-            PhysicalPlan::Meta(MetaOp::ResolveTxn {
+            PhysicalPlan::Meta(MetaOp::ResolveTxnPart {
                 txn_id: nodedb_types::id::TxnId::new(7),
                 plans: vec![],
+                part: 0,
+                max_part_bytes: 1024,
             }),
             PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
                 redo: vec![],

@@ -8,6 +8,7 @@ use super::transaction_redo_wire::ReplicatedIdentity;
 use crate::wal::RedoStreamId;
 
 /// The row-sized part of a committed redo: what a chunked redo splits.
+/// A chunk stream carries it framed: `RedoContent::to_framed`.
 #[derive(
     Debug,
     Clone,
@@ -31,22 +32,6 @@ pub struct RedoContent {
     pub reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
 }
 
-impl RedoContent {
-    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        zerompk::to_msgpack_vec(self).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("redo content encode: {e}"),
-        })
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
-        zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("redo content decode: {e}"),
-        })
-    }
-}
-
 /// Where a `TransactionRedo` entry's content is.
 #[derive(
     Debug,
@@ -60,7 +45,7 @@ pub enum RedoBody {
     /// The entry carries the content.
     Inline(Box<RedoContent>),
     /// Earlier `RedoChunk` entries of `stream` carry the content: `count`
-    /// chunks of `len` bytes in all, encoded as one [`RedoContent`].
+    /// chunks of `len` bytes in all, one framed [`RedoContent`].
     Chunked {
         stream: RedoStreamId,
         count: u32,

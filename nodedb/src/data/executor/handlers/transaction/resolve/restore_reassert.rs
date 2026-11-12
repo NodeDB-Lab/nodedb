@@ -40,6 +40,7 @@ use crate::wal::{
 
 use super::restore::restored_edge;
 use super::restore_changes::RestoreChanges;
+use super::sink::OpSink;
 
 /// Where a RESTORE batch writes, the ordinal it applies at, and the cut the
 /// RESTORE takes effect at.
@@ -306,7 +307,7 @@ impl CoreLoop {
         &self,
         scope: RestoreScope,
         edges: &[RestoredEdgeVersion],
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         let mut newest: BTreeMap<(&str, &str, &str, &str), &RestoredEdgeVersion> = BTreeMap::new();
         for edge in edges {

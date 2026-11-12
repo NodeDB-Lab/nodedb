@@ -23,15 +23,12 @@
 //! record's reserved ordinal to that ordinal before it appends the record
 //! (`wal::redo::stamp_floor`). A Calvin resolve's stamp is final.
 
-use std::collections::BTreeMap;
-
-use nodedb_types::{RowIdentity, StorageKey, Surrogate};
+use nodedb_types::{StorageKey, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::bitemporal_time::KeyStamps;
-use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
+use crate::data::executor::core_loop::bitemporal_time::raised_above;
 use crate::engine::sparse::btree::SparseEngine;
-use crate::types::{DatabaseId, TenantId, TxnId};
+use crate::types::TxnId;
 
 impl CoreLoop {
     /// The system-time ordinal of the transaction `txn_id` resolves: the
@@ -45,84 +42,14 @@ impl CoreLoop {
             None => candidate,
         }
     }
-
-    /// Pin the resolve-time version stamp once, in the overlay sidecar,
-    /// for every put AND tombstone `txn_id` staged in `collection`, so the
-    /// redo carries it and every apply (install, replica, restart) writes
-    /// the same version key. Every document collection keeps versions, so
-    /// every one stamps. Deterministic doc-id order keeps replicas resolving
-    /// the same transaction in sync.
-    pub(super) fn pin_doc_stamps(
-        &mut self,
-        database_id: DatabaseId,
-        tid: u64,
-        txn_id: TxnId,
-        collection: &str,
-        txn_ordinal: i64,
-    ) -> crate::Result<()> {
-        let coll_key = (database_id, TenantId::new(tid), collection.to_string());
-        let mut writes: Vec<(RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
-            Some(overlay) => overlay
-                .iter_staged_bindings_for_collection(&coll_key)
-                .map(|item| item.map(|(doc_id, surrogate, _staged)| (doc_id, surrogate)))
-                .collect::<crate::Result<_>>()?,
-            None => Vec::new(),
-        };
-        writes.sort();
-        let mut ordinals = DocOrdinals::new(
-            &self.sparse,
-            database_id.as_u64(),
-            tid,
-            collection,
-            txn_ordinal,
-        );
-        let mut stamps: Vec<(u32, BitemporalStamp)> = Vec::with_capacity(writes.len());
-        for (_doc_id, surrogate) in writes {
-            let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
-            stamps.push((
-                surrogate,
-                BitemporalStamp {
-                    sys_from: ordinals.for_row(&key)?,
-                    valid_from_ms: i64::MIN,
-                    valid_until_ms: i64::MAX,
-                },
-            ));
-        }
-        if let Some(overlay) = self.txn_overlays.get_mut(&txn_id) {
-            for (surrogate, stamp) in stamps {
-                overlay.set_bitemporal(&coll_key, surrogate, stamp)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The tombstone ordinal of every base row a staged TRUNCATE of
-    /// `collection` removes, keyed by surrogate: the transaction's ordinal,
-    /// raised above the row's newest stored version.
-    pub(super) fn truncated_row_ordinals(
-        &self,
-        database_id: DatabaseId,
-        tid: u64,
-        collection: &str,
-        rows: &[(StorageKey, Vec<u8>)],
-        txn_ordinal: i64,
-    ) -> crate::Result<BTreeMap<u32, i64>> {
-        let mut ordinals = DocOrdinals::new(
-            &self.sparse,
-            database_id.as_u64(),
-            tid,
-            collection,
-            txn_ordinal,
-        );
-        let mut stamps = BTreeMap::new();
-        for (key, _body) in rows {
-            stamps.insert(key.surrogate().as_u32(), ordinals.for_row(key)?);
-        }
-        Ok(stamps)
-    }
 }
 
 /// The stamps of one resolve's document versions in one collection.
+///
+/// A resolve stamps each row of a collection once: a staged row once per
+/// binding, and a base row a staged TRUNCATE removes once, never a row the
+/// overlay stages. So a stamp reads only the row's stored versions, and the
+/// resolve keeps no stamp it has given.
 pub(super) struct DocOrdinals<'a> {
     sparse: &'a SparseEngine,
     database_id: u64,
@@ -130,7 +57,6 @@ pub(super) struct DocOrdinals<'a> {
     collection: &'a str,
     /// The transaction's ordinal.
     txn: i64,
-    stamps: KeyStamps<StorageKey>,
 }
 
 impl<'a> DocOrdinals<'a> {
@@ -147,27 +73,27 @@ impl<'a> DocOrdinals<'a> {
             tenant,
             collection,
             txn,
-            stamps: KeyStamps::default(),
         }
     }
 
     /// The system-time ordinal of the version of row `key`: the
     /// transaction's ordinal, raised one above the newest version of the
-    /// row ([`KeyStamps`]) when that version sits at or above it.
+    /// row when that version sits at or above it ([`raised_above`]).
     ///
     /// `Err` when a stored version does not read.
-    pub(super) fn for_row(&mut self, key: &StorageKey) -> crate::Result<i64> {
-        let Self {
-            sparse,
-            database_id,
-            tenant,
-            collection,
-            txn,
-            stamps,
-        } = self;
-        stamps.stamp_row(*txn, vec![*key], |key| {
-            sparse.versioned_latest_sys_from(*database_id, *tenant, collection, key)
-        })
+    pub(super) fn for_row(&self, key: &StorageKey) -> crate::Result<i64> {
+        let stored = self.sparse.versioned_latest_sys_from(
+            self.database_id,
+            self.tenant,
+            self.collection,
+            key,
+        )?;
+        Ok(raised_above(self.txn, stored))
+    }
+
+    /// [`Self::for_row`] of the row stored under `surrogate`.
+    pub(super) fn for_staged_row(&self, surrogate: u32) -> crate::Result<i64> {
+        self.for_row(&StorageKey::for_surrogate(Surrogate::new(surrogate)))
     }
 }
 
@@ -176,7 +102,6 @@ mod tests {
     use nodedb_types::Surrogate;
 
     use super::*;
-    use crate::data::executor::core_loop::bitemporal_time::raised_above;
     use crate::engine::sparse::btree_versioned::VersionedPut;
 
     const TXN: i64 = 5_000;
@@ -206,7 +131,7 @@ mod tests {
         let sparse = SparseEngine::open(&dir.path().join("s.redb")).expect("open");
         put(&sparse, 1, 100);
         put(&sparse, 2, 9_000);
-        let mut ordinals = DocOrdinals::new(&sparse, 0, 1, "c", TXN);
+        let ordinals = DocOrdinals::new(&sparse, 0, 1, "c", TXN);
         assert_eq!(ordinals.for_row(&key(1)).expect("older"), TXN);
         assert_eq!(
             ordinals.for_row(&key(2)).expect("ahead"),

@@ -378,7 +378,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::RollbackToSavepoint { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
-            | MetaOp::ResolveTxn { .. }
+            | MetaOp::ResolveTxnPart { .. }
             | MetaOp::ApplyTransactionRedo { .. }
             | MetaOp::RestoreRedo(_),
         ) => false,
@@ -2144,9 +2144,11 @@ mod tests {
                 epoch: 0,
                 position: 0,
             }),
-            PhysicalPlan::Meta(MetaOp::ResolveTxn {
+            PhysicalPlan::Meta(MetaOp::ResolveTxnPart {
                 txn_id: TxnId::new(1),
                 plans: Vec::new(),
+                part: 0,
+                max_part_bytes: 1024,
             }),
         ];
         for p in &plans {

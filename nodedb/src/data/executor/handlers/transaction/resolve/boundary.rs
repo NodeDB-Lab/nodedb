@@ -95,7 +95,8 @@ impl CoreLoop {
                         surrogate,
                     }));
                 }
-                for row in staged_document_rows(overlay, &coll_key, strict_schema.as_ref())? {
+                for row in staged_document_rows(overlay, &coll_key, strict_schema.as_ref()) {
+                    let row = row?;
                     documents.push(match row.value {
                         Some(value) => RedoDocOp::Put {
                             collection: collection.clone(),

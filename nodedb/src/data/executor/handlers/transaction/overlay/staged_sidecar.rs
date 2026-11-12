@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Per-row sidecars of the staging overlay: the KV TTL delta, the
-//! bitemporal stamp, the displaced columnar base key and a timeseries
-//! batch's default timestamp. Each lives beside
+//! displaced columnar base key and a timeseries batch's default timestamp.
+//! The file also holds [`BitemporalStamp`], the stamp a document version's
+//! redo sub-record carries. Each lives beside
 //! [`Staged`](super::Staged) rather than inside it because only one engine
 //! reads it.
 
@@ -28,16 +29,12 @@ pub enum StagedTtl {
     Persist,
 }
 
-/// The bitemporal system/valid-time stamp assigned to one staged document
-/// `Put` at COMMIT resolve time, kept OUTSIDE `Staged` because it is only
-/// meaningful for a `bitemporal=true` document collection (like [`StagedTtl`]
-/// is only meaningful for KV).
+/// The bitemporal system/valid-time stamp of one document version.
 ///
-/// Assigning it ONCE at resolve — rather than re-deriving it at both the
-/// commit-time base install and WAL replay — is what keeps a normal restart
-/// from writing a SECOND version of the same row: the redo sub-record carries
-/// this stamp verbatim, and the base install reads the identical stamp back
-/// out of the overlay sidecar so both agree on the version key.
+/// The COMMIT resolve stamps each staged document version as it serializes
+/// (`doc_ordinal`), and the redo sub-record carries the stamp verbatim. WAL
+/// replay and the commit-time install read the same stamp from the record, so
+/// a normal restart never writes a SECOND version of the same row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct BitemporalStamp {
     /// System-time ordinal the version row is keyed at. `_ts_system`
@@ -52,12 +49,6 @@ pub struct BitemporalStamp {
 impl SpillWeight for StagedTtl {
     fn spill_weight(&self) -> usize {
         std::mem::size_of::<StagedTtl>()
-    }
-}
-
-impl SpillWeight for BitemporalStamp {
-    fn spill_weight(&self) -> usize {
-        std::mem::size_of::<BitemporalStamp>()
     }
 }
 
@@ -136,83 +127,6 @@ impl TxnOverlay {
         Ok(overlay
             .ttl_by_surrogate
             .get(&*surrogate, reader)?
-            .map(Cow::into_owned))
-    }
-
-    /// Every staged TTL delta of `coll_key` whose row has no staged value:
-    /// an `EXPIRE` or `PERSIST` of a base row. Yields the row's client
-    /// identity and its delta.
-    pub fn iter_ttl_only_for_collection<'a>(
-        &'a self,
-        coll_key: &CollKey,
-    ) -> impl Iterator<Item = crate::Result<(RowIdentity, StagedTtl)>> + 'a {
-        let poisoned = self.guard().err();
-        let overlay = match poisoned {
-            Some(_) => None,
-            None => self.collections.get(coll_key),
-        };
-        let reader = self.space.reader();
-        let entries = overlay.into_iter().flat_map(move |overlay| {
-            overlay
-                .doc_id_to_surrogate
-                .iter()
-                .filter_map(move |binding| {
-                    let ttl_only = |(doc_id, surrogate): (RowIdentity, u32)| -> crate::Result<Option<(RowIdentity, StagedTtl)>> {
-                        if overlay.by_surrogate.contains(&surrogate, reader)? {
-                            return Ok(None);
-                        }
-                        Ok(overlay
-                            .ttl_by_surrogate
-                            .get(&surrogate, reader)?
-                            .map(|ttl| (doc_id, ttl.into_owned())))
-                    };
-                    match binding.and_then(|(doc_id, surrogate)| {
-                        ttl_only((doc_id, surrogate.into_owned()))
-                    }) {
-                        Ok(Some(entry)) => Some(Ok(entry)),
-                        Ok(None) => None,
-                        Err(e) => Some(Err(e)),
-                    }
-                })
-        });
-        poisoned.map(Err).into_iter().chain(entries)
-    }
-
-    /// Record the resolve-time bitemporal stamp for `surrogate` in the given
-    /// collection. Assigned exactly once, at COMMIT resolve, after all
-    /// savepoint activity for the transaction has completed — so no undo
-    /// journalling is needed (it is never rolled back mid-statement).
-    pub fn set_bitemporal(
-        &mut self,
-        coll_key: &CollKey,
-        surrogate: u32,
-        stamp: BitemporalStamp,
-    ) -> crate::Result<()> {
-        self.guard()?;
-        let seq = self.journal.next_seq() as u64;
-        self.collections
-            .entry(coll_key.clone())
-            .or_default()
-            .bitemporal_by_surrogate
-            .insert(surrogate, stamp, seq);
-        self.spill_past_threshold()
-    }
-
-    /// Look up the resolve-time version stamp for `surrogate` in the given
-    /// collection. `Some` for every staged put and tombstone once its
-    /// resolve pinned the stamp.
-    pub fn get_bitemporal(
-        &self,
-        coll_key: &CollKey,
-        surrogate: u32,
-    ) -> crate::Result<Option<BitemporalStamp>> {
-        self.guard()?;
-        let Some(overlay) = self.collections.get(coll_key) else {
-            return Ok(None);
-        };
-        Ok(overlay
-            .bitemporal_by_surrogate
-            .get(&surrogate, self.space.reader())?
             .map(Cow::into_owned))
     }
 

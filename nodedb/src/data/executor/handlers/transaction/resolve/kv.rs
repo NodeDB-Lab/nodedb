@@ -35,20 +35,21 @@
 //!
 //! ## Determinism
 //!
-//! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
-//! into a `BTreeMap` keyed by the row's identity (`kv_row_identity` of the KV
-//! key) before emitting. Two replicas resolving the same transaction produce
-//! byte-identical redo ops.
+//! Entries emit in the overlay's merged identity order: the key-byte order
+//! of each row's encoded identity (`kv_row_identity` of the KV key). The
+//! order is a function of the staged rows alone, so two replicas resolving
+//! the same transaction produce byte-identical redo ops, and the resolve
+//! holds no row it has emitted.
 
-use std::collections::BTreeMap;
-
-use nodedb_types::RowIdentity;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch_kv::encode::{
     encode_kv_expire, encode_kv_persist, encode_kv_put, encode_kv_truncate,
 };
-use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl, TxnOverlay};
+use crate::data::executor::handlers::transaction::overlay::{
+    Staged, StagedSlot, StagedTtl, TxnOverlay,
+};
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoSubRecord;
@@ -61,10 +62,7 @@ const RESOLVE_TTL_MS: u64 = 0;
 /// Append the `kv_truncate` redo sub-record for a collection a staged
 /// TRUNCATE wipes at COMMIT — the same record the autocommit KV truncate
 /// appends.
-pub(super) fn serialize_kv_truncate(
-    collection: &str,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
+pub(super) fn serialize_kv_truncate(collection: &str, ops: &mut dyn OpSink) -> crate::Result<()> {
     let payload = encode_kv_truncate(collection)?;
     ops.push(RedoSubRecord {
         record_type: RecordType::Delete as u32,
@@ -73,14 +71,8 @@ pub(super) fn serialize_kv_truncate(
     Ok(())
 }
 
-/// One staged KV row: a value or tombstone, or a TTL delta on a base row.
-enum KvSlot<'a> {
-    Staged(u32, std::borrow::Cow<'a, Staged>),
-    TtlOnly(StagedTtl),
-}
-
 /// Append the redo sub-records for every KV post-image staged in `overlay`
-/// for `coll_key` to `ops`, in deterministic doc-id order.
+/// for `coll_key` to `ops`, in the overlay's identity order.
 ///
 /// An `EXPIRE` or `PERSIST` of a row the transaction did not otherwise
 /// write resolves to a `kv_expire` or `kv_persist` sub-record, the shapes
@@ -91,28 +83,18 @@ pub(super) fn serialize_kv_collection(
     overlay: &TxnOverlay,
     coll_key: &(DatabaseId, TenantId, String),
     collection: &str,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<RowIdentity, KvSlot<'_>> = BTreeMap::new();
-    for item in overlay.iter_staged_bindings_for_collection(coll_key) {
-        let (doc_id, surrogate, staged) = item?;
-        entries.insert(doc_id, KvSlot::Staged(surrogate, staged));
-    }
     // A staged TRUNCATE hides every base row, so no TTL delta can target one.
-    if !overlay.is_truncated(coll_key) {
-        for item in overlay.iter_ttl_only_for_collection(coll_key) {
-            let (doc_id, ttl) = item?;
-            entries.insert(doc_id, KvSlot::TtlOnly(ttl));
-        }
-    }
-
-    for (doc_id, slot) in entries {
+    let ttl_only = !overlay.is_truncated(coll_key);
+    for item in overlay.iter_slots_for_collection(coll_key, ttl_only) {
+        let (doc_id, slot) = item?;
         let key = unhex_key(doc_id.as_str()).ok_or_else(|| crate::Error::Internal {
             detail: format!("kv resolve: overlay doc-id '{doc_id}' is not valid hex"),
         })?;
         let (surrogate, staged) = match slot {
-            KvSlot::Staged(surrogate, staged) => (surrogate, staged),
-            KvSlot::TtlOnly(ttl) => {
+            StagedSlot::Written { surrogate, staged } => (surrogate, staged),
+            StagedSlot::TtlOnly(ttl) => {
                 let payload = match ttl {
                     StagedTtl::ExpireAt(ms) => {
                         encode_kv_expire(collection, &key, RESOLVE_TTL_MS, ms)?
@@ -234,7 +216,7 @@ mod tests {
     }
 
     fn resolve(overlay: &TxnOverlay) -> Vec<RedoSubRecord> {
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_kv_collection(overlay, &coll_key(), "cache", &mut ops).unwrap();
         ops
     }

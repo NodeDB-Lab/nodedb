@@ -2,7 +2,7 @@
 
 //! Run a plan that an `ExecuteRequest` carried to this node.
 //!
-//! A transaction meta-op (`StageWrite`, `ResolveTxn`, `DropTxnOverlay`, ...)
+//! A transaction meta-op (`StageWrite`, `ResolveTxnPart`, `DropTxnOverlay`, ...)
 //! runs on the one core owning its vShard, because only that core holds the
 //! transaction's staging overlay. Fanning it to every core stages the write on
 //! each of them and returns a non-owning core's answer. Every other plan fans
@@ -113,9 +113,11 @@ mod tests {
             route_received_plan(&stage, Some(VShardId::new(41))).unwrap(),
             ReceivedRoute::OwningCore(VShardId::new(41))
         );
-        let resolve = PhysicalPlan::Meta(MetaOp::ResolveTxn {
+        let resolve = PhysicalPlan::Meta(MetaOp::ResolveTxnPart {
             txn_id: TxnId::new(3),
             plans: vec![kv_put()],
+            part: 0,
+            max_part_bytes: 1024,
         });
         assert_eq!(
             route_received_plan(&resolve, Some(VShardId::new(7))).unwrap(),

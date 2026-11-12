@@ -24,7 +24,7 @@ pub fn plan_adds_storage(plan: &PhysicalPlan) -> bool {
     }
     match plan {
         PhysicalPlan::Meta(
-            MetaOp::TransactionBatch { plans, .. } | MetaOp::ResolveTxn { plans, .. },
+            MetaOp::TransactionBatch { plans, .. } | MetaOp::ResolveTxnPart { plans, .. },
         ) => plans.iter().any(plan_adds_storage),
         _ => !frees_or_keeps_space(plan),
     }
@@ -251,9 +251,11 @@ mod tests {
     #[test]
     fn a_transaction_adds_storage_when_any_plan_adds() {
         let batch = |plans| {
-            PhysicalPlan::Meta(MetaOp::ResolveTxn {
+            PhysicalPlan::Meta(MetaOp::ResolveTxnPart {
                 txn_id: nodedb_types::id::TxnId::new(1),
                 plans,
+                part: 0,
+                max_part_bytes: 1024,
             })
         };
         assert!(!plan_adds_storage(&batch(vec![delete(), truncate()])));

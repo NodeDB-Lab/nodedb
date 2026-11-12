@@ -34,18 +34,17 @@ use crate::wal::{
 
 use super::restore_changes::RestoreChanges;
 use super::restore_reassert::RestoreScope;
+use super::sink::{ChangeSink, OpSink, RedoSink};
 
 impl CoreLoop {
-    /// Append the rows, edge versions and node labels of every RESTORE batch
-    /// among `plans` to `ops`, and their rows' change events to
-    /// `row_changes`.
+    /// Push the rows, edge versions and node labels of every RESTORE batch
+    /// among `plans` into `sink`, with their rows' change events.
     pub(super) fn serialize_restored_batches(
         &self,
         database_id: DatabaseId,
         tid: u64,
         plans: &[PhysicalPlan],
-        ops: &mut Vec<RedoSubRecord>,
-        row_changes: &mut Vec<RedoRowChange>,
+        sink: &mut RedoSink,
     ) -> crate::Result<()> {
         for plan in plans {
             let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan else {
@@ -54,8 +53,13 @@ impl CoreLoop {
             let scope = self.restore_scope(database_id, tid, batch)?;
             let applied = scope.applied;
             let (rows, changes) = self.restored_row_ops(scope, batch)?;
-            ops.extend(rows);
-            row_changes.extend(changes);
+            for row in rows {
+                OpSink::push(sink, row);
+            }
+            for change in changes {
+                ChangeSink::push(sink, change);
+            }
+            let ops: &mut dyn OpSink = &mut *sink;
             for edge in &batch.edges {
                 ops.push(restored_edge(edge, scope.edge_apply())?);
             }
@@ -167,7 +171,7 @@ pub(super) fn restored_edge(
 fn restored_labels(
     node: &RestoredNodeLabels,
     applied: i64,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
     let exact = |labels: &[String], system_from: i64| -> crate::Result<RedoSubRecord> {
         let payload = NodeLabelRedo {
@@ -278,7 +282,7 @@ mod tests {
             versions: vec![(100, labels(&["Person"])), (200, labels(&["Admin"]))],
             current: labels(&["Admin"]),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         restored_labels(&node, 5_000, &mut ops).expect("resolve");
         assert_eq!(
             decode(&ops),
@@ -295,7 +299,7 @@ mod tests {
             versions: vec![(9_000, labels(&["Person"]))],
             current: labels(&["Robot"]),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         restored_labels(&node, 5_000, &mut ops).expect("resolve");
         assert_eq!(
             decode(&ops),
@@ -306,7 +310,7 @@ mod tests {
             versions: Vec::new(),
             current: labels(&["City"]),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         restored_labels(&unversioned, 5_000, &mut ops).expect("resolve");
         assert_eq!(decode(&ops), vec![(5_000, labels(&["City"]))]);
     }

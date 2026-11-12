@@ -27,7 +27,7 @@ use zerompk::{Read, Write};
 
 use super::lease::LeaseStamp;
 use super::staged_journal::{JournalEntry, OverlayJournal};
-use super::staged_sidecar::{BitemporalStamp, PkBytes, StagedTtl};
+use super::staged_sidecar::{PkBytes, StagedTtl};
 use crate::data::executor::handlers::spill::tiered::{SpillSpace, SpillWeight, TieredMap};
 use crate::engine::timeseries::columnar_memtable::ColumnarSchema;
 use crate::types::{DatabaseId, TenantId};
@@ -90,11 +90,6 @@ pub struct CollectionOverlay {
     /// Staged KV TTL delta per surrogate — sibling to `by_surrogate`, never
     /// consulted by non-KV engines. See [`StagedTtl`].
     pub(super) ttl_by_surrogate: TieredMap<u32, StagedTtl>,
-    /// Bitemporal stamp per surrogate — sibling to `by_surrogate`, written at
-    /// COMMIT resolve time for every staged document write and read back by
-    /// the commit-time base install so redo and install share one stamp.
-    /// See [`BitemporalStamp`].
-    pub(super) bitemporal_by_surrogate: TieredMap<u32, BitemporalStamp>,
     /// Primary key (MessagePack) of the base row a staged columnar write
     /// displaced, per surrogate. Recorded when a statement first stages a
     /// base row, read by COMMIT resolve so the redo names the row it removes.
@@ -121,7 +116,6 @@ impl CollectionOverlay {
         self.by_surrogate.is_empty()
             && self.doc_id_to_surrogate.is_empty()
             && self.ttl_by_surrogate.is_empty()
-            && self.bitemporal_by_surrogate.is_empty()
             && self.base_pk_by_surrogate.is_empty()
             && self.ingest_now_by_surrogate.is_empty()
             && self.unkeyed_ingest_now.is_empty()
@@ -133,7 +127,6 @@ impl CollectionOverlay {
         self.by_surrogate.hot_bytes()
             + self.doc_id_to_surrogate.hot_bytes()
             + self.ttl_by_surrogate.hot_bytes()
-            + self.bitemporal_by_surrogate.hot_bytes()
             + self.base_pk_by_surrogate.hot_bytes()
     }
 
@@ -142,7 +135,6 @@ impl CollectionOverlay {
         self.by_surrogate.spill(space, "value")?;
         self.doc_id_to_surrogate.spill(space, "binding")?;
         self.ttl_by_surrogate.spill(space, "ttl")?;
-        self.bitemporal_by_surrogate.spill(space, "bitemporal")?;
         self.base_pk_by_surrogate.spill(space, "base-pk")
     }
 
@@ -151,8 +143,6 @@ impl CollectionOverlay {
         self.by_surrogate.rollback(bound, space, "value")?;
         self.doc_id_to_surrogate.rollback(bound, space, "binding")?;
         self.ttl_by_surrogate.rollback(bound, space, "ttl")?;
-        self.bitemporal_by_surrogate
-            .rollback(bound, space, "bitemporal")?;
         self.base_pk_by_surrogate.rollback(bound, space, "base-pk")
     }
 }

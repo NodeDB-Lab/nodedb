@@ -253,6 +253,7 @@ mod redaction_expression_reads;
 mod redaction_policy_database_scope;
 mod redaction_provider_relation;
 mod redo_chunked_session_commit;
+mod redo_streamed_commit;
 mod reindex_concurrent;
 mod request_of_mixed_verbs;
 mod restart_refused_write_not_resurrected;

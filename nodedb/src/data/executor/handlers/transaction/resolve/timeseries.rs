@@ -37,6 +37,8 @@ use crate::engine::timeseries::resolved_ingest::{
 use crate::types::{TenantId, TxnId};
 use crate::wal::RedoSubRecord;
 
+use super::sink::OpSink;
+
 /// What a transaction's timeseries serializer carries from one plan op to the
 /// next.
 #[derive(Default)]
@@ -45,8 +47,37 @@ pub(super) struct TimeseriesResolveState {
     pub unkeyed_seen: std::collections::HashMap<String, usize>,
     /// The schema the last ingest into each collection resolved to.
     pub resolved_schemas: std::collections::HashMap<String, ColumnarSchema>,
-    /// The index in `ops` of each ingest sub-record, per collection.
-    pub ingest_ops: std::collections::HashMap<String, Vec<usize>>,
+    /// The plan index of each collection's last truncate.
+    pub last_truncate: std::collections::HashMap<String, usize>,
+    /// The plan index of the op the serializer reads.
+    pub plan_index: usize,
+}
+
+impl TimeseriesResolveState {
+    /// The state for a resolve of `plans`, with the last truncate of each
+    /// timeseries collection found up front.
+    pub(super) fn for_plans(plans: &[nodedb_physical::physical_plan::PhysicalPlan]) -> Self {
+        let mut state = Self::default();
+        for (index, plan) in plans.iter().enumerate() {
+            if let nodedb_physical::physical_plan::PhysicalPlan::Timeseries(
+                TimeseriesOp::Truncate { collection, .. },
+            ) = plan
+            {
+                state
+                    .last_truncate
+                    .insert(collection.as_str().to_owned(), index);
+            }
+        }
+        state
+    }
+
+    /// Whether a truncate later in the plan drops the ingest the serializer
+    /// reads into `collection`.
+    fn truncated_later(&self, collection: &str) -> bool {
+        self.last_truncate
+            .get(collection)
+            .is_some_and(|truncate| *truncate > self.plan_index)
+    }
 }
 
 impl CoreLoop {
@@ -59,12 +90,26 @@ impl CoreLoop {
         txn_id: TxnId,
         op: &TimeseriesOp,
         state: &mut TimeseriesResolveState,
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
+        // The rows an ingest adds before a later truncate of its collection
+        // leave the redo: their versions would start and end at the
+        // transaction's one ordinal, so no read ever sees them. The ingest
+        // still resolves, so a later ingest resolves against its schema.
+        let dropped = match op {
+            TimeseriesOp::Ingest { collection, .. } => state.truncated_later(collection.as_str()),
+            TimeseriesOp::Truncate { .. }
+            | TimeseriesOp::Scan { .. }
+            | TimeseriesOp::ResolveIngest(_)
+            | TimeseriesOp::ReadAggregate { .. }
+            | TimeseriesOp::RefreshAggregate { .. }
+            | TimeseriesOp::Partitions { .. } => false,
+        };
+        let mut kept = KeptOps { ops, dropped };
         let TimeseriesResolveState {
             unkeyed_seen,
             resolved_schemas,
-            ingest_ops,
+            ..
         } = state;
         match op {
             // Redo carries the ingested rows, not one caller's projected
@@ -81,16 +126,12 @@ impl CoreLoop {
                 // replica logs exactly those rows, and installs them by name.
                 let batch =
                     ResolvedTsBatch::from_bytes(payload)?.with_drift(TsDriftPolicy::ApplyByName);
-                ingest_ops
-                    .entry(collection.as_str().to_owned())
-                    .or_default()
-                    .push(ops.len());
                 push_resolved_batch(
                     collection.as_str(),
                     provenance,
                     &batch,
                     resolved_schemas,
-                    ops,
+                    &mut kept,
                 )
             }
             TimeseriesOp::Ingest {
@@ -153,35 +194,28 @@ impl CoreLoop {
                         base: resolved_schemas.get(collection.as_str()),
                     },
                 )?;
-                ingest_ops
-                    .entry(collection.as_str().to_owned())
-                    .or_default()
-                    .push(ops.len());
                 push_resolved_batch(
                     collection.as_str(),
                     provenance,
                     &batch,
                     resolved_schemas,
-                    ops,
+                    &mut kept,
                 )
             }
 
             // Same record the autocommit path appends
             // (`RecordType::TimeseriesTruncate`), replayed via
-            // `replay_timeseries_truncate`. The rows this transaction ingested
-            // into the collection before the truncate leave the redo: their
-            // versions would start and end at the transaction's one ordinal,
-            // so no read ever sees them. Every ingest sub-record of the
-            // collection then follows its truncate, and the truncate's flush
-            // never splits the transaction's record.
+            // `replay_timeseries_truncate`. No ingest of the collection staged
+            // before the last truncate is in the redo, so every ingest
+            // sub-record of the collection follows its truncate, and the
+            // truncate's flush never splits the transaction's record.
             TimeseriesOp::Truncate {
                 collection,
                 restart_identity: _,
             } => {
-                drop_ingests_before_truncate(collection.as_str(), ingest_ops, ops);
                 let sub_payload =
                     encode_columnar_truncate_payload(collection.as_str(), None, false)?;
-                ops.push(RedoSubRecord {
+                kept.ops.push(RedoSubRecord {
                     record_type: RecordType::TimeseriesTruncate as u32,
                     payload: sub_payload,
                 });
@@ -221,30 +255,11 @@ pub(super) fn refuse_timeseries_op(op: &TimeseriesOp) -> crate::Result<()> {
     }
 }
 
-/// Remove from `ops` every ingest sub-record of `collection` the transaction
-/// staged so far, and shift the recorded index of every other collection's
-/// ingest past the removed ones.
-fn drop_ingests_before_truncate(
-    collection: &str,
-    ingest_ops: &mut std::collections::HashMap<String, Vec<usize>>,
-    ops: &mut Vec<RedoSubRecord>,
-) {
-    let Some(mut dropped) = ingest_ops.remove(collection) else {
-        return;
-    };
-    dropped.sort_unstable();
-    let mut index = 0usize;
-    ops.retain(|_| {
-        let keep = dropped.binary_search(&index).is_err();
-        index += 1;
-        keep
-    });
-    for indices in ingest_ops.values_mut() {
-        for i in indices.iter_mut() {
-            let at = *i;
-            *i = at - dropped.partition_point(|removed| *removed < at);
-        }
-    }
+/// The sub-record output of one timeseries op: `ops`, or nothing for an
+/// ingest a later truncate drops.
+struct KeptOps<'a> {
+    ops: &'a mut dyn OpSink,
+    dropped: bool,
 }
 
 /// Append the `ts-resolved` sub-record of `batch` to `ops`, and record the
@@ -255,7 +270,7 @@ fn push_resolved_batch(
     provenance: &Option<nodedb_types::sync::wire::SyncProvenance>,
     batch: &ResolvedTsBatch,
     resolved_schemas: &mut std::collections::HashMap<String, ColumnarSchema>,
-    ops: &mut Vec<RedoSubRecord>,
+    out: &mut KeptOps<'_>,
 ) -> crate::Result<()> {
     resolved_schemas.insert(
         collection.to_owned(),
@@ -273,10 +288,12 @@ fn push_resolved_batch(
         format: RESOLVED_INGEST_FORMAT,
         default_timestamp_ms: batch.now_ms,
     })?;
-    ops.push(RedoSubRecord {
-        record_type: RecordType::TimeseriesBatch as u32,
-        payload: sub_payload,
-    });
+    if !out.dropped {
+        out.ops.push(RedoSubRecord {
+            record_type: RecordType::TimeseriesBatch as u32,
+            payload: sub_payload,
+        });
+    }
     Ok(())
 }
 
@@ -284,27 +301,27 @@ fn push_resolved_batch(
 mod tests {
     use super::*;
 
-    /// A truncate removes the collection's earlier ingest sub-records and
-    /// keeps every other sub-record, in order, with its index tracked.
+    /// An ingest a later truncate of its collection drops is left out, and
+    /// every other ingest is kept.
     #[test]
-    fn a_truncate_drops_only_its_collections_earlier_ingests() {
-        let op = |tag: u8| RedoSubRecord {
-            record_type: RecordType::TimeseriesBatch as u32,
-            payload: vec![tag],
+    fn only_ingests_before_their_collections_last_truncate_drop() {
+        let truncate = |name: &str| {
+            nodedb_physical::physical_plan::PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection: nodedb_types::QualifiedCollection::new(
+                    crate::types::DatabaseId::DEFAULT,
+                    name,
+                ),
+                restart_identity: false,
+            })
         };
-        let mut ops: Vec<RedoSubRecord> = (0..5).map(op).collect();
-        let mut ingest_ops = std::collections::HashMap::from([
-            ("a".to_string(), vec![0, 3]),
-            ("b".to_string(), vec![1, 4]),
-        ]);
-        drop_ingests_before_truncate("a", &mut ingest_ops, &mut ops);
-        let kept: Vec<u8> = ops.iter().map(|op| op.payload[0]).collect();
-        assert_eq!(kept, vec![1, 2, 4]);
-        assert_eq!(ingest_ops.get("b"), Some(&vec![0, 2]));
-        assert!(!ingest_ops.contains_key("a"));
-
-        drop_ingests_before_truncate("absent", &mut ingest_ops, &mut ops);
-        assert_eq!(ops.len(), 3);
+        let plans = vec![truncate("a"), truncate("b"), truncate("a")];
+        let mut state = TimeseriesResolveState::for_plans(&plans);
+        let a = nodedb_types::QualifiedCollection::new(crate::types::DatabaseId::DEFAULT, "a");
+        state.plan_index = 1;
+        assert!(state.truncated_later(a.as_str()), "a truncates again at 2");
+        state.plan_index = 2;
+        assert!(!state.truncated_later(a.as_str()));
+        assert!(!state.truncated_later("absent"));
     }
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::engine::timeseries::columnar_memtable::{ColumnType, ColumnValue, TimeKind};
@@ -354,7 +371,7 @@ mod tests {
             rls_filters: Vec::new(),
         };
         let mut state = TimeseriesResolveState::default();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         core.serialize_timeseries_op(
             &make_default_task(),
             1,

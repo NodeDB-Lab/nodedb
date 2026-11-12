@@ -61,6 +61,7 @@
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use super::vector_primary::{VectorPrimaryCollections, VectorPrimarySpec, note_direct_write};
 use crate::control::server::wal_dispatch::{
     VectorResolvedDirectWritePayload, encode_multi_vector_delete_payload,
@@ -80,7 +81,7 @@ use crate::wal::RedoSubRecord;
 /// vector-index DDL (`SetParams`) raises a typed error (see module docs).
 pub(super) fn serialize_vector_op(
     op: &VectorOp,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
     direct_writes: &mut VectorPrimaryCollections,
 ) -> crate::Result<()> {
     match op {

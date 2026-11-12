@@ -44,6 +44,7 @@ use nodedb_types::columnar::{
 use nodedb_types::value::Value;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::encode_columnar_truncate_payload;
 use crate::data::executor::handlers::columnar_write::row_values_to_object;
 use crate::data::executor::handlers::transaction::overlay::{
@@ -120,7 +121,7 @@ pub(super) struct ColumnarCollectionImages<'a> {
 /// collection) and the collection's `columnar_image` record to `ops`.
 pub(super) fn serialize_columnar_collection(
     params: ColumnarCollectionImages<'_>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
     let ColumnarCollectionImages {
         overlay,
@@ -257,7 +258,7 @@ mod tests {
 
     fn serialize(overlay: &TxnOverlay) -> Vec<RedoSubRecord> {
         let schema = schema();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_columnar_collection(
             ColumnarCollectionImages {
                 overlay,
