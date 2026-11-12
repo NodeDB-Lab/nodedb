@@ -7,11 +7,13 @@
 //! sequence where it was. The reconnaissance route restarts them once its
 //! transaction has committed (`planner::calvin::edge_truncate`). Autocommit
 //! restarts them right after dispatch instead
-//! (`pgwire::handler::routing::dispatch_loop`, `http::routes::query::materialized::shape`).
+//! (`pgwire::handler::routing::dispatch_loop`, `http::routes::query::materialized::shape`,
+//! `http::routes::query::ndjson`, `http::routes::ws_rpc::execute_sql`).
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_task::PhysicalTask;
 
+use crate::control::gateway::core::QueryContext;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -54,5 +56,25 @@ pub(crate) fn restart_truncated_identity(
             tenant_id.as_u64(),
             collection.as_str(),
         );
+    }
+}
+
+/// The plan to hand to [`restart_after_ok`]: a clone of `plan` when it is a
+/// `TRUNCATE ... RESTART IDENTITY`, `None` otherwise. A dispatch that consumes
+/// the plan holds this copy.
+pub(crate) fn restart_plan_of(plan: &PhysicalPlan) -> Option<PhysicalPlan> {
+    matches!(plan.truncate_target(), Some((_, true))).then(|| plan.clone())
+}
+
+/// Restart the sequences of `plan` once its dispatch under `ctx` answered
+/// `Ok`. A `None` plan or an `Err` answer restarts nothing.
+pub(crate) fn restart_after_ok<T>(
+    state: &SharedState,
+    ctx: &QueryContext,
+    plan: Option<&PhysicalPlan>,
+    answer: &crate::Result<T>,
+) {
+    if let (Some(plan), Ok(_)) = (plan, answer) {
+        restart_truncated_identity(state, ctx.database_id, ctx.tenant_id, plan);
     }
 }
