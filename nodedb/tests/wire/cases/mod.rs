@@ -217,6 +217,7 @@ mod object_literal_trailing_clause;
 mod oidc_catalog_provider_boot;
 mod otlp_metrics_export;
 mod period_lock;
+mod period_lock_shapes;
 mod permission_tree_database_scope;
 mod permission_tree_fence;
 mod permission_tree_restart;

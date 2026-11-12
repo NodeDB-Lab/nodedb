@@ -41,7 +41,7 @@ const FC_ENTRIES: &str = "pl_fc_entries";
 const BE_ENTRIES: &str = "pl_be_entries";
 
 /// A period collection, an entries collection and the period lock between them.
-async fn setup(server: &TestServer, periods: &str, entries: &str) {
+pub(super) async fn setup(server: &TestServer, periods: &str, entries: &str) {
     for sql in [
         format!(
             "CREATE COLLECTION {periods} (period_key TEXT PRIMARY KEY, status TEXT) \
@@ -65,7 +65,7 @@ async fn setup(server: &TestServer, periods: &str, entries: &str) {
 }
 
 /// Insert the period row `key` with `status`.
-async fn seed_period(server: &TestServer, periods: &str, key: &str, status: &str) {
+pub(super) async fn seed_period(server: &TestServer, periods: &str, key: &str, status: &str) {
     server
         .exec(&format!(
             "INSERT INTO {periods} (period_key, status) VALUES ('{key}', '{status}')"
@@ -74,7 +74,7 @@ async fn seed_period(server: &TestServer, periods: &str, key: &str, status: &str
         .unwrap_or_else(|e| panic!("seed period {key}: {e}"));
 }
 
-fn vshard(name: &str) -> u32 {
+pub(super) fn vshard(name: &str) -> u32 {
     CollectionKey::from_bare(DatabaseId::DEFAULT, name)
         .vshard()
         .as_u32()
@@ -82,7 +82,7 @@ fn vshard(name: &str) -> u32 {
 
 /// A name that starts with `prefix` and homes on a vShard none of `taken`
 /// homes on.
-fn name_off(prefix: &str, taken: &[&str]) -> String {
+pub(super) fn name_off(prefix: &str, taken: &[&str]) -> String {
     let used: Vec<u32> = taken.iter().map(|name| vshard(name)).collect();
     (0..)
         .map(|n| format!("{prefix}{n}"))
@@ -90,7 +90,7 @@ fn name_off(prefix: &str, taken: &[&str]) -> String {
         .expect("a name on a free vShard")
 }
 
-async fn create_side(server: &TestServer, name: &str) {
+pub(super) async fn create_side(server: &TestServer, name: &str) {
     server
         .exec(&format!(
             "CREATE COLLECTION {name} (id TEXT PRIMARY KEY, v INT) \
@@ -118,13 +118,13 @@ async fn wait_parked(release: &Path, what: &str) {
 }
 
 /// `sql` as one block: its COMMIT flushes every write through Calvin.
-fn block(sql: &str) -> String {
+pub(super) fn block(sql: &str) -> String {
     format!("BEGIN; {sql}; COMMIT")
 }
 
 /// Run `statements` in order on one new connection. The first error ends the
 /// run and is the answer.
-async fn spawn_statements(
+pub(super) async fn spawn_statements(
     server: &TestServer,
     statements: Vec<String>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
@@ -147,7 +147,7 @@ async fn spawn_statements(
 }
 
 /// Run `sql` as one request on its own connection.
-async fn spawn_request(
+pub(super) async fn spawn_request(
     server: &TestServer,
     sql: String,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
@@ -259,7 +259,7 @@ async fn a_write_sequenced_after_a_foreign_close_of_its_period_is_refused() {
 
 /// The answer of a write refused after its period closed: the period-locked
 /// refusal or a serialization conflict.
-fn is_period_refusal(message: &str) -> bool {
+pub(super) fn is_period_refusal(message: &str) -> bool {
     message.to_lowercase().contains("period locked")
         || message.contains("23603")
         || message.contains("40001")
@@ -394,7 +394,7 @@ async fn a_batch_insert_in_a_request_is_refused_after_a_foreign_close() {
 
 /// The answer to a block must come within the statement deadline. A halted
 /// vShard answers `57014` after 30 s.
-const ORD_ANSWER_WITHIN: Duration = Duration::from_secs(20);
+pub(super) const ORD_ANSWER_WITHIN: Duration = Duration::from_secs(20);
 
 /// A block on two vShards that writes into a period closed before the block
 /// began. The answer is a clean refusal, within the deadline, and no row
