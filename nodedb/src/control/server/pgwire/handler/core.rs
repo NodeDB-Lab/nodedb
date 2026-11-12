@@ -134,6 +134,20 @@ impl NodeDbPgHandler {
         self.state.database_metrics.record_error(database_id);
     }
 
+    /// Pin the deadline of one statement on this connection: the session's
+    /// `statement_timeout`, else the node default. Every Control -> Data
+    /// request the statement fans out into reads it. Dropping the guard
+    /// restores the previous deadline.
+    pub(super) fn enter_statement_deadline(
+        &self,
+        session_id: SessionId,
+    ) -> crate::control::server::shared::session::deadline::StatementScope {
+        crate::control::server::shared::session::deadline::enter(
+            self.sessions.statement_timeout(session_id),
+            self.state.tuning.network.default_deadline_secs,
+        )
+    }
+
     pub(super) fn next_request_id(&self) -> RequestId {
         self.state.next_request_id()
     }
@@ -193,10 +207,7 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
 
         // Same statement scope the simple-query path installs: one pinned
         // deadline for every request this statement fans out into.
-        let _statement_scope = crate::control::server::shared::session::deadline::enter(
-            self.sessions.statement_timeout(session_id),
-            self.state.tuning.network.default_deadline_secs,
-        );
+        let _statement_scope = self.enter_statement_deadline(session_id);
         let _read_scope =
             crate::control::server::shared::session::read_scope::enter(&self.sessions, session_id);
 

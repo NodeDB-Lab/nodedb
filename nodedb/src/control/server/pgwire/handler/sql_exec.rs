@@ -49,6 +49,9 @@ impl NodeDbPgHandler {
         }
         let mut all = Vec::new();
         for stmt in statements {
+            // Each statement runs under its own `statement_timeout`, as in
+            // PostgreSQL 13+. A `SET statement_timeout` bounds the rest.
+            let _statement_scope = self.enter_statement_deadline(session_id);
             // Each statement's DDL proposals carry that statement's own text.
             let _audit = AuditScope::statement(identity, &stmt);
             if let Some(binding) = self.sessions.binding(session_id) {
