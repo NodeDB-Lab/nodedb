@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `TRUNCATE ... RESTART IDENTITY` of the source of a cross-shard materialized
-//! sum, over pgwire, HTTP and native SQL.
+//! sum, over pgwire, HTTP, NDJSON `/v1/query/stream`, WebSocket RPC `/v1/ws` and
+//! native SQL.
 //!
 //! The sequence `ptv_post_n_seq` matches the implicit pattern
 //! `{collection}_*_seq`, so a TRUNCATE of `ptv_post` with the flag must restart
 //! it. Row R0 checks that premise on a plain collection first.
 //!
 //! A TRUNCATE that settles a balance commits as a Calvin transaction. A
-//! TRUNCATE of an empty source on HTTP commits as a lone write. Both must
-//! restart the sequence once they commit.
+//! TRUNCATE of an empty source on HTTP, NDJSON or WebSocket RPC commits as a
+//! lone write. Both must restart the sequence once they commit.
 
 use std::time::Duration;
 
+use futures::{SinkExt, StreamExt};
 use nodedb_test_support::native_harness::{open_trust_session, send_request_within};
 use nodedb_types::protocol::{OpCode, TextFields};
 use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
 
 use super::materialized_sum_cross_shard_expanders::{balance, sum_fixture};
 use crate::harness::TestServer;
@@ -30,6 +33,8 @@ const ANSWER_BOUND: Duration = Duration::from_secs(60);
 enum Route {
     Pgwire,
     Http,
+    Ndjson,
+    Ws,
     NativeSql,
 }
 
@@ -37,6 +42,8 @@ enum Route {
 enum Session<'a> {
     Pgwire(tokio_postgres::Client),
     Http(&'a TestServer),
+    Ndjson(&'a TestServer),
+    Ws(&'a TestServer),
     NativeSql { stream: TcpStream, seq: u64 },
 }
 
@@ -51,6 +58,8 @@ impl<'a> Session<'a> {
                 Session::Pgwire(client)
             }
             Route::Http => Session::Http(server),
+            Route::Ndjson => Session::Ndjson(server),
+            Route::Ws => Session::Ws(server),
             // Seq 1 is the handshake.
             Route::NativeSql => Session::NativeSql {
                 stream: open_trust_session(server.native_port, "nodedb").await,
@@ -81,6 +90,8 @@ impl<'a> Session<'a> {
                             Err(status.to_string())
                         }
                     }
+                    Session::Ndjson(server) => ndjson_answer(server, sql).await,
+                    Session::Ws(server) => ws_answer(server, sql).await,
                     Session::NativeSql { stream, seq } => {
                         *seq += 1;
                         let fields = TextFields {
@@ -99,6 +110,56 @@ impl<'a> Session<'a> {
         tokio::time::timeout(ANSWER_BOUND, answer)
             .await
             .unwrap_or_else(|_| panic!("{sql} did not answer"))
+    }
+}
+
+/// POST `sql` to `/v1/query/stream`. An error carries the status.
+async fn ndjson_answer(server: &TestServer, sql: &str) -> Result<(), String> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/v1/query/stream",
+            server.http_port
+        ))
+        .json(&serde_json::json!({ "sql": sql }))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST /v1/query/stream {sql}: {e}"));
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(status.as_u16().to_string())
+    }
+}
+
+/// Send `sql` as WebSocket RPC `query` on a new socket. An error carries the
+/// error frame.
+async fn ws_answer(server: &TestServer, sql: &str) -> Result<(), String> {
+    let url = format!("ws://127.0.0.1:{}/v1/ws", server.http_port);
+    let (mut ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("connect the WebSocket RPC endpoint");
+    let request = serde_json::json!({ "id": 1, "method": "query", "params": { "sql": sql } });
+    ws.send(Message::Text(request.to_string().into()))
+        .await
+        .unwrap_or_else(|e| panic!("send {sql}: {e}"));
+    loop {
+        let message = ws
+            .next()
+            .await
+            .unwrap_or_else(|| panic!("the socket closed before answering {sql}"))
+            .unwrap_or_else(|e| panic!("read the answer to {sql}: {e}"));
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("a JSON frame for {sql}: {e}: {text}"));
+        if frame["id"] == 1 {
+            return match frame.get("error") {
+                Some(error) => Err(error.to_string()),
+                None => Ok(()),
+            };
+        }
     }
 }
 
@@ -208,6 +269,18 @@ async fn http_zero_row_restart_identity_restarts_the_sequence() {
     zero_row_restart(Route::Http).await;
 }
 
+/// Rejects an NDJSON zero-row restart that leaves the next value past 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ndjson_zero_row_restart_identity_restarts_the_sequence() {
+    zero_row_restart(Route::Ndjson).await;
+}
+
+/// Rejects a WebSocket RPC zero-row restart that leaves the next value past 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_zero_row_restart_identity_restarts_the_sequence() {
+    zero_row_restart(Route::Ws).await;
+}
+
 /// Rejects a native SQL zero-row restart that leaves the next value past 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_sql_zero_row_restart_identity_restarts_the_sequence() {
@@ -230,4 +303,16 @@ async fn http_restart_identity_over_rows_restarts_the_sequence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_sql_restart_identity_over_rows_restarts_the_sequence() {
     nonzero_restart(Route::NativeSql).await;
+}
+
+/// Rejects an NDJSON restart over rows that leaves the next value at 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ndjson_restart_identity_over_rows_restarts_the_sequence() {
+    nonzero_restart(Route::Ndjson).await;
+}
+
+/// Rejects a WebSocket RPC restart over rows that leaves the next value at 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_restart_identity_over_rows_restarts_the_sequence() {
+    nonzero_restart(Route::Ws).await;
 }
