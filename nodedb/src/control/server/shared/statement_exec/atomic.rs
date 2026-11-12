@@ -43,6 +43,7 @@ use crate::control::server::response_shape::calvin_fold::{
     CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
 use crate::control::server::shared::authorization::{AuthorizedTaskSet, authorize_task_set};
+use crate::control::server::shared::calvin_metered_rows::calvin_metered_rows;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::plan_admission_request::folded_schema;
 use crate::control::server::shared::session::DmlTxnCtx;
@@ -299,16 +300,21 @@ pub(crate) fn calvin_answer(
 }
 
 /// Meter each task of a statement Calvin applied, as pgwire does.
+///
+/// The first plan that reads the deposited count meters it. Every other plan
+/// meters one unit.
 fn meter_applied(exec: &StatementExec<'_>, applied: &CalvinApplied) {
     if !exec.state.metering_config.enabled {
         return;
     }
-    for plan in &applied.plans {
+    let plan_refs: Vec<_> = applied.plans.iter().collect();
+    let rows = calvin_metered_rows(&plan_refs, applied.apply_result.as_ref());
+    for (plan, plan_rows) in applied.plans.iter().zip(rows) {
         meter_dispatch(
             exec.state,
             exec.scope,
             &PlanMeteringInfo::extract(plan),
-            None,
+            plan_rows,
         );
     }
 }

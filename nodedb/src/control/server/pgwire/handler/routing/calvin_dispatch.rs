@@ -19,6 +19,7 @@ use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::calvin_fold::{
     CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
+use crate::control::server::shared::calvin_metered_rows::calvin_metered_rows;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::{DatabaseId, TenantId};
@@ -32,18 +33,17 @@ use super::super::core::NodeDbPgHandler;
 /// whole batch atomically, so by the time responses are being shaped every
 /// task in `tasks` has already committed.
 ///
-/// `rows: None` — a task yields either a tag contribution or its rows, which
-/// the fold takes once for the statement's single result set; counting rows
-/// here will mean reaching into that fold. `meter_dispatch` charges one unit
-/// for `None`, correct for the write that committed.
+/// `rows` is the count the task reads from the deposited reply. `None`
+/// charges one unit.
 fn meter_calvin_task(
     state: &crate::control::state::SharedState,
     scope: Option<&RequestAuthScope<'_>>,
     task: &PhysicalTask,
+    rows: Option<u64>,
 ) {
     if let Some(scope) = scope {
         let info = PlanMeteringInfo::extract(&task.plan);
-        meter_dispatch(state, scope, &info, None);
+        meter_dispatch(state, scope, &info, rows);
     }
 }
 
@@ -291,8 +291,9 @@ impl NodeDbPgHandler {
             CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
             CalvinFoldError::Shape(e) => error_to_pg(&e),
         })?;
-        for task in tasks {
-            meter_calvin_task(&self.state, metering_scope.as_ref(), task);
+        let metered = calvin_metered_rows(&plans, apply_resp);
+        for (task, rows) in tasks.iter().zip(metered) {
+            meter_calvin_task(&self.state, metering_scope.as_ref(), task, rows);
         }
         let mut responses: Vec<Response> = Vec::with_capacity(2);
         if let Some(shaped) = fold.rows {
