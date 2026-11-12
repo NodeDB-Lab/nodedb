@@ -475,6 +475,8 @@ mod sql_where_instant_literals;
 mod sql_where_vector_search;
 mod sql_window_frames;
 mod sql_window_functions;
+mod statement_atomicity;
+mod statement_atomicity_batches;
 mod streaming_select;
 mod strict_bitemporal_audit_query;
 mod strict_bitemporal_select_star;

@@ -17,6 +17,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::control::server::shared::statement_exec::fallible_returning::returning_commits_through_calvin;
+use crate::control::server::shared::statement_exec::{SeveralWrites, several_writes_route};
 use crate::control::server::shared::write_admission::{all_writes_bufferable, plan_is_write};
 use crate::types::TenantId;
 
@@ -203,15 +204,28 @@ impl NodeDbPgHandler {
             // writes stage on their vShards' leaders and commit together at
             // its end. A list's fallibility reads the announced columns.
             let tx_state = self.sessions.transaction_state(session_id);
+            // An autocommit statement of several writes commits them as one,
+            // ahead of the gateway gate: a forward applies its tasks one by
+            // one, each its own commit.
+            let several_writes = if tx_state == TransactionState::InBlock {
+                None
+            } else {
+                several_writes_route(
+                    &self.state,
+                    &tasks,
+                    self.sessions.cross_shard_txn_mode(session_id),
+                )
+            };
             if tx_state != TransactionState::InBlock
-                && with_announced_returning(effective_schema, async {
-                    crate::control::server::shared::txn_route::statement_needs_implicit_txn(
-                        &self.state,
-                        &tasks,
-                    )
-                })
-                .await
-                .map_err(|error| sql_error(&error))?
+                && (several_writes == Some(SeveralWrites::ImplicitTxn)
+                    || with_announced_returning(effective_schema, async {
+                        crate::control::server::shared::txn_route::statement_needs_implicit_txn(
+                            &self.state,
+                            &tasks,
+                        )
+                    })
+                    .await
+                    .map_err(|error| sql_error(&error))?)
             {
                 if !all_writes_bufferable(&tasks) {
                     return Err(sql_error(
@@ -261,11 +275,13 @@ impl NodeDbPgHandler {
             // transaction on any vShard count, ahead of the gateway gate: its
             // participant evaluates the list before it votes, so an error
             // stores nothing. A predicate write takes the recon coordinator.
+            // Several writes commit there too, as one transaction.
             if tx_state != TransactionState::InBlock
-                && with_announced_returning(effective_schema, async {
-                    returning_commits_through_calvin(&self.state, tenant_id, &tasks)
-                })
-                .await
+                && (several_writes == Some(SeveralWrites::Calvin)
+                    || with_announced_returning(effective_schema, async {
+                        returning_commits_through_calvin(&self.state, tenant_id, &tasks)
+                    })
+                    .await)
             {
                 return self
                     .dispatch_calvin_multishard(

@@ -4,7 +4,7 @@
 
 use nodedb_physical::physical_task::PhysicalTask;
 
-use crate::control::planner::calvin::TxnDispatchPosition;
+use crate::control::planner::calvin::{TxnDispatchPosition, is_write_plan};
 use crate::control::server::shared::returning::tasks_carry_returning_contract;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 
@@ -16,15 +16,29 @@ use crate::control::server::shared::session::read_set::ReadSetEntry;
 ///   Its `reads` still guard the balance.
 /// - A task that carries a `RETURNING` contract has its list evaluated
 ///   before the vote, so an error in the list stores nothing.
+/// - A set of several writes commits them as one transaction, so an error
+///   in any of them stores none.
 ///
-/// Either commits through the scheduler in every cross-shard mode.
+/// Each commits through the scheduler in every cross-shard mode.
 pub(crate) fn single_vshard_commits_through_calvin(
     tasks: &[PhysicalTask],
     reads: &[ReadSetEntry],
     position: TxnDispatchPosition,
 ) -> bool {
     position == TxnDispatchPosition::Autocommit
-        && (!reads.is_empty() || tasks_carry_returning_contract(tasks))
+        && (!reads.is_empty()
+            || tasks_carry_returning_contract(tasks)
+            || holds_several_writes(tasks))
+}
+
+/// Whether `tasks` hold more than one write. One statement's writes commit
+/// together, so a set of several needs one commit for all of them.
+pub(crate) fn holds_several_writes(tasks: &[PhysicalTask]) -> bool {
+    tasks
+        .iter()
+        .filter(|task| is_write_plan(&task.plan))
+        .nth(1)
+        .is_some()
 }
 
 #[cfg(test)]
@@ -114,5 +128,22 @@ mod tests {
                 &carrying, &reads, position
             ));
         }
+    }
+
+    #[test]
+    fn several_writes_on_one_vshard_commit_through_calvin_at_autocommit() {
+        let pair = [insert(None), insert(None)];
+        assert!(holds_several_writes(&pair));
+        assert!(!holds_several_writes(&[insert(None)]));
+        assert!(single_vshard_commits_through_calvin(
+            &pair,
+            &[],
+            TxnDispatchPosition::Autocommit
+        ));
+        assert!(!single_vshard_commits_through_calvin(
+            &pair,
+            &[],
+            TxnDispatchPosition::MidBlockStatement
+        ));
     }
 }

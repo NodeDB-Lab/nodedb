@@ -22,7 +22,11 @@
 //!    so an error in the list stores nothing. A list that cannot fail keeps
 //!    the direct path. An `INSERT ... SELECT`, `UPDATE ... FROM` or `MERGE`
 //!    whose list can fail takes route 1 instead: Calvin keys none of them.
-//! 5. A write that spans vShards commits through the Calvin sequencer, so a
+//! 5. An autocommit statement of several writes on one vShard commits them
+//!    as one Calvin transaction, so an error in any of them stores none. A
+//!    set Calvin cannot carry, or one that writes a clone still reading its
+//!    source, takes route 1 instead ([`several_writes_route`]).
+//! 6. A write that spans vShards commits through the Calvin sequencer, so a
 //!    derived task (a cross-shard balance move, an implicit edge) commits
 //!    with the user's write. A predicate write among them takes the
 //!    coordinator, which reads the rows it matched.
@@ -60,6 +64,7 @@ use super::edge_recon::{
 };
 use super::error::StatementError;
 use super::fallible_returning::returning_commits_through_calvin;
+use super::several_writes::{SeveralWrites, several_writes_route};
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
 /// A planned statement before it takes a route.
@@ -129,8 +134,19 @@ async fn route_atomic(
     refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
 
     let in_txn_block = in_block(session);
+    // An autocommit statement of several writes commits them as one.
+    let several_writes = if in_txn_block {
+        None
+    } else {
+        several_writes_route(
+            state,
+            &tasks,
+            session.sessions.cross_shard_txn_mode(session.session_id),
+        )
+    };
     if !in_txn_block
-        && statement_needs_implicit_txn(state, &tasks).map_err(StatementError::Error)?
+        && (several_writes == Some(SeveralWrites::ImplicitTxn)
+            || statement_needs_implicit_txn(state, &tasks).map_err(StatementError::Error)?)
     {
         if !all_writes_bufferable(&tasks) {
             return Err(StatementError::Error(unbufferable_joined_statement()));
@@ -210,6 +226,12 @@ async fn route_atomic(
             if !in_txn_block
                 && returning_commits_through_calvin(state, exec.tenant_id(), &tasks) =>
         {
+            let applied = commit_through_calvin(exec, tasks, authorized, &sum_target_reads).await?;
+            return Ok(AtomicRoute::Calvin(applied));
+        }
+        // Several writes on one vShard commit as one transaction, so an
+        // error in any of them stores none.
+        DispatchClass::SingleShard { .. } if several_writes == Some(SeveralWrites::Calvin) => {
             let applied = commit_through_calvin(exec, tasks, authorized, &sum_target_reads).await?;
             return Ok(AtomicRoute::Calvin(applied));
         }

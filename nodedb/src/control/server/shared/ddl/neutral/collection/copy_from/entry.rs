@@ -31,14 +31,13 @@ use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
 
-use crate::control::trigger::statement_txn::{fires_joined_body, in_block, with_statement_txn};
+use crate::control::trigger::statement_txn::fires_joined_body;
 use crate::control::trigger::{DmlEvent, TriggerScope};
 
 use super::array_load::raster::copy_raster;
 use super::array_load::{ArrayLoadCtx, ArrayLoader, LoadInput, TextFormat};
-use super::csv_import::{CsvOptions, import_csv};
-use super::import_ctx::ImportCtx;
-use super::json_import::{import_json_array, import_ndjson};
+use super::csv_import::CsvOptions;
+use super::row_load_txn::{RowLoad, load_rows_in_txn};
 use super::source_file::CopySourceFile;
 
 /// How many bytes one read of an array load's file takes.
@@ -55,7 +54,8 @@ pub struct CopyFromOptions<'a> {
 }
 
 /// The row format of a collection load.
-enum RowFormat {
+#[derive(Clone, Copy)]
+pub(super) enum RowFormat {
     Ndjson,
     JsonArray,
     Csv(CsvOptions),
@@ -144,43 +144,31 @@ pub async fn copy_from_file(
     let file = CopySourceFile::open(path).await?.read_all(&memory).await?;
     let bytes = file.bytes.as_slice();
 
-    // Each row fires its collection's BEFORE, INSTEAD OF and SYNC AFTER
-    // bodies, which join the statement's transaction. Outside a transaction
-    // block a COPY into such a collection runs in an implicit one: its rows
-    // and the bodies' writes commit together, or none of them do.
-    let implicit = !in_block(txn_ctx)
-        && fires_joined_body(
-            state,
-            TriggerScope {
-                database_id,
-                tenant_id,
-            },
-            collection,
-            DmlEvent::Insert,
-        );
-    let row_count = with_statement_txn(
+    // The load is one statement: its rows commit together or none of them
+    // do. Each row fires its collection's BEFORE, INSTEAD OF and SYNC AFTER
+    // bodies, which join the load's transaction.
+    let joined = fires_joined_body(
+        state,
+        TriggerScope {
+            database_id,
+            tenant_id,
+        },
+        collection,
+        DmlEvent::Insert,
+    );
+    let row_count = load_rows_in_txn(RowLoad {
         state,
         identity,
+        tenant_id,
+        database_id,
         txn_ctx,
-        implicit,
-        async |txn_ctx: &DmlTxnCtx<'_>| {
-            let import_ctx = ImportCtx {
-                state,
-                identity,
-                tenant_id,
-                database_id,
-                txn_ctx,
-                memory: &memory,
-            };
-            match row_format {
-                RowFormat::Ndjson => import_ndjson(&import_ctx, collection, path, bytes).await,
-                RowFormat::JsonArray => {
-                    import_json_array(&import_ctx, collection, path, bytes).await
-                }
-                RowFormat::Csv(csv) => import_csv(&import_ctx, collection, path, bytes, csv).await,
-            }
-        },
-    )
+        memory: &memory,
+        format: row_format,
+        collection,
+        path,
+        bytes,
+        fires_joined_body: joined,
+    })
     .await?;
 
     // The count is baked into `command` (not `rows_affected`) because the

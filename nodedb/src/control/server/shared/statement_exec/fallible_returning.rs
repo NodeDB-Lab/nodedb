@@ -149,7 +149,7 @@ fn lists_a_star(list: &ReturningColumns) -> bool {
 /// path orchestrates on the Control Plane keeps it: Calvin takes no write
 /// key for one, so its transaction will write nothing. A task carrying a
 /// contract must also be a write Calvin keys, and the set must key.
-fn calvin_sequences(tasks: &[PhysicalTask]) -> bool {
+pub(crate) fn calvin_sequences(tasks: &[PhysicalTask]) -> bool {
     tasks.iter().all(|task| {
         !orchestrated_on_control_plane(&task.plan)
             && (!plan_carries_returning_contract(&task.plan) || is_write_plan(&task.plan))

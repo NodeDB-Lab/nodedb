@@ -208,7 +208,9 @@ impl CopyHandler for NodeDbCopyHandler {
             copies: &self.array_copy,
             conn_id: id,
         };
-        if feed_array_copy(&array_conn, &copy_data.data).await? {
+        // Boxed: an array load dispatches whole statements, and inlining that
+        // future here nests past the layout limit.
+        if Box::pin(feed_array_copy(&array_conn, &copy_data.data)).await? {
             return Ok(());
         }
         match self.restore_state.append(id, &copy_data.data) {
@@ -245,7 +247,15 @@ impl CopyHandler for NodeDbCopyHandler {
         let id = self.connection_id.get();
         if let Some(pending) = self.array_copy.take(id) {
             let session_id = SessionId::Connection(self.connection_id);
-            let rows = finish_array_copy(&self.state, &self.sessions, session_id, pending).await?;
+            // Boxed: an array load dispatches whole statements, and inlining
+            // that future here nests past the layout limit.
+            let rows = Box::pin(finish_array_copy(
+                &self.state,
+                &self.sessions,
+                session_id,
+                pending,
+            ))
+            .await?;
             return complete_copy_in(client, Tag::new("COPY").with_rows(rows as usize)).await;
         }
         let pending = self.restore_state.take(id).ok_or_else(|| {

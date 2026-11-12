@@ -6,15 +6,16 @@ use tracing::debug;
 
 use crate::bridge::envelope::{EdgeImage, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::partial_refusal::refusal_after_rows;
-use crate::data::executor::handlers::transaction::undo::edge_write::EdgeTarget;
+use crate::data::executor::handlers::transaction::undo::edge_write::{EdgeTarget, EdgeWriteUndo};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 
-use super::shared::owns_logical_edge_stats;
+use super::shared::{check_batch_collections, owns_logical_edge_stats};
 
 impl CoreLoop {
-    /// Apply a batched edge delete in a single SPSC round-trip.
+    /// Apply a batched edge delete in a single SPSC round-trip. The batch
+    /// writes every tombstone or none: a refusal after some tombstones
+    /// landed takes them back first.
     ///
     /// The bitemporal edge store always appends a tombstone version on
     /// success, whether or not a live edge existed. The affected count is the
@@ -46,12 +47,18 @@ impl CoreLoop {
         }) {
             return self.response_error(task, refusal);
         }
+        if let Err(error) = check_batch_collections(task, edges) {
+            return self.response_error(task, error);
+        }
         let database_id = task.request.database_id.as_u64();
-        let mut removed: u64 = 0;
         // Each edge's tombstone, at the ordinal decided here, journalled after
-        // apply. A tombstone that failed after earlier ones landed refuses the
-        // batch with the landed tombstones, which stay.
+        // apply. A tombstone that fails after earlier ones landed takes every
+        // landed tombstone back, so the batch writes all of them or none.
         let mut write_set: Vec<WriteSetEntry> = Vec::with_capacity(edges.len());
+        let mut landed: Vec<EdgeWriteUndo> = Vec::with_capacity(edges.len());
+        // The source of each tombstone that ended a live edge, counted once
+        // the batch stands.
+        let mut ended_live: Vec<&str> = Vec::new();
         for edge in edges {
             let target = EdgeTarget {
                 database_id,
@@ -64,10 +71,7 @@ impl CoreLoop {
             let csr_prior = self.capture_edge_csr(&target);
             let stamp = match self.graph_write_stamp() {
                 Ok(stamp) => stamp,
-                Err(e) => {
-                    let code = refusal_after_rows(write_set.len() as u64, e);
-                    return self.refusal_with_landed_rows(task, code, write_set);
-                }
+                Err(e) => return self.refuse_edge_batch(task, landed, e.into()),
             };
             let ord = stamp.system_from;
             use crate::engine::graph::edge_store::EdgeRef;
@@ -87,10 +91,7 @@ impl CoreLoop {
                 owns_logical_edge_stats(task, &edge.src_id),
             ) {
                 Ok(tombstone) => tombstone,
-                Err(e) => {
-                    let code = refusal_after_rows(write_set.len() as u64, e);
-                    return self.refusal_with_landed_rows(task, code, write_set);
-                }
+                Err(e) => return self.refuse_edge_batch(task, landed, e.into()),
             };
             self.historical_csr.note_version(
                 task.request.database_id,
@@ -101,8 +102,8 @@ impl CoreLoop {
             let current = tombstone.current.clone();
             let removed_live = tombstone.ended_live_edge();
             // The CSR follows what the edge resolves to after the tombstone.
-            // A CSR refusal takes this tombstone back out; the edges before it
-            // stand and are journalled.
+            // A CSR refusal takes this tombstone back out, then every
+            // tombstone before it.
             if let Err(e) = self.mirror_edge_csr(
                 database_id,
                 tid,
@@ -111,12 +112,10 @@ impl CoreLoop {
                 current.as_deref(),
             ) {
                 let reversed = self.reverse_edge_write(target.undo(tombstone, csr_prior), e);
-                let code = refusal_after_rows(write_set.len() as u64, reversed);
-                return self.refusal_with_landed_rows(task, code, write_set);
+                return self.refuse_edge_batch(task, landed, reversed);
             }
             if removed_live {
-                removed += 1;
-                self.count_edge_removed(task, &edge.src_id);
+                ended_live.push(&edge.src_id);
             }
             write_set.push(WriteSetEntry::edge(EdgeImage::Delete(
                 crate::wal::EdgeDeleteRedo {
@@ -130,10 +129,7 @@ impl CoreLoop {
                     applied: (stamp.applied != ord).then_some(stamp.applied),
                 },
             )));
-        }
-        if !edges.is_empty() {
-            self.checkpoint_coordinator
-                .mark_dirty("sparse", edges.len());
+            landed.push(target.undo(tombstone, csr_prior));
         }
         for edge in edges {
             if let Err(e) = self.note_edge_write(
@@ -144,9 +140,19 @@ impl CoreLoop {
                 &edge.label,
                 &edge.dst_id,
             ) {
-                let code = refusal_after_rows(write_set.len() as u64, e);
-                return self.refusal_with_landed_rows(task, code, write_set);
+                return self.refuse_edge_batch(task, landed, e.into());
             }
+        }
+        // Every tombstone stands: the batch counts, marks and publishes them.
+        for src_id in &ended_live {
+            self.count_edge_removed(task, src_id);
+        }
+        let removed = ended_live.len() as u64;
+        if !edges.is_empty() {
+            self.checkpoint_coordinator
+                .mark_dirty("sparse", edges.len());
+        }
+        for edge in edges {
             // CDC: one Delete event per edge on the edge's own collection.
             self.emit_graph_edge_event(
                 task,

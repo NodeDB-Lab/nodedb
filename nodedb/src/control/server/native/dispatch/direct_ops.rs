@@ -13,6 +13,7 @@ use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::TransactionState;
+use crate::control::server::shared::statement_exec::{SeveralWrites, several_writes_route};
 use crate::control::server::shared::txn_route::statement_needs_implicit_txn;
 use crate::control::server::shared::write_admission::plan_is_write;
 use crate::types::TraceId;
@@ -318,10 +319,18 @@ pub(crate) async fn handle_direct_op(
         // and stages each write into the block or refuses it with 25001. The
         // loop clone-checks, authorizes and meters each task itself.
         let block_write = in_txn_block && tasks.iter().any(|task| plan_is_write(&task.plan));
-        let needs_implicit_txn = match statement_needs_implicit_txn(ctx.state, &tasks) {
-            Ok(needs) => needs,
-            Err(error) => return error_to_native(seq, &error),
+        // An op of several writes (a row and its implicit edge) commits them
+        // as one: an error in any of them stores none.
+        let several_writes = if in_txn_block {
+            None
+        } else {
+            several_writes_route(ctx.state, &tasks, CrossShardTxnMode::Strict)
         };
+        let needs_implicit_txn = several_writes == Some(SeveralWrites::ImplicitTxn)
+            || match statement_needs_implicit_txn(ctx.state, &tasks) {
+                Ok(needs) => needs,
+                Err(error) => return error_to_native(seq, &error),
+            };
         if block_write || needs_implicit_txn {
             let _request = ctx.state.tenant_request_guard(tenant_id);
             needs_top_level_metering = false;
@@ -387,9 +396,11 @@ pub(crate) async fn handle_direct_op(
                 Err(error) => return error_to_native(seq, &error),
             };
         // A block's writes returned above, so these tasks apply autocommit. A
-        // set with settlement reads commits through Calvin on any vShard count:
-        // the per-task loop checks no read.
-        let route_to_calvin = !sum_target_reads.is_empty()
+        // set with settlement reads, or of several writes, commits through
+        // Calvin on any vShard count: the per-task loop checks no read and
+        // commits each task on its own.
+        let route_to_calvin = several_writes == Some(SeveralWrites::Calvin)
+            || !sum_target_reads.is_empty()
             || matches!(
                 classify_dispatch(&tasks, &sum_read_vshards),
                 DispatchClass::MultiShard { .. }

@@ -2,11 +2,26 @@
 
 //! Shared param structs and helpers for the edge write handlers.
 
-use crate::bridge::envelope::ErrorCode;
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::newest_ordinals::collection_vshard;
 use crate::data::executor::handlers::transaction::undo::edge_write::EdgeWriteUndo;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{RecordHomes, TenantId};
+
+/// Refuse a batch whose edges name a collection outside the task's
+/// database, before any edge is written. Every edge's write note reads the
+/// name, and a note refused after edges landed would leave the notes of the
+/// edges before it behind once the batch is taken back.
+pub(in crate::data::executor) fn check_batch_collections(
+    task: &ExecutionTask,
+    edges: &[nodedb_physical::physical_plan::BatchEdge],
+) -> crate::Result<()> {
+    for edge in edges {
+        collection_vshard(task.request.database_id, edge.collection.as_str())?;
+    }
+    Ok(())
+}
 
 /// Dual-homed edges are physically present on both endpoint homes. The source
 /// home is the canonical owner of logical graph cardinality, so only that
@@ -115,6 +130,30 @@ impl CoreLoop {
                 ErrorCode::from(undo_error)
             }
         }
+    }
+
+    /// Refuse an edge batch with `code` after the edge writes `landed` names
+    /// were applied, taking them back newest first. The batch then writes no
+    /// edge, on every replica that applies it, so the refusal stays a
+    /// definite one and carries no write set. A failed take-back leaves the
+    /// edge store and the CSR apart: the answer is then the undo error,
+    /// which fail-stops the core.
+    pub(in crate::data::executor) fn refuse_edge_batch(
+        &mut self,
+        task: &ExecutionTask,
+        landed: Vec<EdgeWriteUndo>,
+        code: ErrorCode,
+    ) -> Response {
+        for undo in landed.into_iter().rev() {
+            if let Err(mut undo_error) = self.apply_undo_edge_write(0, undo) {
+                undo_error.action = format!(
+                    "{}; while taking back an edge batch refused with {code:?}",
+                    undo_error.action
+                );
+                return self.response_error(task, ErrorCode::from(undo_error));
+            }
+        }
+        self.response_error(task, code)
     }
 
     /// Record a committed edge write's version, keyed by the edge's

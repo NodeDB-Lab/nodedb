@@ -3,11 +3,12 @@
 //! The Calvin route of one autocommit collection-DML statement.
 //!
 //! A statement outside a transaction block commits as one Calvin
-//! transaction when it spans vShards, holds settlement reads, or carries a
-//! `RETURNING` list that can fail. The direct path evaluates a list after
-//! its write is stored. A Calvin participant evaluates it before it votes,
-//! so an error in the list stores nothing. A list that cannot fail keeps
-//! the direct path, as it does over every other protocol.
+//! transaction when it spans vShards, holds settlement reads, holds several
+//! writes, or carries a `RETURNING` list that can fail. The direct path
+//! evaluates a list after its write is stored. A Calvin participant
+//! evaluates it before it votes, so an error in the list stores nothing. A
+//! list that cannot fail keeps the direct path, as it does over every other
+//! protocol.
 
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -38,6 +39,8 @@ pub(super) struct AutocommitStatement<'a> {
     /// from.
     pub reads: &'a [ReadSetEntry],
     pub has_returning: bool,
+    /// The statement holds several writes Calvin commits as one.
+    pub several_writes: bool,
 }
 
 /// The route an autocommit statement took.
@@ -77,11 +80,13 @@ async fn route(
         authorized,
         reads,
         has_returning,
+        several_writes,
     } = statement;
     let read_vshards = read_vshards_of(reads).map_err(|error| DdlError::from_error(&error))?;
     // A statement with settlement reads commits through Calvin on any vShard
     // count: the direct route checks no read.
-    let through_calvin = !reads.is_empty()
+    let through_calvin = several_writes
+        || !reads.is_empty()
         || matches!(
             classify_dispatch(tasks, &read_vshards),
             DispatchClass::MultiShard { .. }
