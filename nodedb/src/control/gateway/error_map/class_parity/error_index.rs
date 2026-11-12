@@ -3,7 +3,7 @@
 //! A dense index per `crate::Error` variant.
 
 /// The number of `crate::Error` variants [`error_variant_index`] numbers.
-pub(super) const ERROR_VARIANT_COUNT: usize = 131;
+pub(super) const ERROR_VARIANT_COUNT: usize = 130;
 
 /// A dense index per `crate::Error` variant. Exhaustive, so a new variant
 /// fails to compile here until it gets an index, and
@@ -13,7 +13,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
     use crate::Error as E;
     match err {
         E::RejectedConstraint { .. } => 0,
-        E::TxnOverlayMemoryExceeded { .. } => 1,
         E::RejectedAuthz { .. } => 2,
         E::OffsetRegression { .. } => 3,
         E::DeadlineExceeded { .. } => 4,
@@ -142,6 +141,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::TxnSnapshotTooOld { .. } => 97,
         E::StorageQuotaExceeded { .. } => 127,
         E::InvalidArgumentForLogarithm { .. } => 129,
-        E::InvalidArgumentForPowerFunction { .. } => 130,
+        E::InvalidArgumentForPowerFunction { .. } => 1,
     }
 }

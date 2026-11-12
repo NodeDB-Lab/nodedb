@@ -333,14 +333,6 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::SERIALIZATION_FAILURE,
             "CRDT state changed after preview; retry the write".into(),
         ),
-        ErrorCode::TxnOverlayMemoryExceeded { limit } => (
-            "ERROR",
-            sqlstate::PROGRAM_LIMIT_EXCEEDED,
-            format!(
-                "transaction staging overlay exceeded its {limit}-byte per-core budget; \
-                 split the transaction into smaller batches"
-            ),
-        ),
         ErrorCode::ProgramLimitExceeded { detail } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, detail.clone())
         }

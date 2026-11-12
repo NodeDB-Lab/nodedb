@@ -30,14 +30,27 @@ impl CoreLoop {
         overlay: &TxnOverlay,
         coll_key: &(DatabaseId, TenantId, String),
     ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
-        // Each base row at its current version.
+        // Each base row at its current version. The predicate returns a
+        // `bool`, so a spilled overlay tier that cannot be read is held here
+        // and returned once the scan ends.
         let database_id = task.request.database_id.as_u64();
-        self.current_rows_where(
+        let overlay_err: std::cell::Cell<Option<crate::Error>> = std::cell::Cell::new(None);
+        let rows = self.current_rows_where(
             database_id,
             tid,
             collection,
-            &|key: &StorageKey, _: &[u8]| overlay.get(coll_key, key.surrogate().as_u32()).is_none(),
-        )
+            &|key: &StorageKey, _: &[u8]| match overlay.get(coll_key, key.surrogate().as_u32()) {
+                Ok(staged) => staged.is_none(),
+                Err(e) => {
+                    overlay_err.set(Some(e));
+                    false
+                }
+            },
+        )?;
+        match overlay_err.take() {
+            Some(e) => Err(e),
+            None => Ok(rows),
+        }
     }
 }
 

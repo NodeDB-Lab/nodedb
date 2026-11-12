@@ -14,13 +14,17 @@ mod snapshot_merge;
 mod sparse_merge;
 mod spatial_merge;
 mod staged;
+mod staged_journal;
 mod staged_read;
 mod staged_sidecar;
+mod staged_spill;
+mod staged_truncate;
 mod staged_vector;
 mod timeseries_merge;
 mod vector_merge;
 mod vector_primary_merge;
 
+pub use array_merge::ArrayOverlayMergeError;
 pub(in crate::data::executor) use array_merge::ArrayOverlayMergeParams;
 pub use array_staged::{ArrayTxnOverlay, StagedCellPut};
 pub(in crate::data::executor) use columnar_merge::{

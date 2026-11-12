@@ -39,7 +39,6 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         // A client-matchable class or a retry contract a caller matches by
         // variant.
         Error::RejectedConstraint { .. }
-        | Error::TxnOverlayMemoryExceeded { .. }
         | Error::RejectedAuthz { .. }
         | Error::OffsetRegression { .. }
         | Error::DeadlineExceeded { .. }

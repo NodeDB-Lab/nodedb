@@ -171,7 +171,7 @@ impl CoreLoop {
                 if let Err(e) = self.stage_check_ctx_row_image(&ctx, &body) {
                     return self.response_error(task, e);
                 }
-                if let Err(e) = self.stage_put_capped(&ctx, body) {
+                if let Err(e) = self.stage_put(&ctx, body) {
                     return self.response_error(task, e);
                 }
                 self.stage_count_response(task, 1)

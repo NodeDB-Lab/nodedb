@@ -227,9 +227,7 @@ impl CoreLoop {
                     );
                 }
             };
-            if let Err(e) =
-                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, body)
-            {
+            if let Err(e) = self.stage_bulk_put(txn_id, &coll_key, surrogate, &identity, body) {
                 return self.response_error(task, e);
             }
         }
@@ -314,8 +312,13 @@ impl CoreLoop {
             }
         }
         for (surrogate, identity) in surrogates {
-            self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, &identity);
+            if let Err(e) = self.txn_overlay_mut(txn_id).insert_tombstone(
+                coll_key.clone(),
+                surrogate,
+                &identity,
+            ) {
+                return self.response_error(task, e);
+            }
         }
 
         self.stage_columnar_dml_response(task, affected)

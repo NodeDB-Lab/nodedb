@@ -11,83 +11,115 @@
 //! overlay type held alongside it on `CoreLoop` (`graph_txn_overlays`).
 //!
 //! Scope: this overlay serves read-your-own-writes for Neighbors, Hop and
-//! the `NeighborsMulti` hops of the walk coordinators, and COMMIT resolves the staged edges and labels into
-//! the transaction's redo record, which the redo install applies.
-//! This overlay is in-memory only and is dropped at commit or rollback, same
+//! the `NeighborsMulti` hops of the walk coordinators, and COMMIT resolves
+//! the staged edges and labels into the transaction's redo record, which
+//! the redo install applies. It is dropped at commit or rollback, same
 //! lifecycle as `super::TxnOverlay`.
+//!
+//! Edges and label deltas live in tiered maps: a hot tier in RAM and sorted
+//! runs in the transaction's spill directory. Past `[tuning.query]
+//! max_txn_overlay_bytes` of hot entries, the overlay spills.
 //!
 //! This file owns the type itself plus the savepoint undo journal
 //! (`record_edge_undo` / `record_labels_undo` / `rollback_to`). Edge staging
 //! and node-label staging live in the sibling `edges` and `labels` modules;
-//! memory accounting lives in `memory`.
+//! hot-tier accounting lives in `memory`.
 
 use std::collections::HashMap;
 
 use super::super::lease::{LeaseStamp, SystemFromLatch};
-use super::types::{EdgeKey, EdgeValidTime, GraphCollKey, GraphCollectionOverlay, NodeLabelDelta};
+use super::types::{EdgeKey, EdgeSlot, GraphCollKey, GraphCollectionOverlay, NodeLabelDelta};
+use crate::data::executor::handlers::spill::tiered::{SpillSpace, SpillWeight, UndoJournal};
 
-/// One graph-overlay slot's state captured immediately before a staged edge
-/// or node-label mutation overwrote it. The undo journal of these entries is
-/// what makes `ROLLBACK TO SAVEPOINT` correct for the GRAPH overlay: every
-/// mutator is last-writer-wins with CROSS-SET CLEARING (staging an edge put
-/// removes the identity from the tombstone set and vice-versa; a node-label
-/// add removes it from the delta's removed-set), so a naive "drop
-/// post-savepoint keys" rewind would lose an earlier same-slot write AND
-/// leave the opposite set in its post-mutation state. Restoring the recorded
-/// prior membership of BOTH affected sets rewinds without either loss.
-#[derive(Debug, Clone)]
-enum GraphOverlayUndo {
-    /// Prior state of an edge identity across BOTH edge sets: its properties
-    /// in `pending_edges` (or `None` if absent) and whether it was present in
-    /// `pending_edge_tombstones`. Both `stage_edge_put` and `stage_edge_delete`
-    /// touch both sets, so both record this.
+/// One staged slot's hot state captured immediately before a mutation
+/// overwrote it, with the hot version's seq. A rollback restores it.
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub(super) enum GraphOverlayUndo {
     Edge {
         coll_key: GraphCollKey,
         key: EdgeKey,
-        /// Prior `pending_edges` entry, or `None` if the slot was absent.
-        prev_props: Option<Vec<u8>>,
-        /// Prior membership in `pending_edge_tombstones`.
-        prev_tombstoned: bool,
-        /// Prior `pending_edge_valid` entry, or `None` if the slot was absent.
-        prev_valid: Option<EdgeValidTime>,
+        prev: Option<(EdgeSlot, u64)>,
     },
-    /// Prior `pending_node_labels` delta for a node, or `None` if the node had
-    /// no staged delta before this mutation.
     NodeLabels {
         coll_key: GraphCollKey,
         node_id: String,
-        prev_delta: Option<NodeLabelDelta>,
+        prev: Option<(NodeLabelDelta, u64)>,
     },
 }
 
-/// Per-transaction GRAPH staging overlay: holds not-yet-durable edge/label
-/// writes for every collection touched by the transaction, keyed by
-/// `(DatabaseId, TenantId, collection)`.
-#[derive(Debug, Default)]
+impl SpillWeight for GraphOverlayUndo {
+    fn spill_weight(&self) -> usize {
+        std::mem::size_of::<GraphOverlayUndo>()
+            + match self {
+                GraphOverlayUndo::Edge {
+                    coll_key,
+                    key,
+                    prev,
+                } => {
+                    coll_key.2.len()
+                        + key.spill_weight()
+                        + prev.as_ref().map_or(0, |(slot, _)| slot.spill_weight())
+                }
+                GraphOverlayUndo::NodeLabels {
+                    coll_key,
+                    node_id,
+                    prev,
+                } => {
+                    coll_key.2.len()
+                        + node_id.len()
+                        + prev.as_ref().map_or(0, |(delta, _)| delta.spill_weight())
+                }
+            }
+    }
+}
+
+/// Per-transaction GRAPH staging overlay: holds not-yet-durable edge puts,
+/// tombstones and node-label deltas for every collection touched by the
+/// transaction.
+#[derive(Debug)]
 pub struct GraphTxnOverlay {
     pub(super) collections: HashMap<GraphCollKey, GraphCollectionOverlay>,
-    /// Append-only undo journal recording each edge/label slot's prior state
-    /// before a staged mutation overwrote it. `journal_len` reads its length
-    /// (the graph savepoint marker); `rollback_to` replays it in reverse down
-    /// to a marker. The four mutators are the ONLY writers of the private
-    /// edge/tombstone/label sets and each appends here first, so no mutation
-    /// escapes the journal — the guarantee `ROLLBACK TO SAVEPOINT` relies on.
-    /// Dropped with the overlay when the transaction resolves.
-    journal: Vec<GraphOverlayUndo>,
-    /// Ordinal-clock stamp of the last time this transaction touched its GRAPH
-    /// overlay — the parallel of `super::super::staged::TxnOverlay`'s stamp,
-    /// read alongside it by the lease reaper (a refresh on EITHER overlay keeps
-    /// the transaction alive). `Cell` for the same single-threaded `!Send`
-    /// interior-mutability reason.
+    /// The undo journal. Every mutator appends here before it stages, so no
+    /// mutation escapes it.
+    pub(super) journal: UndoJournal<GraphOverlayUndo>,
+    /// Ordinal-clock stamp of the last time this transaction touched its
+    /// GRAPH overlay. Read by the lease reaper alongside the other overlays'
+    /// stamps: a refresh on ANY overlay keeps the transaction alive.
     last_touch: LeaseStamp,
     /// Frozen system-time ordinal used by both live transaction apply and WAL
     /// redo. Separate from lease liveness so refreshes cannot change history.
     resolved_system_from: SystemFromLatch,
+    /// The spill directory, the hot-tier threshold, and the lookup reader.
+    pub(super) space: SpillSpace,
+    /// Set when a spill or a rollback failed part way: every later call
+    /// fails with this text.
+    pub(super) poisoned: Option<String>,
+}
+
+#[cfg(test)]
+impl Default for GraphTxnOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphTxnOverlay {
+    /// An overlay that spills into `space`.
+    pub(in crate::data::executor) fn with_spill(space: SpillSpace) -> Self {
+        Self {
+            collections: HashMap::new(),
+            journal: UndoJournal::default(),
+            last_touch: LeaseStamp::default(),
+            resolved_system_from: SystemFromLatch::default(),
+            space,
+            poisoned: None,
+        }
+    }
+
+    /// An overlay that never spills, for tests.
+    #[cfg(test)]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_spill(SpillSpace::never_spills())
     }
 
     /// Refresh the graph overlay's lease stamp to `ord`. See
@@ -111,116 +143,110 @@ impl GraphTxnOverlay {
         self.resolved_system_from.resolved()
     }
 
-    /// Record an edge identity's prior state across BOTH edge sets before a
-    /// staged edge mutation overwrites it. Single chokepoint shared by
-    /// `stage_edge_put` and `stage_edge_delete` (and the batch forms, which
-    /// call those per-edge), so no edge-set mutation escapes the journal.
-    pub(super) fn record_edge_undo(&mut self, coll_key: &GraphCollKey, key: &EdgeKey) {
-        let (prev_props, prev_tombstoned, prev_valid) = match self.collections.get(coll_key) {
-            Some(overlay) => (
-                overlay.pending_edges.get(key).cloned(),
-                overlay.pending_edge_tombstones.contains(key),
-                overlay.pending_edge_valid.get(key).copied(),
-            ),
-            None => (None, false, None),
-        };
-        self.journal.push(GraphOverlayUndo::Edge {
+    /// Fail when an earlier spill or rollback left the overlay unusable.
+    pub(super) fn guard(&self) -> crate::Result<()> {
+        match &self.poisoned {
+            None => Ok(()),
+            Some(reason) => Err(crate::Error::Internal {
+                detail: format!(
+                    "graph staging overlay is unusable after a spill error: {reason}; \
+                     roll the transaction back"
+                ),
+            }),
+        }
+    }
+
+    /// Record an edge slot's hot state before a staged mutation overwrites
+    /// it. Returns the journal position the mutation's version carries.
+    pub(super) fn record_edge_undo(
+        &mut self,
+        coll_key: &GraphCollKey,
+        key: &EdgeKey,
+    ) -> crate::Result<u64> {
+        self.guard()?;
+        let prev = self.collections.get(coll_key).and_then(|overlay| {
+            overlay
+                .edges
+                .hot(key)
+                .map(|hot| (hot.value.clone(), hot.seq))
+        });
+        Ok(self.journal.push(GraphOverlayUndo::Edge {
             coll_key: coll_key.clone(),
             key: key.clone(),
-            prev_props,
-            prev_tombstoned,
-            prev_valid,
-        });
+            prev,
+        }))
     }
 
-    /// Record a node's prior label delta before a staged label mutation
-    /// overwrites it. Single chokepoint shared by `stage_node_labels_set` and
-    /// `stage_node_labels_remove`.
-    pub(super) fn record_labels_undo(&mut self, coll_key: &GraphCollKey, node_id: &str) {
-        let prev_delta = self
-            .collections
-            .get(coll_key)
-            .and_then(|overlay| overlay.pending_node_labels.get(node_id).cloned());
-        self.journal.push(GraphOverlayUndo::NodeLabels {
+    /// Record a node's hot label-delta state before a staged mutation
+    /// overwrites it. Returns the journal position.
+    pub(super) fn record_labels_undo(
+        &mut self,
+        coll_key: &GraphCollKey,
+        node_id: &str,
+    ) -> crate::Result<u64> {
+        self.guard()?;
+        let prev = self.collections.get(coll_key).and_then(|overlay| {
+            overlay
+                .node_labels
+                .hot(node_id)
+                .map(|hot| (hot.value.clone(), hot.seq))
+        });
+        Ok(self.journal.push(GraphOverlayUndo::NodeLabels {
             coll_key: coll_key.clone(),
             node_id: node_id.to_string(),
-            prev_delta,
-        });
+            prev,
+        }))
     }
 
-    /// Current length of the graph overlay undo journal — the savepoint marker
-    /// a later `rollback_to` rewinds toward. `MetaOp::MarkSavepoint` records it
-    /// on the core beside the value overlay's marker.
+    /// Current length of the graph overlay undo journal: the savepoint
+    /// marker a later `rollback_to` rewinds toward.
     pub fn journal_len(&self) -> usize {
-        self.journal.len()
+        self.journal.next_seq() as usize
     }
 
-    /// Revert every staged edge/label mutation recorded after `marker`,
-    /// restoring each slot's prior membership across BOTH affected sets (or
-    /// removing it when the prior slot was absent), then truncate the journal
-    /// to `marker`.
-    ///
-    /// Entries are replayed strictly in reverse so repeated writes to one slot
-    /// unwind to the exact state present at the marked point, and the
-    /// cross-set clearing each mutator performed is undone in lockstep. A
-    /// `marker` at or beyond the current length is a no-op.
-    pub fn rollback_to(&mut self, marker: usize) {
-        while self.journal.len() > marker {
-            let Some(undo) = self.journal.pop() else {
-                break;
-            };
-            match undo {
+    /// Revert every staged graph mutation recorded at or after `marker`.
+    /// Every version written since is dropped from the hot tier and the
+    /// runs, and the journal restores the hot versions the mutations
+    /// overwrote, newest first. A `marker` at or beyond the current length
+    /// is a no-op. A spill-file error part way leaves the overlay unusable.
+    pub fn rollback_to(&mut self, marker: usize) -> crate::Result<()> {
+        self.guard()?;
+        if marker >= self.journal_len() {
+            return Ok(());
+        }
+        let result = self.rollback_tiers(marker as u64);
+        if let Err(e) = &result {
+            self.poisoned = Some(e.to_string());
+        }
+        result
+    }
+
+    fn rollback_tiers(&mut self, bound: u64) -> crate::Result<()> {
+        for overlay in self.collections.values_mut() {
+            overlay.rollback(bound, &mut self.space)?;
+        }
+        let collections = &mut self.collections;
+        self.journal
+            .rollback(bound, &self.space, |undo| match undo {
                 GraphOverlayUndo::Edge {
                     coll_key,
                     key,
-                    prev_props,
-                    prev_tombstoned,
-                    prev_valid,
+                    prev,
                 } => {
-                    let Some(overlay) = self.collections.get_mut(&coll_key) else {
-                        continue;
-                    };
-                    match prev_valid {
-                        Some(valid) => {
-                            overlay.pending_edge_valid.insert(key.clone(), valid);
-                        }
-                        None => {
-                            overlay.pending_edge_valid.remove(&key);
-                        }
-                    }
-                    match prev_props {
-                        Some(props) => {
-                            overlay.pending_edges.insert(key.clone(), props);
-                        }
-                        None => {
-                            overlay.pending_edges.remove(&key);
-                        }
-                    }
-                    if prev_tombstoned {
-                        overlay.pending_edge_tombstones.insert(key);
-                    } else {
-                        overlay.pending_edge_tombstones.remove(&key);
+                    if let Some(overlay) = collections.get_mut(&coll_key) {
+                        overlay.edges.restore(key, prev);
                     }
                 }
                 GraphOverlayUndo::NodeLabels {
                     coll_key,
                     node_id,
-                    prev_delta,
+                    prev,
                 } => {
-                    let Some(overlay) = self.collections.get_mut(&coll_key) else {
-                        continue;
-                    };
-                    match prev_delta {
-                        Some(delta) => {
-                            overlay.pending_node_labels.insert(node_id, delta);
-                        }
-                        None => {
-                            overlay.pending_node_labels.remove(&node_id);
-                        }
+                    if let Some(overlay) = collections.get_mut(&coll_key) {
+                        overlay.node_labels.restore(node_id, prev);
                     }
                 }
-            }
-        }
+            })
     }
 }
 
@@ -236,35 +262,43 @@ mod tests {
     #[test]
     fn rollback_to_restores_edge_put_added_after_marker() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![1]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![1])
+            .unwrap();
         let marker = overlay.journal_len();
-        overlay.stage_edge_put(key("g"), "a", "knows", "c", vec![2]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "c", vec![2])
+            .unwrap();
 
         // Before rollback both edges are visible.
-        assert_eq!(overlay.edges_for_src(&key("g"), "a").count(), 2);
+        assert_eq!(overlay.edges_for_src(&key("g"), "a").unwrap().len(), 2);
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
         // Post-savepoint edge A→C is gone; A→B (staged before the marker)
         // remains.
-        let out: Vec<_> = overlay.edges_for_src(&key("g"), "a").collect();
-        assert_eq!(out, vec![("knows", "b", &[1u8][..])]);
+        let out = overlay.edges_for_src(&key("g"), "a").unwrap();
+        assert_eq!(out, vec![("knows".to_string(), "b".to_string(), vec![1u8])]);
         assert_eq!(overlay.journal_len(), marker);
     }
 
     #[test]
     fn rollback_to_restores_prior_props_for_reoverwritten_edge() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![1]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![1])
+            .unwrap();
         let marker = overlay.journal_len();
         // Overwrite the SAME edge slot after the marker: a naive drop would
         // lose the pre-marker props entirely.
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![9, 9]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![9, 9])
+            .unwrap();
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
-        let out: Vec<_> = overlay.edges_for_src(&key("g"), "a").collect();
-        assert_eq!(out, vec![("knows", "b", &[1u8][..])]);
+        let out = overlay.edges_for_src(&key("g"), "a").unwrap();
+        assert_eq!(out, vec![("knows".to_string(), "b".to_string(), vec![1u8])]);
     }
 
     #[test]
@@ -273,18 +307,28 @@ mod tests {
         // the tombstone). Rollback must restore BOTH sets: the edge put goes
         // away AND the tombstone comes back.
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(key("g"), "a", "knows", "b")
+            .unwrap();
         let marker = overlay.journal_len();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![7]);
-        assert!(!overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"));
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![7])
+            .unwrap();
+        assert!(
+            !overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap()
+        );
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
         assert!(
-            overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"),
+            overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap(),
             "rollback must restore the pre-marker tombstone the re-put cleared"
         );
-        assert_eq!(overlay.edges_for_src(&key("g"), "a").count(), 0);
+        assert_eq!(overlay.edges_for_src(&key("g"), "a").unwrap().len(), 0);
     }
 
     #[test]
@@ -293,29 +337,43 @@ mod tests {
         // put, adds a tombstone). Rollback restores the put and drops the
         // tombstone.
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![5]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![5])
+            .unwrap();
         let marker = overlay.journal_len();
-        overlay.stage_edge_delete(key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(key("g"), "a", "knows", "b")
+            .unwrap();
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
-        assert!(!overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"));
-        let out: Vec<_> = overlay.edges_for_src(&key("g"), "a").collect();
-        assert_eq!(out, vec![("knows", "b", &[5u8][..])]);
+        assert!(
+            !overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap()
+        );
+        let out = overlay.edges_for_src(&key("g"), "a").unwrap();
+        assert_eq!(out, vec![("knows".to_string(), "b".to_string(), vec![5u8])]);
     }
 
     #[test]
     fn rollback_to_restores_prior_node_label_delta() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_set(key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(key("g"), "n1", &["Person".to_string()])
+            .unwrap();
         let marker = overlay.journal_len();
         // After the marker: remove Person and add Robot.
-        overlay.stage_node_labels_remove(key("g"), "n1", &["Person".to_string()]);
-        overlay.stage_node_labels_set(key("g"), "n1", &["Robot".to_string()]);
+        overlay
+            .stage_node_labels_remove(key("g"), "n1", &["Person".to_string()])
+            .unwrap();
+        overlay
+            .stage_node_labels_set(key("g"), "n1", &["Robot".to_string()])
+            .unwrap();
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
-        let delta = overlay.labels_delta(&key("g"), "n1").unwrap();
+        let delta = overlay.labels_delta(&key("g"), "n1").unwrap().unwrap();
         assert!(delta.added.contains("Person"));
         assert!(!delta.added.contains("Robot"));
         assert!(delta.removed.is_empty());
@@ -325,19 +383,23 @@ mod tests {
     fn rollback_to_removes_node_delta_absent_at_marker() {
         let mut overlay = GraphTxnOverlay::new();
         let marker = overlay.journal_len();
-        overlay.stage_node_labels_set(key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
 
-        assert!(overlay.labels_delta(&key("g"), "n1").is_none());
+        assert!(overlay.labels_delta(&key("g"), "n1").unwrap().is_none());
     }
 
     #[test]
     fn rollback_to_current_len_is_noop() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![1]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![1])
+            .unwrap();
         let marker = overlay.journal_len();
-        overlay.rollback_to(marker);
-        assert_eq!(overlay.edges_for_src(&key("g"), "a").count(), 1);
+        overlay.rollback_to(marker).unwrap();
+        assert_eq!(overlay.edges_for_src(&key("g"), "a").unwrap().len(), 1);
     }
 }

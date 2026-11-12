@@ -55,7 +55,8 @@ impl CoreLoop {
             Err(refusal) => refusal,
         };
         // A session COMMIT releases the overlay once the install answered.
-        self.drop_overlay_entry(TxnId::new(lsn));
+        self.drop_overlay_entry(TxnId::new(lsn))
+            .expect("drop overlay");
         response
     }
 
@@ -77,7 +78,8 @@ impl CoreLoop {
             }
             Err(refusal) => refusal,
         };
-        self.drop_overlay_entry(TxnId::new(lsn));
+        self.drop_overlay_entry(TxnId::new(lsn))
+            .expect("drop overlay");
         response
     }
 

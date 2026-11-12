@@ -1,16 +1,40 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Edge staging and read-your-own-writes accessors for [`GraphTxnOverlay`].
+//!
+//! Every read merges the hot tier with the spilled runs. Edges order by
+//! their encoded `(src, label, dst)`, so the out-edges of one source are one
+//! prefix range. The in-edges of one destination need a full scan.
 
-use crate::types::{DatabaseId, TenantId};
+use std::borrow::Cow;
 
 use super::txn_overlay::GraphTxnOverlay;
-use super::types::{EdgeValidTime, GraphCollKey, StagedEdgePut};
+use super::types::{
+    CollectionEdgePut, EdgeKey, EdgeRef, EdgeSlot, EdgeValidTime, GraphCollKey, StagedEdgePut,
+};
+use crate::data::executor::handlers::spill::tiered::ScanBounds;
+use crate::data::executor::handlers::spill::tiered::map::encode_key;
+use crate::types::{DatabaseId, TenantId};
+
+/// The MessagePack header of a three-element array: the first byte of every
+/// encoded edge key.
+const EDGE_KEY_HEADER: u8 = 0x93;
+
+fn edge_key(src: &str, label: &str, dst: &str) -> EdgeKey {
+    (src.to_string(), label.to_string(), dst.to_string())
+}
+
+/// The encoded-key prefix every out-edge of `src` shares.
+fn src_prefix(src: &str) -> crate::Result<Vec<u8>> {
+    let mut prefix = vec![EDGE_KEY_HEADER];
+    prefix.extend(encode_key(&src)?);
+    Ok(prefix)
+}
 
 impl GraphTxnOverlay {
-    /// Stage an edge put: adds to the pending add-set and clears any
-    /// pending tombstone for the same identity (last-writer-wins within the
-    /// transaction).
+    /// Stage an edge put (`(src, label, dst)` -> `properties`) with the
+    /// apply's default valid time. Clears any pending tombstone for the same
+    /// edge.
     pub fn stage_edge_put(
         &mut self,
         coll_key: GraphCollKey,
@@ -18,99 +42,113 @@ impl GraphTxnOverlay {
         label: &str,
         dst: &str,
         properties: Vec<u8>,
-    ) {
+    ) -> crate::Result<()> {
         self.stage_edge_put_valid(
             coll_key,
             (src, label, dst),
             properties,
             EdgeValidTime::default(),
-        );
+        )
     }
 
-    /// Stage an edge put that names its valid time. A later put of the same
-    /// identity replaces both its properties and its valid time.
+    /// Stage an edge put with the valid time its statement named. Clears
+    /// any pending tombstone for the same edge.
     pub fn stage_edge_put_valid(
         &mut self,
         coll_key: GraphCollKey,
         (src, label, dst): (&str, &str, &str),
         properties: Vec<u8>,
         valid: EdgeValidTime,
-    ) {
-        let key = (src.to_string(), label.to_string(), dst.to_string());
-        self.record_edge_undo(&coll_key, &key);
-        let overlay = self.collections.entry(coll_key).or_default();
-        overlay.pending_edge_tombstones.remove(&key);
-        if valid == EdgeValidTime::default() {
-            overlay.pending_edge_valid.remove(&key);
-        } else {
-            overlay.pending_edge_valid.insert(key.clone(), valid);
-        }
-        overlay.pending_edges.insert(key, properties);
+    ) -> crate::Result<()> {
+        let key = edge_key(src, label, dst);
+        let seq = self.record_edge_undo(&coll_key, &key)?;
+        self.collections.entry(coll_key).or_default().edges.insert(
+            key,
+            EdgeSlot::Put { properties, valid },
+            seq,
+        );
+        self.spill_past_threshold()
     }
 
-    /// The valid time the staged put of `(src, label, dst)` names. The
-    /// default when the put names none, or nothing is staged.
+    /// The valid time the staged put of `(src, label, dst)` named. The
+    /// default when no staged put names one.
     pub fn staged_edge_valid_time(
         &self,
         coll_key: &GraphCollKey,
         src: &str,
         label: &str,
         dst: &str,
-    ) -> EdgeValidTime {
-        let key = (src.to_string(), label.to_string(), dst.to_string());
-        self.collections
-            .get(coll_key)
-            .and_then(|overlay| overlay.pending_edge_valid.get(&key).copied())
-            .unwrap_or_default()
+    ) -> crate::Result<EdgeValidTime> {
+        Ok(match self.slot(coll_key, src, label, dst)?.as_deref() {
+            Some(EdgeSlot::Put { valid, .. }) => *valid,
+            Some(EdgeSlot::Tombstone) | None => EdgeValidTime::default(),
+        })
     }
 
-    /// Stage an edge delete: adds a tombstone and clears any pending put for
-    /// the same identity.
-    pub fn stage_edge_delete(&mut self, coll_key: GraphCollKey, src: &str, label: &str, dst: &str) {
-        let key = (src.to_string(), label.to_string(), dst.to_string());
-        self.record_edge_undo(&coll_key, &key);
-        let overlay = self.collections.entry(coll_key).or_default();
-        overlay.pending_edges.remove(&key);
-        overlay.pending_edge_valid.remove(&key);
-        overlay.pending_edge_tombstones.insert(key);
+    /// Stage an edge delete (tombstone). Clears any pending put for the same
+    /// edge.
+    pub fn stage_edge_delete(
+        &mut self,
+        coll_key: GraphCollKey,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> crate::Result<()> {
+        let key = edge_key(src, label, dst);
+        let seq = self.record_edge_undo(&coll_key, &key)?;
+        self.collections
+            .entry(coll_key)
+            .or_default()
+            .edges
+            .insert(key, EdgeSlot::Tombstone, seq);
+        self.spill_past_threshold()
+    }
+
+    /// The staged state of one edge, in any tier.
+    fn slot(
+        &self,
+        coll_key: &GraphCollKey,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> crate::Result<Option<Cow<'_, EdgeSlot>>> {
+        self.guard()?;
+        let Some(overlay) = self.collections.get(coll_key) else {
+            return Ok(None);
+        };
+        overlay
+            .edges
+            .get(&EdgeRef(src, label, dst), self.space.reader())
     }
 
     /// Whether `(src, label, dst)` is currently staged in this transaction's
     /// own overlay: `Some(true)` when staged as a put, `Some(false)` when
     /// staged as a tombstone, `None` when this transaction has not touched
-    /// the edge — the caller must then resolve it against BASE state.
+    /// the edge. The caller then resolves it against BASE state.
     pub fn staged_edge_presence(
         &self,
         coll_key: &GraphCollKey,
         src: &str,
         label: &str,
         dst: &str,
-    ) -> Option<bool> {
-        let overlay = self.collections.get(coll_key)?;
-        let key = (src.to_string(), label.to_string(), dst.to_string());
-        if overlay.pending_edges.contains_key(&key) {
-            Some(true)
-        } else if overlay.pending_edge_tombstones.contains(&key) {
-            Some(false)
-        } else {
-            None
-        }
+    ) -> crate::Result<Option<bool>> {
+        Ok(self
+            .slot(coll_key, src, label, dst)?
+            .map(|slot| matches!(*slot, EdgeSlot::Put { .. })))
     }
 
-    /// The property map of a put of `(src, label, dst)` staged in `coll_key`,
-    /// or `None` when this transaction staged no put of that edge there.
+    /// The staged put properties of `(src, label, dst)`, when one is staged.
     pub fn staged_edge_properties(
         &self,
         coll_key: &GraphCollKey,
         src: &str,
         label: &str,
         dst: &str,
-    ) -> Option<&[u8]> {
-        self.collections
-            .get(coll_key)?
-            .pending_edges
-            .get(&(src.to_string(), label.to_string(), dst.to_string()))
-            .map(Vec::as_slice)
+    ) -> crate::Result<Option<Vec<u8>>> {
+        Ok(match self.slot(coll_key, src, label, dst)?.as_deref() {
+            Some(EdgeSlot::Put { properties, .. }) => Some(properties.clone()),
+            Some(EdgeSlot::Tombstone) | None => None,
+        })
     }
 
     /// True if `(src, label, dst)` has been staged-deleted in this
@@ -121,104 +159,113 @@ impl GraphTxnOverlay {
         src: &str,
         label: &str,
         dst: &str,
-    ) -> bool {
-        self.collections.get(coll_key).is_some_and(|overlay| {
-            overlay.pending_edge_tombstones.contains(&(
-                src.to_string(),
-                label.to_string(),
-                dst.to_string(),
-            ))
+    ) -> crate::Result<bool> {
+        Ok(matches!(
+            self.slot(coll_key, src, label, dst)?.as_deref(),
+            Some(EdgeSlot::Tombstone)
+        ))
+    }
+
+    /// Every staged edge of `coll_key` that passes `keep`, in key order.
+    fn scan_edges<T>(
+        &self,
+        coll_key: &GraphCollKey,
+        bounds: ScanBounds,
+        mut keep: impl FnMut(EdgeKey, Cow<'_, EdgeSlot>) -> Option<T>,
+    ) -> crate::Result<Vec<T>> {
+        self.guard()?;
+        let Some(overlay) = self.collections.get(coll_key) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for item in overlay.edges.scan(bounds) {
+            let (key, slot) = item?;
+            if let Some(kept) = keep(key, slot) {
+                out.push(kept);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Staged OUT-edges of `src_id` in `coll_key`: `(label, dst, props)`.
+    pub fn edges_for_src(
+        &self,
+        coll_key: &GraphCollKey,
+        src_id: &str,
+    ) -> crate::Result<Vec<(String, String, Vec<u8>)>> {
+        let bounds = ScanBounds {
+            after: None,
+            prefix: Some(src_prefix(src_id)?),
+        };
+        self.scan_edges(coll_key, bounds, |(s, l, d), slot| {
+            if s != src_id {
+                return None;
+            }
+            match slot.into_owned() {
+                EdgeSlot::Put { properties, .. } => Some((l, d, properties)),
+                EdgeSlot::Tombstone => None,
+            }
         })
     }
 
-    /// Staged out-edges from `src_id`: `(label, dst, properties)`, excluding
-    /// anything tombstoned (staging never leaves a key in both sets, so no
-    /// extra filter is needed here).
-    pub fn edges_for_src<'a>(
-        &'a self,
-        coll_key: &GraphCollKey,
-        src_id: &str,
-    ) -> impl Iterator<Item = (&'a str, &'a str, &'a [u8])> {
-        self.collections
-            .get(coll_key)
-            .into_iter()
-            .flat_map(move |overlay| {
-                overlay
-                    .pending_edges
-                    .iter()
-                    .filter_map(move |((s, l, d), props)| {
-                        (s == src_id).then_some((l.as_str(), d.as_str(), props.as_slice()))
-                    })
-            })
-    }
-
-    /// Staged in-edges into `dst_id`: `(label, src, properties)`.
-    pub fn edges_for_dst<'a>(
-        &'a self,
+    /// Staged IN-edges of `dst_id` in `coll_key`: `(label, src, props)`.
+    pub fn edges_for_dst(
+        &self,
         coll_key: &GraphCollKey,
         dst_id: &str,
-    ) -> impl Iterator<Item = (&'a str, &'a str, &'a [u8])> {
-        self.collections
-            .get(coll_key)
-            .into_iter()
-            .flat_map(move |overlay| {
-                overlay
-                    .pending_edges
-                    .iter()
-                    .filter_map(move |((s, l, d), props)| {
-                        (d == dst_id).then_some((l.as_str(), s.as_str(), props.as_slice()))
-                    })
-            })
+    ) -> crate::Result<Vec<(String, String, Vec<u8>)>> {
+        self.scan_edges(coll_key, ScanBounds::default(), |(s, l, d), slot| {
+            if d != dst_id {
+                return None;
+            }
+            match slot.into_owned() {
+                EdgeSlot::Put { properties, .. } => Some((l, s, properties)),
+                EdgeSlot::Tombstone => None,
+            }
+        })
     }
 
-    /// Staged out-edges from `src_id` across every collection this
-    /// transaction has touched for `(database_id, tenant)`: `(label, dst,
-    /// properties)`. Neighbors/Hop read the CSR partition tenant-wide (it
-    /// carries no `collection` field on the plan), so the read-merge cannot
-    /// scope to one collection the way the write side does.
+    /// The collections of `(database_id, tenant)` this transaction staged.
+    fn tenant_collections(
+        &self,
+        database_id: DatabaseId,
+        tenant: TenantId,
+    ) -> impl Iterator<Item = &GraphCollKey> {
+        self.collections
+            .keys()
+            .filter(move |(db, t, _)| *db == database_id && *t == tenant)
+    }
+
+    /// Staged OUT-edges of `src_id` across every collection of the tenant.
     pub fn edges_for_src_any_collection(
         &self,
         database_id: DatabaseId,
         tenant: TenantId,
         src_id: &str,
-    ) -> Vec<(String, String, Vec<u8>)> {
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .flat_map(|(_, overlay)| {
-                overlay
-                    .pending_edges
-                    .iter()
-                    .filter(move |((s, _, _), _)| s == src_id)
-                    .map(|((_, l, d), props)| (l.clone(), d.clone(), props.clone()))
-            })
-            .collect()
+    ) -> crate::Result<Vec<(String, String, Vec<u8>)>> {
+        let mut out = Vec::new();
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            out.extend(self.edges_for_src(coll_key, src_id)?);
+        }
+        Ok(out)
     }
 
-    /// Staged in-edges into `dst_id` across every collection for
-    /// `(database_id, tenant)`: `(label, src, properties)`.
+    /// Staged IN-edges of `dst_id` across every collection of the tenant.
     pub fn edges_for_dst_any_collection(
         &self,
         database_id: DatabaseId,
         tenant: TenantId,
         dst_id: &str,
-    ) -> Vec<(String, String, Vec<u8>)> {
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .flat_map(|(_, overlay)| {
-                overlay
-                    .pending_edges
-                    .iter()
-                    .filter(move |((_, _, d), _)| d == dst_id)
-                    .map(|((s, l, _), props)| (l.clone(), s.clone(), props.clone()))
-            })
-            .collect()
+    ) -> crate::Result<Vec<(String, String, Vec<u8>)>> {
+        let mut out = Vec::new();
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            out.extend(self.edges_for_dst(coll_key, dst_id)?);
+        }
+        Ok(out)
     }
 
-    /// True if `(src, label, dst)` was tombstoned in ANY collection this
-    /// transaction has touched for `(database_id, tenant)` -- the tenant-wide
-    /// counterpart of `is_edge_tombstoned`.
+    /// Whether `(src, label, dst)` is staged-deleted in any collection of
+    /// the tenant.
     pub fn is_edge_tombstoned_any_collection(
         &self,
         database_id: DatabaseId,
@@ -226,105 +273,93 @@ impl GraphTxnOverlay {
         src: &str,
         label: &str,
         dst: &str,
-    ) -> bool {
-        let key = (src.to_string(), label.to_string(), dst.to_string());
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .any(|(_, overlay)| overlay.pending_edge_tombstones.contains(&key))
+    ) -> crate::Result<bool> {
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            if self.is_edge_tombstoned(coll_key, src, label, dst)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    /// Every staged edge put `(src, label, dst)` across every collection this
-    /// transaction has touched for `(database_id, tenant)`. Feeds the
-    /// multi-hop / subgraph read-your-own-writes overlay translation.
+    /// Every staged edge put identity of the tenant.
     pub fn all_staged_edges(
         &self,
         database_id: DatabaseId,
         tenant: TenantId,
-    ) -> Vec<(String, String, String)> {
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .flat_map(|(_, overlay)| {
-                overlay
-                    .pending_edges
-                    .keys()
-                    .map(|(s, l, d)| (s.clone(), l.clone(), d.clone()))
-            })
-            .collect()
+    ) -> crate::Result<Vec<(String, String, String)>> {
+        let mut out = Vec::new();
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            out.extend(
+                self.scan_edges(coll_key, ScanBounds::default(), |key, slot| {
+                    matches!(*slot, EdgeSlot::Put { .. }).then_some(key)
+                })?,
+            );
+        }
+        Ok(out)
     }
 
-    /// Every staged edge put for `(database_id, tenant)` with its collection
-    /// and property image: `(collection, (src, label, dst), properties)`.
+    /// Every staged edge put of the tenant with its collection and
+    /// properties.
     pub fn staged_edge_puts(
         &self,
         database_id: DatabaseId,
         tenant: TenantId,
-    ) -> Vec<StagedEdgePut> {
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .flat_map(|((_, _, collection), overlay)| {
-                overlay
-                    .pending_edges
-                    .iter()
-                    .map(move |(edge, props)| (collection.clone(), edge.clone(), props.clone()))
-            })
-            .collect()
+    ) -> crate::Result<Vec<StagedEdgePut>> {
+        let mut out = Vec::new();
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            let collection = &coll_key.2;
+            out.extend(
+                self.scan_edges(coll_key, ScanBounds::default(), |key, slot| {
+                    match slot.into_owned() {
+                        EdgeSlot::Put { properties, .. } => {
+                            Some((collection.clone(), key, properties))
+                        }
+                        EdgeSlot::Tombstone => None,
+                    }
+                })?,
+            );
+        }
+        Ok(out)
     }
 
-    /// Every staged edge tombstone `(src, label, dst)` across every collection
-    /// this transaction has touched for `(database_id, tenant)`.
+    /// Every staged edge tombstone identity of the tenant.
     pub fn all_tombstones(
         &self,
         database_id: DatabaseId,
         tenant: TenantId,
-    ) -> Vec<(String, String, String)> {
-        self.collections
-            .iter()
-            .filter(|((db, t, _), _)| *db == database_id && *t == tenant)
-            .flat_map(|(_, overlay)| {
-                overlay
-                    .pending_edge_tombstones
-                    .iter()
-                    .map(|(s, l, d)| (s.clone(), l.clone(), d.clone()))
-            })
-            .collect()
+    ) -> crate::Result<Vec<(String, String, String)>> {
+        let mut out = Vec::new();
+        for coll_key in self.tenant_collections(database_id, tenant) {
+            out.extend(self.staged_tombstones_for_collection(coll_key)?);
+        }
+        Ok(out)
     }
 
-    /// Every staged edge put in `coll_key`: `(src, label, dst, properties)`.
-    /// Feeds transaction-resolve serialization, which needs the full put
-    /// set (identity + properties) for exactly one collection rather than
-    /// the tenant-wide identity-only views `all_staged_edges` returns.
-    pub fn staged_edges_for_collection<'a>(
-        &'a self,
+    /// Every staged edge put of one collection: `(src, label, dst, props,
+    /// valid time)`.
+    pub fn staged_edges_for_collection(
+        &self,
         coll_key: &GraphCollKey,
-    ) -> impl Iterator<Item = (&'a str, &'a str, &'a str, &'a [u8])> {
-        self.collections
-            .get(coll_key)
-            .into_iter()
-            .flat_map(|overlay| {
-                overlay.pending_edges.iter().map(|((s, l, d), props)| {
-                    (s.as_str(), l.as_str(), d.as_str(), props.as_slice())
-                })
-            })
+    ) -> crate::Result<Vec<CollectionEdgePut>> {
+        self.scan_edges(
+            coll_key,
+            ScanBounds::default(),
+            |(s, l, d), slot| match slot.into_owned() {
+                EdgeSlot::Put { properties, valid } => Some((s, l, d, properties, valid)),
+                EdgeSlot::Tombstone => None,
+            },
+        )
     }
 
-    /// Every staged edge tombstone in `coll_key`: `(src, label, dst)`. The
-    /// per-collection counterpart of `staged_edges_for_collection`.
-    pub fn staged_tombstones_for_collection<'a>(
-        &'a self,
+    /// Every staged edge tombstone of one collection: `(src, label, dst)`.
+    pub fn staged_tombstones_for_collection(
+        &self,
         coll_key: &GraphCollKey,
-    ) -> impl Iterator<Item = (&'a str, &'a str, &'a str)> {
-        self.collections
-            .get(coll_key)
-            .into_iter()
-            .flat_map(|overlay| {
-                overlay
-                    .pending_edge_tombstones
-                    .iter()
-                    .map(|(s, l, d)| (s.as_str(), l.as_str(), d.as_str()))
-            })
+    ) -> crate::Result<Vec<(String, String, String)>> {
+        self.scan_edges(coll_key, ScanBounds::default(), |key, slot| {
+            matches!(*slot, EdgeSlot::Tombstone).then_some(key)
+        })
     }
 }
 
@@ -339,35 +374,65 @@ mod tests {
     #[test]
     fn stage_edge_put_then_visible_for_src() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![1, 2]);
-        let out: Vec<_> = overlay.edges_for_src(&key("g"), "a").collect();
-        assert_eq!(out, vec![("knows", "b", &[1u8, 2u8][..])]);
-        assert!(!overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"));
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![1, 2])
+            .unwrap();
+        let out = overlay.edges_for_src(&key("g"), "a").unwrap();
+        assert_eq!(
+            out,
+            vec![("knows".to_string(), "b".to_string(), vec![1u8, 2u8])]
+        );
+        assert!(
+            !overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap()
+        );
     }
 
     #[test]
     fn stage_edge_delete_tombstones_and_clears_put() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![1]);
-        overlay.stage_edge_delete(key("g"), "a", "knows", "b");
-        assert!(overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"));
-        assert_eq!(overlay.edges_for_src(&key("g"), "a").count(), 0);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![1])
+            .unwrap();
+        overlay
+            .stage_edge_delete(key("g"), "a", "knows", "b")
+            .unwrap();
+        assert!(
+            overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap()
+        );
+        assert!(overlay.edges_for_src(&key("g"), "a").unwrap().is_empty());
     }
 
     #[test]
     fn stage_put_after_delete_clears_tombstone() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(key("g"), "a", "knows", "b");
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![9]);
-        assert!(!overlay.is_edge_tombstoned(&key("g"), "a", "knows", "b"));
-        assert_eq!(overlay.edges_for_src(&key("g"), "a").count(), 1);
+        overlay
+            .stage_edge_delete(key("g"), "a", "knows", "b")
+            .unwrap();
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![9])
+            .unwrap();
+        assert!(
+            !overlay
+                .is_edge_tombstoned(&key("g"), "a", "knows", "b")
+                .unwrap()
+        );
+        assert_eq!(overlay.edges_for_src(&key("g"), "a").unwrap().len(), 1);
     }
 
     #[test]
     fn edges_for_dst_returns_in_edges() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(key("g"), "a", "knows", "b", vec![]);
-        let out: Vec<_> = overlay.edges_for_dst(&key("g"), "b").collect();
-        assert_eq!(out, vec![("knows", "a", &[][..])]);
+        overlay
+            .stage_edge_put(key("g"), "a", "knows", "b", vec![])
+            .unwrap();
+        let out = overlay.edges_for_dst(&key("g"), "b").unwrap();
+        assert_eq!(
+            out,
+            vec![("knows".to_string(), "a".to_string(), Vec::new())]
+        );
     }
 }

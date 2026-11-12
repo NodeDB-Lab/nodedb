@@ -271,8 +271,10 @@ impl CoreLoop {
         if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_kv_ttl_side_effect(ctx, ttl_ms);
-        if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
+        if let Err(e) = self
+            .stage_kv_ttl_side_effect(ctx, ttl_ms)
+            .and_then(|()| self.stage_put(ctx, value.to_vec()))
+        {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)
@@ -287,17 +289,26 @@ impl CoreLoop {
         value: &[u8],
         ttl_ms: u64,
     ) -> Response {
-        if self.stage_kv_pk_present(ctx, key) {
-            return self.response_error(
-                ctx.task,
-                crate::data::executor::handlers::kv::crud::kv_duplicate_key(ctx.collection, key),
-            );
+        match self.stage_kv_pk_present(ctx, key) {
+            Ok(true) => {
+                return self.response_error(
+                    ctx.task,
+                    crate::data::executor::handlers::kv::crud::kv_duplicate_key(
+                        ctx.collection,
+                        key,
+                    ),
+                );
+            }
+            Ok(false) => {}
+            Err(e) => return self.response_error(ctx.task, e),
         }
         if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_kv_ttl_side_effect(ctx, ttl_ms);
-        if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
+        if let Err(e) = self
+            .stage_kv_ttl_side_effect(ctx, ttl_ms)
+            .and_then(|()| self.stage_put(ctx, value.to_vec()))
+        {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)
@@ -312,14 +323,18 @@ impl CoreLoop {
         value: &[u8],
         ttl_ms: u64,
     ) -> Response {
-        if self.stage_kv_pk_present(ctx, key) {
-            return self.stage_count_response(ctx.task, 0);
+        match self.stage_kv_pk_present(ctx, key) {
+            Ok(true) => return self.stage_count_response(ctx.task, 0),
+            Ok(false) => {}
+            Err(e) => return self.response_error(ctx.task, e),
         }
         if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_kv_ttl_side_effect(ctx, ttl_ms);
-        if let Err(e) = self.stage_put_capped(ctx, value.to_vec()) {
+        if let Err(e) = self
+            .stage_kv_ttl_side_effect(ctx, ttl_ms)
+            .and_then(|()| self.stage_put(ctx, value.to_vec()))
+        {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)
@@ -330,8 +345,12 @@ impl CoreLoop {
     /// True when `key` is present under base ∪ overlay (mirrors
     /// `stage_pk_present`, but against the KV engine). `pub(super)` so
     /// `stage_kv_ttl.rs` reuses this for `Expire`/`Persist` found checks.
-    pub(super) fn stage_kv_pk_present(&self, ctx: &StageCtx<'_>, key: &[u8]) -> bool {
-        match self.stage_overlay_pk(ctx) {
+    pub(super) fn stage_kv_pk_present(
+        &self,
+        ctx: &StageCtx<'_>,
+        key: &[u8],
+    ) -> crate::Result<bool> {
+        Ok(match self.stage_overlay_pk(ctx)? {
             super::constraint::OverlayPk::Present => true,
             super::constraint::OverlayPk::Absent => false,
             super::constraint::OverlayPk::Unstaged => {
@@ -340,7 +359,7 @@ impl CoreLoop {
                     .get(ctx.database_id, ctx.tid, ctx.collection, key, now_ms)
                     .is_some()
             }
-        }
+        })
     }
 
     /// The surrogate a staged write on `key` lands on, or `None` when the
@@ -355,16 +374,19 @@ impl CoreLoop {
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         key: &[u8],
-    ) -> Option<Surrogate> {
+    ) -> crate::Result<Option<Surrogate>> {
         let doc_id = kv_row_identity(key);
         let overlay = self.txn_overlays.get(&txn_id);
         // A staged row is found through its doc-id binding, so a staged put
         // resolves to the surrogate that binding names.
-        let staged = overlay.and_then(|o| {
-            let surrogate = o.surrogate_for_doc_id(coll_key, &doc_id)?;
-            Some((surrogate, o.get(coll_key, surrogate)?))
-        });
-        match staged {
+        let mut staged = None;
+        if let Some(o) = overlay
+            && let Some(surrogate) = o.surrogate_for_doc_id(coll_key, &doc_id)?
+            && let Some(value) = o.get(coll_key, surrogate)?
+        {
+            staged = Some((surrogate, value.into_owned()));
+        }
+        Ok(match staged {
             Some((surrogate, Staged::Put(_))) => Some(Surrogate::new(surrogate)),
             Some((_, Staged::Tombstone)) => None,
             None if !overlay.is_none_or(|o| o.base_visible(coll_key)) => None,
@@ -378,19 +400,25 @@ impl CoreLoop {
                     self.kv_read_now_ms(),
                 )
                 .map(|(_, s)| s),
-        }
+        })
     }
 
     /// Resolve the current value for `key` under base ∪ overlay, preferring
     /// a staged put/tombstone over the base KV engine. `pub(super)` so
     /// `stage_kv_atomic.rs` reuses this instead of re-deriving it.
-    pub(super) fn resolve_kv_current(&self, ctx: &StageCtx<'_>, key: &[u8]) -> Option<Vec<u8>> {
-        match self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .and_then(|o| o.get(&ctx.coll_key, ctx.surrogate.0))
-        {
-            Some(Staged::Put(body)) => Some(body.clone()),
+    pub(super) fn resolve_kv_current(
+        &self,
+        ctx: &StageCtx<'_>,
+        key: &[u8],
+    ) -> crate::Result<Option<Vec<u8>>> {
+        let staged = match self.txn_overlays.get(&ctx.txn_id) {
+            Some(o) => o
+                .get(&ctx.coll_key, ctx.surrogate.0)?
+                .map(std::borrow::Cow::into_owned),
+            None => None,
+        };
+        Ok(match staged {
+            Some(Staged::Put(body)) => Some(body),
             Some(Staged::Tombstone) => None,
             None if !self.stage_base_visible(ctx.txn_id, &ctx.coll_key) => None,
             None => {
@@ -398,7 +426,7 @@ impl CoreLoop {
                 self.kv_engine
                     .get(ctx.database_id, ctx.tid, ctx.collection, key, now_ms)
             }
-        }
+        })
     }
 }
 
@@ -477,7 +505,7 @@ mod tests {
         assert_eq!(
             core.txn_overlays
                 .get(&txn_id)
-                .and_then(|o| o.get_ttl(&cache_coll_key(1), 5)),
+                .and_then(|o| o.get_ttl(&cache_coll_key(1), 5).unwrap()),
             Some(StagedTtl::ExpireAt(1_030_000)),
             "a Put with ttl_ms > 0 must stage an absolute expiry instant"
         );
@@ -499,7 +527,7 @@ mod tests {
         assert_eq!(
             core.txn_overlays
                 .get(&txn_id)
-                .and_then(|o| o.get_ttl(&cache_coll_key(1), 5)),
+                .and_then(|o| o.get_ttl(&cache_coll_key(1), 5).unwrap()),
             None,
             "ttl_ms == 0 means persistent -- no StagedTtl entry at all"
         );

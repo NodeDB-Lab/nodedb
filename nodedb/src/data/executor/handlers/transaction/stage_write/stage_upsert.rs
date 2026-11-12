@@ -85,7 +85,7 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
-        if let Err(e) = self.stage_put_capped(ctx, stored_bytes) {
+        if let Err(e) = self.stage_put(ctx, stored_bytes) {
             return self.response_error(ctx.task, e);
         }
 

@@ -31,6 +31,7 @@ mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
+mod spill;
 mod storage_bytes;
 mod vector;
 mod vector_build;
@@ -94,6 +95,7 @@ pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
 pub(in crate::diag) use retention::{RetentionAutowireOrphaned, SequenceRestartFailed};
+pub(in crate::diag) use spill::SpillCleanupFailed;
 pub(in crate::diag) use storage_bytes::{
     StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
 };

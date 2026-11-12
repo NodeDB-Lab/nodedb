@@ -246,6 +246,9 @@ unicode-normalization = "0.1"
 # Fast hashing for integer keys (GROUP BY aggregation)
 rustc-hash = "2"
 
+# Hash maps looked up by a borrowed key form (spill-tier hot maps)
+hashbrown = "0.16"
+
 # Fast non-cryptographic hashing (xxHash3 for cluster key partitioning)
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

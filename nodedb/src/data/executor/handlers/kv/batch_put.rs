@@ -76,7 +76,7 @@ impl CoreLoop {
             intent,
             self.declared_columns_of(did, tid, collection),
             &self.crs_context(),
-            |key| self.kv_engine.get(did, tid, collection, key, now_ms),
+            |key| Ok(self.kv_engine.get(did, tid, collection, key, now_ms)),
         ) {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),

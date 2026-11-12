@@ -102,7 +102,17 @@ impl std::fmt::Display for StorageKey {
 ///
 /// A minted row renders its surrogate in decimal. A row with a declared
 /// `PRIMARY KEY` carries the user's own value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct RowIdentity(String);
 
 impl RowIdentity {

@@ -252,7 +252,7 @@ impl CoreLoop {
                 RowIdentity::for_surrogate(surrogate),
                 surrogate,
             );
-            if let Err(e) = self.stage_put_capped(&ctx, body) {
+            if let Err(e) = self.stage_put(&ctx, body) {
                 return self.response_error(task, e);
             }
             staged += 1;

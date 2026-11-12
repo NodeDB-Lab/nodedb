@@ -14,7 +14,7 @@ use nodedb_wal::record::RecordType;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{
-    GraphCollKey, GraphTxnOverlay, NodeLabelDelta,
+    EdgeValidTime, GraphCollKey, GraphTxnOverlay, NodeLabelDelta,
 };
 use crate::wal::{NodeLabelRedo, RedoSubRecord};
 
@@ -39,21 +39,17 @@ pub(super) fn serialize_graph_collection(
     ordinals: &EdgeOrdinals<'_>,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut puts: BTreeMap<(String, String, String), Vec<u8>> = BTreeMap::new();
-    for (src, label, dst, properties) in overlay.staged_edges_for_collection(coll_key) {
-        puts.insert(
-            (src.to_string(), label.to_string(), dst.to_string()),
-            properties.to_vec(),
-        );
+    let mut puts: BTreeMap<(String, String, String), (Vec<u8>, EdgeValidTime)> = BTreeMap::new();
+    for (src, label, dst, properties, valid) in overlay.staged_edges_for_collection(coll_key)? {
+        puts.insert((src, label, dst), (properties, valid));
     }
 
-    let mut deletes: BTreeSet<(String, String, String)> = BTreeSet::new();
-    for (src, label, dst) in overlay.staged_tombstones_for_collection(coll_key) {
-        deletes.insert((src.to_string(), label.to_string(), dst.to_string()));
-    }
+    let deletes: BTreeSet<(String, String, String)> = overlay
+        .staged_tombstones_for_collection(coll_key)?
+        .into_iter()
+        .collect();
 
-    for ((src, label, dst), properties) in puts {
-        let valid = overlay.staged_edge_valid_time(coll_key, &src, &label, &dst);
+    for ((src, label, dst), (properties, valid)) in puts {
         let identity_key = (
             collection.to_string(),
             src.clone(),
@@ -157,13 +153,14 @@ pub(super) fn serialize_node_label_deltas(
     ordinal_of: impl Fn(&str) -> crate::Result<i64>,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut deltas: BTreeMap<&str, &NodeLabelDelta> = BTreeMap::new();
-    for (node_id, delta) in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
+    let mut deltas: BTreeMap<String, NodeLabelDelta> = BTreeMap::new();
+    for item in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
+        let (node_id, delta) = item?;
         deltas.insert(node_id, delta);
     }
 
     for (node_id, delta) in deltas {
-        let system_from = Some(ordinal_of(node_id)?);
+        let system_from = Some(ordinal_of(&node_id)?);
         let parts = [
             (RecordType::GraphNodeLabelSet, &delta.added),
             (RecordType::GraphNodeLabelRemove, &delta.removed),
@@ -173,7 +170,7 @@ pub(super) fn serialize_node_label_deltas(
                 continue;
             }
             let payload = NodeLabelRedo {
-                node_id: node_id.to_string(),
+                node_id: node_id.clone(),
                 labels: sorted_labels(labels),
                 system_from,
                 exact: false,
@@ -404,7 +401,9 @@ mod tests {
     #[test]
     fn edge_put_emits_timestamped_tuple_with_surrogates() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", vec![1, 2, 3]);
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![1, 2, 3])
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         surrogates.insert(
@@ -445,7 +444,9 @@ mod tests {
     #[test]
     fn edge_put_without_bound_surrogates_is_typed_error() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", vec![]);
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![])
+            .unwrap();
 
         let surrogates = BTreeMap::new();
         let mut ops = Vec::new();
@@ -466,7 +467,9 @@ mod tests {
     #[test]
     fn edge_delete_emits_timestamped_redo() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         surrogates.insert(
@@ -510,7 +513,9 @@ mod tests {
     #[test]
     fn edge_delete_without_bound_surrogates_is_typed_error() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
         let key = (
             "g".to_string(),
             "a".to_string(),
@@ -537,9 +542,15 @@ mod tests {
     #[test]
     fn entries_emit_in_deterministic_edge_identity_order() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "c", "l", "z", vec![]);
-        overlay.stage_edge_put(coll_key("g"), "a", "l", "x", vec![]);
-        overlay.stage_edge_put(coll_key("g"), "b", "l", "y", vec![]);
+        overlay
+            .stage_edge_put(coll_key("g"), "c", "l", "z", vec![])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "l", "x", vec![])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "b", "l", "y", vec![])
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         for (s, d) in [("a", "x"), ("b", "y"), ("c", "z")] {
@@ -578,7 +589,9 @@ mod tests {
     #[test]
     fn node_label_set_emits_graph_node_label_set_subrecord() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
         let mut ops = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
@@ -599,7 +612,9 @@ mod tests {
     #[test]
     fn node_label_remove_emits_graph_node_label_remove_subrecord() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
         let mut ops = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
@@ -616,8 +631,12 @@ mod tests {
     #[test]
     fn node_label_added_and_removed_on_same_node_emit_both_subrecords() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_set(coll_key("g"), "n1", &["Robot".to_string()]);
-        overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(coll_key("g"), "n1", &["Robot".to_string()])
+            .unwrap();
+        overlay
+            .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
         let mut ops = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
@@ -638,18 +657,22 @@ mod tests {
         // Two overlays, same final delta, different HashSet insertion order —
         // the encoded redo sub-record bytes must be byte-identical.
         let mut overlay_a = GraphTxnOverlay::new();
-        overlay_a.stage_node_labels_set(
-            coll_key("g"),
-            "n1",
-            &["Zeta".to_string(), "Alpha".to_string(), "Mu".to_string()],
-        );
+        overlay_a
+            .stage_node_labels_set(
+                coll_key("g"),
+                "n1",
+                &["Zeta".to_string(), "Alpha".to_string(), "Mu".to_string()],
+            )
+            .unwrap();
 
         let mut overlay_b = GraphTxnOverlay::new();
-        overlay_b.stage_node_labels_set(
-            coll_key("g"),
-            "n1",
-            &["Mu".to_string(), "Zeta".to_string(), "Alpha".to_string()],
-        );
+        overlay_b
+            .stage_node_labels_set(
+                coll_key("g"),
+                "n1",
+                &["Mu".to_string(), "Zeta".to_string(), "Alpha".to_string()],
+            )
+            .unwrap();
 
         let mut ops_a = Vec::new();
         serialize_node_label_deltas(&overlay_a, &coll_key("g"), |_| Ok(123), &mut ops_a)

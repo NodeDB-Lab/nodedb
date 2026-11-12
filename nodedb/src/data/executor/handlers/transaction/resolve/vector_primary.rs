@@ -110,9 +110,10 @@ impl CoreLoop {
         }
 
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, &writes.field);
-        let entries: BTreeMap<u32, &Staged> = overlay.iter_for_collection(coll_key).collect();
-        let mut mutations = Vec::with_capacity(entries.len());
-        for (surrogate_u32, staged) in entries {
+        // The scan yields ascending surrogates, the order the record keeps.
+        let mut mutations = Vec::new();
+        for item in overlay.iter_for_collection(coll_key) {
+            let (surrogate_u32, staged) = item?;
             let surrogate = Surrogate::new(surrogate_u32);
             let base = if !truncated && self.vector_direct_node(&index_key, surrogate).is_some() {
                 Some(
@@ -128,7 +129,7 @@ impl CoreLoop {
             } else {
                 None
             };
-            match staged {
+            match &*staged {
                 Staged::Put(body) => {
                     let row = StagedVectorRow::from_bytes(body)?;
                     mutations.push(VectorResolvedMutation::Upsert {

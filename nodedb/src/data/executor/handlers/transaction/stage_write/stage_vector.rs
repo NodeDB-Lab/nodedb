@@ -305,13 +305,12 @@ impl CoreLoop {
         surrogate: Surrogate,
     ) -> Result<Option<VectorCurrentRow>, ErrorCode> {
         let staged = self
-            .txn_overlays
-            .get(&scope.txn_id)
-            .and_then(|o| o.get(&scope.coll_key, surrogate.0));
+            .staged_row(scope.txn_id, &scope.coll_key, surrogate.0)
+            .map_err(ErrorCode::from)?;
         match staged {
             Some(Staged::Tombstone) => return Ok(None),
             Some(Staged::Put(body)) => {
-                let row = StagedVectorRow::from_bytes(body).map_err(ErrorCode::from)?;
+                let row = StagedVectorRow::from_bytes(&body).map_err(ErrorCode::from)?;
                 let fields =
                     decode_payload_lowercased(&row.sidecar).map_err(|e| ErrorCode::Internal {
                         detail: format!(
@@ -474,7 +473,7 @@ impl CoreLoop {
         ) {
             return self.response_error(task, e);
         }
-        if let Err(e) = self.stage_put_capped(&ctx, staged) {
+        if let Err(e) = self.stage_put(&ctx, staged) {
             return self.response_error(task, e);
         }
         if !on_conflict_updates.is_empty() {
@@ -712,14 +711,10 @@ mod tests {
         );
         assert_eq!(affected(&up), 1);
         let coll_key = (DatabaseId::DEFAULT, TenantId::new(1), COLL.to_string());
-        let Some(Staged::Put(body)) = core
-            .txn_overlays
-            .get(&txn_id)
-            .and_then(|o| o.get(&coll_key, 3))
-        else {
+        let Some(Staged::Put(body)) = core.staged_row(txn_id, &coll_key, 3).expect("read") else {
             panic!("the upsert must leave a staged put");
         };
-        let row = StagedVectorRow::from_bytes(body).expect("decode");
+        let row = StagedVectorRow::from_bytes(&body).expect("decode");
         assert_eq!(row.vector, vec![0.0, 1.0]);
         let fields = decode_payload_lowercased(&row.sidecar).expect("sidecar");
         assert_eq!(fields.get("owner"), Some(&Value::String("bob".into())));

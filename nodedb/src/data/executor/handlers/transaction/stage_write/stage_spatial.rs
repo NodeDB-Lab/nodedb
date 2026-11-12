@@ -95,7 +95,7 @@ impl CoreLoop {
             RowIdentity::for_surrogate(surrogate),
             surrogate,
         );
-        if let Err(e) = self.stage_put_capped(&ctx, body) {
+        if let Err(e) = self.stage_put(&ctx, body) {
             return self.response_error(task, e);
         }
         self.stage_count_response(task, 1)
@@ -124,11 +124,13 @@ impl CoreLoop {
             RowIdentity::for_surrogate(surrogate),
             surrogate,
         );
-        self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
+        match self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,
-        );
-        self.stage_count_response(task, 1)
+        ) {
+            Ok(()) => self.stage_count_response(task, 1),
+            Err(e) => self.response_error(task, e),
+        }
     }
 }

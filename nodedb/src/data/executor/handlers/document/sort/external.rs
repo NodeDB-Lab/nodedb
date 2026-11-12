@@ -11,6 +11,10 @@ use nodedb_physical::physical_plan::SortKeySpec;
 use tracing::debug;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::spill::cleanup::{
+    SpillKind, remove_empty_spill_dir, remove_spill_file,
+};
+use crate::data::executor::handlers::spill::error::SpillError;
 use crate::data::io::uring_seq_reader::UringSeqReader;
 use crate::data::io::uring_writer::UringWriter;
 
@@ -149,27 +153,63 @@ impl CoreLoop {
             }
         }
 
+        drop(readers);
+        cleanup.finish()?;
         Ok(result)
     }
 }
 
-/// Drop guard that unlinks named sort spill files (and their directory).
+/// Guard that unlinks named sort spill files and their directory.
 ///
 /// Named spill files do not auto-unlink (unlike tempfile handles), so each is
-/// removed explicitly. Declared before the [`RunReader`]s in `external_sort` so
-/// it Drops last — after the readers' fds close. Unlink is a bounded metadata
-/// op, not bulk content I/O, so it stays plain `std::fs`.
+/// removed explicitly. A finished sort calls [`SortSpillCleanup::finish`],
+/// which returns a removal error. A sort that fails part way drops the guard:
+/// the drop removes what it can, and each removal that fails files its
+/// faultbox report while the sort's own error propagates. Unlink is a bounded
+/// metadata op, not bulk content I/O, so it stays plain `std::fs`.
 struct SortSpillCleanup {
     dir: PathBuf,
     paths: Vec<PathBuf>,
 }
 
+impl SortSpillCleanup {
+    /// Remove every run file, then the directory.
+    fn remove(&mut self) -> Result<(), SpillError> {
+        let mut first_error = None;
+        for path in self.paths.drain(..) {
+            if let Err(e) = remove_spill_file(SpillKind::Sort, &path) {
+                first_error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = remove_empty_spill_dir(SpillKind::Sort, &self.dir) {
+            first_error.get_or_insert(e);
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove the sort's spill files. A removal that fails is an error.
+    fn finish(mut self) -> crate::Result<()> {
+        let removed = self.remove();
+        self.paths.clear();
+        removed?;
+        Ok(())
+    }
+}
+
 impl Drop for SortSpillCleanup {
     fn drop(&mut self) {
-        for p in &self.paths {
-            let _ = std::fs::remove_file(p);
+        if self.paths.is_empty() {
+            return;
         }
-        let _ = std::fs::remove_dir(&self.dir);
+        // Reached only when the sort fails part way and returns its own
+        // error. Each removal error files its faultbox report at the
+        // removal site.
+        if let Err(e) = self.remove() {
+            tracing::error!(error = %e, "external sort: spill files left after a failed sort");
+        }
     }
 }
 

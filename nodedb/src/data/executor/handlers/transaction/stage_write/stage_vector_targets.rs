@@ -106,8 +106,10 @@ impl CoreLoop {
                     scope.collection,
                     &filters,
                 )? {
-                    let superseded =
-                        overlay.is_some_and(|o| o.get(&scope.coll_key, surrogate.0).is_some());
+                    let superseded = match overlay {
+                        Some(o) => o.get(&scope.coll_key, surrogate.0)?.is_some(),
+                        None => false,
+                    };
                     if superseded {
                         continue;
                     }
@@ -120,8 +122,9 @@ impl CoreLoop {
                 if let Some(overlay) = overlay {
                     let identity_column =
                         self.identity_column(scope.database_id, scope.tid, scope.collection);
-                    for (surrogate, staged) in overlay.iter_for_collection(&scope.coll_key) {
-                        let Staged::Put(_) = staged else {
+                    for item in overlay.iter_for_collection(&scope.coll_key) {
+                        let (surrogate, staged) = item?;
+                        let Staged::Put(_) = &*staged else {
                             continue;
                         };
                         let surrogate = Surrogate::new(surrogate);
@@ -199,11 +202,13 @@ impl CoreLoop {
         }
         let count = doomed.len();
         for (surrogate, identity) in doomed {
-            self.txn_overlay_mut(txn_id).insert_tombstone(
+            if let Err(e) = self.txn_overlay_mut(txn_id).insert_tombstone(
                 scope.coll_key.clone(),
                 surrogate.0,
                 &identity,
-            );
+            ) {
+                return self.response_error(task, e);
+            }
         }
         self.stage_count_response(task, count)
     }
@@ -300,7 +305,7 @@ impl CoreLoop {
         let count = planned.len();
         for (surrogate, staged, identity) in planned {
             let row_ctx = StageCtx::new(task, tid, txn_id, collection, identity, surrogate);
-            if let Err(e) = self.stage_put_capped(&row_ctx, staged) {
+            if let Err(e) = self.stage_put(&row_ctx, staged) {
                 return self.response_error(task, e);
             }
         }

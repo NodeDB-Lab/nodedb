@@ -87,9 +87,10 @@ impl CoreLoop {
                 .enumerate()
                 .map(|(idx, h)| (h.id, idx))
                 .collect();
-            for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
+            for item in overlay.iter_for_collection(&coll_key) {
+                let (surrogate, staged) = item?;
                 let key = HybridFusionKey::for_surrogate(Surrogate::new(surrogate));
-                let scored = match staged {
+                let scored = match &*staged {
                     Staged::Tombstone => None,
                     Staged::Put(body) => {
                         let doc = self.decode_indexed_body(&coll_key, body)?;

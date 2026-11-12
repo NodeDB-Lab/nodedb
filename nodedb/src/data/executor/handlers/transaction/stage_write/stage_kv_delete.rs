@@ -48,8 +48,10 @@ impl CoreLoop {
             // An absent key (never present, already staged-deleted, or hidden
             // by a staged TRUNCATE) matches PostgreSQL/Document DELETE
             // semantics for a missing key: DELETE 0, not an error.
-            let Some(surrogate) = self.resolve_kv_stage_surrogate(txn_id, &coll_key, key) else {
-                continue;
+            let surrogate = match self.resolve_kv_stage_surrogate(txn_id, &coll_key, key) {
+                Ok(Some(surrogate)) => surrogate,
+                Ok(None) => continue,
+                Err(e) => return self.response_error(task, e),
             };
 
             // The row being removed is the image the write policy decides, and
@@ -59,12 +61,15 @@ impl CoreLoop {
                 rls_write_check.decision(),
                 nodedb_types::WriteGateDecision::AdmitAll
             ) {
-                let current = match self
-                    .txn_overlays
-                    .get(&txn_id)
-                    .and_then(|o| o.get_by_doc_id(&coll_key, &doc_id))
-                {
-                    Some(Staged::Put(body)) => Some(body.clone()),
+                let staged = match self.txn_overlays.get(&txn_id) {
+                    Some(o) => match o.get_by_doc_id(&coll_key, &doc_id) {
+                        Ok(staged) => staged.map(std::borrow::Cow::into_owned),
+                        Err(e) => return self.response_error(task, e),
+                    },
+                    None => None,
+                };
+                let current = match staged {
+                    Some(Staged::Put(body)) => Some(body),
                     Some(Staged::Tombstone) => None,
                     None => {
                         let now_ms = self.kv_read_now_ms();
@@ -86,8 +91,12 @@ impl CoreLoop {
                 }
             }
 
-            self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key, surrogate.0, &doc_id);
+            if let Err(e) =
+                self.txn_overlay_mut(txn_id)
+                    .insert_tombstone(coll_key, surrogate.0, &doc_id)
+            {
+                return self.response_error(task, e);
+            }
             deleted += 1;
         }
         self.stage_count_response(task, deleted)

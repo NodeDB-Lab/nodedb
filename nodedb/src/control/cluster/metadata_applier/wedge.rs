@@ -67,7 +67,6 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         }
         // Not provably a pure function of the entry and persisted state.
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::DeadlineExceeded { .. }

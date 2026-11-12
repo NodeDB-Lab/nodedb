@@ -59,6 +59,10 @@ impl CoreLoop {
         governor: Arc<nodedb_mem::MemoryGovernor>,
         array_catalog: ArrayCatalogHandle,
     ) -> crate::Result<Self> {
+        // Spill files are never durable state: every spill directory this
+        // core left behind goes before the core serves a request.
+        crate::data::executor::handlers::spill::cleanup::sweep_core_spill_dirs(data_dir, core_id)?;
+
         let sparse_path =
             crate::data::executor::snapshot::layout::sparse_store_path(data_dir, core_id);
         let sparse = SparseEngine::open(&sparse_path)?;

@@ -6,7 +6,6 @@ use nodedb_types::error::sqlstate;
 use pgwire::error::{ErrorInfo, PgWireError};
 
 use crate::OllpExhaustedCause;
-use crate::bridge::envelope::{ErrorCode, Status};
 use crate::control::server::response_shape::types::DmlFoldError;
 
 pub(crate) use super::numeric_sqlstate::numeric_code_to_sqlstate;
@@ -178,8 +177,7 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             detail.clone(),
         ),
         // A resource limit, `54000` as PostgreSQL reports one.
-        crate::Error::TxnOverlayMemoryExceeded { .. }
-        | crate::Error::ExecutionLimitExceeded { .. } => {
+        crate::Error::ExecutionLimitExceeded { .. } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, err.to_string())
         }
         // Control-Plane twins of Data-Plane codes take the SQLSTATE their
@@ -470,36 +468,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CascadeCycle { .. } => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
-    }
-}
-
-/// Create a notice response (WARNING level).
-pub fn notice_warning(message: &str) -> pgwire::messages::response::NoticeResponse {
-    pgwire::messages::response::NoticeResponse::from(pgwire::error::ErrorInfo::new(
-        "WARNING".to_owned(),
-        sqlstate::WARNING.to_owned(),
-        message.to_owned(),
-    ))
-}
-
-/// Map a Data Plane response status + error code to a SQLSTATE triple.
-pub fn response_status_to_sqlstate(
-    status: Status,
-    error_code: Option<&ErrorCode>,
-) -> Option<(&'static str, &'static str, String)> {
-    match status {
-        Status::Ok | Status::Partial => None,
-        Status::Error => {
-            if let Some(code) = error_code {
-                Some(crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code))
-            } else {
-                Some((
-                    "ERROR",
-                    sqlstate::INTERNAL_ERROR,
-                    "unknown data plane error".into(),
-                ))
-            }
-        }
     }
 }
 

@@ -154,14 +154,15 @@ impl CoreLoop {
         };
         out.truncated = overlay.is_truncated(coll_key);
 
-        for (_surrogate, staged) in overlay.iter_for_collection(coll_key) {
+        for item in overlay.iter_for_collection(coll_key) {
+            let (_surrogate, staged) = item?;
             if out.rows.len() >= limit {
                 break;
             }
             // A base timeseries row carries no surrogate, so a staged
             // `Tombstone` has nothing to remove here — skip it. Only staged
             // inserts (`Put`) contribute new rows.
-            let Staged::Put(body) = staged else {
+            let Staged::Put(body) = &*staged else {
                 continue;
             };
             let row = decode_staged_row(body)?;

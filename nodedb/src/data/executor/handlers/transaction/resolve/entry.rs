@@ -633,10 +633,14 @@ mod tests {
         let overlay_bytes = match core
             .txn_overlays
             .get(&txn)
-            .and_then(|o| o.get_by_doc_id(&coll_key("counters"), &kv_row_identity(b"c")))
+            .and_then(|o| {
+                o.get_by_doc_id(&coll_key("counters"), &kv_row_identity(b"c"))
+                    .unwrap()
+                    .map(std::borrow::Cow::into_owned)
+            })
             .expect("staged incr present")
         {
-            Staged::Put(v) => v.clone(),
+            Staged::Put(v) => v,
             Staged::Tombstone => panic!("incr must stage a value"),
         };
 
@@ -670,18 +674,22 @@ mod tests {
         let expire_at = 1_700_000_000_000u64;
         {
             let overlay = core.txn_overlay_mut(txn);
-            overlay.insert_put(
-                coll_key("sessions"),
-                7,
-                &kv_row_identity(b"s1"),
-                b"v1".to_vec(),
-            );
-            overlay.set_ttl(
-                coll_key("sessions"),
-                7,
-                &kv_row_identity(b"s1"),
-                StagedTtl::ExpireAt(expire_at),
-            );
+            overlay
+                .insert_put(
+                    coll_key("sessions"),
+                    7,
+                    &kv_row_identity(b"s1"),
+                    b"v1".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .set_ttl(
+                    coll_key("sessions"),
+                    7,
+                    &kv_row_identity(b"s1"),
+                    StagedTtl::ExpireAt(expire_at),
+                )
+                .unwrap();
         }
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("sessions")]);
@@ -713,12 +721,14 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(3);
 
-        core.txn_overlay_mut(txn).insert_put(
-            coll_key("kvc"),
-            9,
-            &kv_row_identity(b"k9"),
-            b"body".to_vec(),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("kvc"),
+                9,
+                &kv_row_identity(b"k9"),
+                b"body".to_vec(),
+            )
+            .unwrap();
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
         let redo = decode_redo(&resp);
@@ -741,7 +751,8 @@ mod tests {
         let txn = TxnId::new(4);
 
         core.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("kvc"), 11, &kv_row_identity(b"gone"));
+            .insert_tombstone(coll_key("kvc"), 11, &kv_row_identity(b"gone"))
+            .unwrap();
 
         let resp = core.execute_resolve_txn(
             &task,
@@ -793,12 +804,14 @@ mod tests {
             .get(DatabaseId::DEFAULT.as_u64(), TID, "kvc", b"k", now);
         assert_eq!(before.as_deref(), Some(b"base".as_slice()));
 
-        core.txn_overlay_mut(txn).insert_put(
-            coll_key("kvc"),
-            1,
-            &kv_row_identity(b"k"),
-            b"staged".to_vec(),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("kvc"),
+                1,
+                &kv_row_identity(b"k"),
+                b"staged".to_vec(),
+            )
+            .unwrap();
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
         assert_eq!(resp.status, Status::Ok);
@@ -819,11 +832,13 @@ mod tests {
 
         // A DELETE ... RETURNING stages like any other point delete: the overlay
         // holds a tombstone, and resolve serializes it from there.
-        core.txn_overlay_mut(txn).insert_tombstone(
-            coll_key("notes"),
-            surrogate,
-            &RowIdentity::from_user_key("gone"),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_tombstone(
+                coll_key("notes"),
+                surrogate,
+                &RowIdentity::from_user_key("gone"),
+            )
+            .unwrap();
 
         let doc_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -922,10 +937,12 @@ mod tests {
         let overlay = core.txn_overlays.get(&txn).expect("overlay present");
         match overlay
             .get(&coll_key("notes"), surrogate)
+            .unwrap()
+            .map(std::borrow::Cow::into_owned)
             .expect("row staged")
         {
             Staged::Put(body) => assert_eq!(
-                staged_name(body).as_deref(),
+                staged_name(&body).as_deref(),
                 Some("bob"),
                 "overlay holds the resolved post-update post-image"
             ),
@@ -983,10 +1000,12 @@ mod tests {
         for s in [1u32, 2u32] {
             match overlay
                 .get(&coll_key("notes"), s)
+                .unwrap()
+                .map(std::borrow::Cow::into_owned)
                 .expect("row staged per-surrogate")
             {
                 Staged::Put(body) => assert_eq!(
-                    staged_name(body).as_deref(),
+                    staged_name(&body).as_deref(),
                     Some("new"),
                     "each matched row is staged with the applied update"
                 ),
@@ -1044,6 +1063,8 @@ mod tests {
                 matches!(
                     overlay
                         .get(&coll_key("notes"), s)
+                        .unwrap()
+                        .as_deref()
                         .expect("row staged per-surrogate"),
                     Staged::Tombstone
                 ),
@@ -1062,18 +1083,22 @@ mod tests {
         // leaves them; a RETURNING clause does not change the overlay contents.
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(
-                coll_key("notes"),
-                1,
-                &RowIdentity::from_user_key("u1"),
-                schemaless_body("bob"),
-            );
-            overlay.insert_put(
-                coll_key("notes"),
-                2,
-                &RowIdentity::from_user_key("u2"),
-                schemaless_body("bob"),
-            );
+            overlay
+                .insert_put(
+                    coll_key("notes"),
+                    1,
+                    &RowIdentity::from_user_key("u1"),
+                    schemaless_body("bob"),
+                )
+                .unwrap();
+            overlay
+                .insert_put(
+                    coll_key("notes"),
+                    2,
+                    &RowIdentity::from_user_key("u2"),
+                    schemaless_body("bob"),
+                )
+                .unwrap();
         }
 
         // Serializes the staged post-images from the overlay.
@@ -1451,14 +1476,15 @@ mod tests {
         );
         let staged = src.execute_stage_write(&make_stage_task(txn), TID, &upsert);
         assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
-        let staged_sidecar = match src
-            .txn_overlays
-            .get(&txn)
-            .and_then(|overlay| overlay.get(&coll_key("vp"), 31))
-        {
+        let staged_sidecar = match src.txn_overlays.get(&txn).and_then(|overlay| {
+            overlay
+                .get(&coll_key("vp"), 31)
+                .unwrap()
+                .map(std::borrow::Cow::into_owned)
+        }) {
             Some(Staged::Put(body)) => {
                 crate::data::executor::handlers::transaction::overlay::StagedVectorRow::from_bytes(
-                    body,
+                    &body,
                 )
                 .expect("decode staged row")
                 .sidecar
@@ -1747,12 +1773,14 @@ mod tests {
         let surrogate = 7u32;
         let row_key = storage_key(surrogate);
 
-        src.txn_overlay_mut(txn).insert_put(
-            coll_key("sdocs"),
-            surrogate,
-            &RowIdentity::from_user_key("row1"),
-            strict_tuple(surrogate as i64, "elephant"),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("sdocs"),
+                surrogate,
+                &RowIdentity::from_user_key("row1"),
+                strict_tuple(surrogate as i64, "elephant"),
+            )
+            .unwrap();
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("sdocs")]);
         let redo = decode_redo(&resp);
@@ -1798,12 +1826,14 @@ mod tests {
         let row_key = storage_key(surrogate);
         let body = schemaless_body("alice");
 
-        src.txn_overlay_mut(txn).insert_put(
-            coll_key("notes"),
-            surrogate,
-            &RowIdentity::from_user_key("userpk"),
-            body,
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("notes"),
+                surrogate,
+                &RowIdentity::from_user_key("userpk"),
+                body,
+            )
+            .unwrap();
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
         let redo = decode_redo(&resp);
@@ -1838,11 +1868,13 @@ mod tests {
         let surrogate = 11u32;
         let row_key = storage_key(surrogate);
 
-        src.txn_overlay_mut(txn).insert_tombstone(
-            coll_key("notes"),
-            surrogate,
-            &RowIdentity::from_user_key("gone"),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_tombstone(
+                coll_key("notes"),
+                surrogate,
+                &RowIdentity::from_user_key("gone"),
+            )
+            .unwrap();
 
         let delete_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -2009,12 +2041,14 @@ mod tests {
             Some(stored_schemaless_body("base").as_slice())
         );
 
-        core.txn_overlay_mut(txn).insert_put(
-            coll_key("notes"),
-            surrogate,
-            &RowIdentity::from_user_key("userpk"),
-            schemaless_body("staged"),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("notes"),
+                surrogate,
+                &RowIdentity::from_user_key("userpk"),
+                schemaless_body("staged"),
+            )
+            .unwrap();
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
         assert_eq!(resp.status, Status::Ok);
@@ -2041,13 +2075,17 @@ mod tests {
 
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec());
-            overlay.insert_put(
-                coll_key("notes"),
-                doc_surrogate,
-                &RowIdentity::from_user_key("userpk"),
-                schemaless_body("bob"),
-            );
+            overlay
+                .insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec())
+                .unwrap();
+            overlay
+                .insert_put(
+                    coll_key("notes"),
+                    doc_surrogate,
+                    &RowIdentity::from_user_key("userpk"),
+                    schemaless_body("bob"),
+                )
+                .unwrap();
         }
 
         let resp = src.execute_resolve_txn(
@@ -2099,19 +2137,25 @@ mod tests {
         let expire_at = crate::engine::kv::current_ms() + 3_600_000;
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"live"), b"V".to_vec());
-            overlay.set_ttl(
-                coll_key("kvc"),
-                1,
-                &kv_row_identity(b"live"),
-                StagedTtl::ExpireAt(expire_at),
-            );
-            overlay.insert_put(
-                coll_key("kvc"),
-                2,
-                &kv_row_identity(b"plain"),
-                b"P".to_vec(),
-            );
+            overlay
+                .insert_put(coll_key("kvc"), 1, &kv_row_identity(b"live"), b"V".to_vec())
+                .unwrap();
+            overlay
+                .set_ttl(
+                    coll_key("kvc"),
+                    1,
+                    &kv_row_identity(b"live"),
+                    StagedTtl::ExpireAt(expire_at),
+                )
+                .unwrap();
+            overlay
+                .insert_put(
+                    coll_key("kvc"),
+                    2,
+                    &kv_row_identity(b"plain"),
+                    b"P".to_vec(),
+                )
+                .unwrap();
         }
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
@@ -2237,10 +2281,9 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(30);
 
-        src.graph_txn_overlays
-            .entry(txn)
-            .or_default()
-            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![9, 9]);
+        src.graph_txn_overlay_mut(txn)
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![9, 9])
+            .unwrap();
 
         let plan = graph_edge_put_plan("g", "a", "knows", "b", 10, 20);
         let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -2302,10 +2345,9 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(32);
 
-        src.graph_txn_overlays
-            .entry(txn)
-            .or_default()
-            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![]);
+        src.graph_txn_overlay_mut(txn)
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![])
+            .unwrap();
 
         let plan = graph_edge_put_plan("g", "x", "other", "y", 1, 2);
         let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -2323,10 +2365,9 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(33);
 
-        src.graph_txn_overlays
-            .entry(txn)
-            .or_default()
-            .stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        src.graph_txn_overlay_mut(txn)
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
 
         let plan = PhysicalPlan::Graph(GraphOp::EdgeDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "g"),
@@ -2441,10 +2482,9 @@ mod tests {
             },
         );
 
-        core.graph_txn_overlays
-            .entry(txn)
-            .or_default()
-            .stage_edge_put(coll_key("g"), "a", "knows", "b", b"staged".to_vec());
+        core.graph_txn_overlay_mut(txn)
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", b"staged".to_vec())
+            .unwrap();
 
         let plan = graph_edge_put_plan("g", "a", "knows", "b", 1, 2);
         let resp = core.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -2480,17 +2520,18 @@ mod tests {
 
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(
-                coll_key("notes"),
-                doc_surrogate,
-                &RowIdentity::from_user_key("userpk"),
-                schemaless_body("carol"),
-            );
+            overlay
+                .insert_put(
+                    coll_key("notes"),
+                    doc_surrogate,
+                    &RowIdentity::from_user_key("userpk"),
+                    schemaless_body("carol"),
+                )
+                .unwrap();
         }
-        src.graph_txn_overlays
-            .entry(txn)
-            .or_default()
-            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![]);
+        src.graph_txn_overlay_mut(txn)
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![])
+            .unwrap();
 
         let resp = src.execute_resolve_txn(
             &task,
@@ -2757,9 +2798,15 @@ mod tests {
 
         {
             let overlay = src.graph_txn_overlay_mut(txn);
-            overlay.stage_edge_put(coll_key("g"), "c", "l", "z", vec![]);
-            overlay.stage_edge_put(coll_key("g"), "a", "l", "x", vec![]);
-            overlay.stage_edge_put(coll_key("g"), "b", "l", "y", vec![]);
+            overlay
+                .stage_edge_put(coll_key("g"), "c", "l", "z", vec![])
+                .unwrap();
+            overlay
+                .stage_edge_put(coll_key("g"), "a", "l", "x", vec![])
+                .unwrap();
+            overlay
+                .stage_edge_put(coll_key("g"), "b", "l", "y", vec![])
+                .unwrap();
         }
         let plans = [
             graph_edge_put_plan("g", "a", "l", "x", 1, 2),
@@ -3545,12 +3592,9 @@ mod tests {
         let txn = TxnId::new(47);
 
         // Stage the KV write into the overlay (overlay-driven serializer).
-        src.txn_overlay_mut(txn).insert_put(
-            coll_key("kvc"),
-            1,
-            &kv_row_identity(b"k"),
-            b"V".to_vec(),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec())
+            .unwrap();
 
         // Stage the columnar row into the overlay (overlay-driven serializer).
         let columnar = columnar_insert_plan("cevents", columnar_row("a", 7, "x"), 22, Vec::new());
@@ -3869,12 +3913,9 @@ mod tests {
         let txn = TxnId::new(44);
         let surrogate = 13u32;
 
-        src.txn_overlay_mut(txn).insert_put(
-            coll_key("kvc"),
-            1,
-            &kv_row_identity(b"k"),
-            b"V".to_vec(),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec())
+            .unwrap();
 
         let plans = [
             kv_write_plan("kvc"),
@@ -4144,7 +4185,7 @@ mod tests {
         assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
         let overlay = core.txn_overlays.get(&txn).expect("overlay");
         assert!(
-            overlay.get(&coll_key("m"), 5).is_none(),
+            overlay.get(&coll_key("m"), 5).unwrap().as_deref().is_none(),
             "DO NOTHING stages no row over an existing key"
         );
 
@@ -4199,26 +4240,36 @@ mod tests {
         }
         {
             let overlay = core.txn_overlay_mut(txn);
-            overlay.insert_put(
-                coll_key("netkv"),
-                1,
-                &kv_row_identity(b"inserted"),
-                b"v".to_vec(),
-            );
-            overlay.insert_put(
-                coll_key("netkv"),
-                2,
-                &kv_row_identity(b"updated"),
-                b"v".to_vec(),
-            );
-            overlay.insert_tombstone(coll_key("netkv"), 3, &kv_row_identity(b"deleted"));
-            overlay.insert_put(
-                coll_key("netkv"),
-                4,
-                &kv_row_identity(b"transient"),
-                b"v".to_vec(),
-            );
-            overlay.insert_tombstone(coll_key("netkv"), 4, &kv_row_identity(b"transient"));
+            overlay
+                .insert_put(
+                    coll_key("netkv"),
+                    1,
+                    &kv_row_identity(b"inserted"),
+                    b"v".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .insert_put(
+                    coll_key("netkv"),
+                    2,
+                    &kv_row_identity(b"updated"),
+                    b"v".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .insert_tombstone(coll_key("netkv"), 3, &kv_row_identity(b"deleted"))
+                .unwrap();
+            overlay
+                .insert_put(
+                    coll_key("netkv"),
+                    4,
+                    &kv_row_identity(b"transient"),
+                    b"v".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .insert_tombstone(coll_key("netkv"), 4, &kv_row_identity(b"transient"))
+                .unwrap();
         }
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("netkv")]);
@@ -4256,11 +4307,21 @@ mod tests {
     fn stage_document_writes(core: &mut CoreLoop, txn: TxnId, collection: &str) {
         let overlay = core.txn_overlay_mut(txn);
         let id = RowIdentity::from_user_key;
-        overlay.insert_put(coll_key(collection), 1, &id("new"), schemaless_body("n"));
-        overlay.insert_put(coll_key(collection), 2, &id("upd"), schemaless_body("u"));
-        overlay.insert_tombstone(coll_key(collection), 3, &id("del"));
-        overlay.insert_put(coll_key(collection), 4, &id("gone"), schemaless_body("g"));
-        overlay.insert_tombstone(coll_key(collection), 4, &id("gone"));
+        overlay
+            .insert_put(coll_key(collection), 1, &id("new"), schemaless_body("n"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key(collection), 2, &id("upd"), schemaless_body("u"))
+            .unwrap();
+        overlay
+            .insert_tombstone(coll_key(collection), 3, &id("del"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key(collection), 4, &id("gone"), schemaless_body("g"))
+            .unwrap();
+        overlay
+            .insert_tombstone(coll_key(collection), 4, &id("gone"))
+            .unwrap();
     }
 
     fn expected_document_kinds() -> std::collections::BTreeMap<String, crate::wal::RedoRowKind> {
@@ -4343,12 +4404,14 @@ mod tests {
 
         let (mut core, _dir) = make_core();
         let txn = TxnId::new(62);
-        core.txn_overlay_mut(txn).insert_put(
-            coll_key("boards"),
-            7,
-            &RowIdentity::from_user_key("c1"),
-            schemaless_body("card"),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_put(
+                coll_key("boards"),
+                7,
+                &RowIdentity::from_user_key("c1"),
+                schemaless_body("card"),
+            )
+            .unwrap();
         let upsert = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "boards"),
             document_id: "c1".to_owned(),

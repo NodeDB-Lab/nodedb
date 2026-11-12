@@ -23,7 +23,9 @@
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
+use super::overlay_gauge::txn_spill_dir;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::spill::cleanup::{SpillKind, remove_spill_dir};
 use crate::types::TxnId;
 
 /// Conservative logical-nanosecond lease after which an untouched per-txn
@@ -73,12 +75,15 @@ impl CoreLoop {
     }
 
     /// Release all staging state for `txn_id`: the value/TTL overlay, the
-    /// parallel GRAPH and ARRAY overlays, its savepoint records, its
-    /// timeseries resolve holds, and any
+    /// parallel GRAPH and ARRAY overlays, their spill directory, its
+    /// savepoint records, its timeseries resolve holds, and any
     /// still-empty columnar engines this transaction auto-created during
     /// staging. Decrements the
     /// `active_txn_overlays` gauge by the number of overlays removed and
     /// returns that count.
+    ///
+    /// Every in-memory release runs first. A spill directory that cannot be
+    /// removed then files a faultbox report and returns the error.
     ///
     /// The single canonical teardown, shared by `MetaOp::DropTxnOverlay`
     /// (commit/rollback) and the lease reaper so the two can never drift. The
@@ -86,7 +91,10 @@ impl CoreLoop {
     /// a rolled-back (or reaped) txn's auto-created engine never had rows leave
     /// the overlay, so its memtable is empty and the phantom engine is dropped;
     /// a committed txn populated the memtable before this runs, so it survives.
-    pub(in crate::data::executor) fn drop_overlay_entry(&mut self, txn_id: TxnId) -> u64 {
+    pub(in crate::data::executor) fn drop_overlay_entry(
+        &mut self,
+        txn_id: TxnId,
+    ) -> crate::Result<u64> {
         let removed = u64::from(self.txn_overlays.remove(&txn_id).is_some())
             + u64::from(self.graph_txn_overlays.remove(&txn_id).is_some())
             + u64::from(self.array_txn_overlays.remove(&txn_id).is_some());
@@ -112,7 +120,11 @@ impl CoreLoop {
                 }
             }
         }
-        removed
+        remove_spill_dir(
+            SpillKind::Txn,
+            &txn_spill_dir(&self.data_dir, self.core_id, txn_id),
+        )?;
+        Ok(removed)
     }
 
     /// Reclaim per-txn staging overlays whose lease has expired.
@@ -175,8 +187,21 @@ impl CoreLoop {
             return;
         }
         let reaped = expired.len();
+        let mut cleanup_errors = 0usize;
         for txn_id in expired {
-            self.drop_overlay_entry(txn_id);
+            // The release reports a spill directory it cannot remove at its
+            // detection site. The reaper counts the failures and goes on: the
+            // overlay itself is gone, and the next tick reaps the rest.
+            if self.drop_overlay_entry(txn_id).is_err() {
+                cleanup_errors += 1;
+            }
+        }
+        if cleanup_errors > 0 {
+            tracing::error!(
+                core = self.core_id,
+                cleanup_errors,
+                "overlay lease GC: spill directories of reaped transactions were not removed"
+            );
         }
         tracing::warn!(
             core = self.core_id,

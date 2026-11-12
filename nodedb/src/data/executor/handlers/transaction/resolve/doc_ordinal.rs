@@ -61,15 +61,11 @@ impl CoreLoop {
         txn_ordinal: i64,
     ) -> crate::Result<()> {
         let coll_key = (database_id, TenantId::new(tid), collection.to_string());
-        let mut writes: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
+        let mut writes: Vec<(RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
             Some(overlay) => overlay
-                .iter_doc_entries_for_collection(&coll_key)
-                .filter_map(|(doc_id, _staged)| {
-                    overlay
-                        .surrogate_for_doc_id(&coll_key, doc_id)
-                        .map(|surrogate| (doc_id, surrogate))
-                })
-                .collect(),
+                .iter_staged_bindings_for_collection(&coll_key)
+                .map(|item| item.map(|(doc_id, surrogate, _staged)| (doc_id, surrogate)))
+                .collect::<crate::Result<_>>()?,
             None => Vec::new(),
         };
         writes.sort();
@@ -94,7 +90,7 @@ impl CoreLoop {
         }
         if let Some(overlay) = self.txn_overlays.get_mut(&txn_id) {
             for (surrogate, stamp) in stamps {
-                overlay.set_bitemporal(&coll_key, surrogate, stamp);
+                overlay.set_bitemporal(&coll_key, surrogate, stamp)?;
             }
         }
         Ok(())

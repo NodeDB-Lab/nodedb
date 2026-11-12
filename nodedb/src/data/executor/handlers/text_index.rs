@@ -83,8 +83,9 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
-        for (_, staged) in overlay.iter_for_collection(&config_key) {
-            let Staged::Put(body) = staged else {
+        for item in overlay.iter_for_collection(&config_key) {
+            let (_, staged) = item?;
+            let Staged::Put(body) = &*staged else {
                 continue;
             };
             let Some(doc) = self.decode_indexed_body(&config_key, body)? else {

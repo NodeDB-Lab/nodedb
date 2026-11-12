@@ -96,10 +96,12 @@ impl CoreLoop {
                 // before the write is staged, so no row image is projected here.
                 returning: _,
                 rls_filters: _,
-            } => {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_field_set(&ctx, key, updates, *if_present, rls_write_check)
-            }
+            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                Ok(ctx) => {
+                    self.stage_kv_field_set(&ctx, key, updates, *if_present, rls_write_check)
+                }
+                Err(e) => self.response_error(task, e),
+            },
             KvOp::Transfer {
                 collection,
                 source_key,
@@ -156,7 +158,10 @@ impl CoreLoop {
         if_present: bool,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let current = self.resolve_kv_current(ctx, key);
+        let current = match self.resolve_kv_current(ctx, key) {
+            Ok(current) => current,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
 
         // SQL UPDATE against an absent key is `UPDATE 0`, not a create —
         // mirrors `execute_kv_field_set`'s decision. RETURNING is already
@@ -187,7 +192,7 @@ impl CoreLoop {
         {
             return self.response_error(ctx.task, e);
         }
-        if let Err(e) = self.stage_put_capped(ctx, computed.new_value) {
+        if let Err(e) = self.stage_put(ctx, computed.new_value) {
             return self.response_error(ctx.task, e);
         }
         match response_codec::encode_json_as_msgpack(&serde_json::json!({
@@ -211,12 +216,25 @@ impl CoreLoop {
             rls_write_check,
         } = params;
         let task = cx.task;
-        let source_ctx = self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, collection, source_key);
-        let Some(source_bytes) = self.resolve_kv_current(&source_ctx, source_key) else {
-            return self.response_error(task, ErrorCode::NotFound);
+        let source_ctx =
+            match self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, collection, source_key) {
+                Ok(ctx) => ctx,
+                Err(e) => return self.response_error(task, e),
+            };
+        let source_bytes = match self.resolve_kv_current(&source_ctx, source_key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return self.response_error(task, ErrorCode::NotFound),
+            Err(e) => return self.response_error(task, e),
         };
-        let dest_ctx = self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, collection, dest_key);
-        let dest_bytes = self.resolve_kv_current(&dest_ctx, dest_key);
+        let dest_ctx = match self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, collection, dest_key)
+        {
+            Ok(ctx) => ctx,
+            Err(e) => return self.response_error(task, e),
+        };
+        let dest_bytes = match self.resolve_kv_current(&dest_ctx, dest_key) {
+            Ok(bytes) => bytes,
+            Err(e) => return self.response_error(task, e),
+        };
 
         let declared = self.declared_columns(&source_ctx.coll_key);
         let computed = match compute_transfer(
@@ -269,10 +287,10 @@ impl CoreLoop {
             }
         }
 
-        if let Err(e) = self.stage_put_capped(&source_ctx, computed.new_source) {
+        if let Err(e) = self.stage_put(&source_ctx, computed.new_source) {
             return self.response_error(task, e);
         }
-        if let Err(e) = self.stage_put_capped(&dest_ctx, computed.new_dest) {
+        if let Err(e) = self.stage_put(&dest_ctx, computed.new_dest) {
             return self.response_error(task, e);
         }
 
@@ -308,11 +326,20 @@ impl CoreLoop {
         } = params;
         let task = cx.task;
         let source_ctx =
-            self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, source_collection, item_key);
-        let Some(item_bytes) = self.resolve_kv_current(&source_ctx, item_key) else {
-            return self.response_error(task, ErrorCode::NotFound);
+            match self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, source_collection, item_key) {
+                Ok(ctx) => ctx,
+                Err(e) => return self.response_error(task, e),
+            };
+        let item_bytes = match self.resolve_kv_current(&source_ctx, item_key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return self.response_error(task, ErrorCode::NotFound),
+            Err(e) => return self.response_error(task, e),
         };
-        let dest_ctx = self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, dest_collection, dest_key);
+        let dest_ctx =
+            match self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, dest_collection, dest_key) {
+                Ok(ctx) => ctx,
+                Err(e) => return self.response_error(task, e),
+            };
         // The row arriving at the destination meets the destination's
         // declared numeric columns.
         let fitted = match fit_kv_image(&item_bytes, self.declared_columns(&dest_ctx.coll_key)) {
@@ -340,13 +367,15 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        self.txn_overlay_mut(cx.txn_id).insert_tombstone(
+        if let Err(e) = self.txn_overlay_mut(cx.txn_id).insert_tombstone(
             source_ctx.coll_key.clone(),
             source_ctx.surrogate.0,
             &source_ctx.document_id,
-        );
+        ) {
+            return self.response_error(task, e);
+        }
 
-        if let Err(e) = self.stage_put_capped(&dest_ctx, dest_bytes) {
+        if let Err(e) = self.stage_put(&dest_ctx, dest_bytes) {
             return self.response_error(task, e);
         }
 

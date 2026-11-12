@@ -225,7 +225,7 @@ impl CoreLoop {
             };
             encoded_rows.push(body);
         }
-        // `stage_put_capped` mutates one row at a time. Preserve the complete
+        // `stage_put` mutates one row at a time. Preserve the complete
         // preimage so a later cap failure cannot expose a partial ILP batch to
         // same-transaction reads or Calvin resolve.
         let prior_marker = self
@@ -242,8 +242,12 @@ impl CoreLoop {
                 RowIdentity::for_surrogate(surrogate),
                 surrogate,
             );
-            if let Err(error) = self.stage_put_capped(&ctx, body) {
-                self.rollback_canonical_ilp_stage(txn_id, prior_marker);
+            if let Err(error) = self.stage_put(&ctx, body) {
+                // A rollback error leaves the overlay unusable, and the
+                // transaction can only roll back: it outranks the stage error.
+                if let Err(rollback) = self.rollback_canonical_ilp_stage(txn_id, prior_marker) {
+                    return self.response_error(task, rollback);
+                }
                 return self.response_error(task, error);
             }
         }
@@ -356,15 +360,14 @@ mod tests {
         });
         assert_ne!(response.status, crate::bridge::envelope::Status::Error);
         let body = core
-            .txn_overlays
-            .get(&txn_id)
-            .and_then(|overlay| overlay.get(&coll_key("metrics"), 700))
+            .staged_row(txn_id, &coll_key("metrics"), 700)
+            .expect("read")
             .expect("staged canonical ILP row");
         let Staged::Put(body) = body else {
             panic!("canonical ILP row must stage as a put");
         };
         let nodedb_types::Value::Object(row) =
-            nodedb_types::decode_object(body).expect("decode staged row")
+            nodedb_types::decode_object(&body).expect("decode staged row")
         else {
             panic!("staged row must be an object");
         };
@@ -455,12 +458,14 @@ mod tests {
         let existing = TxnId::new(81);
         {
             let overlay = core.txn_overlay_mut(existing);
-            overlay.insert_put(
-                collection.clone(),
-                1,
-                &RowIdentity::from_user_key("1"),
-                b"prior".to_vec(),
-            );
+            overlay
+                .insert_put(
+                    collection.clone(),
+                    1,
+                    &RowIdentity::from_user_key("1"),
+                    b"prior".to_vec(),
+                )
+                .unwrap();
         }
         let prior_marker = core
             .txn_overlays
@@ -469,51 +474,61 @@ mod tests {
             .journal_len();
         {
             let overlay = core.txn_overlay_mut(existing);
-            overlay.insert_put(
-                collection.clone(),
-                2,
-                &RowIdentity::from_user_key("2"),
-                b"first-new".to_vec(),
-            );
-            overlay.insert_put(
-                collection.clone(),
-                3,
-                &RowIdentity::from_user_key("3"),
-                b"second-new".to_vec(),
-            );
+            overlay
+                .insert_put(
+                    collection.clone(),
+                    2,
+                    &RowIdentity::from_user_key("2"),
+                    b"first-new".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .insert_put(
+                    collection.clone(),
+                    3,
+                    &RowIdentity::from_user_key("3"),
+                    b"second-new".to_vec(),
+                )
+                .unwrap();
         }
-        core.rollback_canonical_ilp_stage(existing, Some(prior_marker));
+        core.rollback_canonical_ilp_stage(existing, Some(prior_marker))
+            .expect("rollback");
         let overlay = core
             .txn_overlays
             .get(&existing)
             .expect("prior overlay retained");
         assert_eq!(
-            overlay.get(&collection, 1),
+            overlay.get(&collection, 1).unwrap().as_deref(),
             Some(&Staged::Put(b"prior".to_vec()))
         );
-        assert_eq!(overlay.get(&collection, 2), None);
-        assert_eq!(overlay.get(&collection, 3), None);
+        assert_eq!(overlay.get(&collection, 2).unwrap(), None);
+        assert_eq!(overlay.get(&collection, 3).unwrap(), None);
         assert_eq!(overlay.journal_len(), prior_marker);
         assert_eq!(metrics.active_txn_overlays.load(Ordering::Relaxed), 1);
 
         let created = TxnId::new(82);
         {
             let overlay = core.txn_overlay_mut(created);
-            overlay.insert_put(
-                collection.clone(),
-                4,
-                &RowIdentity::from_user_key("4"),
-                b"created-a".to_vec(),
-            );
-            overlay.insert_put(
-                collection,
-                5,
-                &RowIdentity::from_user_key("5"),
-                b"created-b".to_vec(),
-            );
+            overlay
+                .insert_put(
+                    collection.clone(),
+                    4,
+                    &RowIdentity::from_user_key("4"),
+                    b"created-a".to_vec(),
+                )
+                .unwrap();
+            overlay
+                .insert_put(
+                    collection,
+                    5,
+                    &RowIdentity::from_user_key("5"),
+                    b"created-b".to_vec(),
+                )
+                .unwrap();
         }
         assert_eq!(metrics.active_txn_overlays.load(Ordering::Relaxed), 2);
-        core.rollback_canonical_ilp_stage(created, None);
+        core.rollback_canonical_ilp_stage(created, None)
+            .expect("rollback");
         assert!(!core.txn_overlays.contains_key(&created));
         assert_eq!(metrics.active_txn_overlays.load(Ordering::Relaxed), 1);
     }

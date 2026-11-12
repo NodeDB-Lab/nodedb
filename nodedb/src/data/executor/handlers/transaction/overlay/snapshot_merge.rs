@@ -54,7 +54,7 @@ fn merge_snapshot_rows(
     matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
 ) -> crate::Result<()> {
     let format = SparseBodyFormatRef::from_schema(strict_schema);
-    merge_staged_rows::<crate::Error>(overlay, coll_key, rows, matches, &|_, body| {
+    merge_staged_rows(overlay, coll_key, rows, matches, &|_, body| {
         sparse_body_to_msgpack(body, format).map(std::borrow::Cow::into_owned)
     })
 }
@@ -86,9 +86,15 @@ mod tests {
     #[test]
     fn staged_writes_merge_over_the_snapshot_rows() {
         let mut overlay = super::super::TxnOverlay::new();
-        overlay.insert_put(key(), 1, &RowIdentity::from_user_key("a"), map(1));
-        overlay.insert_tombstone(key(), 2, &RowIdentity::from_user_key("b"));
-        overlay.insert_put(key(), 3, &RowIdentity::from_user_key("c"), map(3));
+        overlay
+            .insert_put(key(), 1, &RowIdentity::from_user_key("a"), map(1))
+            .expect("stage");
+        overlay
+            .insert_tombstone(key(), 2, &RowIdentity::from_user_key("b"))
+            .expect("stage");
+        overlay
+            .insert_put(key(), 3, &RowIdentity::from_user_key("c"), map(3))
+            .expect("stage");
         let mut rows = vec![row(1, &map(0)), row(2, &map(0))];
         merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| true).expect("merge");
         rows.sort_by_key(|(key, _)| key.surrogate().as_u32());
@@ -99,7 +105,9 @@ mod tests {
     #[test]
     fn a_staged_row_meets_the_scan_predicate() {
         let mut overlay = super::super::TxnOverlay::new();
-        overlay.insert_put(key(), 5, &RowIdentity::from_user_key("e"), map(5));
+        overlay
+            .insert_put(key(), 5, &RowIdentity::from_user_key("e"), map(5))
+            .expect("stage");
         let mut rows = Vec::new();
         merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| false).expect("merge");
         assert!(rows.is_empty());

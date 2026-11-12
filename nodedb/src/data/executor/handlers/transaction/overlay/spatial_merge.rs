@@ -173,7 +173,14 @@ impl CoreLoop {
             let Some(raw) = hit.surrogate else {
                 return base_visible;
             };
-            match overlay.get(coll_key, raw) {
+            let staged = match overlay.get(coll_key, raw) {
+                Ok(staged) => staged,
+                Err(e) => {
+                    first_err = Some(e);
+                    return true;
+                }
+            };
+            match staged.as_deref() {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(body)) => {
                     let doc = match decode_staged_spatial_row(body, schema) {
@@ -211,11 +218,12 @@ impl CoreLoop {
         // not return, appended when the decoded geometry satisfies the
         // scan's spatial predicate (plus attribute/row-level filters) — this
         // is what makes a staged spatial INSERT visible (read-your-own-writes).
-        for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
+        for item in overlay.iter_for_collection(coll_key) {
+            let (surrogate, staged) = item?;
             if seen.contains(&surrogate) {
                 continue;
             }
-            let Staged::Put(body) = staged else {
+            let Staged::Put(body) = &*staged else {
                 continue;
             };
             let Some(doc) = decode_staged_spatial_row(body, schema)? else {

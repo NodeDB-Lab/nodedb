@@ -83,7 +83,9 @@ impl CoreLoop {
             .ok_or_else(|| ErrorCode::Internal {
                 detail: "calvin RETURNING: the transaction overlay is missing after staging".into(),
             })?;
-        let slots = overlay.slots_touched_since(marker, &coll_key);
+        let slots = overlay
+            .slots_touched_since(marker, &coll_key)
+            .map_err(ErrorCode::from)?;
         let at = RowLocation {
             engine: target.engine,
             database_id: database_id.as_u64(),
@@ -91,7 +93,7 @@ impl CoreLoop {
             collection: target.collection,
             vector_field: target.vector_field,
         };
-        let written = slots.iter().filter_map(|slot| match slot.after {
+        let written = slots.iter().filter_map(|slot| match &slot.after {
             Some(Staged::Put(body)) => Some((slot, body.as_slice())),
             Some(Staged::Tombstone) | None => None,
         });
@@ -118,7 +120,7 @@ impl CoreLoop {
                 });
             }
             (ReplyImage::After, RowEngine::Document | RowEngine::Crdt) => {
-                let written: Vec<WrittenRow<'_, '_>> = written.collect();
+                let written: Vec<WrittenRow<'_>> = written.collect();
                 let rows = self.calvin_installed_rows(&at, plan, earlier_crdt, &written)?;
                 self.calvin_image_docs(&at, &rows)?
             }
@@ -212,7 +214,7 @@ impl CoreLoop {
         &self,
         at: &RowLocation<'_>,
         target: &ReturningTarget<'_>,
-        slots: &[TouchedSlot<'_>],
+        slots: &[TouchedSlot],
         base_visible: bool,
     ) -> Result<Vec<ReturningImageRow>, ErrorCode> {
         let mut rows = Vec::new();
@@ -221,7 +223,7 @@ impl CoreLoop {
                 continue;
             }
             let surrogate = Surrogate::new(slot.surrogate);
-            let prior = match slot.before {
+            let prior = match &slot.before {
                 Some(Staged::Put(body)) => Some(staged_row_image(at.engine, body)?),
                 Some(Staged::Tombstone) => None,
                 None if base_visible => self
@@ -248,10 +250,10 @@ impl CoreLoop {
         &self,
         at: &RowLocation<'_>,
         target: &ReturningTarget<'_>,
-        slot: &TouchedSlot<'_>,
+        slot: &TouchedSlot,
         surrogate: Surrogate,
     ) -> Result<Option<Vec<u8>>, ErrorCode> {
-        let base = self.calvin_base_row(at, slot.doc_id, surrogate)?;
+        let base = self.calvin_base_row(at, &slot.doc_id, surrogate)?;
         match (base, target.vector_field) {
             (None, Some(field)) => {
                 let index_key =

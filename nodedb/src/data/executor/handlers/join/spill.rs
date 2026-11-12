@@ -64,18 +64,28 @@ fn spill_io_error(path: &Path, action: &str, error: std::io::Error) -> crate::Er
 /// w.append_row(row_bytes)?;
 /// let path = w.finish()?;
 /// ```
-pub(super) struct SpillPartitionWriter {
+pub(in crate::data::executor) struct SpillPartitionWriter {
     backend: SpillBackend,
+    /// Bytes handed to the backend so far.
+    written: u64,
+    /// Framed rows not yet handed to the backend. Batching frames keeps one
+    /// backend write per [`PENDING_FLUSH_BYTES`], not two per row.
+    pending: Vec<u8>,
 }
+
+/// Pending framed bytes that trigger one backend write.
+const PENDING_FLUSH_BYTES: usize = 64 * 1024;
 
 impl SpillPartitionWriter {
     /// Create a new partition spill file at `path`, through io_uring when a
     /// ring opens, else through a buffered file. A file that cannot be
     /// created is an error.
-    pub(super) fn create(path: &Path) -> crate::Result<Self> {
+    pub(in crate::data::executor) fn create(path: &Path) -> crate::Result<Self> {
         if let Some(writer) = UringWriter::new(path) {
             return Ok(Self {
                 backend: SpillBackend::Uring(Box::new(writer)),
+                written: 0,
+                pending: Vec::new(),
             });
         }
         let file = std::fs::File::create(path).map_err(|e| spill_io_error(path, "create", e))?;
@@ -84,29 +94,40 @@ impl SpillPartitionWriter {
                 out: std::io::BufWriter::new(file),
                 path: path.to_path_buf(),
             },
+            written: 0,
+            pending: Vec::new(),
         })
     }
 
-    /// Append `bytes` to the spill file.
-    fn append(&mut self, bytes: &[u8]) -> crate::Result<()> {
-        match &mut self.backend {
-            SpillBackend::Uring(writer) => writer.append(bytes),
-            SpillBackend::File { out, path } => out
-                .write_all(bytes)
-                .map_err(|e| spill_io_error(path, "write", e)),
+    /// Hand every pending framed byte to the backend.
+    fn flush_pending(&mut self) -> crate::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
         }
+        match &mut self.backend {
+            SpillBackend::Uring(writer) => writer.append(&self.pending)?,
+            SpillBackend::File { out, path } => out
+                .write_all(&self.pending)
+                .map_err(|e| spill_io_error(path, "write", e))?,
+        }
+        self.written += self.pending.len() as u64;
+        self.pending.clear();
+        Ok(())
+    }
+
+    /// The file offset the next frame starts at.
+    pub(in crate::data::executor) fn offset(&self) -> u64 {
+        self.written + self.pending.len() as u64
     }
 
     /// Write one msgpack row into the spill file with a 4-byte LE length prefix.
     ///
-    /// Two `append` calls are issued: the 4-byte header, then the body.
-    /// Both must succeed atomically from the caller's perspective — any error
-    /// leaves the file in an invalid state (truncated frame), but that is
-    /// acceptable: spill files are temporary and never partially re-used.
+    /// Any error leaves the file with a truncated frame. Spill files are
+    /// temporary and never reused after an error.
     ///
     /// Returns a typed [`crate::Error`] if `row.len()` exceeds `u32::MAX` or
-    /// if either write fails.
-    pub(super) fn append_row(&mut self, row: &[u8]) -> crate::Result<()> {
+    /// if a write fails.
+    pub(in crate::data::executor) fn append_row(&mut self, row: &[u8]) -> crate::Result<()> {
         // Guard: length must fit in a u32 frame header.
         if row.len() > u32::MAX as usize {
             return Err(crate::Error::Storage {
@@ -119,18 +140,20 @@ impl SpillPartitionWriter {
             });
         }
 
-        // Write 4-byte little-endian length prefix.
-        let len_bytes = (row.len() as u32).to_le_bytes();
-        self.append(&len_bytes)?;
-
-        // Write the row body. A zero-length row is legal.
-        self.append(row)?;
-
+        // 4-byte little-endian length prefix, then the body. A zero-length
+        // row is legal.
+        self.pending
+            .extend_from_slice(&(row.len() as u32).to_le_bytes());
+        self.pending.extend_from_slice(row);
+        if self.pending.len() >= PENDING_FLUSH_BYTES {
+            self.flush_pending()?;
+        }
         Ok(())
     }
 
     /// Flush and close the writer, returning the spill file path.
-    pub(super) fn finish(self) -> crate::Result<PathBuf> {
+    pub(in crate::data::executor) fn finish(mut self) -> crate::Result<PathBuf> {
+        self.flush_pending()?;
         match self.backend {
             SpillBackend::Uring(writer) => (*writer).finish(),
             SpillBackend::File { out, path } => {

@@ -187,7 +187,6 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
         | ErrorCode::OllpRetryRequired
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }

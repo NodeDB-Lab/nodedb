@@ -430,8 +430,10 @@ impl CoreLoop {
             MetaOp::DropTxnOverlay { txn_id } => {
                 // Behaviour-preserving delegation to the shared teardown, which
                 // the lease reaper also calls (see `CoreLoop::drop_overlay_entry`).
-                self.drop_overlay_entry(*txn_id);
-                self.response_ok(task)
+                match self.drop_overlay_entry(*txn_id) {
+                    Ok(_) => self.response_ok(task),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             // A savepoint mark and its rewind are transaction activity: both
@@ -442,8 +444,10 @@ impl CoreLoop {
             }
 
             MetaOp::RollbackToSavepoint { txn_id, savepoint } => {
-                self.rollback_to_savepoint(*txn_id, *savepoint);
-                self.response_ok(task)
+                match self.rollback_to_savepoint(*txn_id, *savepoint) {
+                    Ok(()) => self.response_ok(task),
+                    Err(e) => self.response_error(task, e),
+                }
             }
         }
     }
@@ -856,7 +860,8 @@ mod txn_created_columnar_engine_tests {
             "refresh_a".to_string(),
         );
         let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::new();
-        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true);
+        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true)
+            .expect("merge");
 
         core.reap_expired_overlays();
 
@@ -873,6 +878,81 @@ mod txn_created_columnar_engine_tests {
         assert!(
             core.columnar_engines.contains_key(&key_a),
             "read-refreshed txn_A engine must be retained"
+        );
+    }
+
+    // ── Spill directory lifecycle ────────────────────────────────────────
+
+    use crate::data::executor::handlers::transaction::overlay_gauge::txn_spill_dir;
+
+    /// Stage enough rows under a zero hot-tier threshold that the overlay
+    /// spills to its transaction's spill directory.
+    fn stage_spilled(core: &mut CoreLoop, txn_id: TxnId) -> std::path::PathBuf {
+        core.query_tuning.max_txn_overlay_bytes = 0;
+        let coll = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "spilled".to_string(),
+        );
+        for n in 1..=20u32 {
+            let doc_id = nodedb_types::RowIdentity::from_user_key(format!("r{n}"));
+            core.txn_overlay_mut(txn_id)
+                .insert_put(coll.clone(), n, &doc_id, vec![n as u8; 64])
+                .expect("stage a row");
+        }
+        let dir = txn_spill_dir(&core.data_dir, core.core_id, txn_id);
+        assert!(dir.is_dir(), "the overlay spilled into {}", dir.display());
+        dir
+    }
+
+    #[test]
+    fn drop_txn_overlay_removes_the_spill_directory() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(41);
+        let spill_dir = stage_spilled(&mut core, txn_id);
+
+        let task = make_task();
+        let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
+        assert_eq!(resp.status, Status::Ok);
+        assert!(
+            !spill_dir.exists(),
+            "DropTxnOverlay removes the spill directory"
+        );
+        assert!(!core.txn_overlays.contains_key(&txn_id));
+    }
+
+    #[test]
+    fn the_lease_reaper_removes_the_spill_directory() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(42);
+        let spill_dir = stage_spilled(&mut core, txn_id);
+
+        let stamp = core.hlc.peek();
+        core.hlc.update_from_remote(stamp + OVERLAY_LEASE_NS + 1);
+        core.reap_expired_overlays();
+        assert!(!core.txn_overlays.contains_key(&txn_id));
+        assert!(
+            !spill_dir.exists(),
+            "the reaper removes the spill directory"
+        );
+    }
+
+    #[test]
+    fn a_spill_directory_that_cannot_be_removed_fails_the_drop() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(43);
+        let _ = core.txn_overlay_mut(txn_id);
+        // A file where the spill directory goes cannot be removed as one.
+        let spill_dir = txn_spill_dir(&core.data_dir, core.core_id, txn_id);
+        std::fs::create_dir_all(spill_dir.parent().expect("parent")).expect("parent dir");
+        std::fs::write(&spill_dir, b"x").expect("blocking file");
+
+        let task = make_task();
+        let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
+        assert_eq!(resp.status, Status::Error);
+        assert!(
+            !core.txn_overlays.contains_key(&txn_id),
+            "the in-memory release runs before the directory error"
         );
     }
 }

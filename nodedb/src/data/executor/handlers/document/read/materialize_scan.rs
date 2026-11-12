@@ -159,8 +159,10 @@ impl CoreLoop {
                 ) {
                     return self.response_error(task, e);
                 }
-            } else {
-                self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &in_scope);
+            } else if let Err(e) =
+                self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &in_scope)
+            {
+                return self.response_error(task, e);
             }
             let entries = rows
                 .into_iter()

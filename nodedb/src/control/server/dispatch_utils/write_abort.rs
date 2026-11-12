@@ -56,7 +56,6 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::ConflictRetry
         | ErrorCode::SerializationConflict { .. }
         | ErrorCode::OllpRetryRequired
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::TransactionRollback { .. } => true,
         ErrorCode::DeadlineExceeded
         | ErrorCode::ActiveSqlTransaction { .. }
@@ -166,9 +165,6 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // before the statement ran.
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
-        // The staging overlay hit its byte budget, so the transaction's writes
-        // were discarded from the overlay and never installed.
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         // A label write past the node-label cap is refused before any label of
         // the statement stays set.
         | ErrorCode::NodeLabelLimit { .. }

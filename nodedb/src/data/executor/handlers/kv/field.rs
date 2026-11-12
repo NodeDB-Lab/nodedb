@@ -60,11 +60,15 @@ impl CoreLoop {
 
         // Read-your-own-writes: consult this transaction's staging overlay
         // before falling back to base storage (see `execute_kv_batch_get`).
-        let value = match system_time
-            .merges_txn_overlay()
-            .then(|| self.kv_overlay_body(task, tid, collection, key))
-            .flatten()
-        {
+        let staged = if system_time.merges_txn_overlay() {
+            match self.kv_overlay_body(task, tid, collection, key) {
+                Ok(staged) => staged,
+                Err(e) => return self.response_error(task, e),
+            }
+        } else {
+            None
+        };
+        let value = match staged {
             Some(overlay_result) => overlay_result,
             None => self
                 .kv_engine

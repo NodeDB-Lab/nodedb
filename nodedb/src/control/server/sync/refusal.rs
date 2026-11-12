@@ -61,7 +61,6 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::Unsupported { .. }
             | ErrorCode::RollbackFailed { .. }
             | ErrorCode::OllpRetryRequired
-            | ErrorCode::TxnOverlayMemoryExceeded { .. }
             | ErrorCode::DivisionByZero
             | ErrorCode::UndefinedFunction { .. }
             | ErrorCode::DataException { .. }
@@ -85,7 +84,6 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::ExecutionLimitExceeded { .. } => None,
         },
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::DeadlineExceeded { .. }
@@ -269,7 +267,6 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::MetadataGroupGone { .. } => false,
         // Refused on its merits, or a fault the same bytes reproduce.
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::RejectedPrevalidation { .. }
@@ -415,7 +412,6 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }

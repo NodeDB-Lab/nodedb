@@ -35,6 +35,9 @@ pub(in crate::data::executor) use shuffle_join::ShuffleJoinInputs;
 // (`QueryOp::ShuffleAggregateConsume`), which reads the same frame format.
 pub(in crate::data::executor) use grace_repartition::FrameStreamReader;
 
+// Framed spill writer shared with the transaction spill tier.
+pub(in crate::data::executor) use spill::SpillPartitionWriter;
+
 // `merge_join_docs_binary` is exercised directly by an integration test, so it
 // stays crate-public. The rest are join-internal helpers (private re-export,
 // visible to the join submodules via `super::`).

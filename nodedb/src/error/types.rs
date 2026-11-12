@@ -31,9 +31,6 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("transaction staging overlay exceeded its {limit}-byte per-core budget")]
-    TxnOverlayMemoryExceeded { limit: usize },
-
     #[error("authorization denied for tenant {tenant_id} on {resource}")]
     RejectedAuthz {
         tenant_id: TenantId,

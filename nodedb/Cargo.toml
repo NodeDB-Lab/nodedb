@@ -84,6 +84,7 @@ tempfile = { workspace = true }
 nexar = { workspace = true }
 memmap2 = { workspace = true }
 rustc-hash = { workspace = true }
+hashbrown = { workspace = true }
 
 # CRDTs (needed for LoroValue in engine layer)
 loro = { workspace = true }

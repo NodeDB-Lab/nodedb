@@ -113,7 +113,6 @@ impl RetryableSchemaChange for Error {
         match self {
             Error::RetryableSchemaChanged { descriptor } => Some(descriptor.as_str()),
             Error::RejectedConstraint { .. }
-            | Error::TxnOverlayMemoryExceeded { .. }
             | Error::RejectedAuthz { .. }
             | Error::OffsetRegression { .. }
             | Error::DeadlineExceeded { .. }

@@ -174,9 +174,6 @@ impl From<crate::Error> for ErrorCode {
             capacity @ crate::Error::DispatchCapacity { .. } => Self::DispatchCapacity {
                 reason: capacity.to_string(),
             },
-            crate::Error::TxnOverlayMemoryExceeded { limit } => {
-                Self::TxnOverlayMemoryExceeded { limit }
-            }
             crate::Error::DivisionByZero => Self::DivisionByZero,
             crate::Error::ExecutionLimitExceeded { detail } => {
                 Self::ExecutionLimitExceeded { detail }

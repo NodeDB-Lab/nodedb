@@ -430,7 +430,8 @@ mod tests {
             Some(&ErrorCode::OllpRetryRequired)
         );
 
-        core.drop_overlay_entry(crate::types::TxnId::new(7));
+        core.drop_overlay_entry(crate::types::TxnId::new(7))
+            .expect("drop overlay");
         assert_eq!(install(&mut core, &batch, 2).status, Status::Ok);
     }
 

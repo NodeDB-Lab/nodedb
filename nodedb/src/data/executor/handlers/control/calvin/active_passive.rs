@@ -439,10 +439,8 @@ mod tests {
         let coll_key = (DatabaseId::DEFAULT, tenant_id, "orders".to_string());
         let expected_body = doc_format::canonicalize_document_for_storage(&doc_value("a", "1"));
         assert_eq!(
-            core.txn_overlays
-                .get(&synthetic)
-                .and_then(|o| o.get(&coll_key, 7)),
-            Some(&Staged::Put(expected_body)),
+            core.staged_row(synthetic, &coll_key, 7).unwrap(),
+            Some(Staged::Put(expected_body)),
             "the active Calvin write plan must be staged into the synthetic-TxnId overlay"
         );
     }

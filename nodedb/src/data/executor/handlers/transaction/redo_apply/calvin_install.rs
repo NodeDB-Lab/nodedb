@@ -96,7 +96,19 @@ impl CoreLoop {
             self.calvin
                 .commit_pending
                 .remove(&(epoch, position, vshard_id));
-            self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+            // The record is durable, so a spill directory the teardown
+            // cannot remove changes no outcome. The teardown filed its
+            // report, and the next core open sweeps the directory.
+            if let Err(error) = self.drop_calvin_synthetic_overlay(epoch, position, vshard_id) {
+                tracing::error!(
+                    core = self.core_id,
+                    epoch,
+                    position,
+                    vshard_id,
+                    %error,
+                    "calvin install: the transaction's spill directory was not removed"
+                );
+            }
         }
 
         match self.calvin_reply_payload(CalvinReply::from(reply.clone()), &ts_installs) {

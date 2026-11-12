@@ -13,7 +13,7 @@
 //! redo install remains the sole durable apply.
 //!
 //! Split out of `dispatch.rs` (which owns the `MetaOp::StageWrite` routing and
-//! the shared `stage_overlay_pk` / `stage_put_capped` / `stage_count_response`
+//! the shared `stage_overlay_pk` / `stage_put` / `stage_count_response`
 //! helpers these methods call) to keep both files within the source-size
 //! limit.
 
@@ -46,8 +46,10 @@ impl CoreLoop {
         }
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
 
-        let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
+        let present = match self
+            .stage_overlay_pk(ctx)
+            .and_then(|overlay_pk| self.stage_pk_present(ctx, &storage_key, overlay_pk))
+        {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -107,8 +109,10 @@ impl CoreLoop {
         // and an earlier statement in this transaction may already have
         // tombstoned it.
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
+        let present = match self
+            .stage_overlay_pk(ctx)
+            .and_then(|overlay_pk| self.stage_pk_present(ctx, &storage_key, overlay_pk))
+        {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -141,12 +145,14 @@ impl CoreLoop {
             }
         }
 
-        self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
+        match self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,
-        );
-        self.stage_count_response(ctx.task, 1)
+        ) {
+            Ok(()) => self.stage_count_response(ctx.task, 1),
+            Err(e) => self.response_error(ctx.task, e),
+        }
     }
 
     pub(in crate::data::executor) fn stage_point_update(
@@ -218,7 +224,7 @@ impl CoreLoop {
         ) {
             return self.response_error(ctx.task, e);
         }
-        if let Err(e) = self.stage_put_capped(ctx, body) {
+        if let Err(e) = self.stage_put(ctx, body) {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)
@@ -278,7 +284,7 @@ impl CoreLoop {
         ) {
             return self.response_error(ctx.task, e);
         }
-        if let Err(e) = self.stage_put_capped(ctx, body) {
+        if let Err(e) = self.stage_put(ctx, body) {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)

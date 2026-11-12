@@ -77,6 +77,30 @@ impl FrameStreamReader {
         Ok(Self { backend })
     }
 
+    /// Open `path` for streaming frame reads that start at byte `offset`, a
+    /// frame boundary, with a `chunk_size`-byte refill buffer.
+    pub(in crate::data::executor) fn open_at(
+        path: &Path,
+        offset: u64,
+        chunk_size: usize,
+    ) -> crate::Result<Self> {
+        let backend = match UringSeqReader::open_at(path, offset, chunk_size) {
+            Some(r) => FrameBackend::Uring(Box::new(r)),
+            None => {
+                use std::io::Seek as _;
+                let open_error = |e: std::io::Error| crate::Error::Storage {
+                    engine: "grace-repartition".into(),
+                    detail: format!("spill frame reader open {}: {e}", path.display()),
+                };
+                let mut file = std::fs::File::open(path).map_err(open_error)?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .map_err(open_error)?;
+                FrameBackend::Std(BufReader::with_capacity(chunk_size.max(1), file))
+            }
+        };
+        Ok(Self { backend })
+    }
+
     /// Read exactly `dst.len()` bytes. `Ok(true)` = filled; `Ok(false)` = clean
     /// EOF before any byte of `dst` (or partway) was filled; `Err` = io failure.
     /// Bridges the two backends to one uniform contract (mirrors `RunReader`).

@@ -246,8 +246,11 @@ impl CoreLoop {
 
         let mut stopped = false;
         // A row the transaction staged is emitted from its staged body.
-        let staged_row = |key: &StorageKey| {
-            overlay.is_some_and(|o| o.get(&coll_key, key.surrogate().as_u32()).is_some())
+        let staged_row = |key: &StorageKey| -> crate::Result<bool> {
+            Ok(match overlay {
+                Some(o) => o.get(&coll_key, key.surrogate().as_u32())?.is_some(),
+                None => false,
+            })
         };
         if overlay.is_none_or(|o| o.base_visible(&coll_key)) {
             match cut.at {
@@ -257,7 +260,7 @@ impl CoreLoop {
                         p.tid,
                         p.collection,
                         |key, bytes| {
-                            if staged_row(key) {
+                            if staged_row(key)? {
                                 return Ok(ControlFlow::Continue(()));
                             }
                             let flow = emit(key, bytes)?;
@@ -281,7 +284,7 @@ impl CoreLoop {
                         &|| false,
                     )?;
                     for (key, bytes) in &rows {
-                        if staged_row(key) {
+                        if staged_row(key)? {
                             continue;
                         }
                         if emit(key, bytes)?.is_break() {
@@ -295,8 +298,9 @@ impl CoreLoop {
         if let Some(overlay) = overlay
             && !stopped
         {
-            for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
-                if let Staged::Put(body) = staged
+            for item in overlay.iter_for_collection(&coll_key) {
+                let (surrogate, staged) = item?;
+                if let Staged::Put(body) = &*staged
                     && emit(&StorageKey::for_surrogate(Surrogate::new(surrogate)), body)?.is_break()
                 {
                     break;

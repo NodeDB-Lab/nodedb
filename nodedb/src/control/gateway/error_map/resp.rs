@@ -48,8 +48,7 @@ impl GatewayErrorMap {
             }
             // Every other variant takes the prefix of its public code, the
             // same prefix a remote rendering of it gets.
-            Error::TxnOverlayMemoryExceeded { .. }
-            | Error::OffsetRegression { .. }
+            Error::OffsetRegression { .. }
             | Error::ConflictRetry { .. }
             | Error::CalvinSerializationConflict
             | Error::CalvinParticipantError

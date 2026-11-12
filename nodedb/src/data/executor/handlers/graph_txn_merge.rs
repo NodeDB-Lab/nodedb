@@ -41,15 +41,15 @@ pub(in crate::data::executor) fn build_graph_overlay_delta(
     overlay: &GraphTxnOverlay,
     database_id: DatabaseId,
     tenant: TenantId,
-) -> GraphOverlayDelta {
+) -> crate::Result<GraphOverlayDelta> {
     let mut delta = GraphOverlayDelta::new();
-    for (src, label, dst) in overlay.all_staged_edges(database_id, tenant) {
+    for (src, label, dst) in overlay.all_staged_edges(database_id, tenant)? {
         delta.stage_edge(&src, &label, &dst);
     }
-    for (src, label, dst) in overlay.all_tombstones(database_id, tenant) {
+    for (src, label, dst) in overlay.all_tombstones(database_id, tenant)? {
         delta.stage_tombstone(&src, &label, &dst);
     }
-    delta
+    Ok(delta)
 }
 
 /// The property images of a transaction's staged edge puts, keyed by
@@ -61,13 +61,13 @@ pub(in crate::data::executor) fn staged_edge_property_map(
     database_id: DatabaseId,
     tenant: TenantId,
     collection: Option<&str>,
-) -> crate::engine::graph::pattern::executor::StagedEdgeProperties {
-    overlay
-        .staged_edge_puts(database_id, tenant)
+) -> crate::Result<crate::engine::graph::pattern::executor::StagedEdgeProperties> {
+    Ok(overlay
+        .staged_edge_puts(database_id, tenant)?
         .into_iter()
         .filter(|(coll, _, _)| collection.is_none_or(|c| c == coll))
         .map(|(coll, (src, label, dst), image)| ((coll, src, label, dst), image))
-        .collect()
+        .collect())
 }
 
 /// Merge a transaction's staged GRAPH edge writes into the durable `(label,
@@ -87,18 +87,18 @@ pub(in crate::data::executor) fn merge_graph_txn_overlay_neighbors(
     node_id: &str,
     direction: Direction,
     durable_of: impl Fn(Direction) -> Vec<(String, String)>,
-) -> Vec<(String, String)> {
+) -> crate::Result<Vec<(String, String)>> {
     let mut merged: Vec<(String, String)> = Vec::new();
     for &pass in Orientation::passes(direction) {
         let durable = durable_of(pass.direction());
         merged.extend(
-            merge_staged_hop_pass(overlay, scope, node_id, pass, durable)
+            merge_staged_hop_pass(overlay, scope, node_id, pass, durable)?
                 .into_iter()
                 .filter(|(_, node, _)| pass.keeps_row(direction, node_id, node))
                 .map(|(label, node, _)| (label, node)),
         );
     }
-    merged
+    Ok(merged)
 }
 
 /// Merge a transaction's staged edge writes in one collection into the
@@ -115,29 +115,35 @@ pub(in crate::data::executor) fn merge_graph_txn_overlay_collection_edges(
     edge_labels: &[&str],
     direction: Direction,
     durable: Vec<(String, String, String)>,
-) -> Vec<(String, String, String)> {
+) -> crate::Result<Vec<(String, String, String)>> {
     let mut merged: std::collections::BTreeSet<(String, String, String)> =
         durable.into_iter().collect();
     let Some(overlay) = overlay else {
-        return merged.into_iter().collect();
+        return Ok(merged.into_iter().collect());
     };
-    merged.retain(|(src, label, dst)| !overlay.is_edge_tombstoned(coll_key, src, label, dst));
+    let mut kept = std::collections::BTreeSet::new();
+    for (src, label, dst) in merged {
+        if !overlay.is_edge_tombstoned(coll_key, &src, &label, &dst)? {
+            kept.insert((src, label, dst));
+        }
+    }
+    merged = kept;
     let label_matches = |label: &str| LabelFilter::keeps_name(edge_labels, label);
     if matches!(direction, Direction::Out | Direction::Both) {
-        for (label, dst, _) in overlay.edges_for_src(coll_key, node_id) {
-            if label_matches(label) {
-                merged.insert((node_id.to_string(), label.to_string(), dst.to_string()));
+        for (label, dst, _) in overlay.edges_for_src(coll_key, node_id)? {
+            if label_matches(&label) {
+                merged.insert((node_id.to_string(), label, dst));
             }
         }
     }
     if matches!(direction, Direction::In | Direction::Both) {
-        for (label, src, _) in overlay.edges_for_dst(coll_key, node_id) {
-            if label_matches(label) {
-                merged.insert((src.to_string(), label.to_string(), node_id.to_string()));
+        for (label, src, _) in overlay.edges_for_dst(coll_key, node_id)? {
+            if label_matches(&label) {
+                merged.insert((src, label, node_id.to_string()));
             }
         }
     }
-    merged.into_iter().collect()
+    Ok(merged.into_iter().collect())
 }
 
 /// The scope a `NeighborsMulti` hop merges its transaction's staged edge
@@ -156,7 +162,7 @@ pub(in crate::data::executor) struct StagedHopScope<'a> {
 /// `(label, neighbour, staged properties)`. The staged properties are the
 /// map of a put this transaction staged for the crossed edge in the hop's
 /// collection, and `None` for a label-only hop.
-pub(in crate::data::executor) type StagedNeighbor<'o> = (String, String, Option<&'o [u8]>);
+pub(in crate::data::executor) type StagedNeighbor = (String, String, Option<Vec<u8>>);
 
 /// Merge a transaction's staged edge writes into one oriented pass of a
 /// `NeighborsMulti` hop from `node`.
@@ -165,13 +171,13 @@ pub(in crate::data::executor) type StagedNeighbor<'o> = (String, String, Option<
 /// - A durable edge the transaction re-put carries the staged map.
 /// - A staged put the durable list lacks joins, with its staged map, when
 ///   its label passes `scope.edge_labels`.
-pub(in crate::data::executor) fn merge_staged_hop_pass<'o>(
-    overlay: &'o GraphTxnOverlay,
+pub(in crate::data::executor) fn merge_staged_hop_pass(
+    overlay: &GraphTxnOverlay,
     scope: &StagedHopScope<'_>,
     node: &str,
     pass: Orientation,
     durable: Vec<(String, String)>,
-) -> Vec<StagedNeighbor<'o>> {
+) -> crate::Result<Vec<StagedNeighbor>> {
     let StagedHopScope {
         database_id,
         tenant,
@@ -179,16 +185,16 @@ pub(in crate::data::executor) fn merge_staged_hop_pass<'o>(
         edge_labels,
     } = *scope;
     let coll_key: Option<GraphCollKey> = collection.map(|c| (database_id, tenant, c.to_owned()));
-    let mut merged: Vec<StagedNeighbor<'o>> = Vec::with_capacity(durable.len());
+    let mut merged: Vec<StagedNeighbor> = Vec::with_capacity(durable.len());
     for (label, other) in durable {
         let (src, dst) = pass.endpoints(node, &other);
         let (tombstoned, staged) = match &coll_key {
             Some(key) => (
-                overlay.is_edge_tombstoned(key, src, &label, dst),
-                overlay.staged_edge_properties(key, src, &label, dst),
+                overlay.is_edge_tombstoned(key, src, &label, dst)?,
+                overlay.staged_edge_properties(key, src, &label, dst)?,
             ),
             None => (
-                overlay.is_edge_tombstoned_any_collection(database_id, tenant, src, &label, dst),
+                overlay.is_edge_tombstoned_any_collection(database_id, tenant, src, &label, dst)?,
                 None,
             ),
         };
@@ -197,28 +203,30 @@ pub(in crate::data::executor) fn merge_staged_hop_pass<'o>(
         }
     }
 
-    let staged_rows: Vec<StagedNeighbor<'o>> = match (&coll_key, pass) {
+    let staged_rows: Vec<StagedNeighbor> = match (&coll_key, pass) {
         (Some(key), Orientation::Out) => overlay
-            .edges_for_src(key, node)
-            .map(|(label, dst, props)| (label.to_owned(), dst.to_owned(), Some(props)))
+            .edges_for_src(key, node)?
+            .into_iter()
+            .map(|(label, dst, props)| (label, dst, Some(props)))
             .collect(),
         (Some(key), Orientation::In) => overlay
-            .edges_for_dst(key, node)
-            .map(|(label, src, props)| (label.to_owned(), src.to_owned(), Some(props)))
+            .edges_for_dst(key, node)?
+            .into_iter()
+            .map(|(label, src, props)| (label, src, Some(props)))
             .collect(),
         (None, Orientation::Out) => overlay
-            .edges_for_src_any_collection(database_id, tenant, node)
+            .edges_for_src_any_collection(database_id, tenant, node)?
             .into_iter()
             .map(|(label, dst, _)| (label, dst, None))
             .collect(),
         (None, Orientation::In) => overlay
-            .edges_for_dst_any_collection(database_id, tenant, node)
+            .edges_for_dst_any_collection(database_id, tenant, node)?
             .into_iter()
             .map(|(label, src, _)| (label, src, None))
             .collect(),
     };
     if staged_rows.is_empty() {
-        return merged;
+        return Ok(merged);
     }
     let mut present: HashSet<(String, String)> = merged
         .iter()
@@ -232,7 +240,7 @@ pub(in crate::data::executor) fn merge_staged_hop_pass<'o>(
             merged.push((label, other, staged));
         }
     }
-    merged
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -276,7 +284,8 @@ mod tests {
             rows
         };
         let mut out =
-            merge_graph_txn_overlay_neighbors(overlay, &scope, node, direction, durable_of);
+            merge_graph_txn_overlay_neighbors(overlay, &scope, node, direction, durable_of)
+                .expect("merge");
         out.sort();
         out
     }
@@ -284,7 +293,9 @@ mod tests {
     #[test]
     fn staged_put_added_for_out_direction() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
 
         let out = neighbors(&overlay, None, &[], "a", Direction::Out, &[]);
         assert_eq!(out, vec![pair("knows", "b")]);
@@ -293,7 +304,9 @@ mod tests {
     #[test]
     fn staged_put_added_for_in_direction() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
 
         let out = neighbors(&overlay, None, &[], "b", Direction::In, &[]);
         assert_eq!(out, vec![pair("knows", "a")]);
@@ -302,7 +315,9 @@ mod tests {
     #[test]
     fn tombstoned_durable_edge_excluded() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "c");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "c")
+            .unwrap();
 
         let durable = [("a", "knows", "c")];
         let out = neighbors(&overlay, None, &[], "a", Direction::Out, &durable);
@@ -315,9 +330,15 @@ mod tests {
     #[test]
     fn a_named_collection_merges_only_its_own_staged_writes() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "c", Vec::new());
-        overlay.stage_edge_put(coll_key("other"), "a", "knows", "d", Vec::new());
-        overlay.stage_edge_delete(coll_key("other"), "a", "knows", "b");
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "c", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("other"), "a", "knows", "d", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_delete(coll_key("other"), "a", "knows", "b")
+            .unwrap();
         let durable = [("a", "knows", "b")];
 
         let scoped = neighbors(&overlay, Some("g"), &[], "a", Direction::Out, &durable);
@@ -332,7 +353,9 @@ mod tests {
     #[test]
     fn both_drops_a_deleted_in_edge_queried_from_its_destination() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
         let durable = [("a", "knows", "b")];
 
         let out = neighbors(&overlay, Some("g"), &[], "b", Direction::Both, &durable);
@@ -344,7 +367,9 @@ mod tests {
     #[test]
     fn both_drops_only_the_deleted_reverse_edge() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "b", "knows", "a");
+        overlay
+            .stage_edge_delete(coll_key("g"), "b", "knows", "a")
+            .unwrap();
         let durable = [("a", "knows", "b"), ("b", "knows", "a")];
 
         let out = neighbors(&overlay, Some("g"), &[], "a", Direction::Both, &durable);
@@ -356,7 +381,9 @@ mod tests {
     #[test]
     fn both_keeps_a_staged_reverse_put_beside_the_forward_edge() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "b", "knows", "a", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "b", "knows", "a", Vec::new())
+            .unwrap();
         let durable = [("a", "knows", "b")];
 
         let out = neighbors(&overlay, Some("g"), &[], "a", Direction::Both, &durable);
@@ -370,7 +397,9 @@ mod tests {
     #[test]
     fn both_lists_a_self_loop_once() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "x", "l", "x", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "x", "l", "x", Vec::new())
+            .unwrap();
         let durable = [("a", "l", "b"), ("a", "l", "a")];
         for collection in [Some("g"), None] {
             let out = neighbors(&overlay, collection, &[], "a", Direction::Both, &durable);
@@ -382,7 +411,9 @@ mod tests {
         }
 
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "l", "a");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "l", "a")
+            .unwrap();
         let out = neighbors(&overlay, Some("g"), &[], "a", Direction::Both, &durable);
         assert_eq!(out, vec![pair("l", "b")]);
     }
@@ -390,7 +421,9 @@ mod tests {
     #[test]
     fn label_filter_excludes_non_matching_staged_edge() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "other_label", "b", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "other_label", "b", Vec::new())
+            .unwrap();
 
         let out = neighbors(&overlay, None, &["knows"], "a", Direction::Out, &[]);
         assert!(out.is_empty());
@@ -399,9 +432,15 @@ mod tests {
     #[test]
     fn label_set_keeps_staged_edges_under_any_listed_label() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
-        overlay.stage_edge_put(coll_key("g"), "a", "works", "c", Vec::new());
-        overlay.stage_edge_put(coll_key("g"), "a", "likes", "d", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "works", "c", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "likes", "d", Vec::new())
+            .unwrap();
 
         let out = neighbors(
             &overlay,
@@ -423,10 +462,15 @@ mod tests {
     #[test]
     fn build_delta_carries_staged_edges_and_tombstones() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
-        overlay.stage_edge_delete(coll_key("g"), "x", "knows", "y");
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_delete(coll_key("g"), "x", "knows", "y")
+            .unwrap();
 
-        let delta = build_graph_overlay_delta(&overlay, DatabaseId::new(1), tenant());
+        let delta =
+            build_graph_overlay_delta(&overlay, DatabaseId::new(1), tenant()).expect("delta");
         assert!(!delta.is_empty());
         let out: Vec<_> = delta.out_neighbors("a", &[]).collect();
         assert_eq!(out, vec![("knows", "b")]);
@@ -438,17 +482,22 @@ mod tests {
     #[test]
     fn build_delta_scopes_to_database_tenant() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
 
         // A different database id sees none of the staged edges.
-        let delta = build_graph_overlay_delta(&overlay, DatabaseId::new(999), tenant());
+        let delta =
+            build_graph_overlay_delta(&overlay, DatabaseId::new(999), tenant()).expect("delta");
         assert!(delta.is_empty());
     }
 
     #[test]
     fn unrelated_node_unaffected() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new());
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", Vec::new())
+            .unwrap();
 
         let out = neighbors(&overlay, None, &[], "z", Direction::Out, &[]);
         assert!(out.is_empty());
@@ -464,9 +513,15 @@ mod tests {
     #[test]
     fn collection_merge_folds_only_its_own_collection() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
-        overlay.stage_edge_put(coll_key("g"), "c", "knows", "a", Vec::new());
-        overlay.stage_edge_put(coll_key("other"), "a", "knows", "d", Vec::new());
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "c", "knows", "a", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("other"), "a", "knows", "d", Vec::new())
+            .unwrap();
 
         let out = merge_graph_txn_overlay_collection_edges(
             Some(&overlay),
@@ -475,7 +530,8 @@ mod tests {
             &[],
             Direction::Both,
             vec![triple("a", "b"), triple("a", "e")],
-        );
+        )
+        .expect("merge");
         assert_eq!(out, vec![triple("a", "e"), triple("c", "a")]);
     }
 
@@ -498,11 +554,21 @@ mod tests {
     #[test]
     fn staged_hop_pass_folds_its_collection() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "c", vec![0x80]);
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "d", vec![0x81]);
-        overlay.stage_edge_put(coll_key("g"), "a", "likes", "e", Vec::new());
-        overlay.stage_edge_put(coll_key("other"), "a", "knows", "f", Vec::new());
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "c", vec![0x80])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "d", vec![0x81])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "likes", "e", Vec::new())
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("other"), "a", "knows", "f", Vec::new())
+            .unwrap();
 
         let mut out = merge_staged_hop_pass(
             &overlay,
@@ -510,13 +576,14 @@ mod tests {
             "a",
             Orientation::Out,
             vec![pair("knows", "b"), pair("knows", "c"), pair("knows", "z")],
-        );
+        )
+        .expect("merge");
         out.sort();
         assert_eq!(
             out,
             vec![
-                ("knows".to_string(), "c".to_string(), Some(&[0x80u8][..])),
-                ("knows".to_string(), "d".to_string(), Some(&[0x81u8][..])),
+                ("knows".to_string(), "c".to_string(), Some(vec![0x80u8])),
+                ("knows".to_string(), "d".to_string(), Some(vec![0x81u8])),
                 ("knows".to_string(), "z".to_string(), None),
             ]
         );
@@ -526,9 +593,15 @@ mod tests {
     #[test]
     fn staged_hop_pass_reads_incoming_edges_by_destination() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "x", "knows", "a");
-        overlay.stage_edge_put(coll_key("g"), "y", "knows", "a", vec![0x80]);
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "w", Vec::new());
+        overlay
+            .stage_edge_delete(coll_key("g"), "x", "knows", "a")
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "y", "knows", "a", vec![0x80])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "w", Vec::new())
+            .unwrap();
 
         let mut out = merge_staged_hop_pass(
             &overlay,
@@ -536,13 +609,14 @@ mod tests {
             "a",
             Orientation::In,
             vec![pair("knows", "x"), pair("knows", "v")],
-        );
+        )
+        .expect("merge");
         out.sort();
         assert_eq!(
             out,
             vec![
                 ("knows".to_string(), "v".to_string(), None),
-                ("knows".to_string(), "y".to_string(), Some(&[0x80u8][..])),
+                ("knows".to_string(), "y".to_string(), Some(vec![0x80u8])),
             ]
         );
     }
@@ -551,8 +625,12 @@ mod tests {
     #[test]
     fn staged_hop_pass_without_collection_spans_collections() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
-        overlay.stage_edge_put(coll_key("other"), "a", "knows", "f", vec![0x80]);
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("other"), "a", "knows", "f", vec![0x80])
+            .unwrap();
 
         let mut out = merge_staged_hop_pass(
             &overlay,
@@ -560,7 +638,8 @@ mod tests {
             "a",
             Orientation::Out,
             vec![pair("knows", "b")],
-        );
+        )
+        .expect("merge");
         out.sort();
         assert_eq!(out, vec![("knows".to_string(), "f".to_string(), None)]);
     }
@@ -574,7 +653,8 @@ mod tests {
             &[],
             Direction::Both,
             vec![triple("a", "z"), triple("a", "b"), triple("a", "z")],
-        );
+        )
+        .expect("merge");
         assert_eq!(out, vec![triple("a", "b"), triple("a", "z")]);
     }
 }

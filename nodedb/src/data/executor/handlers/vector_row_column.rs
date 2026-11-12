@@ -127,11 +127,10 @@ impl CoreLoop {
         surrogate: Surrogate,
         at: Option<i64>,
     ) -> crate::Result<Vec<f32>> {
-        if let Some(Staged::Put(body)) = txn_id
-            .and_then(|txn| self.txn_overlays.get(&txn))
-            .and_then(|overlay| overlay.get(coll_key, surrogate.0))
+        if let Some(txn) = txn_id
+            && let Some(Staged::Put(body)) = self.staged_row(txn, coll_key, surrogate.0)?
         {
-            return Ok(StagedVectorRow::from_bytes(body)?.vector);
+            return Ok(StagedVectorRow::from_bytes(&body)?.vector);
         }
         self.primary_vector_at(
             coll_key.0.as_u64(),

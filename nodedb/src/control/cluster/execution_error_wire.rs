@@ -81,8 +81,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         },
         // Every other error crosses as its public numeric code and message.
         // The coordinator renders the SQLSTATE that code maps to.
-        other @ (crate::Error::TxnOverlayMemoryExceeded { .. }
-        | crate::Error::RejectedAuthz { .. }
+        other @ (crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::ConflictRetry { .. }
         | crate::Error::RejectedPrevalidation { .. }

@@ -8,7 +8,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// The number of `ErrorCode` variants [`variant_index`] numbers.
-pub(super) const VARIANT_COUNT: usize = 58;
+pub(super) const VARIANT_COUNT: usize = 57;
 
 /// A dense index per variant. Exhaustive, so a new variant fails to compile
 /// here until it gets an index, and [`every_variant_has_a_sample`] then fails
@@ -48,7 +48,6 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::Unsupported { .. } => 31,
         ErrorCode::RollbackFailed { .. } => 32,
         ErrorCode::OllpRetryRequired => 33,
-        ErrorCode::TxnOverlayMemoryExceeded { .. } => 34,
         ErrorCode::DivisionByZero => 35,
         ErrorCode::UndefinedFunction { .. } => 36,
         ErrorCode::DataException { .. } => 37,
@@ -72,7 +71,7 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::SerializationConflict { .. } => 54,
         ErrorCode::InvalidArgumentForLogarithm { .. } => 55,
         ErrorCode::InvalidArgumentForPowerFunction { .. } => 56,
-        ErrorCode::ExecutionLimitExceeded { .. } => 57,
+        ErrorCode::ExecutionLimitExceeded { .. } => 34,
     }
 }
 
@@ -196,7 +195,6 @@ pub(super) fn samples() -> Vec<ErrorCode> {
             cause: Some(Box::new(ErrorCode::Internal { detail: text() })),
         },
         ErrorCode::OllpRetryRequired,
-        ErrorCode::TxnOverlayMemoryExceeded { limit: 1 << 20 },
         ErrorCode::DivisionByZero,
         ErrorCode::UndefinedFunction { name: "f".into() },
         ErrorCode::DataException { detail: text() },

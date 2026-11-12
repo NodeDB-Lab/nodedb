@@ -52,9 +52,10 @@ impl CoreLoop {
             return Ok(hides);
         };
         hides.all = overlay.is_truncated(&coll_key);
-        for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
+        for item in overlay.iter_for_collection(&coll_key) {
+            let (surrogate, staged) = item?;
             let surrogate = Surrogate::new(surrogate);
-            let hidden = match staged {
+            let hidden = match &*staged {
                 Staged::Tombstone => true,
                 Staged::Put(_) => self
                     .sparse
@@ -106,26 +107,32 @@ mod tests {
             )
             .expect("store the row");
         let txn = TxnId::new(7);
-        let overlay = core.txn_overlays.entry(txn).or_default();
+        let overlay = core.txn_overlay_mut(txn);
         let deleted = Surrogate::new(1);
         let fresh = Surrogate::new(3);
-        overlay.insert_tombstone(
-            coll_key(),
-            deleted.as_u32(),
-            &RowIdentity::for_surrogate(deleted),
-        );
-        overlay.insert_put(
-            coll_key(),
-            stored.as_u32(),
-            &RowIdentity::for_surrogate(stored),
-            Vec::new(),
-        );
-        overlay.insert_put(
-            coll_key(),
-            fresh.as_u32(),
-            &RowIdentity::for_surrogate(fresh),
-            Vec::new(),
-        );
+        overlay
+            .insert_tombstone(
+                coll_key(),
+                deleted.as_u32(),
+                &RowIdentity::for_surrogate(deleted),
+            )
+            .expect("stage");
+        overlay
+            .insert_put(
+                coll_key(),
+                stored.as_u32(),
+                &RowIdentity::for_surrogate(stored),
+                Vec::new(),
+            )
+            .expect("stage");
+        overlay
+            .insert_put(
+                coll_key(),
+                fresh.as_u32(),
+                &RowIdentity::for_surrogate(fresh),
+                Vec::new(),
+            )
+            .expect("stage");
 
         let hides = core
             .staged_multi_vector_hides(txn, DatabaseId::DEFAULT, TenantId::new(TID), COLL)
@@ -135,7 +142,7 @@ mod tests {
         assert!(hides.keeps(fresh), "a staged put of a new row ends nothing");
 
         if let Some(overlay) = core.txn_overlays.get_mut(&txn) {
-            overlay.mark_truncated(coll_key());
+            overlay.mark_truncated(coll_key()).expect("stage");
         }
         let hides = core
             .staged_multi_vector_hides(txn, DatabaseId::DEFAULT, TenantId::new(TID), COLL)

@@ -97,12 +97,11 @@ impl CoreLoop {
             return Ok(values);
         }
         let staged = self
-            .txn_overlays
-            .get(&txn_id)
-            .and_then(|overlay| overlay.get(engine_key, surrogate.0));
+            .staged_row(txn_id, engine_key, surrogate.0)
+            .map_err(ErrorCode::from)?;
         let prior = match staged {
             Some(Staged::Tombstone) => None,
-            Some(Staged::Put(body)) => decode_staged_row(body),
+            Some(Staged::Put(body)) => decode_staged_row(&body),
             None => {
                 let Some(engine) = self.columnar_engines.get(engine_key) else {
                     return Ok(values);

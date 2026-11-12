@@ -52,19 +52,20 @@ impl CoreLoop {
             return Ok(Some(
                 overlay
                     .iter_for_collection(coll_key)
-                    .map(|(surrogate, _)| (surrogate, txn_ordinal))
-                    .collect(),
+                    .map(|item| item.map(|(surrogate, _)| (surrogate, txn_ordinal)))
+                    .collect::<crate::Result<_>>()?,
             ));
         }
         let collection = coll_key.2.as_str();
         let truncated = overlay.is_truncated(coll_key);
-        let staged: BTreeMap<u32, &Staged> = overlay.iter_for_collection(coll_key).collect();
         let mut batch = KeyStamps::default();
         let mut stamps = BTreeMap::new();
-        for (surrogate, entry) in staged {
+        // The scan yields ascending surrogates: the order the stamps follow.
+        for item in overlay.iter_for_collection(coll_key) {
+            let (surrogate, entry) = item?;
             let mut keys: Vec<Vec<u8>> = Vec::with_capacity(2);
-            if !truncated && let Some(prior) = overlay.base_pk(coll_key, surrogate) {
-                let pk = nodedb_types::value_from_msgpack(prior).map_err(|e| {
+            if !truncated && let Some(prior) = overlay.base_pk(coll_key, surrogate)? {
+                let pk = nodedb_types::value_from_msgpack(&prior).map_err(|e| {
                     crate::Error::Serialization {
                         format: "msgpack".into(),
                         detail: format!(
@@ -75,7 +76,7 @@ impl CoreLoop {
                 })?;
                 keys.push(encode_pk(&pk));
             }
-            if let Staged::Put(body) = entry {
+            if let Staged::Put(body) = &*entry {
                 let values = decode_staged_row(body).ok_or_else(|| crate::Error::Internal {
                     detail: format!(
                         "columnar resolve: staged row of '{collection}' (surrogate {surrogate}) \
@@ -151,25 +152,33 @@ mod tests {
 
         let mut overlay = TxnOverlay::new();
         // Surrogate 1: an update of id 1.
-        overlay.note_base_pk(&coll_key, 1, key_bytes(1));
+        overlay.note_base_pk(&coll_key, 1, key_bytes(1)).unwrap();
         let body = nodedb_types::value_to_msgpack(&Value::Array(version(0, 1, 11)))
             .expect("encode staged row");
-        overlay.insert_put(coll_key.clone(), 1, &RowIdentity::from_user_key("1"), body);
+        overlay
+            .insert_put(coll_key.clone(), 1, &RowIdentity::from_user_key("1"), body)
+            .unwrap();
         // Surrogate 2: a delete of id 2.
-        overlay.note_base_pk(&coll_key, 2, key_bytes(2));
-        overlay.insert_tombstone(coll_key.clone(), 2, &RowIdentity::from_user_key("2"));
+        overlay.note_base_pk(&coll_key, 2, key_bytes(2)).unwrap();
+        overlay
+            .insert_tombstone(coll_key.clone(), 2, &RowIdentity::from_user_key("2"))
+            .unwrap();
         // Surrogate 3: a delete of id 3, whose version sits above the txn.
-        overlay.note_base_pk(&coll_key, 3, key_bytes(3));
-        overlay.insert_tombstone(coll_key.clone(), 3, &RowIdentity::from_user_key("3"));
+        overlay.note_base_pk(&coll_key, 3, key_bytes(3)).unwrap();
+        overlay
+            .insert_tombstone(coll_key.clone(), 3, &RowIdentity::from_user_key("3"))
+            .unwrap();
         // Surrogate 4: another staged row on id 1's key.
         let again = nodedb_types::value_to_msgpack(&Value::Array(version(0, 1, 12)))
             .expect("encode staged row");
-        overlay.insert_put(
-            coll_key.clone(),
-            4,
-            &RowIdentity::from_user_key("1b"),
-            again,
-        );
+        overlay
+            .insert_put(
+                coll_key.clone(),
+                4,
+                &RowIdentity::from_user_key("1b"),
+                again,
+            )
+            .unwrap();
 
         let stamps = core
             .columnar_txn_stamps(&overlay, &coll_key, txn)
@@ -196,16 +205,18 @@ mod tests {
         core.columnar_engines.insert(coll_key.clone(), engine);
 
         let mut overlay = TxnOverlay::new();
-        overlay.mark_truncated(coll_key.clone());
+        overlay.mark_truncated(coll_key.clone()).unwrap();
         for (surrogate, id) in [(1, 1), (2, 2), (3, 3)] {
             let body = nodedb_types::value_to_msgpack(&Value::Array(version(0, id, 7)))
                 .expect("encode staged row");
-            overlay.insert_put(
-                coll_key.clone(),
-                surrogate,
-                &RowIdentity::from_user_key(id.to_string()),
-                body,
-            );
+            overlay
+                .insert_put(
+                    coll_key.clone(),
+                    surrogate,
+                    &RowIdentity::from_user_key(id.to_string()),
+                    body,
+                )
+                .unwrap();
         }
 
         let stamps = core

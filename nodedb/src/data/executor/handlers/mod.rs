@@ -79,7 +79,7 @@ pub mod sort_utils;
 pub mod spatial;
 pub mod spatial_refine;
 pub mod spatial_sync;
-pub(super) mod spill;
+pub mod spill;
 pub mod text_index;
 pub mod text_rows;
 pub mod text_score_columns;

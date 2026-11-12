@@ -161,9 +161,10 @@ impl CoreLoop {
             }
         }
         if let Some(overlay) = overlay {
-            for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
+            for item in overlay.iter_for_collection(&coll_key) {
+                let (surrogate, staged) = item?;
                 let surrogate = Surrogate::new(surrogate);
-                let keep = match staged {
+                let keep = match &*staged {
                     Staged::Put(body) => admits(&StorageKey::for_surrogate(surrogate), body)?,
                     Staged::Tombstone => false,
                 };

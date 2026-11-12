@@ -70,8 +70,8 @@ impl CoreLoop {
         self.document_row_changes(scope, collections.documents, &mut changes)?;
         self.crdt_row_changes(scope, collections.plans, &mut changes)?;
         self.kv_row_changes(scope, collections.kv, &mut changes)?;
-        self.vector_primary_row_changes(scope, collections.vector_primary, &mut changes);
-        self.columnar_row_changes(scope, collections.columnar, &mut changes);
+        self.vector_primary_row_changes(scope, collections.vector_primary, &mut changes)?;
+        self.columnar_row_changes(scope, collections.columnar, &mut changes)?;
         self.array_row_changes(scope, collections.plans, &mut changes)?;
         super::grouped::timeseries_row_changes(collections.plans, &mut changes);
         Ok(changes)

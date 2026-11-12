@@ -138,19 +138,21 @@ impl CoreLoop {
         let overlay = self.txn_overlays.get(&statement.txn_id);
         // A staged body that will not decode cannot show the value it claims,
         // so the check fails rather than let an incoming row take it.
-        let staged: Vec<(u32, Option<serde_json::Value>)> = match overlay {
-            Some(overlay) => overlay
-                .iter_for_collection(statement.coll_key)
-                .filter(|(surrogate, _)| !written.contains(surrogate))
-                .map(|(surrogate, staged)| match staged {
-                    Staged::Put(body) => self
-                        .decode_stored_document(config, body)
-                        .map(|doc| (surrogate, Some(doc))),
-                    Staged::Tombstone => Ok((surrogate, None)),
-                })
-                .collect::<crate::Result<_>>()?,
-            None => Vec::new(),
-        };
+        let mut staged: Vec<(u32, Option<serde_json::Value>)> = Vec::new();
+        if let Some(overlay) = overlay {
+            for item in overlay.iter_for_collection(statement.coll_key) {
+                let (surrogate, value) = item?;
+                if written.contains(&surrogate) {
+                    continue;
+                }
+                staged.push(match &*value {
+                    Staged::Put(body) => {
+                        (surrogate, Some(self.decode_stored_document(config, body)?))
+                    }
+                    Staged::Tombstone => (surrogate, None),
+                });
+            }
+        }
         let rows: Vec<PostImage<'_>> = staged
             .iter()
             .map(|(surrogate, doc)| PostImage {

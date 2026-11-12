@@ -33,6 +33,7 @@ mod recovery;
 mod redo_stream;
 mod retention;
 mod shared;
+mod spill;
 mod storage_bytes;
 mod vector;
 mod vector_build;
@@ -98,6 +99,7 @@ pub use redo_stream::{
 };
 pub use retention::{retention_autowire_orphaned, sequence_restart_failed};
 pub use shared::entry_kind;
+pub use spill::spill_cleanup_failed;
 pub use storage_bytes::{
     storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,
     storage_share_peer_skipped,

@@ -126,7 +126,7 @@ impl CoreLoop {
             |key| {
                 let body = self.kv_resolve_read(did, tid, collection, key, now_ms);
                 stored_before.insert(key.to_vec(), body.clone());
-                body
+                Ok(body)
             },
         )?;
         if let KvBatchIntent::Merge {

@@ -10,7 +10,7 @@
 //! with the SAME pure function the autocommit engine methods call
 //! (`nodedb_physical::kv_atomic::compute`) so
 //! a staged value and its COMMIT-time durable replay never diverge, then
-//! stage the new bytes via [`CoreLoop::stage_put_capped`].
+//! stage the new bytes via [`CoreLoop::stage_put`].
 //!
 //! `ttl_ms` on `Incr` / `BatchPut` lives outside the value body
 //! (`KvEntry.expire_at_ms`), so it is staged separately from the value: when
@@ -37,31 +37,20 @@
 //! `KvEngine` atomic path, which ignores the overlay's surrogate entirely).
 
 use nodedb_physical::kv_atomic::compute as atomic_compute;
-use nodedb_physical::physical_plan::{KvBatchIntent, KvCounterShape, KvOp};
+use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
 use nodedb_types::Surrogate;
 
 use super::context::StageCtx;
 use super::stage_kv::kv_row_identity;
+use super::stage_kv_batch::StageKvBatch;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::kv::atomic::incr_float_reply;
-use crate::data::executor::handlers::kv::batch_plan::{merge_batch_verb, plan_kv_batch};
 use crate::data::executor::handlers::kv::declared_body::fit_kv_image;
-use crate::data::executor::handlers::transaction::overlay::StagedTtl;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::fitted_counter_f64;
 use crate::types::TxnId;
-
-/// A `KvOp::BatchPut` a transaction stages.
-struct StageKvBatch<'a> {
-    tid: u64,
-    txn_id: TxnId,
-    collection: &'a str,
-    entries: &'a [(Vec<u8>, Vec<u8>)],
-    ttl_ms: u64,
-    intent: &'a KvBatchIntent,
-}
 
 /// FNV-1a 32-bit hash, used only to derive a stable, collection-local overlay
 /// slot for a KV key that has no planner-assigned surrogate. Not a security
@@ -101,8 +90,13 @@ impl CoreLoop {
                 rls_write_check,
                 shape,
             } => {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_ttl_side_effect(&ctx, *ttl_ms);
+                let ctx = match self
+                    .kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key)
+                    .and_then(|ctx| self.stage_kv_ttl_side_effect(&ctx, *ttl_ms).map(|()| ctx))
+                {
+                    Ok(ctx) => ctx,
+                    Err(e) => return self.response_error(task, e),
+                };
                 self.stage_kv_incr(&ctx, key, *delta, shape, rls_write_check)
             }
             KvOp::IncrFloat {
@@ -112,10 +106,10 @@ impl CoreLoop {
                 surrogate: _,
                 rls_write_check,
                 shape,
-            } => {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_incr_float(&ctx, key, delta, shape, rls_write_check)
-            }
+            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                Ok(ctx) => self.stage_kv_incr_float(&ctx, key, delta, shape, rls_write_check),
+                Err(e) => self.response_error(task, e),
+            },
             KvOp::Cas {
                 collection,
                 key,
@@ -123,10 +117,10 @@ impl CoreLoop {
                 new_value,
                 surrogate: _,
                 rls_write_check,
-            } => {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_cas(&ctx, key, expected, new_value, rls_write_check)
-            }
+            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                Ok(ctx) => self.stage_kv_cas(&ctx, key, expected, new_value, rls_write_check),
+                Err(e) => self.response_error(task, e),
+            },
             KvOp::GetSet {
                 collection,
                 key,
@@ -134,10 +128,10 @@ impl CoreLoop {
                 surrogate: _,
                 rls_filters,
                 rls_write_check,
-            } => {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_getset(&ctx, key, new_value, rls_filters, rls_write_check)
-            }
+            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                Ok(ctx) => self.stage_kv_getset(&ctx, key, new_value, rls_filters, rls_write_check),
+                Err(e) => self.response_error(task, e),
+            },
             // Three slots are deliberately elided. The plan's per-entry
             // cross-engine surrogates are applied by the durable COMMIT-time
             // replay through `execute_kv_batch_put`; the staging overlay keys
@@ -185,26 +179,26 @@ impl CoreLoop {
         txn_id: TxnId,
         collection: &'a str,
         key: &[u8],
-    ) -> StageCtx<'a> {
+    ) -> crate::Result<StageCtx<'a>> {
         let doc_id = kv_row_identity(key);
         let coll_key = (
             task.request.database_id,
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let surrogate = self
-            .txn_overlays
-            .get(&txn_id)
-            .and_then(|o| o.surrogate_for_doc_id(&coll_key, &doc_id))
-            .unwrap_or_else(|| synthetic_kv_surrogate(key));
-        StageCtx::new(
+        let bound = match self.txn_overlays.get(&txn_id) {
+            Some(o) => o.surrogate_for_doc_id(&coll_key, &doc_id)?,
+            None => None,
+        };
+        let surrogate = bound.unwrap_or_else(|| synthetic_kv_surrogate(key));
+        Ok(StageCtx::new(
             task,
             tid,
             txn_id,
             collection,
             doc_id,
             Surrogate::new(surrogate),
-        )
+        ))
     }
 
     // ── Incr / IncrFloat: read-modify-write, computed via the shared engine
@@ -218,7 +212,10 @@ impl CoreLoop {
         shape: &KvCounterShape,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let current = self.resolve_kv_current(ctx, key);
+        let current = match self.resolve_kv_current(ctx, key) {
+            Ok(current) => current,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
         match atomic_compute::incr(current.as_deref(), delta, shape) {
             Ok((new_i64, computed)) => {
                 let new_bytes = match self.stage_fit_kv_image(ctx, computed) {
@@ -233,7 +230,7 @@ impl CoreLoop {
                 {
                     return self.response_error(ctx.task, e);
                 }
-                if let Err(e) = self.stage_put_capped(ctx, new_bytes) {
+                if let Err(e) = self.stage_put(ctx, new_bytes) {
                     return self.response_error(ctx.task, e);
                 }
                 self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "value": new_i64 }))
@@ -250,7 +247,10 @@ impl CoreLoop {
         shape: &KvCounterShape,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let current = self.resolve_kv_current(ctx, key);
+        let current = match self.resolve_kv_current(ctx, key) {
+            Ok(current) => current,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
         match atomic_compute::incr_float(current.as_deref(), delta, shape) {
             Ok((computed_f64, computed)) => {
                 let declared = self.declared_columns(&ctx.coll_key);
@@ -270,7 +270,7 @@ impl CoreLoop {
                     return self.response_error(ctx.task, e);
                 }
                 let reply = incr_float_reply(new_f64, &new_bytes);
-                if let Err(e) = self.stage_put_capped(ctx, new_bytes) {
+                if let Err(e) = self.stage_put(ctx, new_bytes) {
                     return self.response_error(ctx.task, e);
                 }
                 self.kv_atomic_json_response(ctx.task, &reply)
@@ -320,7 +320,10 @@ impl CoreLoop {
         new_value: &[u8],
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let current = self.resolve_kv_current(ctx, key);
+        let current = match self.resolve_kv_current(ctx, key) {
+            Ok(current) => current,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
         let (matches, write_bytes) =
             match atomic_compute::cas(current.as_deref(), expected, new_value) {
                 Ok(outcome) => outcome,
@@ -340,7 +343,7 @@ impl CoreLoop {
             {
                 return self.response_error(ctx.task, e);
             }
-            if let Err(e) = self.stage_put_capped(ctx, write_bytes) {
+            if let Err(e) = self.stage_put(ctx, write_bytes) {
                 return self.response_error(ctx.task, e);
             }
         }
@@ -367,7 +370,10 @@ impl CoreLoop {
         rls_filters: &[u8],
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let current = self.resolve_kv_current(ctx, key);
+        let current = match self.resolve_kv_current(ctx, key) {
+            Ok(current) => current,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
         let write_bytes = match atomic_compute::getset(current.as_deref(), new_value) {
             Ok(bytes) => bytes,
             Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e.into()),
@@ -382,7 +388,7 @@ impl CoreLoop {
         if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &write_bytes) {
             return self.response_error(ctx.task, e);
         }
-        if let Err(e) = self.stage_put_capped(ctx, write_bytes) {
+        if let Err(e) = self.stage_put(ctx, write_bytes) {
             return self.response_error(ctx.task, e);
         }
 
@@ -400,105 +406,6 @@ impl CoreLoop {
         let old_b64 = disclosable_old
             .map(|v| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, v));
         self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "old_value": old_b64 }))
-    }
-
-    // ── BatchPut: stage every entry via the same per-key put primitive ──
-
-    /// Stage a batch put under BASE ∪ OVERLAY, judging each key by the
-    /// batch's intent the way `execute_kv_batch_put` judges it. An `Insert`
-    /// batch with a stored or repeated key stages nothing.
-    fn stage_kv_batch_put(&mut self, task: &ExecutionTask, batch: StageKvBatch<'_>) -> Response {
-        let StageKvBatch {
-            tid,
-            txn_id,
-            collection,
-            entries,
-            ttl_ms,
-            intent,
-        } = batch;
-        let did = task.request.database_id.as_u64();
-        // Every key is read under BASE ∪ OVERLAY, so a row this transaction
-        // staged earlier counts as stored.
-        let rows = match plan_kv_batch(
-            collection,
-            entries,
-            intent,
-            self.declared_columns_of(did, tid, collection),
-            &self.crs_context(),
-            |key| {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key);
-                self.resolve_kv_current(&ctx, key)
-            },
-        ) {
-            Ok(rows) => rows,
-            Err(e) => return self.response_error(task, e),
-        };
-        if let KvBatchIntent::Merge {
-            rls_write_check, ..
-        } = intent
-        {
-            // Staging produces the row images COMMIT installs, so the write
-            // policy decides them here.
-            for row in &rows {
-                let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, row.key);
-                if let Err(e) = self.stage_admit_write(
-                    rls_write_check,
-                    &row.stored,
-                    &ctx.document_id,
-                    did,
-                    tid,
-                    collection,
-                ) {
-                    return self.response_error(task, e);
-                }
-            }
-        }
-        // Every row is held to the row limit before the first one stages.
-        for row in &rows {
-            if let Err(e) =
-                crate::engine::kv::KvRowTooLarge::check(collection, row.key, &row.stored)
-            {
-                return self.response_error(task, e);
-            }
-        }
-        for row in &rows {
-            let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, row.key);
-            self.stage_kv_ttl_side_effect(&ctx, ttl_ms);
-            if let Err(e) = self.stage_put_capped(&ctx, row.stored.to_vec()) {
-                return self.response_error(task, e);
-            }
-        }
-        match intent {
-            KvBatchIntent::Merge { .. } => {
-                self.response_affected_with_op(task, rows.len() as u64, merge_batch_verb(&rows))
-            }
-            KvBatchIntent::Put
-            | KvBatchIntent::Upsert
-            | KvBatchIntent::Insert
-            | KvBatchIntent::InsertIfAbsent => {
-                match response_codec::encode_count("inserted", rows.len()) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
-        }
-    }
-
-    /// Stage the TTL side-effect a non-zero `ttl_ms` on `Incr` / `BatchPut`
-    /// carries, so a same-transaction `GetTtl` observes it (see module doc).
-    /// A zero `ttl_ms` means "no TTL requested" and is a no-op here, matching
-    /// the base `atomic_put` / `execute_kv_batch_put` semantics.
-    pub(super) fn stage_kv_ttl_side_effect(&mut self, ctx: &StageCtx<'_>, ttl_ms: u64) {
-        if ttl_ms == 0 {
-            return;
-        }
-        let now_ms = self.kv_read_now_ms();
-        self.txn_overlay_mut(ctx.txn_id).set_ttl(
-            ctx.coll_key.clone(),
-            ctx.surrogate.0,
-            &ctx.document_id,
-            StagedTtl::ExpireAt(now_ms.saturating_add(ttl_ms)),
-        );
     }
 
     // ── Shared response helpers ──────────────────────────────────────────

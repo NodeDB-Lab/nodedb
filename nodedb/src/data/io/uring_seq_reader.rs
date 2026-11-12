@@ -76,13 +76,18 @@ impl UringSeqReader {
     /// cannot be opened, mirroring the `Option`-return fallback convention of
     /// the writer/reader siblings.
     pub fn open(path: &Path, chunk_size: usize) -> Option<Self> {
+        Self::open_at(path, 0, chunk_size)
+    }
+
+    /// Open `path` for streaming reads that start at byte `offset`.
+    pub fn open_at(path: &Path, offset: u64, chunk_size: usize) -> Option<Self> {
         let ring = io_uring::IoUring::new(QUEUE_DEPTH).ok()?;
         let file = std::fs::File::open(path).ok()?;
 
         Some(Self {
             ring,
             file,
-            file_offset: 0,
+            file_offset: offset,
             buf: vec![0u8; chunk_size.max(1)],
             pos: 0,
             filled: 0,
@@ -196,6 +201,11 @@ impl UringSeqReader {
     /// io_uring streaming reads are Linux-only. Non-Linux builds return `None`
     /// so callers fall back to their non-io_uring path.
     pub fn open(_path: &Path, _chunk_size: usize) -> Option<Self> {
+        None
+    }
+
+    /// io_uring streaming reads are Linux-only. Non-Linux builds return `None`.
+    pub fn open_at(_path: &Path, _offset: u64, _chunk_size: usize) -> Option<Self> {
         None
     }
 

@@ -92,7 +92,19 @@ impl CoreLoop {
         self.calvin
             .commit_pending
             .remove(&(epoch, position, vshard_id));
-        self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        // The stage error is the refusal this replies with. A spill
+        // directory the teardown cannot remove filed its own report, and the
+        // next core open sweeps it.
+        if let Err(cleanup) = self.drop_calvin_synthetic_overlay(epoch, position, vshard_id) {
+            tracing::error!(
+                core = self.core_id,
+                epoch,
+                position,
+                vshard_id,
+                error = %cleanup,
+                "calvin stage failure: the transaction's spill directory was not removed"
+            );
+        }
         // The scheduler proposes this abort vote and waits for the global
         // verdict before it drops anything.
         self.calvin_stage_refusal(task, epoch, position, error.into())

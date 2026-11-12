@@ -9,8 +9,10 @@
 //!   page by page and answers one result set of every copied row, in copy
 //!   order.
 //! - Under any limit, a copy with `RETURNING` runs in an implicit
-//!   transaction. Past a response limit or the staging budget it fails with
-//!   `54000` and stores nothing.
+//!   transaction. Past a response limit it fails with `54000` and stores
+//!   nothing.
+//! - Past the staging overlay's hot-tier threshold, the transaction spills
+//!   to disk: every row commits, or on an error no row is stored.
 //! - A copy that copies nothing answers its columns and no row.
 
 use crate::harness::TestServer;
@@ -180,10 +182,9 @@ async fn a_copy_past_the_row_limit_stores_nothing() {
     );
 }
 
-/// A copy whose list can fail stages every row in one transaction. Past the
-/// per-core staging budget it fails with `54000` and stores nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_copy_past_the_staging_budget_fails_with_54000() {
+/// Start a node with a 64 KiB staging hot tier and seed `orp_big_src` with
+/// 50 rows of 4 KiB, well past that threshold, and an empty `orp_big_dst`.
+async fn seed_past_the_hot_tier() -> TestServer {
     let server = TestServer::start_with_max_txn_overlay_bytes(64 * 1024).await;
     for collection in ["orp_big_src", "orp_big_dst"] {
         create(
@@ -192,7 +193,6 @@ async fn a_copy_past_the_staging_budget_fails_with_54000() {
         )
         .await;
     }
-    // 50 rows of 4 KiB stage past the 64 KiB budget.
     let body = "x".repeat(4 * 1024);
     for index in 0..50 {
         server
@@ -202,17 +202,57 @@ async fn a_copy_past_the_staging_budget_fails_with_54000() {
             .await
             .unwrap_or_else(|e| panic!("seed row {index}: {e}"));
     }
+    server
+}
+
+/// A copy whose list can fail stages every row in one implicit
+/// transaction. Past the hot-tier threshold the overlay spills, and the
+/// copy commits every row and answers each one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_past_the_staging_hot_tier_commits_every_row() {
+    let server = seed_past_the_hot_tier().await;
+
+    let returned = server
+        .query_rows(
+            "INSERT INTO orp_big_dst (id, b) SELECT id, b FROM orp_big_src RETURNING length(b)",
+        )
+        .await
+        .expect("a copy past the hot tier commits");
+    assert_eq!(returned.len(), 50);
+    assert!(
+        returned.iter().all(|row| row == &vec!["4096".to_owned()]),
+        "{returned:?}"
+    );
+    assert_eq!(
+        count_of(&server, "orp_big_dst").await,
+        50,
+        "every copied row is stored"
+    );
+    let stored = rows_of(&server, "SELECT id, length(b) FROM orp_big_dst").await;
+    let expected: Vec<String> = (0..50).map(|index| format!("r{index:02}\t4096")).collect();
+    assert_eq!(stored, expected, "each stored row keeps its full body");
+}
+
+/// An implicit transaction past the hot-tier threshold that fails on its
+/// last row stores none of its rows: the spilled rows roll back with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spilled_copy_that_fails_stores_nothing() {
+    let server = seed_past_the_hot_tier().await;
+    server
+        .exec("INSERT INTO orp_big_dst (id, b) VALUES ('r49', 'held')")
+        .await
+        .expect("seed the conflicting row");
 
     let (code, message) = simple_error(
         &server.client,
-        "INSERT INTO orp_big_dst (id, b) SELECT id, b FROM orp_big_src RETURNING length(b)",
+        "INSERT INTO orp_big_dst (id, b) SELECT id, b FROM orp_big_src RETURNING id",
     )
     .await;
-    assert_eq!(code, "54000", "{message}");
+    assert_eq!(code, "23505", "{message}");
     assert_eq!(
-        count_of(&server, "orp_big_dst").await,
-        0,
-        "the refused transaction stores no row"
+        rows_of(&server, "SELECT id, b FROM orp_big_dst").await,
+        vec!["r49\theld".to_owned()],
+        "the failed copy stores none of its spilled rows"
     );
 }
 

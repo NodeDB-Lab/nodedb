@@ -85,7 +85,7 @@ pub(super) fn serialize_document_collection(
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
     for row in staged_document_rows(overlay, coll_key, strict_schema)? {
-        let stamp = pinned_stamp(overlay, coll_key, row.doc_id, row.surrogate)?;
+        let stamp = pinned_stamp(overlay, coll_key, &row.doc_id, row.surrogate)?;
         match row.value {
             Some(value) => {
                 let prov: Option<SyncProvenance> = None;
@@ -110,7 +110,7 @@ pub(super) fn serialize_document_collection(
             }
             None => ops.push(delete_sub_record(
                 collection,
-                row.doc_id,
+                &row.doc_id,
                 row.surrogate,
                 stamp.sys_from,
             )?),
@@ -121,8 +121,8 @@ pub(super) fn serialize_document_collection(
 
 /// One document row a transaction staged for `coll_key`, as its redo entry
 /// writes it.
-pub(super) struct StagedDocumentRow<'a> {
-    pub doc_id: &'a RowIdentity,
+pub(super) struct StagedDocumentRow {
+    pub doc_id: RowIdentity,
     pub surrogate: u32,
     /// The redo `value` of a put. `None` for a delete.
     pub value: Option<Vec<u8>>,
@@ -132,27 +132,21 @@ pub(super) struct StagedDocumentRow<'a> {
 /// doc-id order, with the value its redo put carries. The resolve
 /// serializes these rows, and the Calvin stage judges them at its commit
 /// boundary.
-pub(super) fn staged_document_rows<'a>(
-    overlay: &'a TxnOverlay,
+pub(super) fn staged_document_rows(
+    overlay: &TxnOverlay,
     coll_key: &(DatabaseId, TenantId, String),
     strict_schema: Option<&StrictSchema>,
-) -> crate::Result<Vec<StagedDocumentRow<'a>>> {
-    let mut entries: BTreeMap<&RowIdentity, (u32, &Staged)> = BTreeMap::new();
-    for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        let surrogate = overlay
-            .surrogate_for_doc_id(coll_key, doc_id)
-            .ok_or_else(|| crate::Error::Internal {
-                detail: format!(
-                    "document resolve: staged doc-id '{doc_id}' has no bound surrogate"
-                ),
-            })?;
+) -> crate::Result<Vec<StagedDocumentRow>> {
+    let mut entries: BTreeMap<RowIdentity, (u32, std::borrow::Cow<'_, Staged>)> = BTreeMap::new();
+    for item in overlay.iter_staged_bindings_for_collection(coll_key) {
+        let (doc_id, surrogate, staged) = item?;
         entries.insert(doc_id, (surrogate, staged));
     }
     entries
         .into_iter()
         .map(|(doc_id, (surrogate, staged))| {
-            let value = match staged {
-                Staged::Put(body) => Some(redo_put_value(body, strict_schema, doc_id)?),
+            let value = match &*staged {
+                Staged::Put(body) => Some(redo_put_value(body, strict_schema, &doc_id)?),
                 Staged::Tombstone => None,
             };
             Ok(StagedDocumentRow {
@@ -196,7 +190,7 @@ fn pinned_stamp(
     surrogate: u32,
 ) -> crate::Result<BitemporalStamp> {
     overlay
-        .get_bitemporal(coll_key, surrogate)
+        .get_bitemporal(coll_key, surrogate)?
         .ok_or_else(|| crate::Error::Internal {
             detail: format!(
                 "document resolve: staged row '{doc_id}' of '{}' has no pinned version stamp",
@@ -272,15 +266,17 @@ mod tests {
 
     /// Pin `sys_from` on `surrogate`, as `pin_doc_stamps` does at resolve.
     fn pin(overlay: &mut TxnOverlay, coll: &str, surrogate: u32, sys_from: i64) {
-        overlay.set_bitemporal(
-            &coll_key(coll),
-            surrogate,
-            BitemporalStamp {
-                sys_from,
-                valid_from_ms: i64::MIN,
-                valid_until_ms: i64::MAX,
-            },
-        );
+        overlay
+            .set_bitemporal(
+                &coll_key(coll),
+                surrogate,
+                BitemporalStamp {
+                    sys_from,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                },
+            )
+            .unwrap();
     }
 
     /// The document put tuple a resolve emits.
@@ -300,7 +296,9 @@ mod tests {
         let schema = strict_schema();
         let tuple = strict_tuple(7, "elephant");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("docs"), 7, &id("row1"), tuple.clone());
+        overlay
+            .insert_put(coll_key("docs"), 7, &id("row1"), tuple.clone())
+            .unwrap();
         pin(&mut overlay, "docs", 7, 900);
 
         let mut ops = Vec::new();
@@ -336,7 +334,9 @@ mod tests {
     fn schemaless_put_emits_body_verbatim() {
         let body = schemaless_body("alice");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 3, &id("userpk"), body.clone());
+        overlay
+            .insert_put(coll_key("notes"), 3, &id("userpk"), body.clone())
+            .unwrap();
         pin(&mut overlay, "notes", 3, 901);
 
         let mut ops = Vec::new();
@@ -353,7 +353,9 @@ mod tests {
     #[test]
     fn tombstone_emits_delete_carrying_surrogate() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(coll_key("notes"), 11, &id("gone"));
+        overlay
+            .insert_tombstone(coll_key("notes"), 11, &id("gone"))
+            .unwrap();
         pin(&mut overlay, "notes", 11, 902);
 
         let mut ops = Vec::new();
@@ -379,14 +381,17 @@ mod tests {
     #[test]
     fn an_unstamped_row_fails_the_resolve() {
         let mut put = TxnOverlay::new();
-        put.insert_put(coll_key("notes"), 5, &id("p"), schemaless_body("p"));
+        put.insert_put(coll_key("notes"), 5, &id("p"), schemaless_body("p"))
+            .unwrap();
         let mut ops = Vec::new();
         let err = serialize_document_collection(&put, &coll_key("notes"), "notes", None, &mut ops)
             .expect_err("an unstamped put");
         assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
 
         let mut tombstone = TxnOverlay::new();
-        tombstone.insert_tombstone(coll_key("notes"), 6, &id("t"));
+        tombstone
+            .insert_tombstone(coll_key("notes"), 6, &id("t"))
+            .unwrap();
         let err =
             serialize_document_collection(&tombstone, &coll_key("notes"), "notes", None, &mut ops)
                 .expect_err("an unstamped tombstone");
@@ -397,16 +402,20 @@ mod tests {
     #[test]
     fn a_bitemporal_tombstone_carries_its_resolve_time_system_time() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(coll_key("hist"), 11, &id("gone"));
-        overlay.set_bitemporal(
-            &coll_key("hist"),
-            11,
-            BitemporalStamp {
-                sys_from: 4_242,
-                valid_from_ms: i64::MIN,
-                valid_until_ms: i64::MAX,
-            },
-        );
+        overlay
+            .insert_tombstone(coll_key("hist"), 11, &id("gone"))
+            .unwrap();
+        overlay
+            .set_bitemporal(
+                &coll_key("hist"),
+                11,
+                BitemporalStamp {
+                    sys_from: 4_242,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                },
+            )
+            .unwrap();
 
         let mut ops = Vec::new();
         serialize_document_collection(&overlay, &coll_key("hist"), "hist", None, &mut ops)
@@ -424,9 +433,15 @@ mod tests {
     #[test]
     fn entries_emit_in_deterministic_doc_id_order() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 30, &id("c"), schemaless_body("c"));
-        overlay.insert_put(coll_key("notes"), 10, &id("a"), schemaless_body("a"));
-        overlay.insert_put(coll_key("notes"), 20, &id("b"), schemaless_body("b"));
+        overlay
+            .insert_put(coll_key("notes"), 30, &id("c"), schemaless_body("c"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key("notes"), 10, &id("a"), schemaless_body("a"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key("notes"), 20, &id("b"), schemaless_body("b"))
+            .unwrap();
         for surrogate in [10, 20, 30] {
             pin(&mut overlay, "notes", surrogate, 1_000);
         }

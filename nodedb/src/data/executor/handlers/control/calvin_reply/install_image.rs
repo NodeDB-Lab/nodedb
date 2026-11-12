@@ -36,7 +36,7 @@ use crate::data::executor::handlers::transaction::resolve::redo_put_value;
 use crate::types::{DatabaseId, TenantId};
 
 /// One row a plan wrote: its overlay slot and its staged body.
-pub(super) type WrittenRow<'s, 'o> = (&'s TouchedSlot<'o>, &'o [u8]);
+pub(super) type WrittenRow<'s> = (&'s TouchedSlot, &'s [u8]);
 
 impl CoreLoop {
     /// The installed image of every row in `written`, which `plan`, a
@@ -47,7 +47,7 @@ impl CoreLoop {
         at: &RowLocation<'_>,
         plan: &PhysicalPlan,
         earlier: &[StagedCrdtWrite],
-        written: &[WrittenRow<'_, '_>],
+        written: &[WrittenRow<'_>],
     ) -> Result<Vec<ReturningImageRow>, ErrorCode> {
         match at.engine {
             RowEngine::Document => {
@@ -56,7 +56,7 @@ impl CoreLoop {
                 written
                     .iter()
                     .map(|(slot, body)| {
-                        let value = redo_put_value(body, strict_schema.as_ref(), slot.doc_id)
+                        let value = redo_put_value(body, strict_schema.as_ref(), &slot.doc_id)
                             .map_err(ErrorCode::from)?;
                         // A committed redo install stamps every document row
                         // with the stamp its record carries.
@@ -99,7 +99,7 @@ impl CoreLoop {
     fn calvin_installed_row(
         &self,
         at: &RowLocation<'_>,
-        slot: &TouchedSlot<'_>,
+        slot: &TouchedSlot,
         value: &[u8],
         bitemporal: bool,
     ) -> Result<ReturningImageRow, ErrorCode> {

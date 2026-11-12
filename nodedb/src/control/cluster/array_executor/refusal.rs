@@ -59,7 +59,6 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         // Every other error crosses in its typed wire form, so the
         // coordinator rebuilds it and renders its own SQLSTATE.
         other @ (crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::ConflictRetry { .. }

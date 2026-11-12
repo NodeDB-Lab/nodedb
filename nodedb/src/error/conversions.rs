@@ -159,3 +159,26 @@ impl From<crate::engine::array::engine::ArrayEngineError> for Error {
         }
     }
 }
+
+impl From<crate::data::executor::handlers::spill::SpillError> for Error {
+    fn from(e: crate::data::executor::handlers::spill::SpillError) -> Self {
+        Error::Storage {
+            engine: "spill".into(),
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl From<crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError> for Error {
+    fn from(
+        e: crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError,
+    ) -> Self {
+        use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError;
+        match e {
+            ArrayOverlayMergeError::Overlay(e) => e,
+            ArrayOverlayMergeError::Array(e) => Error::Internal {
+                detail: format!("array overlay merge: {e}"),
+            },
+        }
+    }
+}

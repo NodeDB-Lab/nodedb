@@ -177,9 +177,7 @@ impl CoreLoop {
             if returning.is_some() {
                 staged.push((identity.clone(), new_body.clone()));
             }
-            if let Err(e) =
-                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, new_body)
-            {
+            if let Err(e) = self.stage_bulk_put(txn_id, &coll_key, surrogate, &identity, new_body) {
                 return self.response_error(task, e);
             }
             affected += 1;
@@ -209,15 +207,10 @@ impl CoreLoop {
         }
     }
 
-    /// Stage a bulk-matched row's new body after enforcing the same
-    /// per-transaction overlay memory cap point writes enforce
-    /// (`stage_put_capped` in `dispatch.rs`): reject with the identical
-    /// [`crate::Error::TxnOverlayMemoryExceeded`] once the cumulative staged
-    /// byte total would exceed `[tuning.query] max_txn_overlay_bytes`. Rows staged before
-    /// the row that trips the cap remain staged — the same
-    /// stage-then-fail-on-overflow behavior `stage_put_capped` exhibits for a
-    /// single point write, applied per matched row here.
-    pub(in crate::data::executor) fn stage_bulk_put_capped(
+    /// Stage a bulk-matched row's new body. Past `[tuning.query]
+    /// max_txn_overlay_bytes` of hot entries the overlay spills, so a bulk
+    /// statement of any size stages whole.
+    pub(in crate::data::executor) fn stage_bulk_put(
         &mut self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
@@ -225,18 +218,7 @@ impl CoreLoop {
         doc_id: &RowIdentity,
         body: Vec<u8>,
     ) -> crate::Result<()> {
-        let current = self
-            .txn_overlays
-            .get(&txn_id)
-            .map(|o| o.memory_size_estimate())
-            .unwrap_or(0);
-        if current.saturating_add(body.len()) > self.query_tuning.max_txn_overlay_bytes {
-            return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: self.query_tuning.max_txn_overlay_bytes,
-            });
-        }
         self.txn_overlay_mut(txn_id)
-            .insert_put(coll_key.clone(), surrogate, doc_id, body);
-        Ok(())
+            .insert_put(coll_key.clone(), surrogate, doc_id, body)
     }
 }

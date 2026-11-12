@@ -247,7 +247,11 @@ impl CoreLoop {
                             return self.response_error(task, e);
                         }
                     } else if mode.is_current() {
-                        self.merge_overlay_into_scan(txn_id, &coll_key, &mut filtered, &matches);
+                        if let Err(e) =
+                            self.merge_overlay_into_scan(txn_id, &coll_key, &mut filtered, &matches)
+                        {
+                            return self.response_error(task, e);
+                        }
                     } else {
                         // A snapshot fetch normalizes its bodies to MessagePack
                         // and reports no schema, so the staged bodies merge in

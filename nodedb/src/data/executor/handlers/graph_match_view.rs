@@ -84,10 +84,12 @@ impl CoreLoop {
             }
             _ => crate::engine::graph::pattern::executor::DocumentCut::Plain,
         };
-        let overlay = self.live_overlay_delta(task, tid, scope);
+        let overlay = self.live_overlay_delta(task, tid, scope)?;
         let staged_edges = match task.request.txn_id {
-            Some(txn_id) if scope.merges_txn_overlay() => {
-                self.graph_txn_overlays.get(&txn_id).map(|ov| {
+            Some(txn_id) if scope.merges_txn_overlay() => self
+                .graph_txn_overlays
+                .get(&txn_id)
+                .map(|ov| {
                     super::graph::graph_txn_merge::staged_edge_property_map(
                         ov,
                         task.request.database_id,
@@ -95,7 +97,7 @@ impl CoreLoop {
                         collection.as_deref(),
                     )
                 })
-            }
+                .transpose()?,
             _ => None,
         };
         Ok(Some(MatchView {

@@ -146,21 +146,14 @@ impl CoreLoop {
             })?;
         let strict_schema =
             self.resolve_strict_schema(coll_key.0.as_u64(), coll_key.1.as_u64(), &coll_key.2);
-        let mut puts: BTreeMap<&RowIdentity, (u32, &[u8])> = BTreeMap::new();
-        for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
+        let mut puts: BTreeMap<RowIdentity, (u32, Vec<u8>)> = BTreeMap::new();
+        for item in overlay.iter_staged_bindings_for_collection(coll_key) {
+            let (doc_id, surrogate, staged) = item.map_err(ErrorCode::from)?;
             // A chained collection removes no row, so no tombstone links.
-            let Staged::Put(body) = staged else {
+            let Staged::Put(body) = staged.into_owned() else {
                 continue;
             };
-            let surrogate = overlay
-                .surrogate_for_doc_id(coll_key, doc_id)
-                .ok_or_else(|| ErrorCode::Internal {
-                    detail: format!(
-                        "calvin RETURNING: staged row '{}' has no bound surrogate",
-                        doc_id.as_str()
-                    ),
-                })?;
-            puts.insert(doc_id, (surrogate, body.as_slice()));
+            puts.insert(doc_id, (surrogate, body));
         }
         let mut head = self
             .chain
@@ -171,7 +164,7 @@ impl CoreLoop {
         let mut linked = BTreeMap::new();
         for (doc_id, (surrogate, body)) in puts {
             let value =
-                redo_put_value(body, strict_schema.as_ref(), doc_id).map_err(ErrorCode::from)?;
+                redo_put_value(&body, strict_schema.as_ref(), &doc_id).map_err(ErrorCode::from)?;
             // A committed redo install stamps every document row with the
             // stamp its record carries. A read never shows the stamp, so the
             // stage's ordinal stands in for it.

@@ -87,7 +87,7 @@ impl CoreLoop {
         )?;
         self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &|_: &StorageKey, _: &[u8]| {
             true
-        });
+        })?;
         // A staged row the base lacks joins at the end: restore key order.
         rows.sort_unstable_by_key(|(key, _)| *key);
         rows.truncate(limit);
@@ -153,12 +153,14 @@ mod tests {
 
         let txn_id = TxnId::new(9);
         let staged = doc_format::encode_to_msgpack(&serde_json::json!({ "name": "staged" }));
-        core.txn_overlay_mut(txn_id).insert_put(
-            (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
-            3,
-            &key(3).to_identity(),
-            staged,
-        );
+        core.txn_overlay_mut(txn_id)
+            .insert_put(
+                (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
+                3,
+                &key(3).to_identity(),
+                staged,
+            )
+            .unwrap();
         let mut task = make_default_task();
         task.request.txn_id = Some(txn_id);
 

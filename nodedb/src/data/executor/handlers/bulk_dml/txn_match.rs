@@ -91,7 +91,7 @@ impl CoreLoop {
         let held = HeldEvalError::default();
         let matches = |row_key: &StorageKey, body: &[u8]| held.check(|| raw_matches(row_key, body));
         let mut rows = self.rows_where_at(database_id, tid, collection, system_as_of, &matches)?;
-        self.merge_overlay_into_scan(txn_id, coll_key, &mut rows, &matches);
+        self.merge_overlay_into_scan(txn_id, coll_key, &mut rows, &matches)?;
         held.finish(rows)
     }
 }

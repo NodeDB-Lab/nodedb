@@ -136,9 +136,6 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 cause: cause.map(|cause| Box::new(Self::from(*cause))),
             },
             ErrorCode::OllpRetryRequired => Self::OllpRetryRequired,
-            ErrorCode::TxnOverlayMemoryExceeded { limit } => Self::TxnOverlayMemoryExceeded {
-                limit: to_wire_count(limit),
-            },
             ErrorCode::DivisionByZero => Self::DivisionByZero,
             ErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             ErrorCode::DataException { detail } => Self::DataException { detail },
@@ -308,11 +305,6 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 cause: cause.map(|cause| Box::new(Self::from(*cause))),
             },
             DataPlaneErrorCode::OllpRetryRequired => Self::OllpRetryRequired,
-            DataPlaneErrorCode::TxnOverlayMemoryExceeded { limit } => {
-                Self::TxnOverlayMemoryExceeded {
-                    limit: from_wire_count(limit),
-                }
-            }
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
             DataPlaneErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             DataPlaneErrorCode::DataException { detail } => Self::DataException { detail },

@@ -130,7 +130,7 @@ impl CoreLoop {
             ) {
                 return self.response_error(task, e);
             }
-            if let Err(e) = self.stage_bulk_put_capped(
+            if let Err(e) = self.stage_bulk_put(
                 txn_id,
                 &coll_key,
                 row.surrogate,
@@ -196,11 +196,13 @@ impl CoreLoop {
 
         let deleted = matched.len();
         for row in &matched {
-            self.txn_overlay_mut(txn_id).insert_tombstone(
+            if let Err(e) = self.txn_overlay_mut(txn_id).insert_tombstone(
                 coll_key.clone(),
                 row.surrogate,
                 &row.doc_id,
-            );
+            ) {
+                return self.response_error(task, e);
+            }
         }
         match response_codec::encode_count("deleted", deleted) {
             Ok(payload) => self.response_with_payload(task, payload),
@@ -256,7 +258,8 @@ impl CoreLoop {
                 ScanFilter::all_match_binary(&filters, &row, &crs)
             })
         };
-        self.merge_kv_overlay_into_scan(txn_id, coll_key, &mut rows, &matches);
+        self.merge_kv_overlay_into_scan(txn_id, coll_key, &mut rows, &matches)
+            .map_err(|e| self.response_error(task, e))?;
         let rows = held
             .finish::<_, crate::Error>(rows)
             .map_err(|e| self.response_error(task, e))?;
@@ -266,7 +269,10 @@ impl CoreLoop {
             // Every row the merge kept is present under BASE ∪ OVERLAY, so a
             // `None` here can only be a row that expired between the scan and
             // this lookup: it is no longer a match.
-            let Some(surrogate) = self.resolve_kv_stage_surrogate(txn_id, coll_key, &key) else {
+            let Some(surrogate) = self
+                .resolve_kv_stage_surrogate(txn_id, coll_key, &key)
+                .map_err(|e| self.response_error(task, e))?
+            else {
                 continue;
             };
             matched.push(KvStageMatch {
@@ -394,12 +400,21 @@ mod tests {
         assert_eq!(count_field(&resp, "deleted"), 1);
         let overlay = core.txn_overlays.get(&txn_id).unwrap();
         assert_eq!(
-            overlay.get_by_doc_id(&coll_key(), &kv_row_identity(b"b")),
+            overlay
+                .get_by_doc_id(&coll_key(), &kv_row_identity(b"b"))
+                .unwrap()
+                .as_deref(),
             Some(&Staged::Tombstone)
         );
-        assert_eq!(overlay.get(&coll_key(), 11), Some(&Staged::Tombstone));
         assert_eq!(
-            overlay.get_by_doc_id(&coll_key(), &kv_row_identity(b"a")),
+            overlay.get(&coll_key(), 11).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
+        assert_eq!(
+            overlay
+                .get_by_doc_id(&coll_key(), &kv_row_identity(b"a"))
+                .unwrap()
+                .as_deref(),
             None
         );
     }
@@ -414,9 +429,11 @@ mod tests {
         let txn_id = TxnId::new(1);
         // `a` is tombstoned this transaction; `z` is staged this transaction.
         core.txn_overlay_mut(txn_id)
-            .insert_tombstone(coll_key(), 10, &kv_row_identity(b"a"));
+            .insert_tombstone(coll_key(), 10, &kv_row_identity(b"a"))
+            .unwrap();
         core.txn_overlay_mut(txn_id)
-            .insert_put(coll_key(), 12, &kv_row_identity(b"z"), body(9));
+            .insert_put(coll_key(), 12, &kv_row_identity(b"z"), body(9))
+            .unwrap();
 
         let updates = vec![(
             "n".to_string(),
@@ -440,13 +457,17 @@ mod tests {
         );
         let overlay = core.txn_overlays.get(&txn_id).unwrap();
         for (key, surrogate) in [(&b"b"[..], 11u32), (&b"z"[..], 12u32)] {
-            let Some(Staged::Put(staged)) = overlay.get(&coll_key(), surrogate) else {
+            let staged = overlay.get(&coll_key(), surrogate).unwrap();
+            let Some(Staged::Put(staged)) = staged.as_deref() else {
                 panic!("{key:?} must be a staged put");
             };
             let v: serde_json::Value = nodedb_types::json_from_msgpack(staged).unwrap();
             assert_eq!(v["n"], serde_json::json!(0));
         }
-        assert_eq!(overlay.get(&coll_key(), 10), Some(&Staged::Tombstone));
+        assert_eq!(
+            overlay.get(&coll_key(), 10).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
     }
 
     #[test]
@@ -507,7 +528,8 @@ mod tests {
         let task = make_task();
         let txn_id = TxnId::new(1);
         core.txn_overlay_mut(txn_id)
-            .insert_put(coll_key(), 12, &kv_row_identity(b"z"), body(7));
+            .insert_put(coll_key(), 12, &kv_row_identity(b"z"), body(7))
+            .unwrap();
 
         let resp = core.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
             task: &task,
@@ -525,9 +547,15 @@ mod tests {
             "snapshot row `a` and staged `z` match; `b` changed after the snapshot"
         );
         let overlay = core.txn_overlays.get(&txn_id).unwrap();
-        assert_eq!(overlay.get(&coll_key(), 10), Some(&Staged::Tombstone));
-        assert_eq!(overlay.get(&coll_key(), 12), Some(&Staged::Tombstone));
-        assert_eq!(overlay.get(&coll_key(), 11), None);
+        assert_eq!(
+            overlay.get(&coll_key(), 10).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
+        assert_eq!(
+            overlay.get(&coll_key(), 12).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
+        assert_eq!(overlay.get(&coll_key(), 11).unwrap().as_deref(), None);
 
         // The same statement at the current state matches the later commit.
         let current_txn = TxnId::new(2);

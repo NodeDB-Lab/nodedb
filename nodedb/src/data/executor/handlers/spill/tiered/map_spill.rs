@@ -1,0 +1,280 @@
+// SPDX-License-Identifier: BUSL-1.1
+
+//! Writing a tiered map's hot tier as a run, merging runs, and rolling the
+//! map back to a journal position.
+//!
+//! A merge keeps every version, ordered by key bytes and then by seq
+//! newest first, so a later rollback can still drop the versions written
+//! after its marker. Runs merge by level: [`MERGE_FANOUT`] runs of one
+//! level at the newest end merge into one run of the next level, so a key
+//! is rewritten once per level and the run count stays logarithmic.
+
+use super::map::{Hot, TieredKey, TieredMap, TieredValue, encode_key};
+use super::space::SpillSpace;
+use crate::data::executor::handlers::spill::run::record::{RunRecordRef, encode_value};
+use crate::data::executor::handlers::spill::run::{
+    RunRecord, RunStream, SortedRun, SortedRunWriter,
+};
+
+/// Runs of one level that merge into one run of the next level.
+const MERGE_FANOUT: usize = 8;
+
+impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
+    /// Write the hot tier as one sorted run tagged `tag`, clear the hot
+    /// tier, and merge runs that reached [`MERGE_FANOUT`]. A hot tier with
+    /// no entry writes nothing.
+    pub(in crate::data::executor) fn spill(
+        &mut self,
+        space: &mut SpillSpace,
+        tag: &str,
+    ) -> crate::Result<()> {
+        if self.hot.is_empty() {
+            return Ok(());
+        }
+        let path = space.next_path(tag)?;
+        let run = {
+            let mut keyed: Vec<(Vec<u8>, &Hot<V>)> = self
+                .hot
+                .iter()
+                .map(|(key, hot)| Ok((encode_key(key)?, hot)))
+                .collect::<crate::Result<_>>()?;
+            keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let mut writer = SortedRunWriter::create(path, keyed.len(), 0)?;
+            for (key_bytes, hot) in &keyed {
+                let value = encode_value(std::path::Path::new(super::map::HOT_TIER), &hot.value)?;
+                writer.push(RunRecordRef {
+                    key: key_bytes,
+                    seq: hot.seq,
+                    value: &value,
+                })?;
+            }
+            writer.finish()?
+        };
+        self.hot.clear();
+        self.hot_bytes = 0;
+        if let Some(run) = run {
+            self.runs.push(run);
+        }
+        self.merge_full_levels(space, tag)
+    }
+
+    /// Merge the newest runs while [`MERGE_FANOUT`] of them share a level.
+    fn merge_full_levels(&mut self, space: &mut SpillSpace, tag: &str) -> crate::Result<()> {
+        loop {
+            let Some(level) = self.runs.last().map(SortedRun::level) else {
+                return Ok(());
+            };
+            let same = self
+                .runs
+                .iter()
+                .rev()
+                .take_while(|run| run.level() == level)
+                .count();
+            if same < MERGE_FANOUT {
+                return Ok(());
+            }
+            let start = self.runs.len() - same;
+            let merged = merge_runs(
+                self.runs.get(start..).unwrap_or_default(),
+                space.next_path(tag)?,
+                level + 1,
+            )?;
+            let replaced: Vec<SortedRun> = self.runs.drain(start..).collect();
+            if let Some(run) = merged {
+                self.runs.push(run);
+            }
+            for run in replaced {
+                run.remove()?;
+            }
+        }
+    }
+
+    /// Drop every version written at or after journal position `bound`: the
+    /// hot versions, and the run records. A run with no version left goes;
+    /// a run with some versions left is rewritten without the others.
+    pub(in crate::data::executor) fn rollback(
+        &mut self,
+        bound: u64,
+        space: &mut SpillSpace,
+        tag: &str,
+    ) -> crate::Result<()> {
+        let late: Vec<K> = self
+            .hot
+            .iter()
+            .filter(|(_, hot)| hot.seq >= bound)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &late {
+            self.remove_hot(key);
+        }
+        if self.runs.iter().all(|run| run.max_seq() < bound) {
+            return Ok(());
+        }
+        let runs = std::mem::take(&mut self.runs);
+        let mut obsolete = Vec::new();
+        for run in runs {
+            if run.max_seq() < bound {
+                self.runs.push(run);
+            } else if run.min_seq() >= bound {
+                obsolete.push(run);
+            } else {
+                let filtered = filter_run(&run, bound, space.next_path(tag)?)?;
+                if let Some(filtered) = filtered {
+                    self.runs.push(filtered);
+                }
+                obsolete.push(run);
+            }
+        }
+        for run in obsolete {
+            run.remove()?;
+        }
+        Ok(())
+    }
+}
+
+/// Rewrite `run` keeping only the versions written before `bound`.
+fn filter_run(
+    run: &SortedRun,
+    bound: u64,
+    path: std::path::PathBuf,
+) -> crate::Result<Option<SortedRun>> {
+    let mut stream = RunStream::open(run, None)?;
+    let mut writer = SortedRunWriter::create(path, run.records() as usize, run.level())?;
+    while let Some(record) = stream.next_record()? {
+        if record.seq < bound {
+            writer.push(record.as_ref())?;
+        }
+    }
+    writer.finish()
+}
+
+/// Merge `runs` (oldest first) into one run of `level`, keeping every
+/// version.
+fn merge_runs(
+    runs: &[SortedRun],
+    path: std::path::PathBuf,
+    level: u8,
+) -> crate::Result<Option<SortedRun>> {
+    let expected: u64 = runs.iter().map(SortedRun::records).sum();
+    let mut writer = SortedRunWriter::create(path, expected as usize, level)?;
+    let mut cursors: Vec<(RunStream, Option<RunRecord>)> = Vec::with_capacity(runs.len());
+    for run in runs {
+        let mut stream = RunStream::open(run, None)?;
+        let head = stream.next_record()?;
+        cursors.push((stream, head));
+    }
+    loop {
+        // The smallest key, newest version first. Across runs, versions of
+        // one key grow newer with the run index, and seq orders them.
+        let mut best: Option<usize> = None;
+        for (index, (_, head)) in cursors.iter().enumerate() {
+            let Some(record) = head else {
+                continue;
+            };
+            let better = match best.and_then(|b| cursors.get(b)?.1.as_ref()) {
+                None => true,
+                Some(current) => match record.key.cmp(&current.key) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Equal => record.seq > current.seq,
+                    std::cmp::Ordering::Greater => false,
+                },
+            };
+            if better {
+                best = Some(index);
+            }
+        }
+        let Some(index) = best else {
+            break;
+        };
+        let Some((stream, head)) = cursors.get_mut(index) else {
+            break;
+        };
+        if let Some(record) = head.take() {
+            writer.push(record.as_ref())?;
+        }
+        *head = stream.next_record()?;
+    }
+    writer.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space(dir: &std::path::Path) -> SpillSpace {
+        SpillSpace::new(dir.join("txn"), "t", 0)
+    }
+
+    #[test]
+    fn spill_then_get_reads_runs_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut space = space(dir.path());
+        let mut map: TieredMap<u32, String> = TieredMap::default();
+        map.insert(1, "a".into(), 0);
+        map.insert(2, "b".into(), 1);
+        map.spill(&mut space, "v").unwrap();
+        map.insert(1, "c".into(), 2);
+        map.spill(&mut space, "v").unwrap();
+        assert_eq!(map.hot_bytes(), 0);
+
+        let reader = space.reader();
+        assert_eq!(map.get(&1, reader).unwrap().unwrap().as_str(), "c");
+        assert_eq!(map.get(&2, reader).unwrap().unwrap().as_str(), "b");
+        assert!(map.get(&3, reader).unwrap().is_none());
+        assert_eq!(map.get_before(&1, 2, reader).unwrap().unwrap(), "a");
+    }
+
+    #[test]
+    fn a_lookup_the_bloom_rejects_reads_no_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut space = space(dir.path());
+        let mut map: TieredMap<u32, u32> = TieredMap::default();
+        for key in 0..200u32 {
+            map.insert(key, key, u64::from(key));
+        }
+        map.spill(&mut space, "v").unwrap();
+        let run = &map.runs[0];
+        let reader = space.reader();
+
+        let mut rejected = 0;
+        for key in 10_000..10_200u32 {
+            let key_bytes = encode_key(&key).unwrap();
+            if run.may_contain(&key_bytes) {
+                continue;
+            }
+            rejected += 1;
+            let before = reader.reads();
+            assert!(map.get(&key, reader).unwrap().is_none());
+            assert!(!map.contains(&key, reader).unwrap());
+            assert!(map.get_before(&key, u64::MAX, reader).unwrap().is_none());
+            assert_eq!(reader.reads(), before, "key {key} read a block");
+        }
+        assert!(
+            rejected > 150,
+            "the bloom rejects most absent keys: {rejected}"
+        );
+
+        let before = reader.reads();
+        assert_eq!(*map.get(&42, reader).unwrap().unwrap(), 42);
+        assert!(reader.reads() > before, "a present key reads its block");
+    }
+
+    #[test]
+    fn merging_runs_keeps_every_version_for_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut space = space(dir.path());
+        let mut map: TieredMap<u32, u32> = TieredMap::default();
+        for seq in 0..(MERGE_FANOUT as u64 * 2) {
+            map.insert(7, seq as u32, seq);
+            map.spill(&mut space, "v").unwrap();
+        }
+        assert!(map.runs.len() < MERGE_FANOUT);
+        let reader = space.reader();
+        assert_eq!(*map.get(&7, reader).unwrap().unwrap(), 15);
+
+        map.rollback(5, &mut space, "v").unwrap();
+        assert_eq!(*map.get(&7, space.reader()).unwrap().unwrap(), 4);
+        map.rollback(0, &mut space, "v").unwrap();
+        assert!(map.is_empty());
+    }
+}

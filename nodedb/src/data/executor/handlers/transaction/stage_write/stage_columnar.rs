@@ -172,7 +172,7 @@ impl CoreLoop {
 
         // Coerce every row, resolve the image it will actually persist, and let
         // the write policy decide all of them BEFORE the first
-        // `stage_put_capped`. A rejection must leave the overlay exactly as it
+        // `stage_put`. A rejection must leave the overlay exactly as it
         // was, and must not have reported an affected count for a row the
         // transaction will never be allowed to keep.
         //
@@ -322,7 +322,7 @@ impl CoreLoop {
             };
 
             let ctx = StageCtx::new(task, tid, txn_id, collection, identity, surrogate);
-            if let Err(e) = self.stage_put_capped(&ctx, body) {
+            if let Err(e) = self.stage_put(&ctx, body) {
                 return self.response_error(task, e);
             }
             staged += 1;
@@ -342,7 +342,11 @@ impl CoreLoop {
         values: &[Value],
     ) -> Result<bool, ErrorCode> {
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
-            match overlay.get(engine_key, surrogate.as_u32()) {
+            match overlay
+                .get(engine_key, surrogate.as_u32())
+                .map_err(ErrorCode::from)?
+                .as_deref()
+            {
                 Some(Staged::Put(_)) => return Ok(true),
                 Some(Staged::Tombstone) => return Ok(false),
                 None if overlay.is_truncated(engine_key) => return Ok(false),

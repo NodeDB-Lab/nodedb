@@ -430,22 +430,24 @@ impl CoreLoop {
     /// [`CoreLoop::install_calvin_redo`] and [`CoreLoop::execute_calvin_drop`]
     /// so neither overlay outlives the `commit_pending` entry it shadows.
     /// Idempotent: a missing key (already removed, or the id derivation
-    /// itself failing) is a silent no-op — the same shape as the
-    /// `commit_pending` removal it accompanies.
+    /// itself failing) is a no-op — the same shape as the `commit_pending`
+    /// removal it accompanies.
     ///
     /// Runs the same teardown as `MetaOp::DropTxnOverlay`
     /// (`drop_overlay_entry`), so the `active_txn_overlays` gauge stays exact.
+    /// A spill directory the teardown cannot remove is returned.
     pub(in crate::data::executor) fn drop_calvin_synthetic_overlay(
         &mut self,
         epoch: u64,
         position: u32,
         vshard: u32,
-    ) {
+    ) -> crate::Result<()> {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
             // The shared teardown also drops a columnar engine staging
             // auto-created that the install left empty.
-            self.drop_overlay_entry(synthetic_txn_id);
+            self.drop_overlay_entry(synthetic_txn_id)?;
         }
+        Ok(())
     }
 }
 

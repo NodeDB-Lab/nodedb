@@ -97,9 +97,9 @@ pub struct QueryTuning {
     /// Default: 512 MiB.
     #[serde(default = "default_max_scan_result_bytes")]
     pub max_scan_result_bytes: usize,
-    /// Per-core upper bound on the staged bytes one transaction's overlay
-    /// holds. A staged write past it fails with `program_limit_exceeded`
-    /// (SQLSTATE 54000) and changes nothing more.
+    /// RAM bytes one transaction's staging overlay holds on one core before
+    /// it spills its staged rows to `data_dir/txn-spill/`. A staged write
+    /// past it spills: no transaction size is refused.
     /// Default: 256 MiB.
     #[serde(default = "default_max_txn_overlay_bytes")]
     pub max_txn_overlay_bytes: usize,

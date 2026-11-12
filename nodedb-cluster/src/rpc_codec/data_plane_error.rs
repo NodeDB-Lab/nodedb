@@ -124,10 +124,6 @@ pub enum DataPlaneErrorCode {
         cause: Option<Box<DataPlaneErrorCode>>,
     },
     OllpRetryRequired,
-    /// `limit` is `u64` on the wire, for the same reason as `max_depth`.
-    TxnOverlayMemoryExceeded {
-        limit: u64,
-    },
     DivisionByZero,
     /// Expression evaluation called a function no evaluator implements.
     UndefinedFunction {

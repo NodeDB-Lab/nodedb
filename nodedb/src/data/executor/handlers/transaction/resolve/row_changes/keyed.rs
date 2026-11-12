@@ -22,9 +22,9 @@ use crate::wal::{EVERY_ROW, RedoRowChange, RedoRowKind};
 type CollKey = (DatabaseId, TenantId, String);
 
 /// One collection's staged rows and whether a TRUNCATE hid its base.
-struct StagedCollection<'a> {
+struct StagedCollection {
     truncated: bool,
-    rows: BTreeMap<&'a RowIdentity, RowState>,
+    rows: BTreeMap<RowIdentity, RowState>,
 }
 
 /// A staged row's final state.
@@ -137,7 +137,7 @@ impl CoreLoop {
         };
         let now_ms = self.kv_read_now_ms();
         for collection in collections {
-            let staged = staged_collection(overlay, &coll_key(scope, collection));
+            let staged = staged_collection(overlay, &coll_key(scope, collection))?;
             push_truncate(collection, staged.truncated, changes);
             for (identity, state) in &staged.rows {
                 let key = unhex_key(identity.as_str()).ok_or_else(|| crate::Error::Internal {
@@ -176,9 +176,9 @@ impl CoreLoop {
         scope: ResolveScope,
         collections: &VectorPrimaryCollections,
         changes: &mut Vec<RedoRowChange>,
-    ) {
+    ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
-            return;
+            return Ok(());
         };
         for (collection, writes) in collections {
             let key = coll_key(scope, collection);
@@ -192,8 +192,10 @@ impl CoreLoop {
             );
             let rows: BTreeMap<u32, bool> = overlay
                 .iter_for_collection(&key)
-                .map(|(surrogate, staged)| (surrogate, matches!(staged, Staged::Put(_))))
-                .collect();
+                .map(|item| {
+                    item.map(|(surrogate, staged)| (surrogate, matches!(&*staged, Staged::Put(_))))
+                })
+                .collect::<crate::Result<_>>()?;
             for (surrogate, holds_value) in rows {
                 let surrogate = Surrogate::new(surrogate);
                 let existed =
@@ -208,6 +210,7 @@ impl CoreLoop {
                 });
             }
         }
+        Ok(())
     }
 
     /// The staged rows of one document or CRDT collection, against its
@@ -221,7 +224,7 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
             return Ok(());
         };
-        let staged = staged_collection(overlay, &coll_key(scope, collection));
+        let staged = staged_collection(overlay, &coll_key(scope, collection))?;
         push_truncate(collection, staged.truncated, changes);
         for (identity, state) in &staged.rows {
             let RowState::Written {
@@ -283,25 +286,25 @@ pub(super) fn push_truncate(collection: &str, truncated: bool, changes: &mut Vec
 }
 
 /// The rows `overlay` staged under `key`, by identity.
-fn staged_collection<'a>(overlay: &'a TxnOverlay, key: &CollKey) -> StagedCollection<'a> {
+fn staged_collection(overlay: &TxnOverlay, key: &CollKey) -> crate::Result<StagedCollection> {
     let truncated = overlay.is_truncated(key);
     let mut rows = BTreeMap::new();
-    for (identity, staged) in overlay.iter_doc_entries_for_collection(key) {
-        let Some(surrogate) = overlay.surrogate_for_doc_id(key, identity) else {
-            continue;
-        };
+    for item in overlay.iter_staged_bindings_for_collection(key) {
+        let (identity, surrogate, staged) = item?;
+        let holds_value = matches!(&*staged, Staged::Put(_));
         rows.insert(
             identity,
             RowState::Written {
                 surrogate,
-                holds_value: matches!(staged, Staged::Put(_)),
+                holds_value,
             },
         );
     }
     if !truncated {
-        for (identity, _ttl) in overlay.iter_ttl_only_for_collection(key) {
+        for item in overlay.iter_ttl_only_for_collection(key) {
+            let (identity, _ttl) = item?;
             rows.insert(identity, RowState::TtlOnly);
         }
     }
-    StagedCollection { truncated, rows }
+    Ok(StagedCollection { truncated, rows })
 }

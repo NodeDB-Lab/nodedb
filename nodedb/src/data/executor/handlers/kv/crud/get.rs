@@ -52,14 +52,19 @@ impl CoreLoop {
                 // whether the row's VALUE was also staged this transaction
                 // (an `Expire` on a base-only row stages only the TTL delta,
                 // never a `Staged::Put`).
-                if matches!(
-                    overlay.get_ttl_by_doc_id(&coll_key, &doc_id),
-                    Some(StagedTtl::ExpireAt(t)) if t <= current_ms()
-                ) {
+                let staged_ttl = match overlay.get_ttl_by_doc_id(&coll_key, &doc_id) {
+                    Ok(ttl) => ttl,
+                    Err(e) => return self.response_error(task, e),
+                };
+                if matches!(staged_ttl, Some(StagedTtl::ExpireAt(t)) if t <= current_ms()) {
                     return self.response_with_payload(task, Vec::new());
                 }
-                if let Some(staged) = overlay.get_by_doc_id(&coll_key, &doc_id) {
-                    return match staged {
+                let staged = match overlay.get_by_doc_id(&coll_key, &doc_id) {
+                    Ok(staged) => staged,
+                    Err(e) => return self.response_error(task, e),
+                };
+                if let Some(staged) = staged {
+                    return match &*staged {
                         Staged::Put(body) => {
                             if !crate::data::executor::handlers::rls_eval::rls_check_msgpack_bytes(
                                 rls_filters,

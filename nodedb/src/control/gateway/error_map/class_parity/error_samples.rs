@@ -19,7 +19,6 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             constraint: "unique".into(),
             detail: text(),
         },
-        E::TxnOverlayMemoryExceeded { limit: 1 << 20 },
         E::RejectedAuthz {
             tenant_id: TenantId::new(1),
             resource: text(),

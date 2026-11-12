@@ -24,11 +24,6 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::RejectedAuthz { resource, .. } => {
             NodeDbError::authorization_denied(resource.clone())
         }
-        // `54000` on the SQL surfaces, the class `TxnOverlayMemoryExceeded`
-        // has as a Data-Plane code.
-        Error::TxnOverlayMemoryExceeded { .. } => {
-            NodeDbError::program_limit_exceeded(e.to_string())
-        }
         Error::BackupTenantMismatch { expected, actual } => {
             NodeDbError::backup_tenant_mismatch(*expected, *actual)
         }

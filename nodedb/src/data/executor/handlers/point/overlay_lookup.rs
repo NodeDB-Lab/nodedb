@@ -59,10 +59,16 @@ impl CoreLoop {
         // A staged-only insert has no base surrogate yet, so the read plan's
         // `surrogate` is unresolved (zero) — resolve by document id first, then
         // fall back to the surrogate for rows that already exist in base.
-        let staged = overlay
-            .get_by_doc_id(&coll_key, document_id)
-            .or_else(|| overlay.get(&coll_key, surrogate.0));
-        let body = match staged {
+        let staged = match overlay.get_by_doc_id(&coll_key, document_id) {
+            Ok(Some(staged)) => Ok(Some(staged)),
+            Ok(None) => overlay.get(&coll_key, surrogate.0),
+            Err(e) => Err(e),
+        };
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(e) => return Some(Err(self.response_error(task, e))),
+        };
+        let body = match staged.as_deref() {
             Some(Staged::Put(body)) => body,
             Some(Staged::Tombstone) => {
                 return Some(Err(self.response_with_payload(task, Vec::new())));
@@ -96,15 +102,18 @@ impl CoreLoop {
     /// `Option`: the outer `None` means "no overlay entry -- fall through to
     /// base storage"; `Some(None)` means "staged-deleted, or hidden by a
     /// staged TRUNCATE of the collection -- treat as absent";
-    /// `Some(Some(body))` is a staged put.
+    /// `Some(Some(body))` is a staged put. A spilled overlay tier that cannot
+    /// be read is an error.
     pub(in crate::data::executor) fn kv_overlay_body(
         &self,
         task: &ExecutionTask,
         tid: u64,
         collection: &str,
         key: &[u8],
-    ) -> Option<Option<Vec<u8>>> {
-        let txn_id = task.request.txn_id?;
+    ) -> crate::Result<Option<Option<Vec<u8>>>> {
+        let Some(txn_id) = task.request.txn_id else {
+            return Ok(None);
+        };
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
         let coll_key = (
@@ -113,24 +122,28 @@ impl CoreLoop {
             collection.to_string(),
         );
         let doc_id = kv_row_identity(key);
-        let overlay = self.txn_overlays.get(&txn_id)?;
+        let Some(overlay) = self.txn_overlays.get(&txn_id) else {
+            return Ok(None);
+        };
 
         // A staged EXPIRE with an already-past instant makes the row appear
         // absent -- independent of whether the row's VALUE was also staged
         // this transaction (an `Expire` on a base-only row stages only the
         // TTL delta, never a `Staged::Put`).
         if matches!(
-            overlay.get_ttl_by_doc_id(&coll_key, &doc_id),
+            overlay.get_ttl_by_doc_id(&coll_key, &doc_id)?,
             Some(StagedTtl::ExpireAt(t)) if t <= current_ms()
         ) {
-            return Some(None);
+            return Ok(Some(None));
         }
 
-        match overlay.get_by_doc_id(&coll_key, &doc_id) {
-            Some(Staged::Put(body)) => Some(Some(body.clone())),
-            Some(Staged::Tombstone) => Some(None),
-            None if overlay.is_truncated(&coll_key) => Some(None),
-            None => None,
-        }
+        Ok(
+            match overlay.get_by_doc_id(&coll_key, &doc_id)?.as_deref() {
+                Some(Staged::Put(body)) => Some(Some(body.clone())),
+                Some(Staged::Tombstone) => Some(None),
+                None if overlay.is_truncated(&coll_key) => Some(None),
+                None => None,
+            },
+        )
     }
 }

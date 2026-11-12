@@ -69,9 +69,14 @@ impl CoreLoop {
             key,
             rls_write_check,
         } = target;
-        let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key);
-        if !self.stage_kv_pk_present(&ctx, key) {
-            return self.response_error(task, ErrorCode::NotFound);
+        let ctx = match self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key) {
+            Ok(ctx) => ctx,
+            Err(e) => return self.response_error(task, e),
+        };
+        match self.stage_kv_pk_present(&ctx, key) {
+            Ok(true) => {}
+            Ok(false) => return self.response_error(task, ErrorCode::NotFound),
+            Err(e) => return self.response_error(task, e),
         }
         if let Err(e) = self.stage_admit_kv_ttl_target(&ctx, key, rls_write_check) {
             return self.response_error(task, e);
@@ -81,13 +86,15 @@ impl CoreLoop {
         let coll_key = ctx.coll_key.clone();
         let document_id = ctx.document_id.clone();
         let surrogate: Surrogate = ctx.surrogate;
-        self.txn_overlay_mut(txn_id).set_ttl(
+        match self.txn_overlay_mut(txn_id).set_ttl(
             coll_key,
             surrogate.0,
             &document_id,
             StagedTtl::ExpireAt(now_ms.saturating_add(ttl_ms)),
-        );
-        self.response_ok(task)
+        ) {
+            Ok(()) => self.response_ok(task),
+            Err(e) => self.response_error(task, e),
+        }
     }
 
     /// Stage `KvOp::Persist`: record "clear any expiry" in the overlay's KV
@@ -104,9 +111,14 @@ impl CoreLoop {
             key,
             rls_write_check,
         } = target;
-        let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key);
-        if !self.stage_kv_pk_present(&ctx, key) {
-            return self.response_error(task, ErrorCode::NotFound);
+        let ctx = match self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key) {
+            Ok(ctx) => ctx,
+            Err(e) => return self.response_error(task, e),
+        };
+        match self.stage_kv_pk_present(&ctx, key) {
+            Ok(true) => {}
+            Ok(false) => return self.response_error(task, ErrorCode::NotFound),
+            Err(e) => return self.response_error(task, e),
         }
         if let Err(e) = self.stage_admit_kv_ttl_target(&ctx, key, rls_write_check) {
             return self.response_error(task, e);
@@ -115,13 +127,15 @@ impl CoreLoop {
         let coll_key = ctx.coll_key.clone();
         let document_id = ctx.document_id.clone();
         let surrogate: Surrogate = ctx.surrogate;
-        self.txn_overlay_mut(txn_id).set_ttl(
+        match self.txn_overlay_mut(txn_id).set_ttl(
             coll_key,
             surrogate.0,
             &document_id,
             StagedTtl::Persist,
-        );
-        self.response_ok(task)
+        ) {
+            Ok(()) => self.response_ok(task),
+            Err(e) => self.response_error(task, e),
+        }
     }
 
     /// Decide the row a staged TTL mutation targets against the write policy.
@@ -142,7 +156,7 @@ impl CoreLoop {
         ) {
             return Ok(());
         }
-        let Some(body) = self.resolve_kv_current(ctx, key) else {
+        let Some(body) = self.resolve_kv_current(ctx, key)? else {
             return Ok(());
         };
         self.stage_admit_kv_image(ctx, &body, rls_write_check)

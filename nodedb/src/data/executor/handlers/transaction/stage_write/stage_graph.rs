@@ -117,21 +117,24 @@ impl CoreLoop {
                 ) {
                     return self.response_error(task, e);
                 }
-                if let Err(e) = self.stage_graph_capped(properties.len()) {
-                    return self.response_error(task, e);
-                }
                 let coll_key = graph_coll_key(task, tid, collection.as_str());
-                self.tag_staged_edge(txn_id, &coll_key, src_id, label, dst_id);
-                self.graph_txn_overlay_mut(txn_id).stage_edge_put_valid(
-                    coll_key,
-                    (src_id, label, dst_id),
-                    properties.clone(),
-                    crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
-                        valid_from_ms: *valid_from_ms,
-                        valid_until_ms: *valid_until_ms,
-                    },
-                );
-                self.stage_count_response(task, 1)
+                let staged = self
+                    .tag_staged_edge(txn_id, &coll_key, src_id, label, dst_id)
+                    .and_then(|()| {
+                        self.graph_txn_overlay_mut(txn_id).stage_edge_put_valid(
+                            coll_key,
+                            (src_id, label, dst_id),
+                            properties.clone(),
+                            crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
+                                valid_from_ms: *valid_from_ms,
+                                valid_until_ms: *valid_until_ms,
+                            },
+                        )
+                    });
+                match staged {
+                    Ok(()) => self.stage_count_response(task, 1),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             GraphOp::EdgeDelete {
@@ -142,30 +145,16 @@ impl CoreLoop {
                 ..
             } => {
                 let coll_key = graph_coll_key(task, tid, collection.as_str());
-                self.tag_staged_edge(txn_id, &coll_key, src_id, label, dst_id);
-                let overlay = self.graph_txn_overlay_mut(txn_id);
-                let staged_presence =
-                    overlay.staged_edge_presence(&coll_key, src_id, label, dst_id);
-                overlay.stage_edge_delete(coll_key, src_id, label, dst_id);
-                // BASE ∪ OVERLAY: this transaction's own overlay wins when it
-                // has already touched the edge; otherwise fall back to the
-                // durable edge store, exactly like every other stage handler's
-                // real affected-count computation.
-                let existed = staged_presence.unwrap_or_else(|| {
-                    self.edge_store
-                        .get_edge(
-                            task.request.database_id.as_u64(),
-                            TenantId::new(tid),
-                            collection.as_str(),
-                            src_id,
-                            label,
-                            dst_id,
-                        )
-                        .ok()
-                        .flatten()
-                        .is_some()
-                });
-                self.stage_count_response(task, usize::from(existed))
+                match self.stage_one_edge_delete(
+                    task,
+                    tid,
+                    txn_id,
+                    coll_key,
+                    (collection.as_str(), src_id, label, dst_id),
+                ) {
+                    Ok(existed) => self.stage_count_response(task, usize::from(existed)),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             GraphOp::EdgePutBatch { edges } => self.stage_edge_put_batch(task, tid, txn_id, edges),
@@ -180,34 +169,27 @@ impl CoreLoop {
                 {
                     return self.response_error(task, refusal);
                 }
-                self.tag_staged_labels(txn_id, &coll_key, node_id);
-                self.graph_txn_overlay_mut(txn_id)
-                    .stage_node_labels_set(coll_key, node_id, labels);
+                let staged = self
+                    .tag_staged_labels(txn_id, &coll_key, node_id)
+                    .and_then(|()| {
+                        self.graph_txn_overlay_mut(txn_id)
+                            .stage_node_labels_set(coll_key, node_id, labels)
+                    });
                 // Replay always interns the node (`ensure_node`), so a set
                 // touches exactly one node — same deterministic count as the
                 // autocommit handler, never `labels.len()`.
-                self.stage_count_response(task, 1)
+                match staged {
+                    Ok(()) => self.stage_count_response(task, 1),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             GraphOp::RemoveNodeLabels { node_id, labels } => {
                 let coll_key = graph_coll_key(task, tid, GRAPH_LABEL_COLL_KEY);
-                self.tag_staged_labels(txn_id, &coll_key, node_id);
-                let database_id = task.request.database_id.as_u64();
-                // BASE ∪ OVERLAY: the node exists if this transaction already
-                // staged labels onto it (a pending `added` set means a staged
-                // `SetNodeLabels` will create it at replay), or if it already
-                // exists in the durable CSR partition.
-                let overlay_created = self
-                    .graph_txn_overlay_mut(txn_id)
-                    .labels_delta(&coll_key, node_id)
-                    .is_some_and(|delta| !delta.added.is_empty());
-                let existed = overlay_created
-                    || self
-                        .csr_partition(database_id, tid)
-                        .is_some_and(|p| p.contains_node(node_id));
-                self.graph_txn_overlay_mut(txn_id)
-                    .stage_node_labels_remove(coll_key, node_id, labels);
-                self.stage_count_response(task, usize::from(existed))
+                match self.stage_labels_remove(task, tid, txn_id, coll_key, node_id, labels) {
+                    Ok(existed) => self.stage_count_response(task, usize::from(existed)),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             GraphOp::ResolveEdgeDelete(_)
@@ -280,10 +262,6 @@ impl CoreLoop {
         txn_id: TxnId,
         edges: &[BatchEdge],
     ) -> Response {
-        let incoming_bytes: usize = edges
-            .iter()
-            .map(|e| e.src_id.len() + e.label.len() + e.dst_id.len() + e.properties.len())
-            .sum();
         // One edge over the row image limit refuses the batch before any edge
         // stages.
         if let Some(e) = edges.iter().find_map(|edge| {
@@ -298,22 +276,25 @@ impl CoreLoop {
         }) {
             return self.response_error(task, e);
         }
-        if let Err(e) = self.stage_graph_capped(incoming_bytes) {
-            return self.response_error(task, e);
-        }
         for edge in edges {
             let coll_key = graph_coll_key(task, tid, edge.collection.as_str());
-            self.tag_staged_edge(txn_id, &coll_key, &edge.src_id, &edge.label, &edge.dst_id);
-            let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
-            overlay.stage_edge_put_valid(
-                coll_key,
-                (&edge.src_id, &edge.label, &edge.dst_id),
-                edge.properties.clone(),
-                crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
-                    valid_from_ms: edge.valid_from_ms,
-                    valid_until_ms: edge.valid_until_ms,
-                },
-            );
+            let staged = self
+                .tag_staged_edge(txn_id, &coll_key, &edge.src_id, &edge.label, &edge.dst_id)
+                .and_then(|()| {
+                    let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
+                    overlay.stage_edge_put_valid(
+                        coll_key,
+                        (&edge.src_id, &edge.label, &edge.dst_id),
+                        edge.properties.clone(),
+                        crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
+                            valid_from_ms: edge.valid_from_ms,
+                            valid_until_ms: edge.valid_until_ms,
+                        },
+                    )
+                });
+            if let Err(e) = staged {
+                return self.response_error(task, e);
+            }
         }
         self.stage_count_response(task, edges.len())
     }
@@ -325,35 +306,86 @@ impl CoreLoop {
         txn_id: TxnId,
         edges: &[BatchEdge],
     ) -> Response {
-        let database_id = task.request.database_id.as_u64();
         let mut removed: usize = 0;
         for edge in edges {
             let coll_key = graph_coll_key(task, tid, edge.collection.as_str());
-            self.tag_staged_edge(txn_id, &coll_key, &edge.src_id, &edge.label, &edge.dst_id);
-            let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
-            let staged_presence =
-                overlay.staged_edge_presence(&coll_key, &edge.src_id, &edge.label, &edge.dst_id);
-            overlay.stage_edge_delete(coll_key, &edge.src_id, &edge.label, &edge.dst_id);
-            // BASE ∪ OVERLAY, same as the single-edge `EdgeDelete` handler.
-            let existed = staged_presence.unwrap_or_else(|| {
-                self.edge_store
-                    .get_edge(
-                        database_id,
-                        TenantId::new(tid),
-                        edge.collection.as_str(),
-                        &edge.src_id,
-                        &edge.label,
-                        &edge.dst_id,
-                    )
-                    .ok()
-                    .flatten()
-                    .is_some()
-            });
-            if existed {
-                removed += 1;
+            match self.stage_one_edge_delete(
+                task,
+                tid,
+                txn_id,
+                coll_key,
+                (
+                    edge.collection.as_str(),
+                    &edge.src_id,
+                    &edge.label,
+                    &edge.dst_id,
+                ),
+            ) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => return self.response_error(task, e),
             }
         }
         self.stage_count_response(task, removed)
+    }
+
+    /// Stage one edge delete. Returns whether the edge existed: this
+    /// transaction's own overlay wins when it has already touched the edge,
+    /// otherwise the durable edge store answers, exactly like every other
+    /// stage handler's real affected-count computation.
+    fn stage_one_edge_delete(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        coll_key: GraphCollKey,
+        (collection, src, label, dst): (&str, &str, &str, &str),
+    ) -> crate::Result<bool> {
+        self.tag_staged_edge(txn_id, &coll_key, src, label, dst)?;
+        let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
+        let staged_presence = overlay.staged_edge_presence(&coll_key, src, label, dst)?;
+        overlay.stage_edge_delete(coll_key, src, label, dst)?;
+        match staged_presence {
+            Some(existed) => Ok(existed),
+            None => Ok(self
+                .edge_store
+                .get_edge(
+                    task.request.database_id.as_u64(),
+                    TenantId::new(tid),
+                    collection,
+                    src,
+                    label,
+                    dst,
+                )?
+                .is_some()),
+        }
+    }
+
+    /// Stage a node-label remove. Returns whether the node existed: it
+    /// exists if this transaction already staged labels onto it (a pending
+    /// `added` set means a staged `SetNodeLabels` will create it at replay),
+    /// or if it already exists in the durable CSR partition.
+    fn stage_labels_remove(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        coll_key: GraphCollKey,
+        node_id: &str,
+        labels: &[String],
+    ) -> crate::Result<bool> {
+        self.tag_staged_labels(txn_id, &coll_key, node_id)?;
+        let overlay_created = self
+            .graph_txn_overlay_mut(txn_id)
+            .labels_delta(&coll_key, node_id)?
+            .is_some_and(|delta| !delta.added.is_empty());
+        let existed = overlay_created
+            || self
+                .csr_partition(task.request.database_id.as_u64(), tid)
+                .is_some_and(|p| p.contains_node(node_id));
+        self.graph_txn_overlay_mut(txn_id)
+            .stage_node_labels_remove(coll_key, node_id, labels)?;
+        Ok(existed)
     }
 
     /// Tag a staged edge for the transaction's row sources, before the
@@ -366,25 +398,31 @@ impl CoreLoop {
         src: &str,
         label: &str,
         dst: &str,
-    ) {
-        let was_staged = self
-            .graph_txn_overlays
-            .get(&txn_id)
-            .and_then(|overlay| overlay.staged_edge_presence(coll_key, src, label, dst))
-            .is_some();
+    ) -> crate::Result<()> {
+        let was_staged = match self.graph_txn_overlays.get(&txn_id) {
+            Some(overlay) => overlay
+                .staged_edge_presence(coll_key, src, label, dst)?
+                .is_some(),
+            None => false,
+        };
         let row = RowIdentity::from_user_key(crate::event::graph_cdc::edge_row_id(src, label, dst));
         self.txn_overlay_mut(txn_id)
-            .note_row(coll_key.clone(), row, was_staged);
+            .note_row(coll_key.clone(), row, was_staged)
     }
 
     /// Tag a staged node-label delta for the transaction's row sources,
     /// before the graph overlay stages it. The delta's write event names it
     /// by its node id on the label stream.
-    fn tag_staged_labels(&mut self, txn_id: TxnId, coll_key: &GraphCollKey, node_id: &str) {
-        let was_staged = self
-            .graph_txn_overlays
-            .get(&txn_id)
-            .is_some_and(|overlay| overlay.labels_delta(coll_key, node_id).is_some());
+    fn tag_staged_labels(
+        &mut self,
+        txn_id: TxnId,
+        coll_key: &GraphCollKey,
+        node_id: &str,
+    ) -> crate::Result<()> {
+        let was_staged = match self.graph_txn_overlays.get(&txn_id) {
+            Some(overlay) => overlay.labels_delta(coll_key, node_id)?.is_some(),
+            None => false,
+        };
         let (database_id, tenant_id, _) = coll_key;
         let stream_key = (
             *database_id,
@@ -395,24 +433,7 @@ impl CoreLoop {
             stream_key,
             RowIdentity::from_user_key(node_id),
             was_staged,
-        );
-    }
-
-    /// Enforce the per-transaction GRAPH overlay memory cap, reusing the
-    /// same budget the surrogate-keyed overlay uses (summed across every
-    /// in-flight transaction's GRAPH overlay on this core).
-    fn stage_graph_capped(&self, incoming_bytes: usize) -> crate::Result<()> {
-        let current: usize = self
-            .graph_txn_overlays
-            .values()
-            .map(GraphTxnOverlay::memory_size_estimate)
-            .sum();
-        if current.saturating_add(incoming_bytes) > self.query_tuning.max_txn_overlay_bytes {
-            return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: self.query_tuning.max_txn_overlay_bytes,
-            });
-        }
-        Ok(())
+        )
     }
 }
 
@@ -436,20 +457,18 @@ impl CoreLoop {
         let partition = self.csr_partition(task.request.database_id.as_u64(), tid);
         let interned = partition.map_or(0, |p| p.node_label_name_count());
         let is_interned = |label: &str| partition.is_some_and(|p| p.has_node_label_name(label));
-        let mut fresh: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut fresh: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         if let Some(overlay) = self.graph_txn_overlays.get(&txn_id) {
-            for (_, delta) in overlay.staged_node_label_deltas_for_collection(coll_key) {
-                fresh.extend(
-                    delta
-                        .added
-                        .iter()
-                        .map(String::as_str)
-                        .filter(|label| !is_interned(label)),
-                );
+            for item in overlay.staged_node_label_deltas_for_collection(coll_key) {
+                let delta = match item {
+                    Ok((_, delta)) => delta,
+                    Err(e) => return Some(ErrorCode::from(e)),
+                };
+                fresh.extend(delta.added.into_iter().filter(|label| !is_interned(label)));
             }
         }
         for label in labels {
-            if is_interned(label.as_str()) || !fresh.insert(label.as_str()) {
+            if is_interned(label.as_str()) || !fresh.insert(label.clone()) {
                 continue;
             }
             if interned + fresh.len() > NODE_LABEL_LIMIT {

@@ -336,8 +336,11 @@ mod tests {
         h.core
             .flush_ts_collection(TenantId::new(TENANT), DatabaseId::DEFAULT, COLLECTION, 0)
             .expect("flush");
+        // A task's deadline starts when it is built, so the scan after the
+        // flush gets its own task.
+        let scan = scan_task(policy_owner_eq("mine"), Vec::new());
         let flushed = h.core.dispatch_timeseries(&scan, &op);
-        assert_eq!(flushed.status, Status::Ok);
+        assert_eq!(flushed.status, Status::Ok, "{:?}", flushed.error_code);
         let rows = decode_rows(flushed.payload.as_bytes());
         assert_eq!(rows.len(), 1, "one flushed row is admitted: {rows:?}");
     }

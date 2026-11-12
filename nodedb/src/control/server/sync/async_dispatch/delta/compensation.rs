@@ -77,8 +77,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
             detail: other.to_string(),
         },
         // Refused on its merits, or a fault the same bytes reproduce.
-        other @ (crate::Error::TxnOverlayMemoryExceeded { .. }
-        | crate::Error::OffsetRegression { .. }
+        other @ (crate::Error::OffsetRegression { .. }
         | crate::Error::AppendOnlyViolation { .. }
         | crate::Error::BalanceViolation { .. }
         | crate::Error::MaterializedSumTargetNotFound { .. }
@@ -231,7 +230,6 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }

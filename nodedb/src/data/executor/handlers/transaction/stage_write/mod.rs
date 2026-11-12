@@ -32,6 +32,7 @@ mod stage_document_batch;
 mod stage_graph;
 mod stage_kv;
 mod stage_kv_atomic;
+mod stage_kv_batch;
 mod stage_kv_conflict;
 mod stage_kv_delete;
 mod stage_kv_predicate;

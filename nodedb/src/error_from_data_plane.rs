@@ -196,12 +196,6 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         // Nothing was enqueued, and the same request succeeds once capacity
         // frees: the retryable overload class.
         ErrorCode::DispatchCapacity { reason } => NodeDbError::server_overload(reason),
-        ErrorCode::TxnOverlayMemoryExceeded { limit } => {
-            NodeDbError::program_limit_exceeded(format!(
-                "transaction staging overlay exceeded its {limit}-byte per-core budget; \
-                 split the transaction into smaller batches"
-            ))
-        }
         ErrorCode::NodeLabelLimit { node, label, limit } => {
             NodeDbError::program_limit_exceeded(node_label_limit_message(&node, &label, limit))
         }
