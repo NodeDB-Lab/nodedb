@@ -164,12 +164,11 @@ pub async fn build_and_persist(
         // reused `{db}:{tenant}:{name}:` storage prefix. Otherwise the
         // stale rows resurrect until the retention GC runs (days later).
         //
-        // Hard-purge synchronously through the SAME path DROP ... PURGE
-        // uses: remove the catalog row + reclaim every engine's storage
-        // on the Data Plane, awaiting completion before we proceed. The
-        // WAL tombstone boundary is the current `next_lsn`: every pre-drop
-        // row sits below it and is shadowed on replay, while every row the
-        // new collection writes sits at or above it and survives.
+        // Purge it through the SAME replicated entry DROP ... PURGE
+        // proposes: every node removes the catalog row and reclaims every
+        // engine's storage before its applied index passes the entry, and
+        // the entry writes the purge-log row that tells sync clients holding
+        // the old incarnation to drop it, online and at their next connect.
         //
         // The purge precedes the CREATE's catalog entry, so it needs its own record.
         super::super::super::audit_intent::record_action_intent(
@@ -178,23 +177,33 @@ pub async fn build_and_persist(
             Some(tenant_id),
             &format!("CREATE COLLECTION {name} purges its soft-deleted incarnation"),
         )?;
-        let purge_lsn = state.wal.next_lsn().as_u64();
-        // Fail closed: if the hard-purge cannot remove the old
-        // catalog row, ABORT the CREATE rather than build a new
-        // collection over un-purged data (which will resurrect the
-        // stale rows). Surface as an internal error to the client.
-        let purge_result =
-            crate::control::server::shared::ddl::neutral::collection::purge::hard_purge_collection(
-                state,
-                database_id.as_u64(),
-                tenant_id.as_u64(),
-                name,
-                purge_lsn,
-                false,
-            )
-            .await;
-        if let Err(failure) = purge_result {
-            return Err(DdlError::from_error(&failure.error));
+        let purge = crate::control::catalog_entry::CatalogEntry::PurgeCollection {
+            database_id: database_id.as_u64(),
+            tenant_id: tenant_id.as_u64(),
+            name: name.to_string(),
+            // Frozen by the proposer's stamp.
+            target_descriptor_version: 0,
+            target_hlc: nodedb_types::Hlc::ZERO,
+        };
+        // A purge buffered in an open transaction applies at COMMIT, ahead
+        // of the CREATE's own entry.
+        if let ProposeOutcome::Replicated { .. } = propose_and_apply_async(state, &purge).await?
+            && catalog
+                .get_collection(database_id, tenant_id.as_u64(), name)
+                .map_err(|error| DdlError::from_error(&error))?
+                .is_some()
+        {
+            // The reclaim queued a durable retry and the row stays until it
+            // finishes. A collection built now would register over storage
+            // the old incarnation still owns.
+            return Err(err(
+                "55006",
+                format!(
+                    "the dropped {} '{name}' is still being reclaimed; retry the CREATE once \
+                     the reclaim finishes",
+                    variant.label
+                ),
+            ));
         }
     }
 

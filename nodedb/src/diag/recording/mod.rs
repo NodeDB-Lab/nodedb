@@ -47,8 +47,8 @@ pub use audit::{
 };
 pub use calvin_frozen::calvin_frozen_reply_store_failed;
 pub use catalog::{
-    catalog_apply_orphan_row, collection_purge_row_missing, consumer_group_offsets_retained,
-    metadata_apply_wedged, synonym_group_not_applied,
+    catalog_apply_orphan_row, consumer_group_offsets_retained, metadata_apply_wedged,
+    purge_log_prune_not_proposed, synonym_group_not_applied,
 };
 pub use columnar::{
     columnar_segment_corrupt, quarantine_record_evicted, timeseries_flush_not_installed,
@@ -95,7 +95,8 @@ pub use recovery::{
     write_acked_without_durability,
 };
 pub use redo_stream::{
-    redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
+    redo_abandon_given_up, redo_changes_unstaged, redo_snapshot_debt_not_recorded,
+    redo_stream_lost_here,
 };
 pub use retention::{retention_autowire_orphaned, sequence_restart_failed};
 pub use shared::entry_kind;

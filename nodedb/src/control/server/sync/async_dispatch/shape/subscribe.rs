@@ -5,19 +5,24 @@
 use tracing::{info, warn};
 
 use nodedb_types::DatabaseId;
+use nodedb_types::sync::wire::ShapeSnapshotRefusal;
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::ClientRequestScope;
 use crate::control::server::sync::session::SyncSession;
 use crate::control::state::SharedState;
+use crate::event::crdt_sync::SubscribedShape;
+use crate::event::crdt_sync::delivery::ShapeRegistration;
 
 use super::super::super::shape::ShapeScope;
 use super::super::super::wire::{SyncFrame, SyncMessageType};
 use super::authorize::{ShapeAuthorizationFailure, authorize_shape_subscription};
-use super::snapshot::{SnapshotRequest, take_shape_snapshot};
+use super::limits::MAX_SHAPES_PER_SESSION;
+use super::snapshot::{SnapshotFailure, SnapshotRequest, take_shape_snapshot};
 
-/// Rewrite the collection a document or vector shape names to its bare
-/// name in `database_id`. A foreign or malformed name is an error.
+/// Rewrite the collection a document or vector shape names, or the array an
+/// array shape names, to its bare name in `database_id`. A foreign or
+/// malformed name is an error.
 fn normalize_shape_collection(
     database_id: DatabaseId,
     shape: &mut nodedb_types::sync::shape::ShapeDefinition,
@@ -32,7 +37,15 @@ fn normalize_shape_collection(
             )?;
             Ok(())
         }
-        ShapeType::Graph { .. } | ShapeType::Array { .. } => Ok(()),
+        // An array name is authorized and routed like a collection name.
+        ShapeType::Array { array_name, .. } => {
+            *array_name = crate::control::server::shared::request_collection::request_collection(
+                database_id,
+                array_name,
+            )?;
+            Ok(())
+        }
+        ShapeType::Graph { .. } => Ok(()),
         // A shape type this build does not know names no checked collection.
         _ => Err(crate::Error::BadRequest {
             detail: "sync: unsupported shape type".into(),
@@ -69,6 +82,26 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
     };
     let tenant_id = identity.tenant_id;
     let database_id = session.database_id();
+
+    // A session holds a bounded number of shapes. A replace of a held ID
+    // stays within the bound.
+    if !shared.shape_registry.can_hold(
+        &session.session_id,
+        &msg.shape.shape_id,
+        MAX_SHAPES_PER_SESSION,
+    ) {
+        warn!(
+            session = %session.session_id,
+            shape_id = %msg.shape.shape_id,
+            limit = MAX_SHAPES_PER_SESSION,
+            "sync: shape subscribe refused, the session holds the most shapes it may"
+        );
+        return SnapshotFailure::new(
+            ShapeSnapshotRefusal::ShapeLimitReached,
+            format!("the session holds {MAX_SHAPES_PER_SESSION} shapes, the most it may"),
+        )
+        .reject_frame(&msg.shape.shape_id);
+    }
 
     // Blacklist + account status, no rate limit: shape subscription is not
     // the per-query traffic the rate-limiter's cost table models, so
@@ -110,6 +143,12 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
         return None;
     }
 
+    // The authorized shape enters the session's delivery registration before
+    // the snapshot is read, so a write that lands between the snapshot and
+    // the registration is still pushed. Pushes queued meanwhile go out after
+    // the snapshot frame, and each passes the push-time checks.
+    let registration = register_row_pushes(shared, session, &msg.shape);
+
     // Get current WAL LSN — this is the watermark for the snapshot.
     let current_lsn = shared.wal.next_lsn().as_u64().saturating_sub(1);
 
@@ -127,7 +166,16 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
     .await
     {
         Ok(snapshot) => snapshot,
-        Err(failure) => return failure.reject_frame(&msg.shape.shape_id),
+        Err(failure) => {
+            if let ShapeRegistration::Registered { replaced } = registration {
+                shared.crdt_sync_delivery.restore_shape(
+                    &session.session_id,
+                    &msg.shape.shape_id,
+                    replaced,
+                );
+            }
+            return failure.reject_frame(&msg.shape.shape_id);
+        }
     };
 
     // Register the shape subscription in the persistent registry.
@@ -149,6 +197,42 @@ pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
     );
 
     response
+}
+
+/// Add an authorized shape to the session's row-push registration.
+///
+/// A document shape pushes the rows its predicate matches. A vector shape
+/// adds nothing: its snapshot ships the collection name and no row, so the
+/// shape defines no row set for a push to extend. A graph shape names no
+/// single collection and adds nothing. An array shape adds nothing here: its
+/// frames go through the array delivery path and its own push-time check.
+fn register_row_pushes(
+    shared: &SharedState,
+    session: &SyncSession,
+    shape: &nodedb_types::sync::shape::ShapeDefinition,
+) -> ShapeRegistration {
+    use nodedb_types::sync::shape::ShapeType;
+
+    let subscribed = match &shape.shape_type {
+        ShapeType::Document {
+            collection,
+            predicate,
+        } => SubscribedShape::new(collection.clone(), predicate.clone()),
+        ShapeType::Vector { .. } | ShapeType::Graph { .. } | ShapeType::Array { .. } => None,
+        // A shape type this build does not know pushes nothing.
+        _ => None,
+    };
+    // An undecodable predicate is refused by the snapshot, so it is not held.
+    // The new subscription still replaces any shape held under its ID.
+    let Some(subscribed) = subscribed else {
+        let replaced = shared
+            .crdt_sync_delivery
+            .unsubscribe_shape(&session.session_id, &shape.shape_id);
+        return ShapeRegistration::Registered { replaced };
+    };
+    shared
+        .crdt_sync_delivery
+        .subscribe_shape(&session.session_id, &shape.shape_id, subscribed)
 }
 
 /// Re-snapshot a previously subscribed shape in response to a ResyncRequest.
@@ -177,13 +261,26 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
         return None;
     }
 
+    resync_shape(shared, session, &msg.shape_id).await
+}
+
+/// Re-snapshot the session's shape `shape_id` at the current WAL LSN.
+///
+/// Serves a client `ResyncRequest`, and the server-side resync of a shape
+/// whose deltas the session's full queue dropped. Authorization, admission
+/// and quota run again, as for every snapshot.
+async fn resync_shape(
+    shared: &SharedState,
+    session: &SyncSession,
+    shape_id: &str,
+) -> Option<SyncFrame> {
     // Session IDs are reusable across reconnects, so the registry lookup is
     // scoped to the authenticated tenant and database. A session with no
     // established identity has no scope and therefore nothing to resync.
     let Some(identity) = session.identity.as_ref() else {
         log_refusal(
             &session.session_id,
-            &msg.shape_id,
+            shape_id,
             ShapeAuthorizationFailure::IdentityNotEstablished,
         );
         return None;
@@ -195,13 +292,13 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
 
     let shape = match shared
         .shape_registry
-        .get_shape(&session.session_id, scope, &msg.shape_id)
+        .get_shape(&session.session_id, scope, shape_id)
     {
         Some(s) => s,
         None => {
             warn!(
                 session = %session.session_id,
-                shape_id = %msg.shape_id,
+                shape_id = %shape_id,
                 "resync for unknown or unsubscribed shape; ignoring"
             );
             return None;
@@ -211,7 +308,7 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
     let identity = match authorize_shape_subscription(shared, session, &shape) {
         Ok(identity) => identity,
         Err(failure) => {
-            log_refusal(&session.session_id, &msg.shape_id, failure);
+            log_refusal(&session.session_id, shape_id, failure);
             return None;
         }
     };
@@ -266,11 +363,11 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
     .await
     {
         Ok(snapshot) => snapshot,
-        Err(failure) => return failure.reject_frame(&msg.shape_id),
+        Err(failure) => return failure.reject_frame(shape_id),
     };
 
     let snapshot = super::super::super::shape::handler::ShapeSnapshotMsg {
-        shape_id: msg.shape_id.clone(),
+        shape_id: shape_id.to_string(),
         data: snapshot_data.data,
         snapshot_lsn: current_lsn,
         doc_count: snapshot_data.doc_count,
@@ -278,7 +375,7 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
 
     info!(
         session = %session.session_id,
-        shape_id = %msg.shape_id,
+        shape_id = %shape_id,
         lsn = current_lsn,
         doc_count = snapshot.doc_count,
         "resync snapshot sent"
@@ -295,7 +392,7 @@ pub(in crate::control::server::sync) async fn handle_resync_request_async(
 /// `$auth.risk_score` — without it the risk gate refuses every subscription as
 /// unassessed once `[auth.risk]` is enabled — and what lets a `REQUIRE IP`
 /// scope grant apply to this subscriber instead of being silently withheld.
-fn subscription_admission_scope<'a>(
+pub(super) fn subscription_admission_scope<'a>(
     shared: &'a SharedState,
     identity: &'a AuthenticatedIdentity,
     database_id: DatabaseId,

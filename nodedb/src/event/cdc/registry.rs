@@ -327,15 +327,17 @@ mod tests {
         let reg = StreamRegistry::new();
         let interest = reg.interest();
         reg.register(sample_def("s1", "orders"));
-        assert!(interest.contains(DatabaseId::new(7), "orders"));
-        assert!(!interest.contains(DatabaseId::new(7), "users"));
+        // Callers ask with the storage name: qualified outside the default
+        // database.
+        assert!(interest.contains(DatabaseId::new(7), "7/orders"));
+        assert!(!interest.contains(DatabaseId::new(7), "7/users"));
         assert!(!interest.contains(DatabaseId::DEFAULT, "orders"));
 
         reg.register(sample_def("all", "*"));
-        assert!(interest.contains(DatabaseId::new(7), "users"));
+        assert!(interest.contains(DatabaseId::new(7), "7/users"));
 
         reg.unregister(DatabaseId::new(7), 1, "all");
         reg.unregister(DatabaseId::new(7), 1, "s1");
-        assert!(!interest.contains(DatabaseId::new(7), "orders"));
+        assert!(!interest.contains(DatabaseId::new(7), "7/orders"));
     }
 }

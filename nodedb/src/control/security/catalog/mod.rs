@@ -23,6 +23,8 @@ pub mod collection_constraints;
 pub mod collection_descriptor_convert;
 pub mod collection_generated;
 pub mod collection_incarnation;
+pub mod collection_purge_log;
+pub mod collection_purge_prune;
 pub mod collections;
 pub mod column_stats;
 pub mod constraint_translate;

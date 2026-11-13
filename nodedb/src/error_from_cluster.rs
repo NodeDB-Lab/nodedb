@@ -255,7 +255,6 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::Shaping(_)
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)

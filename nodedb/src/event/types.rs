@@ -232,6 +232,31 @@ pub struct WriteEvent {
     pub image_fault: Option<crate::event::image_fault::ImageFault>,
 }
 
+impl WriteEvent {
+    /// The collection's bare catalog name.
+    ///
+    /// `collection` names the collection as storage keys it: the bare name in
+    /// the default database, `{database_id}/{name}` in any other. Catalog
+    /// registries (triggers, event definitions, change streams, shapes) key
+    /// the bare name with the database beside it, so every lookup in one goes
+    /// through this. A redaction policy keys the qualified name, so redaction
+    /// reads `collection` as it is.
+    ///
+    /// The graph node-label stream is no stored collection. Its events carry
+    /// the stream name bare in every database, so it is returned as it is.
+    ///
+    /// `None` when `collection` is not qualified for `database_id`: such an
+    /// event names no catalog collection and routes to no registry.
+    pub fn bare_collection(&self) -> Option<&str> {
+        if self.collection.as_ref() == crate::event::graph_cdc::GRAPH_LABEL_STREAM {
+            return Some(crate::event::graph_cdc::GRAPH_LABEL_STREAM);
+        }
+        nodedb_types::CollectionKey::from_qualified_str(self.database_id, &self.collection)
+            .ok()
+            .map(|key| key.name())
+    }
+}
+
 /// Where an event sits in the WAL record it reproduces.
 ///
 /// A record can write one row more than once (a transaction's redo). The
@@ -600,6 +625,32 @@ mod tests {
         ] {
             assert_eq!(source.committed_row_source(), source);
         }
+    }
+
+    /// Outside the default database the event names its collection
+    /// qualified, and the catalog name drops the qualifier. A bare name
+    /// there names no catalog collection.
+    #[test]
+    fn bare_collection_strips_the_database_qualifier() {
+        let mut event = crate::event::test_utils::write_event_in(DatabaseId::DEFAULT, "orders");
+        assert_eq!(event.bare_collection(), Some("orders"));
+
+        event.database_id = DatabaseId::new(7);
+        event.collection = Arc::from("7/orders");
+        assert_eq!(event.bare_collection(), Some("orders"));
+
+        event.collection = Arc::from("orders");
+        assert_eq!(event.bare_collection(), None);
+
+        event.collection = Arc::from("8/orders");
+        assert_eq!(event.bare_collection(), None);
+
+        // The node-label stream is bare in every database.
+        event.collection = Arc::from(crate::event::graph_cdc::GRAPH_LABEL_STREAM);
+        assert_eq!(
+            event.bare_collection(),
+            Some(crate::event::graph_cdc::GRAPH_LABEL_STREAM)
+        );
     }
 
     #[test]

@@ -411,6 +411,7 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::PutOidcProvider(_)
         | CatalogEntry::DeleteOidcProvider { .. }
         | CatalogEntry::RecordWalTombstone { .. }
+        | CatalogEntry::PruneCollectionPurgeLog { .. }
         // Quota enforcement is installed synchronously, in `sync.rs`.
         | CatalogEntry::PutDatabaseQuota { .. }
         | CatalogEntry::DeleteDatabaseQuota { .. }

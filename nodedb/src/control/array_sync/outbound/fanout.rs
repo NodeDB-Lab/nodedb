@@ -324,7 +324,8 @@ mod tests {
 
         // Should have received one frame.
         let frame = rx.try_recv().expect("frame should be delivered");
-        assert!(!frame.is_empty());
+        assert!(!frame.bytes.is_empty());
+        assert_eq!(frame.array, "prices");
     }
 
     #[tokio::test]
@@ -376,7 +377,7 @@ mod tests {
 
         fanout.on_op_applied(&make_op("prices", 50));
 
-        let frame = SyncFrame::from_bytes(&rx.try_recv().expect("delta should be delivered"))
+        let frame = SyncFrame::from_bytes(&rx.try_recv().expect("delta should be delivered").bytes)
             .expect("decode delta frame");
         assert_eq!(frame.msg_type, SyncMessageType::ArrayDelta);
     }

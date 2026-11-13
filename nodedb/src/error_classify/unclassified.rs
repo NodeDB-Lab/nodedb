@@ -26,7 +26,6 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::Internal { .. }
         | Error::DescriptorVersionAnomaly { .. }
         | Error::CatalogIntegrityViolation { .. }
-        | Error::CollectionPurgeRowMissing { .. }
         | Error::CollectionUnstamped { .. }
         | Error::MaterializedSumResolutionMissing { .. }
         | Error::CascadeCycle { .. } => true,

@@ -88,6 +88,7 @@ impl CatalogEntry {
             | Self::PutCustomType(_)
             | Self::DeleteCustomType { .. }
             | Self::RecordWalTombstone { .. }
+            | Self::PruneCollectionPurgeLog { .. }
             | Self::MoveTenantCutover { .. }
             | Self::PutDatabaseQuota { .. }
             | Self::DeleteDatabaseQuota { .. }

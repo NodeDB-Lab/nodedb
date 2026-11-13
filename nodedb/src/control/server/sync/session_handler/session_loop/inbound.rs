@@ -4,9 +4,7 @@
 
 use std::sync::Arc;
 
-use futures::SinkExt;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::control::server::sync::session::SyncSession;
 use crate::control::state::SharedState;
@@ -28,10 +26,8 @@ pub(super) struct InboundCtx<'a> {
     pub session_id: &'a str,
 }
 
-async fn send(ws: &mut Ws, frame: &SyncFrame) -> bool {
-    ws.send(Message::Binary(frame.to_bytes().into()))
-        .await
-        .is_ok()
+async fn send(ws: &mut Ws, session: &SyncSession, frame: &SyncFrame) -> bool {
+    super::send::send_frame(ws, session, frame).await
 }
 
 /// Route one decoded binary frame.
@@ -44,10 +40,9 @@ pub(super) async fn handle_frame(ws: &mut Ws, ctx: InboundCtx<'_>, frame: &SyncF
     } = ctx;
 
     // Shape frames read collection data, so they require an authenticated
-    // session exactly as the engine and CRDT frames below do. Handling them
-    // ahead of this gate is what let an un-handshaken socket ask for a
-    // snapshot; `handle_shape_subscribe_async` refuses without an identity too,
-    // but the gate keeps unauthenticated traffic from reaching dispatch at all.
+    // session exactly as the engine and CRDT frames below do.
+    // `handle_shape_subscribe_async` refuses without an identity too, but the
+    // gate keeps unauthenticated traffic from reaching dispatch at all.
     if matches!(
         frame.msg_type,
         SyncMessageType::ResyncRequest | SyncMessageType::ShapeSubscribe
@@ -68,9 +63,16 @@ pub(super) async fn handle_frame(ws: &mut Ws, ctx: InboundCtx<'_>, frame: &SyncF
         && session.authenticated
         && let Some(shared) = shared.as_ref()
     {
-        if let Some(msg) = frame.decode_body::<PresenceUpdateMsg>()
+        // A shape presence channel shows who works on a collection, so an
+        // update on one needs the collection's read grant. The update goes
+        // to the channel's canonical name, the one the leave after a REVOKE
+        // removes.
+        if let Some(mut msg) = frame.decode_body::<PresenceUpdateMsg>()
             && let Some(tenant_id) = session.tenant_id
+            && let Some(channel) =
+                super::presence_gate::update_channel(session, shared, &msg.channel)
         {
+            msg.channel = channel;
             // Presence channels are keyed by the authenticated tenant and
             // database, so peers in one database never observe another's
             // presence under the same channel name.
@@ -95,21 +97,70 @@ pub(super) async fn handle_frame(ws: &mut Ws, ctx: InboundCtx<'_>, frame: &SyncF
         return handle_array(ws, session, channels, shared, frame).await;
     }
 
+    // A handshake is an authentication boundary. Every server-push
+    // registration made under the previous identity (delivery scope, shapes,
+    // presence, array engine) is released before it is processed, and the
+    // session loop registers again under the new identity once it succeeds.
+    if frame.msg_type == SyncMessageType::Handshake {
+        reset_session_bindings(channels, shared, session_id).await;
+    }
+
     handle_crdt(ws, session, shared, frame).await
+}
+
+/// Release every server-push registration of the session: delivery scope,
+/// shapes, presence and the array engine. The session loop registers again
+/// under the session's identity as it then stands.
+pub(super) async fn reset_session_bindings(
+    channels: &mut SessionChannels,
+    shared: &Option<Arc<SharedState>>,
+    session_id: &str,
+) {
+    if let Some(shared) = shared.as_ref() {
+        crate::control::server::sync::listener::unregister_sync_session(shared, session_id).await;
+    }
+    *channels = SessionChannels::default();
 }
 
 async fn handle_resync(
     ws: &mut Ws,
-    session: &SyncSession,
+    session: &mut SyncSession,
     shared: &Arc<SharedState>,
     frame: &SyncFrame,
 ) -> Flow {
+    // A resync request costs the snapshot read a subscribe costs, so it
+    // draws from the same bucket. A refused one gets a retryable reject.
+    if let Err(retry_after_ms) = session.snapshot_limiter.try_acquire() {
+        let shape_id = frame
+            .decode_body::<nodedb_types::sync::wire::ResyncRequestMsg>()
+            .map(|msg| msg.shape_id)
+            .unwrap_or_default();
+        return send_rate_limited(ws, session, shape_id, retry_after_ms).await;
+    }
     let response = crate::control::server::sync::async_dispatch::handle_resync_request_async(
         shared, session, frame,
     )
     .await;
     match response {
-        Some(r) => Flow::from_send(send(ws, &r).await),
+        Some(r) => Flow::from_send(send(ws, session, &r).await),
+        None => Flow::Continue,
+    }
+}
+
+/// Answer a snapshot read the session's snapshot bucket refused.
+async fn send_rate_limited(
+    ws: &mut Ws,
+    session: &SyncSession,
+    shape_id: String,
+    retry_after_ms: u64,
+) -> Flow {
+    let reject = nodedb_types::sync::wire::ShapeSnapshotRejectMsg {
+        shape_id,
+        refusal: nodedb_types::sync::wire::ShapeSnapshotRefusal::RateLimited,
+        detail: format!("snapshot reads are rate limited; retry in {retry_after_ms} ms"),
+    };
+    match SyncFrame::try_encode(SyncMessageType::ShapeSnapshotReject, &reject) {
+        Some(frame) => Flow::from_send(send(ws, session, &frame).await),
         None => Flow::Continue,
     }
 }
@@ -122,6 +173,21 @@ async fn handle_shape_subscribe(
     session_id: &str,
     frame: &SyncFrame,
 ) -> Flow {
+    // Decoded once, for the rate-limit refusal, the presence join and the
+    // schema announce below.
+    let shape_sub_msg =
+        frame.decode_body::<crate::control::server::sync::wire::ShapeSubscribeMsg>();
+
+    // Each subscribe costs a snapshot read, so a session sends them at a
+    // bounded rate. A refused one gets a retryable reject.
+    if let Err(retry_after_ms) = session.snapshot_limiter.try_acquire() {
+        let shape_id = shape_sub_msg
+            .as_ref()
+            .map(|msg| msg.shape.shape_id.clone())
+            .unwrap_or_default();
+        return send_rate_limited(ws, session, shape_id, retry_after_ms).await;
+    }
+
     let Some(response) =
         crate::control::server::sync::async_dispatch::handle_shape_subscribe_async(
             shared, session, frame,
@@ -131,48 +197,55 @@ async fn handle_shape_subscribe(
         return Flow::Continue;
     };
 
-    // Decode once, reused for both the presence-channel subscribe and the
-    // schema-announce below (avoids a redundant second msgpack decode of the
-    // same body). The subscription was authorized upstream, so this only runs
-    // for shapes the session may read.
-    let shape_sub_msg =
-        frame.decode_body::<crate::control::server::sync::wire::ShapeSubscribeMsg>();
+    // Only a snapshot means the subscription was authorized and registered.
+    // A reject joins no presence channel and announces no schema.
+    if response.msg_type != SyncMessageType::ShapeSnapshot {
+        return Flow::from_send(send(ws, session, &response).await);
+    }
 
     let database_id = session.database_id();
-    if let Some(sub_msg) = shape_sub_msg.as_ref()
-        && let Some(coll) = sub_msg.shape.collection()
-    {
+    let collection = shape_sub_msg
+        .as_ref()
+        .and_then(|msg| msg.shape.collection())
+        .and_then(|name| {
+            crate::control::server::shared::request_collection::request_collection(
+                database_id,
+                name,
+            )
+            .ok()
+        });
+    if let Some(coll) = collection {
         if channels.presence_registered
             && let Some(tenant) = session.tenant_id
         {
-            let channel = format!("shape:{coll}");
             shared.presence.write().await.subscribe_to_channel(
                 session_id,
                 tenant,
                 database_id,
-                &channel,
+                &super::presence_gate::shape_channel(&coll),
             );
+            session.presence_shapes.insert(coll.clone());
         }
 
         // Announce the collection descriptor before the shape snapshot so
         // schema strictly precedes data on the subscription path. Idempotent
         // per session; skips shape variants that carry no single collection.
-        let tenant_id = session.tenant_id.map(|t| t.as_u64()).unwrap_or(0);
+        let tenant_id = session.tenant_id.map_or(0, |t| t.as_u64());
         if let Some(schema_frame) = super::super::announce::build_collection_schema_frame(
             shared,
             session,
             tenant_id,
             database_id,
-            coll,
+            &coll,
         ) {
-            if !send(ws, &schema_frame).await {
+            if !send(ws, session, &schema_frame).await {
                 return Flow::Break;
             }
-            session.announced_collections.insert(coll.to_string());
+            session.announced_collections.insert(coll);
         }
     }
 
-    Flow::from_send(send(ws, &response).await)
+    Flow::from_send(send(ws, session, &response).await)
 }
 
 async fn handle_array(
@@ -191,7 +264,7 @@ async fn handle_array(
         session.authenticated,
         session.identity.is_some(),
     ) {
-        return Flow::from_send(send(ws, &reject).await);
+        return Flow::from_send(send(ws, session, &reject).await);
     }
 
     // Bind the inbound array engine to the session's authenticated tenant,
@@ -210,7 +283,7 @@ async fn handle_array(
         // provenance is server-authoritative.
         inbound.set_session_identity(session.producer_id, session.accepted_epoch);
         if let Some(f) = dispatch_array_frame(frame, inbound, session).await
-            && !send(ws, &f).await
+            && !send(ws, session, &f).await
         {
             return Flow::Break;
         }
@@ -235,7 +308,7 @@ async fn handle_crdt(
     if let Some(delta_msg) = delta_msg.as_mut()
         && let Some(refusal) = session.refuse_delta_collection(delta_msg)
     {
-        if !send(ws, &refusal).await {
+        if !send(ws, session, &refusal).await {
             return Flow::Break;
         }
         return Flow::Continue;
@@ -257,7 +330,7 @@ async fn handle_crdt(
                 crate::control::server::sync::async_dispatch::permission_denied_delta_reject(
                     delta_msg,
                 )
-                && !send(ws, &reject).await
+                && !send(ws, session, &reject).await
             {
                 return Flow::Break;
             }
@@ -270,7 +343,7 @@ async fn handle_crdt(
     // those two mutexes, scoped to the synchronous call. Locking them out here
     // as well deadlocks that re-acquisition — they are plain non-reentrant
     // mutexes — and every delta push hangs until the client's frame timeout.
-    // The `shared`-absent path has no store to lock and keeps the old shape.
+    // The `shared`-absent path has no store to lock.
     let response = if let Some(shared) = shared.as_ref() {
         session
             .process_frame(frame, Some(&shared.rls), None, None, Some(shared))
@@ -282,6 +355,31 @@ async fn handle_crdt(
     let Some(response) = response else {
         return Flow::Continue;
     };
+
+    // The purge catch-up goes ahead of the ack that carries the new
+    // watermark, and ahead of every shape snapshot and push. A client that
+    // dies before the ack names its old watermark again and gets the same
+    // frames.
+    if response.msg_type == SyncMessageType::HandshakeAck {
+        for catch_up in std::mem::take(&mut session.purge_catch_up) {
+            if !send(ws, session, &catch_up).await {
+                return Flow::Break;
+            }
+        }
+    }
+
+    // An admitted delta proves the client stores the collection. A purge of
+    // it reaches the session only under a read grant too: a write grant alone
+    // reads nothing.
+    if response.msg_type == SyncMessageType::DeltaAck
+        && let Some(shared) = shared.as_ref()
+        && let Some(delta_msg) = delta_msg.as_ref()
+        && super::register::may_read(session, shared, &delta_msg.collection)
+    {
+        shared
+            .crdt_sync_delivery
+            .hold_collection(&session.session_id, &delta_msg.collection);
+    }
 
     let dispatched = if response.msg_type == SyncMessageType::DeltaAck
         && let Some(shared) = shared.as_ref()
@@ -325,5 +423,5 @@ async fn handle_crdt(
     if delta_msg.is_some() {
         session.record_delta_outcome(&r);
     }
-    Flow::from_send(send(ws, &r).await)
+    Flow::from_send(send(ws, session, &r).await)
 }

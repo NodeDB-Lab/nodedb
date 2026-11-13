@@ -58,6 +58,24 @@ pub fn redo_stream_lost_here(
     .emit();
 }
 
+/// Report that an installed chunked redo's row changes did not read back
+/// from this node's WAL after every retry, so the entry holds its group's
+/// apply. Called from the apply loop, the one site that stages them.
+pub fn redo_changes_unstaged(group_id: u64, log_index: u64, error: &crate::Error) {
+    let ctx = context::RedoChangesUnstaged {
+        group_id,
+        log_index,
+        error: error.to_string(),
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "an installed chunked redo's change events did not stage on this replica",
+    )
+    .domain(&ctx)
+    .error_chain(error_chain_of(error))
+    .emit();
+}
+
 /// Report that the snapshot debt of data groups this node left did not
 /// persist. Their streams stay, with their WAL floor holds, until a later
 /// membership pass records it. Called from that pass, the one site that

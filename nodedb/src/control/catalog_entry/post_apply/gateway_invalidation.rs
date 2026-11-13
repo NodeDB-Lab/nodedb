@@ -311,6 +311,9 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         CatalogEntry::RecordWalTombstone { .. } => {
             // WAL replay barrier only; no plan shape is affected.
         }
+        CatalogEntry::PruneCollectionPurgeLog { .. } => {
+            // Sync purge records only; no plan shape is affected.
+        }
         CatalogEntry::PutDatabaseQuota { .. } | CatalogEntry::DeleteDatabaseQuota { .. } => {
             // no-op: quotas gate admission and memory at exec time; they do
             // not change plan shape.

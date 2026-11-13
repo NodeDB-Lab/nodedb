@@ -45,9 +45,15 @@ pub(super) fn authorize_shape_subscription<'a>(
         .as_ref()
         .ok_or(ShapeAuthorizationFailure::IdentityNotEstablished)?;
 
-    // Shape variants that name no single collection (graph roots) still require
-    // an established identity, but there is no collection grant to check.
-    let Some(collection) = shape.collection() else {
+    // An array shape reads the array, so it needs the read grant every array
+    // read needs: Read on the array name. Graph roots name no single
+    // collection, so only the identity is required; such a shape pushes no
+    // rows.
+    let resource = match &shape.shape_type {
+        nodedb_types::sync::shape::ShapeType::Array { array_name, .. } => Some(array_name.as_str()),
+        _ => shape.collection(),
+    };
+    let Some(collection) = resource else {
         return Ok(identity);
     };
 

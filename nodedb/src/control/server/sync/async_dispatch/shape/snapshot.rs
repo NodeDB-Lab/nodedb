@@ -96,7 +96,7 @@ pub(super) async fn take_shape_snapshot(
                 shared,
                 shape_id: &shape.shape_id,
                 collection,
-                predicate,
+                predicates: &[predicate.as_slice()],
                 identity,
                 database_id,
                 peer_addr,
@@ -141,17 +141,28 @@ pub(super) async fn take_shape_snapshot(
     }
 }
 
-struct DocumentSnapshot<'a> {
-    shared: &'a SharedState,
-    shape_id: &'a str,
-    collection: &'a str,
-    predicate: &'a [u8],
-    identity: &'a AuthenticatedIdentity,
-    database_id: DatabaseId,
-    peer_addr: &'a str,
+pub(super) struct DocumentSnapshot<'a> {
+    pub shared: &'a SharedState,
+    /// The shape the snapshot answers, or the collection a collection resync
+    /// covers. Names the snapshot in logs.
+    pub shape_id: &'a str,
+    pub collection: &'a str,
+    /// One predicate per shape the snapshot covers. A row passes when any
+    /// matches it.
+    pub predicates: &'a [&'a [u8]],
+    pub identity: &'a AuthenticatedIdentity,
+    pub database_id: DatabaseId,
+    pub peer_addr: &'a str,
 }
 
-/// Scan a document collection for the subscription's initial dataset.
+/// Scan a document or key-value collection for the subscription's initial
+/// dataset.
+///
+/// A KV collection's rows live in the KV engine, so it is read with a KV
+/// scan, and each row becomes a `{id, data}` envelope keyed by its key (see
+/// [`super::kv_rows`]). Every other collection is read with a document
+/// range scan. Either way the snapshot holds every row the collection
+/// stores, so a client that replaces its rows with it loses none.
 ///
 /// The scan carries row-level security: it is a read on the subscriber's
 /// behalf, so the subscriber's policies apply to it exactly as they do to
@@ -163,28 +174,58 @@ struct DocumentSnapshot<'a> {
 /// Column redaction applies for the same reason, and is applied to the
 /// delivered payload here rather than left to the SELECT-path shaping core
 /// this dispatch never reaches — see [`super::payload`].
-async fn document_snapshot(
+pub(super) async fn document_snapshot(
     req: DocumentSnapshot<'_>,
 ) -> Result<ShapeSnapshotData, SnapshotFailure> {
     use crate::bridge::envelope::PhysicalPlan;
     use crate::control::server::shared::ddl::user_dispatch::dispatch_for_identity;
-    use nodedb_physical::physical_plan::DocumentOp;
+    use nodedb_physical::physical_plan::{DocumentOp, KvOp};
 
     use super::payload::{
         SnapshotPayload, finalize_snapshot, predicate_redacted_field, snapshot_redaction,
     };
 
-    let plan = PhysicalPlan::Document(DocumentOp::RangeScan {
-        collection: nodedb_types::QualifiedCollection::new(req.database_id, req.collection),
-        field: String::new(),
-        lower: None,
-        upper: None,
-        // The replica's initial dataset is every row: a cut would leave the
-        // client missing rows with nothing saying so. The Data Plane bounds
-        // the read by its scan byte budget and fails loudly past it.
-        limit: usize::MAX,
-        rls_filters: Vec::new(),
-    });
+    let is_kv = match req.shared.credentials.catalog().get_collection(
+        req.database_id,
+        req.identity.tenant_id.as_u64(),
+        req.collection,
+    ) {
+        Ok(stored) => stored.is_some_and(|stored| stored.collection_type.is_kv()),
+        Err(error) => {
+            return Err(SnapshotFailure::new(
+                ShapeSnapshotRefusal::QueryFailed,
+                format!("the collection's catalog entry does not read: {error}"),
+            ));
+        }
+    };
+
+    let collection = nodedb_types::QualifiedCollection::new(req.database_id, req.collection);
+    // The replica's initial dataset is every row: a cut leaves the
+    // client missing rows with nothing saying so. The Data Plane bounds the
+    // read by its scan byte budget and fails loudly past it.
+    let plan = if is_kv {
+        PhysicalPlan::Kv(KvOp::Scan {
+            collection,
+            cursor: Vec::new(),
+            count: usize::MAX,
+            filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
+            match_pattern: None,
+            sort_keys: Vec::new(),
+            surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
+        })
+    } else {
+        PhysicalPlan::Document(DocumentOp::RangeScan {
+            collection,
+            field: String::new(),
+            lower: None,
+            upper: None,
+            limit: usize::MAX,
+            rls_filters: Vec::new(),
+        })
+    };
 
     // Resolved once for the whole snapshot, before `plan` is moved into the
     // dispatch, and from the subscriber's own identity — every row of this
@@ -208,8 +249,9 @@ async fn document_snapshot(
     // A predicate that probes a redacted column discloses it through row
     // presence no matter how the delivered cell is masked, so the subscription
     // is refused rather than answered.
-    if let Some(field) = predicate_redacted_field(req.predicate, &redaction, &req.shared.redaction)
-    {
+    if let Some(field) = req.predicates.iter().find_map(|predicate| {
+        predicate_redacted_field(predicate, &redaction, &req.shared.redaction)
+    }) {
         warn!(
             shape_id = %req.shape_id,
             collection = %req.collection,
@@ -253,8 +295,12 @@ async fn document_snapshot(
     .await
     {
         Ok(payload) => finalize_snapshot(SnapshotPayload {
-            payload,
-            predicate: req.predicate,
+            payload: if is_kv {
+                super::kv_rows::kv_rows_as_envelopes(&payload)?
+            } else {
+                payload
+            },
+            predicates: req.predicates,
             shape_id: req.shape_id,
             redaction: &redaction,
             store: &req.shared.redaction,

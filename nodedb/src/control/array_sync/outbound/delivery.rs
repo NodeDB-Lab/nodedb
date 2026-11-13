@@ -24,8 +24,25 @@ use tracing::{debug, info, warn};
 /// catch up via snapshot when it reconnects).
 const CHANNEL_CAPACITY: usize = 1_024;
 
-/// An encoded binary frame ready to write to the WebSocket.
-pub type ArrayFrame = Vec<u8>;
+/// An encoded binary frame ready to write to the WebSocket, with the array
+/// it carries. The session's push-time check re-authorizes the read of
+/// `array` before the bytes leave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayFrame {
+    /// The bare array name the frame carries data of.
+    pub array: String,
+    /// The encoded `SyncFrame`.
+    pub bytes: Vec<u8>,
+}
+
+impl ArrayFrame {
+    pub fn new(array: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            array: array.into(),
+            bytes,
+        }
+    }
+}
 
 /// Registry of connected Lite sessions for outbound array frame delivery.
 ///
@@ -142,13 +159,17 @@ impl ArrayDeliveryRegistry {
 mod tests {
     use super::*;
 
+    fn frame(bytes: Vec<u8>) -> ArrayFrame {
+        ArrayFrame::new("arr", bytes)
+    }
+
     #[tokio::test]
     async fn register_and_receive() {
         let reg = ArrayDeliveryRegistry::new();
         let mut rx = reg.register("s1".into());
-        assert!(reg.enqueue("s1", vec![1, 2, 3]));
-        let frame = rx.recv().await.expect("should receive frame");
-        assert_eq!(frame, vec![1, 2, 3]);
+        assert!(reg.enqueue("s1", frame(vec![1, 2, 3])));
+        let received = rx.recv().await.expect("should receive frame");
+        assert_eq!(received, frame(vec![1, 2, 3]));
     }
 
     #[tokio::test]
@@ -157,7 +178,7 @@ mod tests {
         let mut rx = reg.register("s1".into());
         reg.unregister("s1");
         // After unregister, the sender is dropped; channel is closed.
-        assert!(!reg.enqueue("s1", vec![9])); // Session is gone.
+        assert!(!reg.enqueue("s1", frame(vec![9]))); // Session is gone.
         // rx.recv() returns None because sender was dropped on unregister.
         assert_eq!(rx.recv().await, None);
     }
@@ -165,7 +186,7 @@ mod tests {
     #[test]
     fn enqueue_unknown_session_fails() {
         let reg = ArrayDeliveryRegistry::new();
-        assert!(!reg.enqueue("ghost", vec![0]));
+        assert!(!reg.enqueue("ghost", frame(vec![0])));
         assert_eq!(reg.frames_dropped.load(Ordering::Relaxed), 0);
     }
 
@@ -174,15 +195,15 @@ mod tests {
         let reg = ArrayDeliveryRegistry::with_test_capacity(1);
         let mut rx = reg.register("s1".into());
 
-        assert!(reg.enqueue("s1", vec![1]));
-        assert!(!reg.enqueue("s1", vec![2]));
-        assert_eq!(rx.recv().await, Some(vec![1]));
-        assert!(!reg.enqueue("s1", vec![3]));
+        assert!(reg.enqueue("s1", frame(vec![1])));
+        assert!(!reg.enqueue("s1", frame(vec![2])));
+        assert_eq!(rx.recv().await, Some(frame(vec![1])));
+        assert!(!reg.enqueue("s1", frame(vec![3])));
         assert!(rx.try_recv().is_err());
 
         reg.unregister("s1");
         let mut rx = reg.register("s1".into());
-        assert!(reg.enqueue("s1", vec![4]));
-        assert_eq!(rx.recv().await, Some(vec![4]));
+        assert!(reg.enqueue("s1", frame(vec![4])));
+        assert_eq!(rx.recv().await, Some(frame(vec![4])));
     }
 }

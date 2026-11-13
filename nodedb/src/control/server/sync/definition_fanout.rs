@@ -23,8 +23,15 @@ use nodedb_types::sync::wire::{DefinitionSyncMsg, SyncFrame, SyncMessageType};
 /// Capacity of each session's outbound definition-sync channel.
 const CHANNEL_CAPACITY: usize = 256;
 
-/// A pre-encoded binary frame ready to write to the WebSocket.
-type DefinitionFrame = Vec<u8>;
+/// A pre-encoded binary frame ready to write to the WebSocket, with the
+/// tenant and database of the definition it carries. The session's push-time
+/// check matches that scope against its principal before the bytes leave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionFrame {
+    pub tenant_id: u64,
+    pub database_id: DatabaseId,
+    pub bytes: Vec<u8>,
+}
 
 /// Authenticated scope and delivery channel for one Lite session.
 struct DefinitionSession {
@@ -106,7 +113,11 @@ impl DefinitionSyncFanout {
     /// re-requesting the catalog on the next reconnect.
     pub fn broadcast(&self, msg: &DefinitionSyncMsg) {
         let frame = match SyncFrame::try_encode(SyncMessageType::DefinitionSync, msg) {
-            Some(frame) => frame.to_bytes(),
+            Some(frame) => DefinitionFrame {
+                tenant_id: msg.tenant_id,
+                database_id: DatabaseId::new(msg.database_id),
+                bytes: frame.to_bytes(),
+            },
             None => return,
         };
 
@@ -173,7 +184,9 @@ mod tests {
             .recv()
             .await
             .expect("matching scope should receive frame");
-        let frame = SyncFrame::from_bytes(&frame_bytes).expect("decode frame");
+        assert_eq!(frame_bytes.tenant_id, 1);
+        assert_eq!(frame_bytes.database_id, DatabaseId::new(7));
+        let frame = SyncFrame::from_bytes(&frame_bytes.bytes).expect("decode frame");
         assert_eq!(frame.msg_type, SyncMessageType::DefinitionSync);
         let decoded: DefinitionSyncMsg = frame.decode_body().expect("decode body");
         assert_eq!(decoded.name, "my_fn");

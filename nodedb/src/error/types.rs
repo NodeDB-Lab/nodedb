@@ -673,19 +673,6 @@ pub enum Error {
         prior: u64,
     },
 
-    /// A collection purge found no catalog row to deactivate, so the
-    /// fail-closed CREATE/UNDROP barrier was never written — the lookup key
-    /// and stored key disagree, or another writer removed it concurrently.
-    #[error(
-        "purge of collection '{name}' (database {database_id}, tenant {tenant_id}) \
-         found no catalog row to deactivate"
-    )]
-    CollectionPurgeRowMissing {
-        database_id: u64,
-        tenant_id: u64,
-        name: String,
-    },
-
     /// A collection row reached the catalog with no incarnation. Every writer
     /// stamps the row first, so the catalog refuses it rather than commit a
     /// row no write can route by.

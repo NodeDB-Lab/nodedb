@@ -361,6 +361,9 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::RecordWalTombstone { .. } => {
             // WAL replay barrier only; no in-memory cache to refresh.
         }
+        CatalogEntry::PruneCollectionPurgeLog { .. } => {
+            // Sync purge records only; no in-memory cache to refresh.
+        }
         CatalogEntry::PutDatabaseQuota { db_id, record } => {
             quota::put_database(DatabaseId::new(*db_id), record, shared);
         }

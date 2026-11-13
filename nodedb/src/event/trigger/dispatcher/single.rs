@@ -61,12 +61,21 @@ pub async fn dispatch_triggers(
         }
     };
 
+    // Triggers are registered under the bare catalog name. An event whose
+    // name is not qualified for its database names no collection a trigger
+    // is on.
+    let Some(collection) =
+        event.routed_collection(crate::event::unrouted::UnroutedConsumer::TriggerDispatcher)
+    else {
+        return;
+    };
+
     let identity = trigger_identity(event.tenant_id);
     let op_str = event.op.to_string();
     let source = ActionSource {
         database_id: event.database_id,
         tenant_id: event.tenant_id.as_u64(),
-        collection: &event.collection,
+        collection,
         row_id: event.row_id.as_str(),
         operation: &op_str,
         source_lsn: event.lsn.as_u64(),
@@ -112,7 +121,7 @@ pub async fn dispatch_triggers(
             identity: &identity,
             database_id: event.database_id,
             tenant_id: event.tenant_id,
-            collection: &event.collection,
+            collection,
             new_fields: new_fields.as_ref(),
             old_fields: old_fields.as_ref(),
             cascade_depth: 0,
@@ -148,7 +157,7 @@ pub async fn dispatch_triggers(
             database_id: event.database_id,
             tenant_id: event.tenant_id,
         },
-        collection: &event.collection,
+        collection,
         event: dml_event,
         cascade_depth: 0,
         mode_filter,

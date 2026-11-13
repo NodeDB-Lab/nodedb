@@ -141,8 +141,7 @@ pub fn put_if_absent(stored: &StoredCollection, catalog: &SystemCatalog) -> crat
 /// from crossing an incomplete reclaim.
 ///
 /// Returns whether a row was found and deactivated. `false` is legitimate
-/// only for the replicated applier (it can lack the row) — a caller
-/// that already read the row must use [`prepare_purge_checked`] instead.
+/// for the replicated applier, which can lack the row.
 pub fn prepare_purge(
     database_id: u64,
     tenant_id: u64,
@@ -164,27 +163,6 @@ pub fn prepare_purge(
     // `finalize_purge`, which removes their records outright.
     set_index_visibility(database_id.as_u64(), tenant_id, name, false, catalog)?;
     Ok(true)
-}
-
-/// Fail-closed [`prepare_purge`] for callers that resolved the collection
-/// before asking for the purge. A miss is never benign: the reclaim runs
-/// while the row is active and a same-name CREATE can register over keys
-/// the old incarnation still owns. Raises rather than reporting success.
-pub fn prepare_purge_checked(
-    database_id: u64,
-    tenant_id: u64,
-    name: &str,
-    catalog: &SystemCatalog,
-) -> crate::Result<()> {
-    if prepare_purge(database_id, tenant_id, name, catalog)? {
-        return Ok(());
-    }
-    crate::diag::collection_purge_row_missing(database_id, tenant_id, name);
-    Err(crate::Error::CollectionPurgeRowMissing {
-        database_id,
-        tenant_id,
-        name: name.to_string(),
-    })
 }
 
 /// Remove catalog metadata only after every persistent engine surface has been
@@ -704,54 +682,6 @@ mod tests {
         let found =
             prepare_purge(0, 1, "ghost", catalog).expect("missing row is not a read failure");
         assert!(!found);
-    }
-
-    /// A collection stored under the default database is invisible to a purge
-    /// looking under another one. The checked variant must not report success.
-    #[test]
-    fn prepare_purge_checked_rejects_a_database_id_that_holds_no_row() {
-        let (credentials, _tmp) = open_catalog();
-        let catalog = credentials.catalog();
-        let stored = StoredCollection::stamped_for_test(1, "orders", "tester");
-        apply_to(&CatalogEntry::PutCollection(Box::new(stored)), catalog).expect("apply");
-
-        let err = prepare_purge_checked(1024, 1, "orders", catalog)
-            .expect_err("a purge that deactivates nothing must not report success");
-        assert!(matches!(
-            err,
-            crate::Error::CollectionPurgeRowMissing {
-                database_id: 1024,
-                tenant_id: 1,
-                ..
-            }
-        ));
-        // The row under the database that actually holds it is untouched.
-        assert!(
-            catalog
-                .get_collection(DatabaseId::DEFAULT, 1, "orders")
-                .unwrap()
-                .expect("row preserved")
-                .is_active
-        );
-    }
-
-    #[test]
-    fn prepare_purge_checked_accepts_the_database_that_holds_the_row() {
-        let (credentials, _tmp) = open_catalog();
-        let catalog = credentials.catalog();
-        let mut stored = StoredCollection::stamped_for_test(1, "orders", "tester");
-        stored.database_id = DatabaseId::new(1024);
-        apply_to(&CatalogEntry::PutCollection(Box::new(stored)), catalog).expect("apply");
-
-        prepare_purge_checked(1024, 1, "orders", catalog)
-            .expect("prepare purge under the owning database");
-        assert!(
-            !catalog
-                .get_collection(DatabaseId::new(1024), 1, "orders")
-                .unwrap()
-                .expect("row preserved")
-                .is_active
-        );
     }
 
     fn vector_model(collection: &str, column: &str) -> nodedb_types::VectorModelEntry {

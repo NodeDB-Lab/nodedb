@@ -77,12 +77,18 @@ impl std::fmt::Display for ReclaimFailure {
 }
 
 /// Reclaim every engine's storage for `(tenant_id, name)` on this node — WAL
-/// tombstone, redb tombstone, optional L2 cleanup enqueue, quiesce drain,
-/// `MetaOp::UnregisterCollection` dispatch to the local Data Plane, and Lite
-/// `CollectionPurged` broadcast.
+/// tombstone, redb tombstone, optional L2 cleanup enqueue, quiesce drain, and
+/// `MetaOp::UnregisterCollection` dispatch to the local Data Plane.
 ///
-/// Shared by the synchronous replicated post-apply barrier, materialized-view
-/// target deletion, and the interactive re-CREATE hard-purge. All callers use
+/// The Lite `CollectionPurged` notice is not sent here. The metadata applier
+/// sends it for each purge-log row the entry recorded, with the row's
+/// position, once this reclaim ran. A notice that a full session queue drops
+/// reaches the client from the purge log at its next handshake.
+///
+/// Shared by the replicated purge post-apply barrier (`DROP ... PURGE`, the
+/// retention sweep, and the re-CREATE over a soft-deleted name), the
+/// materialized-view target deletion, the MOVE TENANT source reclaim, and the
+/// metadata snapshot reconcile. All callers use
 /// this one result-checked implementation rather than duplicating lifecycle
 /// cleanup.
 pub(crate) async fn reclaim_collection_storage(
@@ -248,16 +254,6 @@ pub(crate) async fn reclaim_collection_storage(
             }
         }
         Ok(()) => {
-            // Broadcast only after every core reclaimed the old incarnation.
-            // Saturated per-session channels can drop the notification; offline
-            // replay remains the fallback.
-            shared.crdt_sync_delivery.broadcast_collection_purged(
-                tenant_id,
-                DatabaseId::new(database_id),
-                name,
-                purge_lsn,
-            );
-
             // A prior failed attempt can leave a durable entry; a
             // succeeding purge clears it and the hold that entry owned.
             // This call's own hold drops on return.

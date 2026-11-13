@@ -270,6 +270,7 @@ pub fn stamp(
         | CatalogEntry::PutOidcProvider(_)
         | CatalogEntry::DeleteOidcProvider { .. }
         | CatalogEntry::RecordWalTombstone { .. }
+        | CatalogEntry::PruneCollectionPurgeLog { .. }
         | CatalogEntry::PutDatabaseQuota { .. }
         | CatalogEntry::DeleteDatabaseQuota { .. }
         | CatalogEntry::PutTenantQuota { .. }

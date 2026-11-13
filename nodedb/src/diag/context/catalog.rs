@@ -96,48 +96,6 @@ impl DomainContext for CatalogApplyOrphanRow<'_> {
     }
 }
 
-/// A collection purge found no catalog row to deactivate, even though its
-/// caller had just read that row.
-pub(in crate::diag) struct CollectionPurgeRowMissing<'a> {
-    /// Database the purge looked the collection up under.
-    pub database_id: u64,
-    pub tenant_id: u64,
-    /// Collection the purge targeted.
-    pub name: &'a str,
-}
-
-impl DomainContext for CollectionPurgeRowMissing<'_> {
-    fn domain_kind(&self) -> &'static str {
-        "nodedb.collection_purge_row_missing"
-    }
-
-    fn grouping_key(&self) -> String {
-        // Database names the bug; tenant and collection name are the
-        // occurrence, keeping one report per root cause.
-        format!("database={}", self.database_id)
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "database_id": self.database_id,
-            "tenant_id": self.tenant_id,
-            "collection": self.name,
-            "why_fatal": "the inactive row this step writes is the restart-durable barrier \
-                          that stops a same-name CREATE or UNDROP from crossing an \
-                          incomplete storage reclaim. Writing nothing and reporting success \
-                          lets the reclaim run against a row that is still active, so a \
-                          re-CREATE registers over storage keys the old incarnation still \
-                          owns and its rows resurrect",
-            "operator_action": "compare the database_id the purge looked under with the one \
-                                 on the stored collection row: a caller passing a fixed or \
-                                 session-default database for a collection in another \
-                                 namespace misses every row. If they match, another writer \
-                                 removed the row concurrently and the purge raced a \
-                                 same-name lifecycle operation",
-        })
-    }
-}
-
 /// Consumer-group offsets that a replicated topic or group deletion could not
 /// clear on this node, so a recreated stream resumes from a stale cursor.
 pub(in crate::diag) struct ConsumerGroupOffsetsRetained<'a> {
@@ -225,6 +183,34 @@ impl DomainContext for SynonymGroupNotApplied<'_> {
                                  underlying dispatch failure clears. The FTS backend holds \
                                  its own durable copy and no boot seed rebuilds it from the \
                                  catalog, so a restart does not heal this node",
+        })
+    }
+}
+
+/// The collection-GC sweep could not read the collection purge log, so it
+/// proposed no retention prune.
+pub(in crate::diag) struct PurgeLogPruneNotProposed<'a> {
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for PurgeLogPruneNotProposed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.purge_log_prune_not_proposed"
+    }
+
+    fn grouping_key(&self) -> String {
+        format!("cause={}", self.error_class)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "error_class": self.error_class,
+            "why_fatal": "the purge log keeps rows past retention, so it grows with every \
+                          purge, and offline sync clients keep getting per-collection \
+                          replays instead of a resync",
+            "operator_action": "check the system catalog on this node; the sweep proposes \
+                                 the prune again on its next tick",
         })
     }
 }

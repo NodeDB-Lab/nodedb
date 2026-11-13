@@ -140,7 +140,6 @@ impl GatewayErrorMap {
             | Error::Shaping(_)
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)

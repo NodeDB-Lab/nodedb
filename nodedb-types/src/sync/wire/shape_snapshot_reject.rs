@@ -35,14 +35,23 @@ pub enum ShapeSnapshotRefusal {
     /// The shape predicate does not decode. A re-subscribe with the same
     /// predicate fails the same way.
     InvalidPredicate = 4,
+    /// The session holds the most shapes one session may hold. A subscribe
+    /// succeeds again after the client unsubscribes a shape.
+    ShapeLimitReached = 5,
+    /// The session sent shape subscriptions faster than its rate allows. A
+    /// re-subscribe can succeed after a short wait.
+    RateLimited = 6,
 }
 
 impl ShapeSnapshotRefusal {
     /// Whether the same subscription can succeed once the condition clears.
     pub fn is_retryable(self) -> bool {
         match self {
-            Self::QueryFailed => true,
-            Self::PolicyRefused | Self::MalformedRows | Self::InvalidPredicate => false,
+            Self::QueryFailed | Self::RateLimited => true,
+            Self::PolicyRefused
+            | Self::MalformedRows
+            | Self::InvalidPredicate
+            | Self::ShapeLimitReached => false,
         }
     }
 }
@@ -91,10 +100,12 @@ mod tests {
     }
 
     #[test]
-    fn only_a_failed_query_is_retryable() {
+    fn only_a_failed_query_or_rate_limit_is_retryable() {
         assert!(ShapeSnapshotRefusal::QueryFailed.is_retryable());
         assert!(!ShapeSnapshotRefusal::PolicyRefused.is_retryable());
         assert!(!ShapeSnapshotRefusal::MalformedRows.is_retryable());
         assert!(!ShapeSnapshotRefusal::InvalidPredicate.is_retryable());
+        assert!(!ShapeSnapshotRefusal::ShapeLimitReached.is_retryable());
+        assert!(ShapeSnapshotRefusal::RateLimited.is_retryable());
     }
 }

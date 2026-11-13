@@ -60,15 +60,15 @@ pub fn check_and_trigger(
         ),
     };
 
-    if let Some(frame) = encode_reject(&reject) {
-        delivery.enqueue(session_id, frame);
+    if let Some(bytes) = encode_reject(&reject) {
+        delivery.enqueue(session_id, ArrayFrame::new(array_name, bytes));
     }
 
     true
 }
 
 /// Encode an `ArrayRejectMsg` as a binary `SyncFrame`.
-fn encode_reject(msg: &ArrayRejectMsg) -> Option<ArrayFrame> {
+fn encode_reject(msg: &ArrayRejectMsg) -> Option<Vec<u8>> {
     nodedb_types::sync::wire::SyncFrame::try_encode(SyncMessageType::ArrayReject, msg)
         .map(|f| f.to_bytes())
 }
@@ -100,6 +100,7 @@ mod tests {
         assert!(fired);
         // A frame should be enqueued.
         let frame = rx.try_recv().expect("frame should be enqueued");
-        assert!(!frame.is_empty());
+        assert!(!frame.bytes.is_empty());
+        assert_eq!(frame.array, "arr");
     }
 }

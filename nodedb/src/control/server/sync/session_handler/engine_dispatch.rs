@@ -10,10 +10,8 @@
 
 use std::sync::Arc;
 
-use futures::SinkExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::super::session::SyncSession;
 use super::super::wire::{
@@ -52,10 +50,7 @@ macro_rules! dispatch {
                 return EngineOutcome::Break;
             }
             if let Some(ack) = ack
-                && $ws
-                    .send(Message::Binary(ack.to_bytes().into()))
-                    .await
-                    .is_err()
+                && !super::session_loop::send_frame($ws, $session, &ack).await
             {
                 return EngineOutcome::Break;
             }

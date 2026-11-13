@@ -99,6 +99,7 @@ impl SyncTestClient {
             lite_id,
             epoch,
             wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
+            last_server_watermark: 0,
         };
         let frame = SyncFrame::try_encode(SyncMessageType::Handshake, &handshake)
             .ok_or_else(|| "failed to encode HandshakeMsg".to_string())?;

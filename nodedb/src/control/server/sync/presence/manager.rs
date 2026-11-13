@@ -23,23 +23,34 @@ use crate::types::{DatabaseId, TenantId};
 use super::channel::ChannelState;
 use super::types::{PeerState, PresenceConfig};
 
-/// Serialized frame bytes shared across subscribers (serialize once).
-type SharedBytes = Arc<Vec<u8>>;
+/// One presence frame for one subscriber: serialized once, shared across
+/// every subscriber of its channel.
+///
+/// The frame names its channel, so the receiving session checks at push
+/// time that it is still a member. A frame queued before the session left
+/// the channel does not go out.
+#[derive(Debug, Clone)]
+pub struct PresenceFrame {
+    /// The client-visible channel name the frame belongs to.
+    pub channel: Arc<str>,
+    /// The encoded `SyncFrame`.
+    pub bytes: Arc<Vec<u8>>,
+}
 
 /// Handle for sending outbound frames to a specific WebSocket session.
 #[derive(Debug, Clone)]
 pub struct SessionSender {
-    tx: mpsc::Sender<SharedBytes>,
+    tx: mpsc::Sender<PresenceFrame>,
 }
 
 impl SessionSender {
-    pub fn new(tx: mpsc::Sender<SharedBytes>) -> Self {
+    pub fn new(tx: mpsc::Sender<PresenceFrame>) -> Self {
         Self { tx }
     }
 
-    /// Try to send serialized frame bytes. Returns `false` if buffer full or closed.
-    pub fn try_send(&self, bytes: &SharedBytes) -> bool {
-        self.tx.try_send(Arc::clone(bytes)).is_ok()
+    /// Try to send one frame. Returns `false` if buffer full or closed.
+    pub fn try_send(&self, frame: &PresenceFrame) -> bool {
+        self.tx.try_send(frame.clone()).is_ok()
     }
 }
 
@@ -48,8 +59,8 @@ impl SessionSender {
 /// The caller collects these from mutation methods, drops the lock,
 /// then calls `send_all()` to fan out without holding the lock.
 pub struct OutboundFrames {
-    /// (session_id, serialized_frame_bytes) pairs to deliver.
-    targets: Vec<(String, SharedBytes)>,
+    /// (session_id, frame) pairs to deliver.
+    targets: Vec<(String, PresenceFrame)>,
 }
 
 impl OutboundFrames {
@@ -63,29 +74,27 @@ impl OutboundFrames {
         &mut self,
         channel: &ChannelState,
         exclude_session: &str,
-        frame_bytes: SharedBytes,
+        frame: PresenceFrame,
     ) {
         for session_id in channel.session_ids() {
             if session_id != exclude_session {
-                self.targets
-                    .push((session_id.to_owned(), Arc::clone(&frame_bytes)));
+                self.targets.push((session_id.to_owned(), frame.clone()));
             }
         }
     }
 
-    fn add_broadcast_all(&mut self, channel: &ChannelState, frame_bytes: SharedBytes) {
+    fn add_broadcast_all(&mut self, channel: &ChannelState, frame: PresenceFrame) {
         for session_id in channel.session_ids() {
-            self.targets
-                .push((session_id.to_owned(), Arc::clone(&frame_bytes)));
+            self.targets.push((session_id.to_owned(), frame.clone()));
         }
     }
 
     /// Send all queued frames via registered senders.
     /// Call this AFTER dropping the PresenceManager write lock.
     pub fn send_all(self, senders: &HashMap<String, SessionSender>) {
-        for (session_id, bytes) in &self.targets {
+        for (session_id, frame) in &self.targets {
             if let Some(sender) = senders.get(session_id)
-                && !sender.try_send(bytes)
+                && !sender.try_send(frame)
             {
                 debug!(
                     session = session_id.as_str(),
@@ -169,10 +178,12 @@ impl PresenceManager {
         let mut empty_channels = Vec::new();
         for channel_key in &channel_keys {
             if let Some(channel) = self.channels.get_mut(channel_key) {
+                channel.remove_listener(session_id);
                 if let Some(leave) = channel.remove_peer(session_id)
-                    && let Some(bytes) = serialize_frame(SyncMessageType::PresenceLeave, &leave)
+                    && let Some(frame) =
+                        serialize_frame(SyncMessageType::PresenceLeave, &leave, &leave.channel)
                 {
-                    outbound.add_broadcast_all(channel, bytes);
+                    outbound.add_broadcast_all(channel, frame);
                 }
                 if channel.is_empty() {
                     empty_channels.push(channel_key.clone());
@@ -246,8 +257,10 @@ impl PresenceManager {
             .or_default()
             .insert(channel_key);
 
-        if let Some(bytes) = serialize_frame(SyncMessageType::PresenceBroadcast, &broadcast) {
-            outbound.add_broadcast(channel, session_id, bytes);
+        if let Some(frame) =
+            serialize_frame(SyncMessageType::PresenceBroadcast, &broadcast, &msg.channel)
+        {
+            outbound.add_broadcast(channel, session_id, frame);
         }
 
         debug!(
@@ -283,12 +296,49 @@ impl PresenceManager {
             return;
         }
 
-        // Ensure this authenticated scope's channel exists.
+        // The session listens: it receives the channel's frames, and is not
+        // present until it sends an update.
         self.channels
             .entry(channel_key.clone())
-            .or_insert_with(|| ChannelState::new(channel.to_owned()));
+            .or_insert_with(|| ChannelState::new(channel.to_owned()))
+            .add_listener(session_id);
 
         session_channels.insert(channel_key);
+    }
+
+    /// Remove a session from one presence channel. Returns the leave frame
+    /// for the channel's other peers, to send after releasing the lock.
+    ///
+    /// Used when the session loses the read grant a shape presence channel
+    /// was joined under.
+    pub fn leave_channel(
+        &mut self,
+        session_id: &str,
+        tenant_id: TenantId,
+        database_id: DatabaseId,
+        channel: &str,
+    ) -> OutboundFrames {
+        let mut outbound = OutboundFrames::new();
+        let channel_key = ChannelKey::new(tenant_id, database_id, channel);
+        if let Some(joined) = self.session_channels.get_mut(session_id) {
+            joined.remove(&channel_key);
+            if joined.is_empty() {
+                self.session_channels.remove(session_id);
+            }
+        }
+        let Some(state) = self.channels.get_mut(&channel_key) else {
+            return outbound;
+        };
+        state.remove_listener(session_id);
+        if let Some(leave) = state.remove_peer(session_id)
+            && let Some(frame) = serialize_frame(SyncMessageType::PresenceLeave, &leave, channel)
+        {
+            outbound.add_broadcast_all(state, frame);
+        }
+        if state.is_empty() {
+            self.channels.remove(&channel_key);
+        }
+        outbound
     }
 
     /// Sweep expired peers. Returns outbound leave frames.
@@ -300,17 +350,19 @@ impl PresenceManager {
 
         // Collect leaves and their targets during mutable iteration.
         // We have `channel` from the iterator — use it directly for targets.
-        let mut pending_leaves: Vec<(Vec<String>, SharedBytes)> = Vec::new();
+        let mut pending_leaves: Vec<(Vec<String>, PresenceFrame)> = Vec::new();
 
         for (channel_key, channel) in &mut self.channels {
             let leaves = channel.sweep_expired(ttl);
             total_evicted += leaves.len();
             for leave in &leaves {
-                if let Some(bytes) = serialize_frame(SyncMessageType::PresenceLeave, leave) {
+                if let Some(frame) =
+                    serialize_frame(SyncMessageType::PresenceLeave, leave, &leave.channel)
+                {
                     // Collect remaining session IDs from the channel.
                     let targets: Vec<String> =
                         channel.session_ids().map(|s| s.to_owned()).collect();
-                    pending_leaves.push((targets, bytes));
+                    pending_leaves.push((targets, frame));
                 }
             }
             if channel.is_empty() {
@@ -319,9 +371,9 @@ impl PresenceManager {
         }
 
         // Build outbound from collected targets.
-        for (targets, bytes) in pending_leaves {
+        for (targets, frame) in pending_leaves {
             for session_id in targets {
-                outbound.targets.push((session_id, Arc::clone(&bytes)));
+                outbound.targets.push((session_id, frame.clone()));
             }
         }
 
@@ -354,13 +406,18 @@ impl PresenceManager {
     }
 }
 
-/// Serialize a frame once and wrap in Arc for zero-copy fan-out.
+/// Serialize a frame of `channel` once and wrap it in `Arc` for zero-copy
+/// fan-out.
 fn serialize_frame<T: serde::Serialize + zerompk::ToMessagePack>(
     msg_type: SyncMessageType,
     msg: &T,
-) -> Option<SharedBytes> {
+    channel: &str,
+) -> Option<PresenceFrame> {
     let frame = SyncFrame::try_encode(msg_type, msg)?;
-    Some(Arc::new(frame.to_bytes()))
+    Some(PresenceFrame {
+        channel: Arc::from(channel),
+        bytes: Arc::new(frame.to_bytes()),
+    })
 }
 
 #[cfg(test)]
@@ -370,8 +427,8 @@ mod tests {
 
     fn setup() -> (
         PresenceManager,
-        mpsc::Receiver<SharedBytes>,
-        mpsc::Receiver<SharedBytes>,
+        mpsc::Receiver<PresenceFrame>,
+        mpsc::Receiver<PresenceFrame>,
     ) {
         let config = PresenceConfig::default();
         let mut mgr = PresenceManager::new(config);
@@ -424,8 +481,9 @@ mod tests {
             },
         );
         outbound.send_all(mgr.senders());
-        let bytes = rx2.try_recv().unwrap();
-        let frame = SyncFrame::from_bytes(&bytes).unwrap();
+        let queued = rx2.try_recv().unwrap();
+        assert_eq!(&*queued.channel, "doc:d1");
+        let frame = SyncFrame::from_bytes(&queued.bytes).unwrap();
         assert_eq!(frame.msg_type, SyncMessageType::PresenceBroadcast);
         let broadcast: PresenceBroadcastMsg = frame.decode_body().unwrap();
         assert_eq!(broadcast.channel, "doc:d1");
@@ -463,8 +521,9 @@ mod tests {
         let outbound = mgr.unregister_session("s1");
         outbound.send_all(mgr.senders());
 
-        let bytes = rx2.try_recv().unwrap();
-        let frame = SyncFrame::from_bytes(&bytes).unwrap();
+        let queued = rx2.try_recv().unwrap();
+        assert_eq!(&*queued.channel, "doc:d1");
+        let frame = SyncFrame::from_bytes(&queued.bytes).unwrap();
         assert_eq!(frame.msg_type, SyncMessageType::PresenceLeave);
         let leave: PresenceLeaveMsg = frame.decode_body().unwrap();
         assert_eq!(leave.user_id, "alice");

@@ -9,11 +9,13 @@
 //! `CatalogEntry::PurgeCollection` for each. Never touches Data Plane
 //! directly — proposes through the normal metadata-raft path, which
 //! fans out through the existing apply + post_apply pipeline
-//! (including the per-node Data Plane reclaim dispatch).
+//! (including the per-node Data Plane reclaim dispatch). Each tick also
+//! proposes the retention prune of the collection purge log.
 
 pub mod l2_cleanup;
 pub mod pending_reclaim;
 pub mod policy;
+mod purge_log_prune;
 pub mod sweeper;
 
 pub use l2_cleanup::{L2CleanupWorker, spawn_l2_cleanup};

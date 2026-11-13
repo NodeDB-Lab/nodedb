@@ -105,6 +105,16 @@ impl ShapeRegistry {
         }
     }
 
+    /// Whether the session can hold `shape_id` without exceeding `limit`
+    /// shapes: it holds the ID already, or it holds fewer than `limit`.
+    pub fn can_hold(&self, session_id: &str, shape_id: &str, limit: usize) -> bool {
+        let sessions =
+            crate::control::lock_utils::read_or_recover(self.sessions.read(), "shape_sessions");
+        sessions.get(session_id).is_none_or(|client| {
+            client.shapes.contains_key(shape_id) || client.shapes.len() < limit
+        })
+    }
+
     /// Get all shape IDs for a session.
     pub fn shapes_for_session(&self, session_id: &str) -> Vec<ShapeId> {
         let sessions =
@@ -306,6 +316,22 @@ mod tests {
             description: format!("all {collection}"),
             field_filter: vec![],
         }
+    }
+
+    /// A session at its shape limit can replace a held shape but not add one.
+    #[test]
+    fn can_hold_bounds_new_shapes_only() {
+        let reg = ShapeRegistry::new();
+        assert!(
+            reg.can_hold("s1", "sh1", 2),
+            "a new session holds nothing yet"
+        );
+        reg.subscribe("s1", scope(1), make_doc_shape("sh1", "orders"));
+        reg.subscribe("s1", scope(1), make_doc_shape("sh2", "users"));
+
+        assert!(!reg.can_hold("s1", "sh3", 2));
+        assert!(reg.can_hold("s1", "sh1", 2));
+        assert!(reg.can_hold("s1", "sh3", 3));
     }
 
     #[test]

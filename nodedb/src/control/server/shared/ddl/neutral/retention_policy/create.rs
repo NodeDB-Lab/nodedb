@@ -159,22 +159,15 @@ pub async fn create_retention_policy(
     // its own `RetentionPolicyRegistry` via post-apply.
     propose_put(state, &def).await?;
 
-    // Emit CRDT sync delta for Lite visibility.
-    {
-        let delta_payload = zerompk::to_msgpack_vec(&def).unwrap_or_default();
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: RETENTION_POLICIES_CRDT_COLLECTION.into(),
-            document_id: def.name.clone(),
-            payload: delta_payload,
-            op: crate::event::crdt_sync::types::DeltaOp::Upsert,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Definition notice for the tenant admins' Lite sessions.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: RETENTION_POLICIES_CRDT_COLLECTION,
+        document_id: def.name.clone(),
     }
+    .upsert(&def);
 
     // Auto-wire continuous aggregates for each downsample tier.
     if !def.downsample_tiers().is_empty()

@@ -2,7 +2,7 @@
 
 //! Per-channel presence state: subscriber tracking and broadcast generation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use nodedb_types::sync::wire::{PeerPresence, PresenceBroadcastMsg, PresenceLeaveMsg};
@@ -21,6 +21,10 @@ pub struct ChannelState {
     /// Keyed by session_id (not user_id) because a single user may have
     /// multiple sessions (multiple tabs/devices).
     peers: HashMap<String, PeerState>,
+    /// Sessions that receive the channel's frames without being present:
+    /// a shape subscription joins its channel this way, before the session
+    /// sends any update of its own.
+    listeners: HashSet<String>,
 }
 
 impl ChannelState {
@@ -29,6 +33,7 @@ impl ChannelState {
         Self {
             name,
             peers: HashMap::new(),
+            listeners: HashSet::new(),
         }
     }
 
@@ -37,9 +42,22 @@ impl ChannelState {
         self.peers.len()
     }
 
-    /// Whether the channel has no peers (can be garbage collected).
+    /// Whether the channel has no peer and no listener (can be garbage
+    /// collected).
     pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
+        self.peers.is_empty() && self.listeners.is_empty()
+    }
+
+    /// Add a session that receives the channel's frames without being
+    /// present.
+    pub fn add_listener(&mut self, session_id: &str) {
+        self.listeners.insert(session_id.to_owned());
+    }
+
+    /// Remove a listening session. Its leave sends nothing: it was never
+    /// present.
+    pub fn remove_listener(&mut self, session_id: &str) {
+        self.listeners.remove(session_id);
     }
 
     /// Add or update a peer's presence state.
@@ -99,14 +117,21 @@ impl ChannelState {
         }
     }
 
-    /// Get the session IDs of all peers (for broadcast fan-out).
+    /// The session IDs a broadcast fans out to: every peer and every
+    /// listener, each once.
     pub fn session_ids(&self) -> impl Iterator<Item = &str> {
-        self.peers.keys().map(|s| s.as_str())
+        self.peers.keys().map(|s| s.as_str()).chain(
+            self.listeners
+                .iter()
+                .filter(|s| !self.peers.contains_key(s.as_str()))
+                .map(|s| s.as_str()),
+        )
     }
 
-    /// Check if a specific session is subscribed to this channel.
+    /// Check if a specific session is subscribed to this channel, as a
+    /// peer or a listener.
     pub fn has_session(&self, session_id: &str) -> bool {
-        self.peers.contains_key(session_id)
+        self.peers.contains_key(session_id) || self.listeners.contains(session_id)
     }
 }
 
@@ -184,5 +209,28 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"s1"));
         assert!(ids.contains(&"s2"));
+    }
+
+    #[test]
+    fn a_listener_receives_broadcasts_without_being_present() {
+        let mut ch = ChannelState::new("shape:orders".into());
+        ch.add_listener("watcher");
+        assert!(!ch.is_empty());
+        ch.upsert_peer("s1", make_peer("alice", "s1"));
+        ch.add_listener("s1");
+
+        let mut ids: Vec<&str> = ch.session_ids().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["s1", "watcher"], "each session once");
+        assert_eq!(
+            ch.build_broadcast().peers.len(),
+            1,
+            "a listener is not present"
+        );
+
+        ch.remove_peer("s1");
+        ch.remove_listener("s1");
+        ch.remove_listener("watcher");
+        assert!(ch.is_empty());
     }
 }

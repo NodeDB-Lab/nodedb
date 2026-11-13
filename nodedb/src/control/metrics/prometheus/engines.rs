@@ -313,6 +313,13 @@ impl SystemMetrics {
         );
         counter(
             out,
+            "nodedb_event_unrouted_collection_total",
+            "Write events an Event Plane consumer dropped because their collection is not \
+             qualified for their database",
+            crate::event::unrouted::unrouted_events(),
+        );
+        counter(
+            out,
             "nodedb_committed_publishes_dropped_total",
             "Committed transaction messages whose topic was dropped before delivery",
             self.committed_publishes_dropped.load(Ordering::Relaxed),

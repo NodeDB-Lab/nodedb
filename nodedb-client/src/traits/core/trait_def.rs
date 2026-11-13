@@ -391,6 +391,15 @@ pub trait NodeDb: NodeDbGraph {
     /// Register a handler fired when a collection the caller synced is purged
     /// on Origin and the local copy is removed.
     ///
+    /// Delivery is at-least-once. The same purge fires again when it is
+    /// replayed: after a crash before the client stored its sync watermark,
+    /// or when an online notice is followed by a reconnect that replays it
+    /// from Origin's purge log. [`CollectionPurgedEvent::purge_index`]
+    /// identifies the purge, so a handler that must act once dedupes on
+    /// `(name, purge_index)`.
+    ///
+    /// [`CollectionPurgedEvent::purge_index`]: crate::traits::document::CollectionPurgedEvent::purge_index
+    ///
     /// The default returns `NodeDbError::storage` ("not supported").
     /// Implementations with a sync client (Lite) override it. A stateless
     /// pgwire client has nothing to push, so the default is correct there.

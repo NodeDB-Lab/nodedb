@@ -58,9 +58,7 @@ pub(crate) use async_dispatch::array::{
     delete_on_every_core as drop_array_on_every_core,
     open_on_every_core as open_array_on_every_core,
 };
-pub(crate) use async_dispatch::collection::{
-    ReclaimFailure, clear_before_recreate, reclaim_collection_storage,
-};
+pub(crate) use async_dispatch::collection::{clear_before_recreate, reclaim_collection_storage};
 pub(crate) use async_dispatch::continuous_aggregate::{
     RegisterFailure as ContinuousAggregateRegisterFailure,
     delete_async as unregister_continuous_aggregate,

@@ -65,7 +65,7 @@ pub(super) fn snapshot_redaction(
 ///
 /// An undecodable predicate reports `None`: it names no field this can act on,
 /// and [`finalize_snapshot`] refuses it with a snapshot reject.
-pub(super) fn predicate_redacted_field(
+pub(in crate::control::server::sync) fn predicate_redacted_field(
     predicate_bytes: &[u8],
     redaction: &QueryRedaction,
     store: &RedactionStore,
@@ -121,8 +121,10 @@ fn collect_predicate_fields(filter: &MetadataFilter, out: &mut Vec<String>) -> b
 pub(super) struct SnapshotPayload<'a> {
     /// Raw Data-Plane scan payload: a msgpack array of `{id, data}` envelopes.
     pub payload: Vec<u8>,
-    /// Serialized `MetadataFilter`, empty when the shape has no predicate.
-    pub predicate: &'a [u8],
+    /// One serialized `MetadataFilter` per shape the snapshot covers. A row
+    /// is delivered when any of them matches it. An empty predicate matches
+    /// every row.
+    pub predicates: &'a [&'a [u8]],
     pub shape_id: &'a str,
     pub redaction: &'a QueryRedaction,
     pub store: &'a RedactionStore,
@@ -173,7 +175,8 @@ pub(super) fn finalize_snapshot(
 
     // Nothing to rewrite and nothing to filter: the payload is delivered
     // byte-identical, never round-tripped through a decode.
-    if req.predicate.is_empty() && !redacting {
+    let unfiltered = req.predicates.iter().any(|predicate| predicate.is_empty());
+    if unfiltered && !redacting {
         let doc_count = docs.len();
         return Ok(ShapeSnapshotData {
             data: req.payload,
@@ -181,23 +184,27 @@ pub(super) fn finalize_snapshot(
         });
     }
 
-    let filter = if req.predicate.is_empty() {
+    let filters = if unfiltered {
         None
     } else {
-        match zerompk::from_msgpack::<MetadataFilter>(req.predicate) {
-            Ok(f) => Some(f),
-            Err(err) => {
-                warn!(
-                    shape_id = req.shape_id,
-                    error = %err,
-                    "shape snapshot: failed to decode predicate; sending a snapshot reject"
-                );
-                return Err(SnapshotFailure::new(
-                    ShapeSnapshotRefusal::InvalidPredicate,
-                    format!("the shape predicate does not decode: {err}"),
-                ));
+        let mut filters = Vec::with_capacity(req.predicates.len());
+        for predicate in req.predicates {
+            match zerompk::from_msgpack::<MetadataFilter>(predicate) {
+                Ok(filter) => filters.push(filter),
+                Err(err) => {
+                    warn!(
+                        shape_id = req.shape_id,
+                        error = %err,
+                        "shape snapshot: failed to decode predicate; sending a snapshot reject"
+                    );
+                    return Err(SnapshotFailure::new(
+                        ShapeSnapshotRefusal::InvalidPredicate,
+                        format!("the shape predicate does not decode: {err}"),
+                    ));
+                }
             }
         }
+        Some(filters)
     };
 
     let row_redaction = redacting.then_some(req.redaction);
@@ -215,8 +222,13 @@ pub(super) fn finalize_snapshot(
                 "a row covered by a redaction policy could not be rewritten",
             ));
         }
-        let matches = match &filter {
-            Some(filter) => matches_metadata_filter(&decode_document_or_empty(&data_bytes), filter),
+        let matches = match &filters {
+            Some(filters) => {
+                let row = decode_document_or_empty(&data_bytes);
+                filters
+                    .iter()
+                    .any(|filter| matches_metadata_filter(&row, filter))
+            }
             None => true,
         };
         if matches {
@@ -314,7 +326,7 @@ mod tests {
     ) -> Result<ShapeSnapshotData, SnapshotFailure> {
         finalize_snapshot(SnapshotPayload {
             payload,
-            predicate,
+            predicates: &[predicate],
             shape_id: "sh1",
             redaction,
             store,

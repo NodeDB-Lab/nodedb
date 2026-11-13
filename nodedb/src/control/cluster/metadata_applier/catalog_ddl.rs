@@ -178,6 +178,9 @@ impl MetadataCommitApplier {
             self.clear_implicit_drain(&shared, &stamped)?;
             return Ok(());
         }
+        // The purge-log row lands before the reclaim, so an entry that
+        // re-delivers after a crash writes it again.
+        let purges = super::purge_log::record_purges(&shared, &stamped, raft_index)?;
         // Implicit drain clear: if the entry is a `Put*` for one
         // of the six stamped descriptor types, the DDL that was
         // waiting on drain has now committed — remove the drain
@@ -206,6 +209,9 @@ impl MetadataCommitApplier {
                 std::sync::Arc::clone(&shared),
             )
             .await?;
+
+            // The reclaim ran: online sessions drop their copy now.
+            super::purge_log::broadcast_purges(&shared, &purges);
 
             // Emit a DdlChange audit record on every replica, once the entry
             // fully applied, so a re-delivered entry is audited once.

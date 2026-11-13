@@ -62,3 +62,35 @@ pub fn test_commit_hlc() -> u64 {
             u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
         })
 }
+
+/// A user Insert of row `row-1` into `collection` of `database_id`, named as
+/// storage keys it: qualified outside the default database.
+pub fn write_event_in(
+    database_id: crate::types::DatabaseId,
+    collection: &str,
+) -> crate::event::types::WriteEvent {
+    let row = nodedb_types::json_to_msgpack(&serde_json::json!({"id": "row-1", "status": "open"}))
+        .unwrap_or_default();
+    crate::event::types::WriteEvent {
+        sequence: 1,
+        collection: Arc::from(
+            nodedb_types::QualifiedCollection::new(database_id, collection).as_str(),
+        ),
+        op: crate::event::types::WriteOp::Insert,
+        row_id: crate::event::types::RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
+        lsn: crate::types::Lsn::new(10),
+        record: None,
+        database_id,
+        tenant_id: crate::types::TenantId::new(1),
+        vshard_id: crate::types::VShardId::new(0),
+        source: crate::event::types::EventSource::User,
+        new_value: Some(Arc::from(row.as_slice())),
+        old_value: None,
+        system_time_ms: None,
+        valid_time_ms: None,
+        user_id: None,
+        statement_digest: None,
+        commit_hlc: Some(test_commit_hlc()),
+        image_fault: None,
+    }
+}

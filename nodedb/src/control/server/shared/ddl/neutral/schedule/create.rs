@@ -107,21 +107,15 @@ pub async fn create_schedule(
     let entry = crate::control::catalog_entry::CatalogEntry::PutSchedule(Box::new(def.clone()));
     super::super::super::catalog::propose_and_apply_async(state, &entry).await?;
 
-    {
-        let delta_payload = zerompk::to_msgpack_vec(&def).unwrap_or_default();
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: "_schedules".into(),
-            document_id: format!("{}:{}", database_id.as_u64(), def.name),
-            payload: delta_payload,
-            op: crate::event::crdt_sync::types::DeltaOp::Upsert,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Definition notice for the tenant admins' Lite sessions.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: crate::event::crdt_sync::types::DefinitionFamily::Schedules.collection(),
+        document_id: format!("{}:{}", database_id.as_u64(), def.name),
     }
+    .upsert(&def);
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

@@ -214,7 +214,6 @@ impl RetryableSchemaChange for Error {
             | Error::Ddl(_)
             | Error::RemoteTyped { .. }
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::DataPlane(_)

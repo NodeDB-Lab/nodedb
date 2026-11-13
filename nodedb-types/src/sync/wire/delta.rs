@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::DatabaseId;
+use crate::hlc::Hlc;
 use crate::sync::compensation::CompensationHint;
 use crate::sync::wire::ack_status::AckStatus;
 
@@ -95,20 +96,21 @@ pub struct DeltaRejectMsg {
 
 /// Collection purged notification (server → client, 0x14).
 ///
-/// Emitted when Origin hard-deletes a collection (retention window
-/// expired after `DROP COLLECTION` or explicit `DROP COLLECTION ... PURGE`).
-/// The receiving Lite client must:
+/// Origin sends one when it hard-deletes a collection: `DROP COLLECTION ...
+/// PURGE`, or the retention sweep after a soft `DROP COLLECTION`. An online
+/// session gets it once the purge reclaimed storage. A reconnecting session
+/// gets it before its `HandshakeAck` for every purge past the client's
+/// `last_server_watermark`.
 ///
-/// 1. Drop all local Loro CRDT state for the collection.
-/// 2. Remove the collection's redb record.
-/// 3. Terminate any active shape subscriptions or streaming consumers
-///    sourced from the collection.
-/// 4. Fire the `on_collection_purged` client-trait callback.
+/// The receiving Lite client:
 ///
-/// `purge_lsn` is the Origin WAL LSN at which the hard-delete committed.
-/// Clients persist it so that on reconnect they can replay any purge
-/// events that landed while they were offline by querying
-/// `_system.dropped_collections` / purge event log at LSN > last_seen.
+/// 1. Drops the collection's local state in every engine, durably.
+/// 2. Drops the collection's pending outbound writes.
+/// 3. Ends every shape subscription on the collection.
+/// 4. Fires the `on_collection_purged` client-trait callback.
+///
+/// A client that holds a later incarnation of the name than `incarnation`
+/// keeps it: the purge removed an earlier collection of the same name.
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
@@ -119,8 +121,12 @@ pub struct CollectionPurgedMsg {
     pub database_id: DatabaseId,
     /// Collection name.
     pub name: String,
-    /// Origin WAL LSN at which the hard-delete was committed.
-    pub purge_lsn: u64,
+    /// Metadata Raft log index of the entry that committed the purge. It is
+    /// in the same position space as `HandshakeAckMsg::server_watermark`.
+    pub purge_index: u64,
+    /// Incarnation of the purged collection: the HLC of the put that created
+    /// it.
+    pub incarnation: Hlc,
 }
 
 /// Row-level operation carried by a [`RowPushMsg`].
@@ -212,7 +218,8 @@ mod tests {
             tenant_id: 7,
             database_id: DatabaseId::new(42),
             name: "embeddings".into(),
-            purge_lsn: 987_654_321,
+            purge_index: 987_654_321,
+            incarnation: Hlc::new(1_700_000_000_000_000_000, 2),
         };
         let frame = SyncFrame::new_msgpack(SyncMessageType::CollectionPurged, &msg).unwrap();
         let bytes = frame.to_bytes();
@@ -225,6 +232,7 @@ mod tests {
         assert_eq!(decoded.tenant_id, 7);
         assert_eq!(decoded.database_id, DatabaseId::new(42));
         assert_eq!(decoded.name, "embeddings");
-        assert_eq!(decoded.purge_lsn, 987_654_321);
+        assert_eq!(decoded.purge_index, 987_654_321);
+        assert_eq!(decoded.incarnation, Hlc::new(1_700_000_000_000_000_000, 2));
     }
 }

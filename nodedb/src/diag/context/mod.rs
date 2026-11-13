@@ -46,8 +46,8 @@ pub(in crate::diag) use audit::{
 };
 pub(in crate::diag) use calvin_frozen::CalvinFrozenReplyStoreFailed;
 pub(in crate::diag) use catalog::{
-    CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,
-    MetadataApplyWedged, SynonymGroupNotApplied,
+    CatalogApplyOrphanRow, ConsumerGroupOffsetsRetained, MetadataApplyWedged,
+    PurgeLogPruneNotProposed, SynonymGroupNotApplied,
 };
 pub(in crate::diag) use columnar::{
     ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,

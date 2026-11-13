@@ -739,7 +739,6 @@ mod tests {
             7,
             1,
             crate::types::DatabaseId::DEFAULT,
-            Vec::new(),
             &DeliveryConfig::default(),
         );
         let array_delivery_rx = shared.array_delivery.register(session_id.clone());
@@ -873,7 +872,6 @@ mod tests {
             7,
             1,
             crate::types::DatabaseId::DEFAULT,
-            Vec::new(),
             &DeliveryConfig::default(),
         );
         let array_delivery_rx = shared.array_delivery.register(session_id.clone());

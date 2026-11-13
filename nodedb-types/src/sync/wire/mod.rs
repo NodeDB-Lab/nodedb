@@ -20,6 +20,8 @@
 //! - `0x22` ShapeDelta (server → client)
 //! - `0x23` ShapeUnsubscribe (client → server)
 //! - `0x24` ShapeSnapshotReject (server → client)
+//! - `0x25` CollectionResync (server → client)
+//! - `0x26` DatabaseResync (server → client)
 //! - `0x30` VectorClockSync (bidirectional)
 //! - `0x40` TimeseriesPush (client → server)
 //! - `0x41` TimeseriesAck (server → client)
@@ -66,6 +68,7 @@ pub mod array;
 pub mod collection_schema;
 pub mod collection_schema_reject;
 pub mod columnar;
+pub mod database_resync;
 pub mod delta;
 pub mod frame;
 pub mod fts;
@@ -92,6 +95,7 @@ pub use array::{
 pub use collection_schema::{CollectionDescriptor, CollectionSchemaSyncMsg};
 pub use collection_schema_reject::{CollectionSchemaRefusal, CollectionSchemaRejectMsg};
 pub use columnar::{ColumnarInsertAckMsg, ColumnarInsertMsg};
+pub use database_resync::{DatabaseResyncMsg, DatabaseResyncReason};
 pub use delta::{
     CollectionPurgedMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, RowOp, RowPushMsg,
 };
@@ -106,7 +110,8 @@ pub use session::{
     TokenRefreshAckMsg, TokenRefreshMsg, TokenRefreshRequiredMsg,
 };
 pub use shape::{
-    ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, VectorClockSyncMsg,
+    CollectionResyncMsg, ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg,
+    VectorClockSyncMsg,
 };
 pub use shape_snapshot_reject::{ShapeSnapshotRefusal, ShapeSnapshotRejectMsg};
 pub use spatial::{SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg, SpatialInsertMsg};

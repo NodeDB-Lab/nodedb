@@ -70,6 +70,7 @@ impl CatalogEntry {
             Self::PutOidcProvider(_) => "put_oidc_provider",
             Self::DeleteOidcProvider { .. } => "delete_oidc_provider",
             Self::RecordWalTombstone { .. } => "record_wal_tombstone",
+            Self::PruneCollectionPurgeLog { .. } => "prune_collection_purge_log",
             Self::MoveTenantCutover { .. } => "move_tenant_cutover",
             Self::CloneDatabase { .. } => "clone_database",
             Self::PutDatabaseQuota { .. } => "put_database_quota",

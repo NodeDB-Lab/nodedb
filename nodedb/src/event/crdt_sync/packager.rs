@@ -2,18 +2,17 @@
 
 //! CRDT delta packager: converts WriteEvents into outbound deltas for Lite sync.
 //!
-//! The Event Plane consumer calls `package_for_lite()` for each WriteEvent
-//! with `source: User`. If connected Lite devices have subscribed to the
-//! event's collection, the write is packaged as an `OutboundDelta` and
-//! enqueued for delivery.
+//! The Event Plane consumer calls `package_and_enqueue()` for each
+//! WriteEvent with `source: User`. If a connected Lite session holds an
+//! authorized shape on the event's collection, the write is packaged as an
+//! `OutboundDelta` and enqueued for delivery. Each session's push-time
+//! checks then decide what of it leaves the server.
 //!
 //! **Ordering:** Per-collection monotonic sequence ensures Lite devices
 //! apply deltas in LSN order. Cross-collection ordering is best-effort.
 //!
-//! **Conflict resolution:** Outbound deltas carry the full row state
-//! (last-writer-wins). The Lite device applies them via `CrdtState.import()`,
-//! which merges using Loro's built-in conflict resolution (operation-based CRDT).
-//! Constraint violations on the Lite side are surfaced via `CompensationHint`.
+//! **Payload:** An outbound delta carries the full row post-image, not a Loro
+//! delta. The session sends it as a `RowPush` frame, and the last write wins.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::trace;
 
 use super::delivery::CrdtSyncDelivery;
-use super::types::{DeltaOp, OutboundDelta};
+use super::types::{DeltaAudience, DeltaOp, OutboundDelta};
 use crate::event::sink_ledger::{CrdtLedger, SinkEventKey};
 use crate::event::types::{EventSource, WriteEvent, WriteOp};
 
@@ -105,26 +104,31 @@ impl DeltaPackager {
             | EventSource::Deferred => return false,
         }
 
+        // A write event names its collection as storage keys it: qualified
+        // outside the default database. Shapes, grants and the client's
+        // replica use the bare name, so the delta carries the bare name. A
+        // name that is not qualified for the event's database is not routed.
+        let Some(collection) =
+            event.routed_collection(crate::event::unrouted::UnroutedConsumer::CrdtPackager)
+        else {
+            self.deltas_skipped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+
         // Check if any connected Lite session cares about this collection.
-        if !delivery.has_subscribers(
-            event.tenant_id.as_u64(),
-            event.database_id,
-            &event.collection,
-        ) {
+        if !delivery.has_subscribers(event.tenant_id.as_u64(), event.database_id, collection) {
             self.deltas_skipped.fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
-        let (op, payload) = match event.op {
-            WriteOp::Insert | WriteOp::Update => {
-                let payload = event
-                    .new_value
-                    .as_ref()
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default();
-                (DeltaOp::Upsert, payload)
-            }
-            WriteOp::Delete => (DeltaOp::Delete, Vec::new()),
+        // The pre-image travels with an update or delete so the subscriber's
+        // push-time check can tell whether the row was visible to it before
+        // the write: that decides whether a move-out delete goes out.
+        let pre_image = || event.old_value.as_ref().map(|v| v.to_vec());
+        let (op, payload, prior_payload) = match event.op {
+            WriteOp::Insert => (DeltaOp::Upsert, post_image(event), None),
+            WriteOp::Update => (DeltaOp::Upsert, post_image(event), pre_image()),
+            WriteOp::Delete => (DeltaOp::Delete, Vec::new(), pre_image()),
             // Bulk operations: each row in the batch was already emitted
             // as individual per-row events by the ring buffer path. The
             // bulk event carries aggregate metadata, not per-row payloads.
@@ -160,9 +164,11 @@ impl DeltaPackager {
 
         let delta = OutboundDelta {
             database_id: event.database_id,
-            collection: event.collection.to_string(),
+            collection: collection.to_string(),
             document_id: event.row_id.as_str().to_string(),
             payload,
+            prior_payload,
+            audience: DeltaAudience::Subscribers,
             op,
             lsn: event.lsn.as_u64(),
             tenant_id: event.tenant_id.as_u64(),
@@ -184,6 +190,15 @@ impl DeltaPackager {
     }
 }
 
+/// The event's post-image bytes. Empty when the event carried none.
+fn post_image(event: &WriteEvent) -> Vec<u8> {
+    event
+        .new_value
+        .as_ref()
+        .map(|v| v.to_vec())
+        .unwrap_or_default()
+}
+
 impl Default for DeltaPackager {
     fn default() -> Self {
         Self::new()
@@ -200,7 +215,8 @@ mod tests {
     fn make_event(source: EventSource, op: WriteOp) -> WriteEvent {
         WriteEvent {
             sequence: 1,
-            collection: Arc::from("orders"),
+            // Database 7 qualifies the name, as storage keys it.
+            collection: Arc::from("7/orders"),
             op,
             row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("o-1")),
             lsn: Lsn::new(100),
@@ -280,6 +296,102 @@ mod tests {
         let _ = packager.package_and_enqueue(&event, None, None, &delivery);
 
         assert_eq!(expected, b"payload".to_vec());
+    }
+
+    fn subscribed_delivery() -> (
+        CrdtSyncDelivery,
+        tokio::sync::mpsc::Receiver<OutboundDelta>,
+        tokio::sync::mpsc::Receiver<crate::event::crdt_sync::types::ControlFrame>,
+    ) {
+        let delivery = CrdtSyncDelivery::new();
+        let (rx, crx) = delivery.register(
+            "s1".into(),
+            1,
+            1,
+            DatabaseId::new(7),
+            &crate::event::crdt_sync::types::DeliveryConfig::default(),
+        );
+        let shape = crate::event::crdt_sync::SubscribedShape::new("orders".into(), Vec::new())
+            .expect("empty predicate decodes");
+        delivery.subscribe_shape("s1", "sh1", shape);
+        (delivery, rx, crx)
+    }
+
+    /// An update carries its pre-image so the push-time check can send a
+    /// move-out delete when the row leaves what the subscriber sees.
+    #[test]
+    fn update_carries_the_pre_image() {
+        let packager = DeltaPackager::new();
+        let (delivery, mut rx, _crx) = subscribed_delivery();
+        let mut event = make_event(EventSource::User, WriteOp::Update);
+        event.old_value = Some(Arc::from(b"before".as_slice()));
+
+        assert!(packager.package_and_enqueue(&event, None, None, &delivery));
+        let delta = rx
+            .try_recv()
+            .expect("subscribed session receives the delta");
+        assert_eq!(delta.op, DeltaOp::Upsert);
+        assert_eq!(delta.payload, b"payload".to_vec());
+        assert_eq!(delta.prior_payload, Some(b"before".to_vec()));
+        assert_eq!(delta.audience, DeltaAudience::Subscribers);
+    }
+
+    #[test]
+    fn delete_carries_the_pre_image_and_insert_carries_none() {
+        let packager = DeltaPackager::new();
+        let (delivery, mut rx, _crx) = subscribed_delivery();
+
+        let mut delete = make_event(EventSource::User, WriteOp::Delete);
+        delete.old_value = Some(Arc::from(b"before".as_slice()));
+        assert!(packager.package_and_enqueue(&delete, None, None, &delivery));
+        let delta = rx.try_recv().expect("delete delta");
+        assert_eq!(delta.op, DeltaOp::Delete);
+        assert!(delta.payload.is_empty());
+        assert_eq!(delta.prior_payload, Some(b"before".to_vec()));
+
+        let insert = make_event(EventSource::User, WriteOp::Insert);
+        assert!(packager.package_and_enqueue(&insert, None, None, &delivery));
+        let delta = rx.try_recv().expect("insert delta");
+        assert_eq!(delta.prior_payload, None);
+    }
+
+    /// Outside the default database a write event names its collection
+    /// qualified. The delta carries the bare name the shapes subscribe to.
+    #[test]
+    fn qualified_event_collection_routes_by_its_bare_name() {
+        let packager = DeltaPackager::new();
+        let (delivery, mut rx, _crx) = subscribed_delivery();
+        let event = make_event(EventSource::User, WriteOp::Insert);
+
+        assert!(packager.package_and_enqueue(&event, None, None, &delivery));
+        let delta = rx.try_recv().expect("the bare name matches the shape");
+        assert_eq!(delta.collection, "orders");
+    }
+
+    /// A bare name outside the default database matches no storage key, so
+    /// it is not routed.
+    #[test]
+    fn unqualified_name_outside_the_default_database_is_not_packaged() {
+        let packager = DeltaPackager::new();
+        let (delivery, mut rx, _crx) = subscribed_delivery();
+        let mut event = make_event(EventSource::User, WriteOp::Insert);
+        event.collection = Arc::from("orders");
+
+        assert!(!packager.package_and_enqueue(&event, None, None, &delivery));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A collection no session subscribes to is skipped before packaging.
+    #[test]
+    fn unsubscribed_collection_is_not_packaged() {
+        let packager = DeltaPackager::new();
+        let (delivery, mut rx, _crx) = subscribed_delivery();
+        let mut event = make_event(EventSource::User, WriteOp::Insert);
+        event.collection = Arc::from("7/users");
+
+        assert!(!packager.package_and_enqueue(&event, None, None, &delivery));
+        assert_eq!(packager.deltas_skipped.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

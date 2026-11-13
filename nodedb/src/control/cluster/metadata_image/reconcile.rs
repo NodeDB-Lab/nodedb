@@ -173,6 +173,21 @@ async fn reconcile_collections(
             ),
             Err(failure) => return Err(failure.error),
         }
+        // The snapshot carries the purge log, so the purge that removed the
+        // collection is on record. Online sessions drop their copy now.
+        if let Some(purge) = shared
+            .credentials
+            .catalog()
+            .latest_collection_purge(*db, *tenant, name)?
+        {
+            shared.crdt_sync_delivery.broadcast_collection_purged(
+                purge.tenant_id,
+                crate::types::DatabaseId::new(purge.database_id),
+                &purge.name,
+                purge.purge_index,
+                purge.record.incarnation,
+            );
+        }
     }
     for (key, stored) in &after.collections {
         if !stored.is_active {

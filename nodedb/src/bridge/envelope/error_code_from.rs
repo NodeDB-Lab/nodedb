@@ -378,7 +378,6 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::RemoteTyped { .. }
             | crate::Error::Ddl(_)
             | crate::Error::DescriptorVersionAnomaly { .. }
-            | crate::Error::CollectionPurgeRowMissing { .. }
             | crate::Error::CollectionUnstamped { .. }
             | crate::Error::CatalogIntegrityViolation { .. }
             | crate::Error::CascadeCycle { .. }) => Self::Internal {

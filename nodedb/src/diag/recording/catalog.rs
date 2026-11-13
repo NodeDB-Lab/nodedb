@@ -57,23 +57,6 @@ pub fn catalog_apply_orphan_row(entry_kind: &str, orphan_kind: &str, orphan_coun
     .emit();
 }
 
-/// Report a collection purge that found no catalog row to deactivate.
-/// Called only from `apply::collection::prepare_purge_checked`.
-pub fn collection_purge_row_missing(database_id: u64, tenant_id: u64, name: &str) {
-    let ctx = context::CollectionPurgeRowMissing {
-        database_id,
-        tenant_id,
-        name,
-    };
-    let _ = Capture::new(
-        EventKind::InvariantViolation,
-        "collection purge found no catalog row to deactivate",
-    )
-    .domain(&ctx)
-    .with_backtrace()
-    .emit();
-}
-
 /// Report consumer-group offsets that a replicated deletion or migration left
 /// behind on this node. Called from the post-apply offset-store arms.
 pub fn consumer_group_offsets_retained(
@@ -126,6 +109,24 @@ pub fn synonym_group_not_applied(
         EventKind::InvariantViolation,
         "synonym group post-apply: the committed group change never reached this node's \
          FTS backend",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
+/// Report a collection purge-log prune this node could not decide on: the
+/// log did not read. Called from the collection-GC sweep, which retries on
+/// its next tick. Rows past retention stay on record until a prune lands.
+pub fn purge_log_prune_not_proposed(err: &crate::Error) {
+    let class = error_class(err);
+    let ctx = context::PurgeLogPruneNotProposed {
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "collection-gc: the collection purge log did not read, so no prune was proposed",
     )
     .error_chain(error_chain_of(err))
     .domain(&ctx)

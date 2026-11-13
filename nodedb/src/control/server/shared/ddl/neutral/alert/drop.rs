@@ -18,7 +18,8 @@ use super::super::super::result::{DdlError, DdlResult};
 use super::super::auth_support::{require_tenant_admin, status};
 
 /// CRDT collection name for alert rule sync between Origin and Lite.
-const ALERT_RULES_CRDT_COLLECTION: &str = "_alert_rules";
+const ALERT_RULES_CRDT_COLLECTION: &str =
+    crate::event::crdt_sync::types::DefinitionFamily::AlertRules.collection();
 
 fn err(sqlstate: &str, message: String) -> DdlError {
     DdlError::new(sqlstate, message)
@@ -63,22 +64,16 @@ pub async fn drop_alert(
 
     super::replicate::propose_delete(state, database_id.as_u64(), tenant_id, &name).await?;
 
-    // Emit CRDT tombstone delta. Handler-scoped: the apply path runs on every
-    // node, so emitting there will duplicate the delta.
-    {
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: ALERT_RULES_CRDT_COLLECTION.into(),
-            document_id: name.clone(),
-            payload: Vec::new(),
-            op: crate::event::crdt_sync::types::DeltaOp::Delete,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Removal notice for the tenant admins' Lite sessions. Handler-scoped:
+    // the apply path runs on every node, so emitting there duplicates it.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: ALERT_RULES_CRDT_COLLECTION,
+        document_id: name.clone(),
     }
+    .delete();
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

@@ -164,7 +164,6 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::Shaping(_)
         | crate::Error::Ddl(_)
         | crate::Error::RemoteTyped { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::DataPlane(_)
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }

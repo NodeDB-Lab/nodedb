@@ -30,7 +30,10 @@ pub struct SyncSession {
     pub client_clock: HashMap<String, HashMap<String, u64>>,
     /// Server's vector clock per collection (latest LSN).
     pub server_clock: HashMap<String, u64>,
-    /// Subscribed shape IDs.
+    /// Shape IDs the client named in its handshake. Client-supplied and not
+    /// authorized: the session's delivery registration in
+    /// `CrdtSyncDelivery` holds the authorized shapes and the collections a
+    /// purge notice reaches.
     pub subscribed_shapes: Vec<String>,
     /// Mutations admitted by envelope validation in this session.
     ///
@@ -71,23 +74,30 @@ pub struct SyncSession {
     pub created_at: Instant,
     /// Per-session rate limiter.
     pub rate_limiter: SyncRateLimiter,
+    /// Rate limiter for snapshot reads on this session's behalf: a
+    /// `ShapeSubscribe`, a client `ResyncRequest`, a server collection
+    /// resync. Each costs a full collection scan, so they share one bucket
+    /// apart from the mutation limiter.
+    pub snapshot_limiter: SyncRateLimiter,
+    /// Collections whose `shape:{collection}` presence channel this session
+    /// joined through an authorized subscribe. Each push drain re-checks the
+    /// read grant and leaves the channel when it is gone.
+    pub presence_shapes: std::collections::HashSet<String>,
     /// Device metadata from handshake (for DLQ entries).
     pub device_metadata: DeviceMetadata,
-    /// Set of `(tenant_id, collection_name)` pairs the client has
-    /// ever sent a delta or shape subscription for — used by the
-    /// Origin `CollectionPurged` broadcast to decide which sessions
-    /// need to be notified when a collection is hard-deleted.
-    pub tracked_collections: std::collections::HashSet<(u64, String)>,
     /// Collections whose descriptor has already been announced to the peer
     /// this session via a `CollectionSchema` frame. Enforces the
     /// announce-precedes-data guard: a collection's schema is emitted at most
     /// once per session, strictly before its first shape snapshot or delta.
     pub announced_collections: std::collections::HashSet<String>,
-    /// Last WAL LSN the client advertised in its vector clock at
-    /// handshake. Used by offline-client replay to identify
-    /// `CollectionPurged` events that committed while the client
-    /// was disconnected.
-    pub last_seen_lsn: u64,
+    /// The `last_server_watermark` of the client's handshake: the metadata
+    /// log position through which it applied every purge it holds. The
+    /// handshake replays each purge-log row past it.
+    pub client_watermark: u64,
+    /// The `CollectionPurged` or `DatabaseResync` frames the accepted
+    /// handshake owes the client. The session sends them ahead of the
+    /// `HandshakeAck`, so a client that applied the ack applied them first.
+    pub purge_catch_up: Vec<super::super::wire::SyncFrame>,
     /// Durable producer id assigned by `SyncProducerRegistry` at handshake.
     /// `0` means the session is not a Lite client or the registry was
     /// unavailable.
@@ -129,10 +139,12 @@ impl SyncSession {
             last_activity: now,
             created_at: now,
             rate_limiter: SyncRateLimiter::new(rate_config),
+            snapshot_limiter: SyncRateLimiter::new(&super::super::async_dispatch::snapshot_rate()),
+            presence_shapes: std::collections::HashSet::new(),
             device_metadata: DeviceMetadata::default(),
-            tracked_collections: std::collections::HashSet::new(),
             announced_collections: std::collections::HashSet::new(),
-            last_seen_lsn: 0,
+            client_watermark: 0,
+            purge_catch_up: Vec::new(),
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: None,
@@ -166,14 +178,5 @@ impl SyncSession {
     /// Seconds since last activity.
     pub fn idle_secs(&self) -> u64 {
         self.last_activity.elapsed().as_secs()
-    }
-
-    /// Record that the client has interacted with this
-    /// `(tenant, collection)` pair. Called from the delta-push and
-    /// shape-subscribe paths. Membership here is the subscription
-    /// state the Origin `CollectionPurged` broadcast filters on.
-    pub fn track_collection(&mut self, tenant_id: u64, collection: &str) {
-        self.tracked_collections
-            .insert((tenant_id, collection.to_string()));
     }
 }

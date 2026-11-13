@@ -32,6 +32,35 @@ pub struct ShapeSnapshotMsg {
     pub doc_count: usize,
 }
 
+/// Collection replace (server → client, 0x25).
+///
+/// One snapshot of a collection that covers every shape the session holds
+/// on it, sent after Origin dropped pushes for the collection. The client
+/// replaces the collection's rows with it: a local row missing from `data`
+/// is removed, unless a local write of it still waits to reach Origin.
+///
+/// A definition family (`_alert_rules`, `_retention_policies`,
+/// `_schedules`) resyncs the same way, with every definition of the
+/// session's scope and no shape.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
+pub struct CollectionResyncMsg {
+    /// The collection the snapshot replaces.
+    pub collection: String,
+    /// The held shapes the snapshot covers. Empty for a definition family.
+    pub shape_ids: Vec<String>,
+    /// Every row the shapes match: a MessagePack array of `{id, data}`
+    /// envelopes, the shape snapshot's row form.
+    pub data: Vec<u8>,
+    /// The WAL position of the serving node when the read began. The client
+    /// re-bases its shapes' LSN tracking at it. `0` for a definition family,
+    /// which follows no LSN.
+    pub snapshot_lsn: u64,
+    /// Number of rows in `data`.
+    pub doc_count: usize,
+}
+
 /// Shape delta message (server → client, 0x22).
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,

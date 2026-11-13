@@ -336,11 +336,6 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             carried: 5,
             prior: 2,
         },
-        E::CollectionPurgeRowMissing {
-            database_id: 1,
-            tenant_id: 1,
-            name: collection(),
-        },
         E::CollectionUnstamped {
             database_id: 1,
             tenant_id: 1,
