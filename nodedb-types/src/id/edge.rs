@@ -46,11 +46,11 @@ pub struct EdgeId {
     pub dst: NodeId,
     /// Edge label / relationship type (e.g. `"KNOWS"`, `"RELATES_TO"`).
     pub label: String,
-    /// Sequence number within the `(src, dst, label)` bucket.
+    /// Sequence number within the `(src, dst, label)` bucket. Always `0`.
     ///
-    /// `0` = "the only edge in this bucket (for now)".
-    /// Engine-side allocation of monotonically increasing `seq` values is a
-    /// TODO — see `nodedb/src/engine/graph/` for the follow-up location.
+    /// An edge is identified by `(src, dst, label)` alone. A second insert of
+    /// the same triple writes a new version of that edge and replaces its
+    /// properties. It never adds a parallel edge.
     pub seq: u64,
 }
 
