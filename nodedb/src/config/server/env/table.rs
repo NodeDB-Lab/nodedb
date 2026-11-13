@@ -39,13 +39,38 @@ const TABLE: &[&[EnvRow]] = &[
     observability::ROWS,
 ];
 
+/// One override that `apply_env_overrides` applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedOverride {
+    /// `NODEDB_*` variable name.
+    pub name: &'static str,
+    /// The raw value, or `<redacted>` for a secret row.
+    pub logged_value: String,
+}
+
+/// Logs each applied override at `info` level.
+///
+/// Call this once tracing is registered. `apply_env_overrides` itself logs
+/// nothing, because the boot applies overrides before tracing exists.
+pub fn log_applied_overrides(applied: &[AppliedOverride]) {
+    for o in applied {
+        tracing::info!(
+            env_var = o.name,
+            value = o.logged_value.as_str(),
+            "environment variable override applied"
+        );
+    }
+}
+
 /// Applies every `NODEDB_*` override present in the environment to `config`.
 ///
-/// Returns every violation joined into one [`crate::Error::Config`], or
-/// `Ok(())` once none remain. A run with any violation must exit the
-/// process, so partial application here never reaches a running server.
-pub fn apply_env_overrides(config: &mut ServerConfig) -> crate::Result<()> {
+/// Returns the applied overrides, with secret values redacted, or every
+/// violation joined into one [`crate::Error::Config`]. A run with any
+/// violation must exit the process, so partial application here never
+/// reaches a running server.
+pub fn apply_env_overrides(config: &mut ServerConfig) -> crate::Result<Vec<AppliedOverride>> {
     let mut violations = Vec::new();
+    let mut applied = Vec::new();
 
     for group in TABLE {
         for row in *group {
@@ -61,16 +86,15 @@ pub fn apply_env_overrides(config: &mut ServerConfig) -> crate::Result<()> {
             }
             match (row.apply)(config, &raw) {
                 Ok(()) => {
-                    let logged: &str = if row.redact {
-                        "<redacted>"
+                    let logged_value = if row.redact {
+                        "<redacted>".to_string()
                     } else {
-                        raw.as_str()
+                        raw
                     };
-                    tracing::info!(
-                        env_var = row.name,
-                        value = logged,
-                        "environment variable override applied"
-                    );
+                    applied.push(AppliedOverride {
+                        name: row.name,
+                        logged_value,
+                    });
                 }
                 Err(expected) => {
                     violations.push(format!(
@@ -83,7 +107,7 @@ pub fn apply_env_overrides(config: &mut ServerConfig) -> crate::Result<()> {
     }
 
     if violations.is_empty() {
-        Ok(())
+        Ok(applied)
     } else {
         Err(crate::Error::Config {
             detail: violations.join("; "),

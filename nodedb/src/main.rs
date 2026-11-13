@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -9,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nodedb::ServerConfig;
-use nodedb::config::server::apply_env_overrides;
+use nodedb::config::server::{apply_env_overrides, log_applied_overrides};
 use nodedb::control::startup::StartupSequencer;
 use tracing::info;
 
@@ -99,13 +102,11 @@ async fn server_main() -> anyhow::Result<()> {
         None => ServerConfig::default(),
     };
 
-    // Apply env overrides once now (before tracing) so that log_format is
+    // Apply env overrides once, before tracing, so that log_format is
     // correct in case NODEDB_DATA_DIR / NODEDB_MEMORY_LIMIT also affect it,
     // and so a malformed override aborts the boot before any subsystem
-    // starts. The info! messages this call emits reach no subscriber yet;
-    // the second call below re-applies them once tracing is registered so
-    // the operator still sees them logged.
-    apply_env_overrides(&mut config)?;
+    // starts. The applied list is logged after tracing is registered.
+    let applied_overrides = apply_env_overrides(&mut config)?;
 
     // Own the black-box recorder before the subscriber is built: the panic hook
     // it installs chains in front of the one above, and the reports directory
@@ -133,9 +134,8 @@ async fn server_main() -> anyhow::Result<()> {
     // remains accessible for the late record() call after cluster wiring.
     let _root_guard = root_span.enter();
 
-    // Re-apply env overrides after tracing initializes so that
-    // info!/warn! messages are actually emitted for operators.
-    apply_env_overrides(&mut config)?;
+    // Log the applied overrides now that a subscriber exists.
+    log_applied_overrides(&applied_overrides);
 
     let cluster_mode_str = startup_log::log_boot_banner(&config_path, &config);
 

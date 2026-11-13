@@ -31,7 +31,10 @@ pub use cluster::{ClusterSettings, TlsPaths};
 pub use cold_storage::ColdStorageSettings;
 pub use config::ServerConfig;
 pub use egress::{CredentialEncryptionSettings, EgressSettings};
-pub use env::{apply_env_overrides, parse_memory_size, parse_seed_nodes};
+pub use env::{
+    AppliedOverride, apply_env_overrides, log_applied_overrides, parse_memory_size,
+    parse_seed_nodes,
+};
 pub use log_format::LogFormat;
 pub use mirror::{MirrorClientSettings, MirrorSettings, MirrorSourceSettings, MirrorTlsPaths};
 pub use observability::{

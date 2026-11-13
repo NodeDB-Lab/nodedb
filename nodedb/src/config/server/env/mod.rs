@@ -11,4 +11,4 @@ mod table;
 
 pub use memory_size::parse_memory_size;
 pub use seed_nodes::parse_seed_nodes;
-pub use table::apply_env_overrides;
+pub use table::{AppliedOverride, apply_env_overrides, log_applied_overrides};
