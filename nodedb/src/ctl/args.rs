@@ -31,10 +31,8 @@ pub fn parse_flags(args: &[String]) -> Result<HashMap<String, String>, String> {
     while i < args.len() {
         let a = &args[i];
         if let Some(name) = a.strip_prefix("--") {
-            let next = args.get(i + 1);
-            let is_value = next.is_some_and(|n| !n.starts_with("--"));
-            if is_value {
-                map.insert(name.to_string(), next.unwrap().clone());
+            if let Some(value) = args.get(i + 1).filter(|n| !n.starts_with("--")) {
+                map.insert(name.to_string(), value.clone());
                 i += 2;
             } else {
                 // Boolean flag — no value token follows.

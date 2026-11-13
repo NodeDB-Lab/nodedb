@@ -27,18 +27,20 @@ pub fn make_core() -> (
     Consumer<BridgeResponse>,
     tempfile::TempDir,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create the temp data directory");
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        Arc::new(OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            Arc::new(OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
-    .unwrap();
+    .expect("open the test core loop");
     (core, req_tx, resp_rx, dir)
 }
 
@@ -74,9 +76,9 @@ pub fn send_ok(
     plan: PhysicalPlan,
 ) -> Vec<u8> {
     tx.try_push(BridgeRequest::unfloored(make_request(plan)))
-        .unwrap();
+        .expect("push the request onto the bridge");
     core.tick();
-    let resp = rx.try_pop().unwrap();
+    let resp = rx.try_pop().expect("pop the response from the bridge");
     assert_eq!(
         resp.inner.status,
         Status::Ok,
@@ -93,9 +95,11 @@ pub fn send_raw(
     plan: PhysicalPlan,
 ) -> nodedb::bridge::envelope::Response {
     tx.try_push(BridgeRequest::unfloored(make_request(plan)))
-        .unwrap();
+        .expect("push the request onto the bridge");
     core.tick();
-    rx.try_pop().unwrap().inner
+    rx.try_pop()
+        .expect("pop the response from the bridge")
+        .inner
 }
 
 /// Render a row payload as JSON text. Each row is a flat body, a plain map
@@ -231,7 +235,7 @@ pub fn kv_get(key: &[u8]) -> PhysicalPlan {
 
 pub fn columnar_insert(collection: &str, id: &str, val: i64) -> PhysicalPlan {
     let rows = serde_json::json!([{"id": id, "val": val}]);
-    let payload = nodedb_types::json_to_msgpack(&rows).unwrap();
+    let payload = nodedb_types::json_to_msgpack(&rows).expect("encode the rows as MessagePack");
     PhysicalPlan::Columnar(ColumnarOp::Insert {
         collection: qualify(collection),
         payload,
@@ -338,7 +342,7 @@ pub fn vector_direct_insert(collection: &str, surrogate: u32) -> PhysicalPlan {
         surrogate: nodedb_types::Surrogate::new(surrogate),
         pk_bytes: format!("r{surrogate}").into_bytes(),
         vector: vec![0.5, 0.5, 0.5],
-        payload: zerompk::to_msgpack_vec(&payload).unwrap(),
+        payload: zerompk::to_msgpack_vec(&payload).expect("encode the payload as MessagePack"),
         quantization: nodedb_types::VectorQuantization::None,
         storage_dtype: nodedb_types::VectorStorageDtype::F32,
         payload_indexes: Vec::new(),
@@ -374,7 +378,8 @@ pub fn with_unique_refusal(mut plans: Vec<PhysicalPlan>) -> Vec<PhysicalPlan> {
     let insert = PhysicalPlan::Document(DocumentOp::PointInsert {
         collection: qualify("refusal_probe"),
         document_id: "dup".into(),
-        value: nodedb_types::json_to_msgpack(&serde_json::json!({"n": 1})).unwrap(),
+        value: nodedb_types::json_to_msgpack(&serde_json::json!({"n": 1}))
+            .expect("encode the value as MessagePack"),
         surrogate: nodedb_types::Surrogate::new(9_001),
         if_absent: false,
         returning: None,

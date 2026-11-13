@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! # nodedb-bridge
 //!
 //! Lock-free, capacity-bounded SPSC ring buffer bridging a **Tokio Control Plane**

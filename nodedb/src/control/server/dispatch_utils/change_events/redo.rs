@@ -32,8 +32,8 @@ pub(super) fn redo_change_meta(redo: &[u8]) -> Vec<WriteChangeMeta> {
 }
 
 /// The change a named row publishes. A row with no net change publishes
-/// nothing.
-fn named_row_change(change: RedoRowChange) -> Option<WriteChangeMeta> {
+/// nothing. A chunked redo's row changes publish through it page by page.
+pub(super) fn named_row_change(change: RedoRowChange) -> Option<WriteChangeMeta> {
     let operation = match change.kind {
         RedoRowKind::Insert => ChangeOperation::Insert,
         RedoRowKind::Update => ChangeOperation::Update,

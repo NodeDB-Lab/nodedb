@@ -192,7 +192,12 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
         PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo {
             redo,
             ..
-        }) => Some(wal.append_transaction_redo_bytes(tenant_id, vshard_id, database_id, redo)?),
+        }) => Some(wal.append_transaction_redo_bytes(
+            tenant_id,
+            vshard_id,
+            database_id,
+            &super::redo_marker::redo_wal_payload(redo)?,
+        )?),
         // NotAWrite — reads / query ops / control commands. `Meta` durable
         // writes (WAL append, transaction batch, Calvin apply) are logged on
         // their own dedicated paths, never through this autocommit oracle;

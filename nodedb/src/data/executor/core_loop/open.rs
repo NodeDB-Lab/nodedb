@@ -3,12 +3,8 @@
 //! `CoreLoop` constructors: `open` and `open_with_array_catalog`.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
-use nodedb_bridge::buffer::{Consumer, Producer};
-
-use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use crate::control::array_catalog::ArrayCatalogHandle;
 use crate::data::io::IoMetrics;
 use crate::engine::array::{ArrayEngine, ArrayEngineConfig};
@@ -17,31 +13,16 @@ use crate::engine::sparse::btree::SparseEngine;
 use crate::engine::sparse::doc_cache::DocCache;
 use crate::engine::sparse::inverted::InvertedIndex;
 use crate::types::Lsn;
-use nodedb_types::OrdinalClock;
 
+use super::open_params::CoreOpenParams;
 use super::priority_queues::PriorityQueues;
 use super::state::CoreLoop;
 
 impl CoreLoop {
     /// Create a core loop with its SPSC channel endpoints and engine storage.
-    ///
-    /// `data_dir` is the base data directory; each core gets its own redb file
-    /// at `{data_dir}/sparse/core-{core_id}.redb`.
-    pub fn open(
-        core_id: usize,
-        request_rx: Consumer<BridgeRequest>,
-        response_tx: Producer<BridgeResponse>,
-        data_dir: &Path,
-        hlc: Arc<OrdinalClock>,
-        governor: Arc<nodedb_mem::MemoryGovernor>,
-    ) -> crate::Result<Self> {
+    pub fn open(params: CoreOpenParams<'_>) -> crate::Result<Self> {
         Self::open_with_array_catalog(
-            core_id,
-            request_rx,
-            response_tx,
-            data_dir,
-            hlc,
-            governor,
+            params,
             crate::control::array_catalog::ArrayCatalog::handle(),
         )
     }
@@ -51,14 +32,18 @@ impl CoreLoop {
     /// same handle into every core so Data-Plane dispatch and
     /// Control-Plane DDL share one registry.
     pub fn open_with_array_catalog(
-        core_id: usize,
-        request_rx: Consumer<BridgeRequest>,
-        response_tx: Producer<BridgeResponse>,
-        data_dir: &Path,
-        hlc: Arc<OrdinalClock>,
-        governor: Arc<nodedb_mem::MemoryGovernor>,
+        params: CoreOpenParams<'_>,
         array_catalog: ArrayCatalogHandle,
     ) -> crate::Result<Self> {
+        let CoreOpenParams {
+            core_id,
+            request_rx,
+            response_tx,
+            data_dir,
+            wal_source,
+            hlc,
+            governor,
+        } = params;
         // Spill files are never durable state: every spill directory this
         // core left behind goes before the core serves a request.
         crate::data::executor::handlers::spill::cleanup::sweep_core_spill_dirs(data_dir, core_id)?;
@@ -190,6 +175,7 @@ impl CoreLoop {
             throttle: super::pressure::SpscThrottle::new(),
             collection_arena_registry: None,
             metrics: None,
+            wal_source,
             events: super::event_outlet::EventOutlet::new(),
             quiesce: None,
             quarantine_registry: None,

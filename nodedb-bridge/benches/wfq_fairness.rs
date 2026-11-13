@@ -27,8 +27,8 @@ fn wfq_equal_priority(b: &mut Bencher) {
         wfq.set_priority(2, PriorityClass::Standard);
 
         for i in 0..512u64 {
-            wfq.try_enqueue(1, i).unwrap();
-            wfq.try_enqueue(2, i).unwrap();
+            wfq.try_enqueue(1, i).expect("enqueue within capacity");
+            wfq.try_enqueue(2, i).expect("enqueue within capacity");
         }
 
         let mut db1 = 0u32;
@@ -55,8 +55,8 @@ fn wfq_critical_bulk_ratio(b: &mut Bencher) {
         wfq.set_priority(2, PriorityClass::Bulk);
 
         for i in 0..512u64 {
-            wfq.try_enqueue(1, (1, i)).unwrap();
-            wfq.try_enqueue(2, (2, i)).unwrap();
+            wfq.try_enqueue(1, (1, i)).expect("enqueue within capacity");
+            wfq.try_enqueue(2, (2, i)).expect("enqueue within capacity");
         }
 
         let mut critical = 0u32;
@@ -84,7 +84,7 @@ fn wfq_saturation_isolation(b: &mut Bencher) {
 
         // Fill DB-A to its fair share (512 out of 1024).
         for i in 0..512u32 {
-            wfq.try_enqueue(1, i).unwrap();
+            wfq.try_enqueue(1, i).expect("enqueue within capacity");
         }
 
         // DB-B should still accept its own fair share.

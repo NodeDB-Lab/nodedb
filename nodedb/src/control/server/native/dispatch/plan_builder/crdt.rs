@@ -128,8 +128,11 @@ fn require_list_index(value: Option<u64>, field_name: &str) -> crate::Result<usi
 fn require_list_block(fields: &TextFields) -> crate::Result<Vec<u8>> {
     match fields.list_fields.as_ref() {
         Some(nodedb_types::Value::Object(block)) => {
-            nodedb_physical::physical_plan::encode_fields_body(block)
-                .map_err(|detail| crate::Error::BadRequest { detail })
+            nodedb_physical::physical_plan::encode_fields_body(block).map_err(|e| {
+                crate::Error::BadRequest {
+                    detail: e.to_string(),
+                }
+            })
         }
         Some(other) => Err(crate::Error::BadRequest {
             detail: format!(
@@ -279,8 +282,8 @@ mod tests {
             panic!("the request carries an object");
         };
         assert_eq!(
-            nodedb_physical::physical_plan::decode_fields_body(&block),
-            Ok(sent),
+            nodedb_physical::physical_plan::decode_fields_body(&block).expect("block decodes"),
+            sent,
             "the block body keeps every field typed"
         );
 

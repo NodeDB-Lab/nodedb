@@ -306,6 +306,10 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         // Mirrors `ResolveTxnPart`: Calvin scheduler's commit path, treated as Write though it doesn't mutate base state.
         PhysicalPlan::Meta(MetaOp::CalvinResolve { .. }) => Permission::Write,
 
+        // Reads a committed redo's content for the apply that installs it: the
+        // apply loop's own op, judged as the install it serves.
+        PhysicalPlan::Meta(MetaOp::ReadRedoStreamPage { .. }) => Permission::Write,
+
         // Installs a committed transaction's post-images into base state.
         PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { .. }) => Permission::Write,
 

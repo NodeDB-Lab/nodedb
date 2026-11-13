@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Shared NodeDB type definitions: strong IDs (TenantId, VShardId, RequestId,
 //! Lsn, Surrogate), error types (NodeDbError + ErrorCode + ErrorDetails), wire
 //! types for cross-plane and cross-node messages, value types, configuration

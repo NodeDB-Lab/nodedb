@@ -58,7 +58,7 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn row_to_fields_body(
     nodedb_physical::physical_plan::encode_fields_body(&fields).map_err(|detail| {
         crate::Error::Serialization {
             format: "msgpack".into(),
-            detail,
+            detail: detail.to_string(),
         }
     })
 }

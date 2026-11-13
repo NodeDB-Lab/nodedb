@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Shared query-execution utilities used by every engine: BM25 scoring,
 //! text analysis (tokenization / normalization / stop words), expression
 //! evaluation helpers, MessagePack scan readers, and rank-fusion (RRF).

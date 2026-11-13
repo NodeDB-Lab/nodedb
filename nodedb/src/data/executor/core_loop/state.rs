@@ -396,6 +396,10 @@ pub struct CoreLoop {
     /// Shared system metrics — Arc is safe for `!Send` since all fields are atomic.
     pub(in crate::data::executor) metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
 
+    /// The node's WAL directory and key ring. A committed chunked redo's
+    /// install reads its stream back through it.
+    pub(in crate::data::executor) wal_source: crate::wal::WalReadSource,
+
     /// The event bus producer, its sequence, and the collections it emits for.
     pub(in crate::data::executor) events: super::event_outlet::EventOutlet,
 

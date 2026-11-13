@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! NodeDB Array Engine — shared ND sparse array primitives.
 //!
 //! This crate provides the type substrate, schema definitions, coordinate

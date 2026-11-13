@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! NodeDB client SDK: the [`NodeDb`](traits::NodeDb) trait, the
 //! `NodeDbRemote` client (native MessagePack via TLS, opt-in via the
 //! `native` feature; pgwire compatibility via the `remote` feature), and

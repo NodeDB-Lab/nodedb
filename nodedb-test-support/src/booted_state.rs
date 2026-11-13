@@ -190,6 +190,7 @@ async fn boot_node(options: BootOptions) -> Result<Node, BootError> {
         num_cores: 1,
         data_side,
         core_dir: dir.path().to_path_buf(),
+        wal_source: wal.read_source(),
         core_array_catalog: state.array_catalog.clone(),
         event_producer,
         core_metrics: state.system_metrics.clone(),

@@ -5,8 +5,10 @@
 //!
 //! A committed redo past the redo entry limit travels through its data-group
 //! log as chunk entries followed by a final entry. Every replica appends each
-//! chunk it applies as `RedoChunk` records and holds the bytes until the final
-//! entry assembles them. Boot rebuilds the open streams from these records.
+//! chunk it applies as `RedoChunk` records and holds where they sit until the
+//! final entry. The final entry's record names the chunks, and every reader
+//! reads their bytes back from the WAL. Boot rebuilds the open streams from
+//! these records.
 
 use serde::{Deserialize, Serialize};
 

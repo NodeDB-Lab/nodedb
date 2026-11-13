@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Binary Tuple serialization for NodeDB strict document mode.
 //!
 //! Strict mode replaces MessagePack with a fixed-layout Binary Tuple for

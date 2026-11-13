@@ -9,6 +9,7 @@
 //!   Calvin stage runs the same checks on its staged images.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
+//! - [`streamed`]: the content of a stream marker, read back from the WAL.
 //! - [`document`]: document rows written while the apply scope is open.
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
@@ -45,6 +46,7 @@ mod retention_instant_tests;
 mod settle;
 mod snapshot_check;
 mod state;
+mod streamed;
 mod sub_ops;
 mod sum_fold_check;
 #[cfg(test)]

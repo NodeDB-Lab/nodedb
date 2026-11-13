@@ -336,12 +336,14 @@ mod tests {
         let (resp_tx, resp_rx) = RingBuffer::channel::<crate::bridge::dispatch::BridgeResponse>(64);
         drop(req_tx);
         let core = crate::data::executor::core_loop::CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .unwrap();
         (core, resp_rx, dir)

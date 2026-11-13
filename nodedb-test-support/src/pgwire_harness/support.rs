@@ -35,9 +35,13 @@ pub(super) async fn bind_native_listener(
     shutdown_bus: &nodedb::control::shutdown::ShutdownBus,
     conn_semaphore: Arc<tokio::sync::Semaphore>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-    let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
-        .await
-        .expect("bind native listener");
+    let listener = Listener::bind(
+        "127.0.0.1:0"
+            .parse()
+            .expect("parse the loopback listener address"),
+    )
+    .await
+    .expect("bind native listener");
     let port = listener.local_addr().port();
     let state = Arc::clone(shared);
     let startup_gate = Arc::clone(&shared.startup);

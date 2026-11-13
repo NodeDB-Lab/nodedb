@@ -103,7 +103,7 @@ impl TestClusterNode {
         // in-memory-only structures before it starts ticking.
         let wal = open_node_wal(config.pitr.as_ref(), &data_dir_path)?;
         let wal_records: Arc<[nodedb_wal::WalRecord]> = Arc::from(wal.replay()?.into_boxed_slice());
-        let replay_tombstones = nodedb_wal::extract_tombstones(&wal_records).unwrap();
+        let replay_tombstones = nodedb_wal::extract_tombstones(&wal_records)?;
         let (dispatcher, data_sides) = Dispatcher::new(num_cores, DATA_PLANE_QUEUE_CAPACITY);
         let (event_producers, event_consumers) = create_event_bus(num_cores);
 
@@ -272,6 +272,7 @@ impl TestClusterNode {
                     num_cores,
                     data_side,
                     core_dir: data_dir_path.clone(),
+                    wal_source: wal.read_source(),
                     core_array_catalog: shared.array_catalog.clone(),
                     event_producer,
                     core_metrics: shared.system_metrics.clone(),

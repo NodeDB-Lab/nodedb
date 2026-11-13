@@ -38,12 +38,14 @@ pub fn make_core_with_dir(
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir,
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        crate::data::executor::core_loop::test_governor(),
+        crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir,
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            crate::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx)

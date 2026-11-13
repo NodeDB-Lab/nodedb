@@ -502,12 +502,14 @@ mod tests {
         let (_request_tx, request_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (response_tx, _response_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            request_rx,
-            response_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                request_rx,
+                response_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core loop");
         (core, dir)

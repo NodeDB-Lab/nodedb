@@ -128,7 +128,8 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::CalvinResolve { .. } => None,
+        | MetaOp::CalvinResolve { .. }
+        | MetaOp::ReadRedoStreamPage { .. } => None,
     }
 }
 

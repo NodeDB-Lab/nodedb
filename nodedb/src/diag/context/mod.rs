@@ -10,6 +10,7 @@ mod array_sync;
 mod audit;
 mod calvin_frozen;
 mod catalog;
+mod change_feed;
 mod columnar;
 mod continuous_agg;
 mod crdt;
@@ -49,6 +50,7 @@ pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, ConsumerGroupOffsetsRetained, MetadataApplyWedged,
     PurgeLogPruneNotProposed, SynonymGroupNotApplied,
 };
+pub(in crate::diag) use change_feed::{ChangeJournalFailed, ChangeJournalHalted};
 pub(in crate::diag) use columnar::{
     ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,
     TimeseriesIdleFlushFailed, TimeseriesPartitionUnreadable,
@@ -92,7 +94,7 @@ pub(in crate::diag) use raft_apply::{
 pub(in crate::diag) use read_cut::OrdinalReservationLeaked;
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
 pub(in crate::diag) use redo_stream::{
-    RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
+    RedoAbandonGivenUp, RedoChangesUnstaged, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
 pub(in crate::diag) use retention::{RetentionAutowireOrphaned, SequenceRestartFailed};
 pub(in crate::diag) use spill::SpillCleanupFailed;

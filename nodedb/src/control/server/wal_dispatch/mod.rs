@@ -12,6 +12,7 @@ mod crdt;
 mod document;
 mod graph;
 mod redo_floor;
+mod redo_marker;
 mod row_image_bound;
 mod spatial;
 mod stamp;

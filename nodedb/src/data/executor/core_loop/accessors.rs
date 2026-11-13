@@ -20,6 +20,11 @@ impl CoreLoop {
         self.task_queue.len()
     }
 
+    /// Where this core reads WAL records back from.
+    pub(crate) fn wal_source(&self) -> &crate::wal::WalReadSource {
+        &self.wal_source
+    }
+
     pub fn advance_watermark(&mut self, lsn: Lsn) {
         self.watermark = lsn;
     }

@@ -18,6 +18,7 @@
 //!   applies.
 //! - [`pipeline`]: every group's lane and the applies that run.
 //! - [`lane`]: one group's queued and started entries, settled in log order.
+//! - [`marker_changes`]: the change events of an installed chunked redo.
 //! - [`settle`]: settles every group's concluded entries and saves the
 //!   floors that moved.
 //! - [`panicked`]: an entry whose enqueue or apply panicked holds its group.
@@ -81,6 +82,7 @@ mod group_watch;
 mod held_entry;
 mod helpers;
 mod lane;
+mod marker_changes;
 mod metadata_floor;
 mod mirror_hold;
 mod panicked;

@@ -157,6 +157,7 @@ pub(crate) async fn bootstrap_data_plane(
             vector_index_param_seed: Arc::clone(&vector_index_param_seed),
             columnar_schema_seed: Arc::clone(&columnar_schema_seed),
             crs_set_seed: Arc::clone(&crs_set_seed),
+            wal_source: wal.read_source(),
         },
     )?;
 

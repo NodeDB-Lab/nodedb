@@ -378,6 +378,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::RollbackToSavepoint { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
+            | MetaOp::ReadRedoStreamPage { .. }
             | MetaOp::ResolveTxnPart { .. }
             | MetaOp::ApplyTransactionRedo { .. }
             | MetaOp::RestoreRedo(_),

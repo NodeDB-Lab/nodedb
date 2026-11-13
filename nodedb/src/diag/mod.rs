@@ -28,7 +28,7 @@ pub use recording::{
     orphaned_index_entry_after_delete, purge_log_prune_not_proposed, quarantine_record_evicted,
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
     quota_scope_replay_aborted, raft_entries_reapplied, raft_entry_reapplied,
-    redo_abandon_given_up, redo_entry_malformed, redo_note_misnamed,
+    redo_abandon_given_up, redo_changes_unstaged, redo_entry_malformed, redo_note_misnamed,
     redo_snapshot_debt_not_recorded, redo_stream_lost_here, replay_record_unapplied,
     retention_autowire_orphaned, scope_quota_not_installed, security_bus_lagged,
     security_bus_rows_not_recorded, sequence_restart_failed, spill_cleanup_failed,

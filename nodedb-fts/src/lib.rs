@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Full-text search engine shared by Origin, Lite, and WASM: BMW-optimized
 //! BM25 with 128-doc block pruning, 16 Snowball stemmers, 27-language stop
 //! words, CJK bigram tokenization (always available) plus optional

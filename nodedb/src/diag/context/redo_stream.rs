@@ -101,6 +101,44 @@ impl DomainContext for RedoStreamLostHere {
     }
 }
 
+/// The row changes of an installed chunked redo did not read back from this
+/// node's WAL after every retry, so the entry holds its group's apply.
+pub(in crate::diag) struct RedoChangesUnstaged {
+    /// The data group of the committed entry.
+    pub group_id: u64,
+    /// The entry's index in the group's log.
+    pub log_index: u64,
+    /// Why the read failed.
+    pub error: String,
+}
+
+impl DomainContext for RedoChangesUnstaged {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.redo_changes_unstaged"
+    }
+
+    fn grouping_key(&self) -> String {
+        // One bug class: a stream's content that does not read back after
+        // its install. The group and index are the occurrence.
+        "redo_changes_unstaged".to_string()
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "group_id": self.group_id,
+            "log_index": self.log_index,
+            "error": self.error,
+            "impact": "the entry's rows installed, and its change events did not stage \
+                       after every retry. The group's apply holds at the entry until a \
+                       snapshot of the group installs. A cursor of this node's feed below \
+                       the install expires, so no consumer misses an event silently",
+            "operator_action": "the error names the WAL read that failed. Check the node's \
+                                 WAL directory and disk. The group's leader sends the \
+                                 snapshot",
+        })
+    }
+}
+
 /// The membership pass failed to persist that data groups this node left
 /// owe a snapshot install, so their redo streams stay.
 pub(in crate::diag) struct RedoSnapshotDebtNotRecorded {

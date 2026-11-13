@@ -39,6 +39,7 @@ mod materialized_policy_tests;
 mod merge_atomic_tests;
 pub(in crate::data::executor) mod newest_ordinals;
 mod open;
+mod open_params;
 #[cfg(test)]
 mod prepared_update_tests;
 pub mod pressure;
@@ -64,6 +65,7 @@ pub(in crate::data::executor) mod write_set_journal;
 
 pub(in crate::data::executor) use crdt_dead_letters::crdt_rejection;
 pub use doc_config_seed::DocConfigSeedEntry;
+pub use open_params::CoreOpenParams;
 pub(in crate::data::executor) use segment_keks::SegmentKeks;
 pub use state::CoreLoop;
 pub use test_governor::test_governor;

@@ -366,6 +366,16 @@ impl CoreLoop {
                 plans,
             ),
 
+            // One page of a committed chunked redo's content, read back from
+            // this node's WAL for the Control Plane's identity binding and
+            // change stream. Nothing is written.
+            MetaOp::ReadRedoStreamPage {
+                stream,
+                section,
+                from,
+                max_page_bytes,
+            } => self.execute_read_redo_stream_page(task, stream, *section, *from, *max_page_bytes),
+
             // The resolve of `ResolveTxnPart` above, but sourced from Calvin's own
             // staging state (`commit_pending` + the synthetic-`TxnId` overlay)
             // instead of a session transaction's.
@@ -516,12 +526,14 @@ mod txn_created_columnar_engine_tests {
         let (_req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("CoreLoop::open");
         (core, dir)

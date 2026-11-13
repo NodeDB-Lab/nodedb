@@ -347,6 +347,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::CalvinDrop { .. }
         | MetaOp::ResolveTxnPart { .. }
         | MetaOp::CalvinResolve { .. }
+        | MetaOp::ReadRedoStreamPage { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_) => ReadKey::Predicate,
     }

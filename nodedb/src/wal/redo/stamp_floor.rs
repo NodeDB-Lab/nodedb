@@ -57,12 +57,27 @@ impl RedoRecord {
     pub fn raise_stamps_to(&mut self, floor: i64) -> crate::Result<bool> {
         let mut moved = false;
         for sub in &mut self.ops {
-            if let Some(payload) = raised_payload(sub, floor)? {
-                sub.payload = payload;
+            if sub.raise_stamp_to(floor)? {
                 moved = true;
             }
         }
         Ok(moved)
+    }
+}
+
+impl RedoSubRecord {
+    /// Raise every version stamp of this sub-record below `floor` to
+    /// `floor`. Returns whether a stamp moved. A sub-record that carries no
+    /// stamp of its own stays as it is. `Err` as for
+    /// [`RedoRecord::raise_stamps_to`].
+    pub(crate) fn raise_stamp_to(&mut self, floor: i64) -> crate::Result<bool> {
+        match raised_payload(self, floor)? {
+            Some(payload) => {
+                self.payload = payload;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 

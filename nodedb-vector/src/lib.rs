@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Vector search primitives shared by Origin, Lite, and WASM: HNSW + Vamana
 //! indexes, scalar / SIMD distance kernels, the quantization codec frontier
 //! (SQ8, PQ, IVF-PQ, OPQ, RaBitQ, BBQ, Ternary BitNet 1.58, Binary), the

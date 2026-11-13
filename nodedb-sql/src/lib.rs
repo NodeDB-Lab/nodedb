@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! nodedb-sql: SQL parser, planner, and optimizer for NodeDB.
 //!
 //! Parses SQL via sqlparser-rs, resolves against a catalog, and produces

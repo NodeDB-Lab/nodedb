@@ -52,9 +52,12 @@ fn send_request(
     rx: &mut Consumer<BridgeResponse>,
     request: Request,
 ) -> Response {
-    tx.try_push(BridgeRequest::unfloored(request)).unwrap();
+    tx.try_push(BridgeRequest::unfloored(request))
+        .expect("push the request onto the bridge");
     core.tick();
-    rx.try_pop().unwrap().inner
+    rx.try_pop()
+        .expect("pop the response from the bridge")
+        .inner
 }
 
 /// Commit `plans` as one transaction the way a session COMMIT does on its

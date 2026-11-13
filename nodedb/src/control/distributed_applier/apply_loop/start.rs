@@ -54,6 +54,9 @@ pub(super) fn prepare_entry<'a>(
     group_id: u64,
     queued: QueuedEntry,
 ) -> Prepared<'a> {
+    // A second copy of an applied proposal never reaches the funnel, so its
+    // plan is classified here.
+    let plan_writes = queued.plan_writes_user_data();
     let QueuedEntry { entry, mut decoded } = queued;
     let log_index = entry.index;
     let log_term = entry.term;
@@ -81,8 +84,25 @@ pub(super) fn prepare_entry<'a>(
     // A second committed copy of a proposal this node already applied (a
     // re-proposal after a leader change whose first copy also committed)
     // resolves its waiter with the first copy's result and applies nothing.
+    let wrote_rows = plan_writes && gate.prior_wrote_rows(applied_key);
     if gate.skip_duplicate(ctx.tracker, group_id, log_index, applied_key) {
-        return Prepared::Concluded(EntryOutcome::Repeat);
+        let repeat = EntryOutcome::Repeat { wrote_rows };
+        // The same entry delivered again after a restart, when it installed
+        // a chunked redo whose change events the journal does not hold:
+        // they stage again from the marker's chunks before it settles.
+        if let Some(replicated) = decoded.as_ref()
+            && let Some(marker) = ctx.state.redo_chunks.unstaged_marker(group_id, log_index)
+        {
+            let pos = AppliedPosition {
+                group_id,
+                log_index,
+                applied_key,
+                commit_hlc,
+                system_ordinal: scope.system_ordinal,
+            };
+            return super::marker_changes::restage_recovered(ctx, pos, replicated, marker, repeat);
+        }
+        return Prepared::Concluded(repeat);
     }
 
     let pos = AppliedPosition {

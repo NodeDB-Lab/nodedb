@@ -126,6 +126,17 @@ fn change_events(
 }
 
 impl WriteChangeSet {
+    /// The change set of a redo's named row changes: one page of a chunked
+    /// redo's row-change section.
+    pub(crate) fn of_row_changes(changes: Vec<crate::wal::RedoRowChange>) -> Self {
+        Self {
+            metas: changes
+                .into_iter()
+                .filter_map(super::redo::named_row_change)
+                .collect(),
+        }
+    }
+
     /// Whether the write yields no change event.
     pub(crate) fn is_empty(&self) -> bool {
         self.metas.is_empty()
@@ -175,12 +186,24 @@ impl PendingChanges {
         database_id: DatabaseId,
         response: &Response,
     ) {
+        self.publish_at(shared, tenant_id, database_id, response.watermark_lsn);
+    }
+
+    /// Stage the write's events at `lsn`, the LSN of the record that holds
+    /// the write, under its entry.
+    pub(crate) fn publish_at(
+        self,
+        shared: &SharedState,
+        tenant_id: TenantId,
+        database_id: DatabaseId,
+        lsn: nodedb_types::Lsn,
+    ) {
         let events = change_events(
             shared,
             tenant_id,
             database_id,
             self.change_set,
-            response.watermark_lsn,
+            lsn,
             self.commit_hlc,
         );
         shared

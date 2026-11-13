@@ -27,9 +27,9 @@ impl TestServer {
     /// returns success.
     pub async fn start_multicores(num_cores: usize) -> Self {
         assert!(num_cores >= 1, "num_cores must be at least 1");
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create the temp data directory");
         let wal_path = dir.path().join("test.wal");
-        let wal = Arc::new(WalManager::open_for_testing(&wal_path).unwrap());
+        let wal = Arc::new(WalManager::open_for_testing(&wal_path).expect("open the test WAL"));
 
         let (dispatcher, data_sides) = Dispatcher::new(num_cores, 64);
         let (event_producers, event_consumers) = create_event_bus(num_cores);
@@ -37,7 +37,7 @@ impl TestServer {
         let catalog_path = dir.path().join("system.redb");
         let credentials = Arc::new(
             nodedb::control::security::credential::store::CredentialStore::open(&catalog_path)
-                .unwrap(),
+                .expect("open the credential store"),
         );
         credentials
             .bootstrap_trust_superuser("nodedb")
@@ -72,6 +72,7 @@ impl TestServer {
                     num_cores,
                     data_side,
                     core_dir: dir.path().to_path_buf(),
+                    wal_source: wal.read_source(),
                     core_array_catalog: shared.array_catalog.clone(),
                     event_producer,
                     core_metrics: None,
@@ -113,10 +114,12 @@ impl TestServer {
             }
         });
 
-        let watermark_store =
-            Arc::new(nodedb::event::watermark::WatermarkStore::open(dir.path()).unwrap());
+        let watermark_store = Arc::new(
+            nodedb::event::watermark::WatermarkStore::open(dir.path())
+                .expect("open the watermark store"),
+        );
         let trigger_dlq = Arc::new(std::sync::Mutex::new(
-            nodedb::event::trigger::TriggerDlq::open(dir.path()).unwrap(),
+            nodedb::event::trigger::TriggerDlq::open(dir.path()).expect("open the trigger DLQ"),
         ));
         let (shutdown_bus, _) =
             nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
@@ -135,9 +138,13 @@ impl TestServer {
             .await
             .expect("start the one-node cluster");
 
-        let pg_listener = PgListener::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let pg_listener = PgListener::bind(
+            "127.0.0.1:0"
+                .parse()
+                .expect("parse the loopback listener address"),
+        )
+        .await
+        .expect("bind the pgwire listener");
         let pg_addr = pg_listener.local_addr();
 
         let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
@@ -156,7 +163,7 @@ impl TestServer {
                     bus_pg,
                 )
                 .await
-                .unwrap();
+                .expect("run the pgwire listener");
         });
 
         let (native_port, native_handle) =

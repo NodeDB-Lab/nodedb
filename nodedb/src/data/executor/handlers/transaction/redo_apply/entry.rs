@@ -210,6 +210,26 @@ impl CoreLoop {
             Ok(redo) => redo,
             Err(error) => return self.response_error(task, final_refusal(error.into())),
         };
+        // A stream marker installs the content its chunk records hold, with
+        // the sum targets and reads the content carries.
+        let (redo, streamed) = match self.streamed_content(&redo) {
+            Ok(Some(content)) => (content.record, Some(content.carried)),
+            Ok(None) => (redo, None),
+            Err(code) => return self.response_error(task, code),
+        };
+        let redo_bytes = streamed
+            .as_ref()
+            .map_or(committed.redo, |carried| carried.bytes.as_slice());
+        let sum_targets = streamed.as_ref().map_or(committed.sum_targets, |carried| {
+            carried.sum_targets.as_slice()
+        });
+        let snapshot = match (&streamed, snapshot) {
+            (Some(carried), Some(snapshot)) => Some(RedoSnapshot {
+                reads: &carried.reads,
+                ordinal: snapshot.ordinal,
+            }),
+            (_, snapshot) => snapshot,
+        };
         let database_id = task.request.database_id.as_u64();
 
         // A clone copy over a row the target holds writes nothing, so no
@@ -242,7 +262,7 @@ impl CoreLoop {
             tid,
             documents: &doc_ops,
             kv: &kv_writes,
-            sum_targets: committed.sum_targets,
+            sum_targets,
             origin,
             user_roles: &redo.user_roles,
             judged_at_ms: crate::data::executor::enforcement::retention::judged_instant_ms(
@@ -261,7 +281,7 @@ impl CoreLoop {
             tenant_id: task.request.tenant_id.as_u64(),
             vshard_id: task.request.vshard_id.as_u32(),
             database_id,
-            payload: committed.redo.to_vec(),
+            payload: redo_bytes.to_vec(),
             encryption_key: None,
             preamble_bytes: None,
         }) {
@@ -277,7 +297,7 @@ impl CoreLoop {
             tid,
             origin,
         };
-        if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
+        if let Err(refusal) = self.validate_redo_pass(&target, sum_targets) {
             return self.response_error(task, refusal.into_code());
         }
         // A snapshot transaction commits only while nothing it read or
@@ -297,7 +317,7 @@ impl CoreLoop {
         // own version in place and leaves no history.
         let apply_ordinal = self.kv_apply_ordinal();
         let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
-        let installed = self.install_redo_pass(&target, committed.sum_targets);
+        let installed = self.install_redo_pass(&target, sum_targets);
         self.kv_engine.close_write_scope(kv_scope);
         self.record_stamps.remove(lsn);
         let mut scope = match installed {

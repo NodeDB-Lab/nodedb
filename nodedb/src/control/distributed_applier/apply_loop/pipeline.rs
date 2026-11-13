@@ -349,11 +349,6 @@ impl<'a> Pipeline<'a> {
                         restore_id,
                     )
                 });
-            // A second copy of an applied proposal never reaches the funnel,
-            // so its plan is classified here. Its first copy can sit above
-            // the saved floor, and this copy then carries the mark again.
-            let repeat_writes =
-                self.gate.prior_wrote_rows(proposal_key) && queued.plan_writes_user_data();
             let held = HeldEntry {
                 group_id,
                 log_index,
@@ -375,7 +370,10 @@ impl<'a> Pipeline<'a> {
             let (state, blocks, user_write) = match prepared {
                 Prepared::Concluded(outcome) => {
                     release_admission_holds(shared, group_id, log_index);
-                    let user_write = matches!(outcome, EntryOutcome::Repeat) && repeat_writes;
+                    // A second copy carries its first copy's mark: the first
+                    // copy can sit above the saved floor.
+                    let user_write =
+                        matches!(outcome, EntryOutcome::Repeat { .. }) && outcome.wrote_rows();
                     hold = outcome.hold_reason();
                     (
                         SlotState::from(self.gate.conclude(proposal_key, false, outcome)),

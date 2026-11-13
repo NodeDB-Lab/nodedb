@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use tracing::{info, warn};
 
 use crate::data::eventfd::{EventFd, EventFdNotifier};
-use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::{CoreLoop, CoreOpenParams};
 
 use super::boot_replay::replay_wal_and_rebuild_indexes;
 use super::boot_seed::seed_catalog_state;
@@ -33,6 +33,7 @@ pub fn spawn_core(
         request_rx,
         response_tx,
         data_dir,
+        wal_source,
         wal_records,
         tombstones,
         num_cores,
@@ -72,12 +73,15 @@ pub fn spawn_core(
 
             // 2. Open engines.
             let mut core = CoreLoop::open_with_array_catalog(
-                core_id,
-                request_rx,
-                response_tx,
-                &data_dir,
-                hlc,
-                governor,
+                CoreOpenParams {
+                    core_id,
+                    request_rx,
+                    response_tx,
+                    data_dir: &data_dir,
+                    wal_source,
+                    hlc,
+                    governor,
+                },
                 array_catalog,
             )
             .expect("failed to open CoreLoop engines");
@@ -249,6 +253,7 @@ mod tests {
             request_rx: data_side.request_rx,
             response_tx: data_side.response_tx,
             data_dir: &data_dir,
+            wal_source: crate::wal::WalReadSource::unencrypted(data_dir.join("wal")),
             wal_records: Arc::from(Vec::new()),
             tombstones: nodedb_wal::TombstoneSet::default(),
             num_cores: 1,

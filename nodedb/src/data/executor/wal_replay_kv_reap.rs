@@ -137,12 +137,14 @@ mod tests {
             crate::bridge::dispatch::BridgeResponse,
         >(64);
         let mut core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         core.replay_kv_wal(&records, 1, &TombstoneSet::new());

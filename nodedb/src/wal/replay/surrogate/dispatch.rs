@@ -126,7 +126,9 @@ pub fn replay_surrogate_records(
             | RecordType::WriteGroup
             // A redo chunk holds stream bytes; its final record binds nothing
             // the carried identities did not bind first.
-            | RecordType::RedoChunk => {}
+            | RecordType::RedoChunk
+            // A stream reference names chunks and binds nothing.
+            | RecordType::RedoStreamRef => {}
         }
     }
     Ok(stats)

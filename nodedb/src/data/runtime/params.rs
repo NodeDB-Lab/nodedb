@@ -20,6 +20,9 @@ pub struct SpawnCoreParams<'a> {
     pub request_rx: Consumer<BridgeRequest>,
     pub response_tx: Producer<BridgeResponse>,
     pub data_dir: &'a Path,
+    /// The node's WAL directory and key ring. A committed chunked redo's
+    /// install reads its stream back from the WAL through it.
+    pub wal_source: crate::wal::WalReadSource,
     pub wal_records: Arc<[nodedb_wal::WalRecord]>,
     pub tombstones: nodedb_wal::TombstoneSet,
     pub num_cores: usize,

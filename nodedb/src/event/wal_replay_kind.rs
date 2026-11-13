@@ -133,6 +133,9 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         | RecordType::SnapshotInstalled
         // A redo chunk holds bytes of a redo stream. The stream's final
         // record carries the rows and their events.
-        | RecordType::RedoChunk => None,
+        | RecordType::RedoChunk
+        // A stream reference is a sub-record that names those chunks. Every
+        // reader of the whole WAL rebuilds the rows it names.
+        | RecordType::RedoStreamRef => None,
     }
 }

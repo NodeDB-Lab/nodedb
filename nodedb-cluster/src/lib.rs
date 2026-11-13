@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Distributed coordination for NodeDB: vShards, Multi-Raft, QUIC transport,
 //! routing, replication, rebalancing, and the Calvin sequencer for cross-shard
 //! atomicity.

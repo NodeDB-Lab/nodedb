@@ -345,6 +345,9 @@ pub struct CoreSharedResources {
         )>,
     >,
     pub crs_set_seed: Arc<nodedb_crs::CustomCrsSet>,
+    /// The node's WAL directory and key ring, for each core's reads of a
+    /// committed chunked redo's stream.
+    pub wal_source: crate::wal::WalReadSource,
 }
 
 /// Spawn all Data Plane cores, wire dispatcher notifiers, and return core
@@ -376,6 +379,7 @@ pub fn spawn_data_plane_cores(
         vector_index_param_seed,
         columnar_schema_seed,
         crs_set_seed,
+        wal_source,
     } = resources;
     let num_cores = config.server.data_plane_cores;
     let node_id = crate::control::cluster::configured_node_id(config);
@@ -404,6 +408,7 @@ pub fn spawn_data_plane_cores(
             request_rx: data_side.request_rx,
             response_tx: data_side.response_tx,
             data_dir: &config.server.data_dir,
+            wal_source: wal_source.clone(),
             wal_records: Arc::clone(&wal_records),
             tombstones: replay_tombstones.clone(),
             num_cores,

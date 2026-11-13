@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Coordinate reference systems for NodeDB.
 //!
 //! An [`Srid`] names a CRS. A [`CrsContext`] resolves it to a [`CrsDef`]:

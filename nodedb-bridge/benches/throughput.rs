@@ -107,7 +107,7 @@ fn spsc_cross_thread(b: &mut Bencher) {
             }
         }
 
-        let received = consumer.join().unwrap();
+        let received = consumer.join().expect("join the consumer thread");
         black_box(received)
     });
 }

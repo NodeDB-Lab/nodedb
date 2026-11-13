@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Spatial engine primitives shared by Origin, Lite, and WASM: R*-tree with
 //! bulk load and nearest-neighbor / range queries, geohash and H3 hex
 //! indexes, OGC predicates and DE-9IM, geodesic measures on a CRS's own

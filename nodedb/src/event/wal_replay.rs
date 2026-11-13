@@ -39,6 +39,7 @@ use crate::event::wal_replay_parse::{
 use crate::event::wal_replay_scope::{ReplayScope, RowSources};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::WalManager;
+use crate::wal::redo::{ChunkFetch, StreamContents};
 
 use crate::engine::timeseries::install_outcome::TsOutcomeIndex;
 use std::path::Path;
@@ -71,6 +72,7 @@ pub fn replay_wal_to_events(
         num_cores,
         base_sequence,
         &outcomes,
+        &mut |reference| wal.fetch_stream_content(reference),
     )
 }
 
@@ -96,10 +98,13 @@ pub fn replay_wal_mmap(
         num_cores,
         base_sequence,
         &outcomes,
+        &mut |reference| wal.fetch_stream_content(reference),
     )
 }
 
-/// Convert WAL records to WriteEvents, filtering by core affinity.
+/// Convert WAL records to WriteEvents, filtering by core affinity. A stream
+/// marker's events come from the content its chunk records hold: from
+/// `records`, else through `fetch`.
 fn convert_records_to_events(
     records: &[nodedb_wal::WalRecord],
     from_lsn: Lsn,
@@ -107,7 +112,9 @@ fn convert_records_to_events(
     num_cores: usize,
     base_sequence: u64,
     outcomes: &TsOutcomeIndex,
+    fetch: &mut ChunkFetch<'_>,
 ) -> crate::Result<Vec<WriteEvent>> {
+    let mut contents = StreamContents::new(records, fetch);
     let mut events = Vec::new();
     let mut sequence = base_sequence;
     let mut numbering = crate::event::record_numbering::RecordNumbering::new();
@@ -132,7 +139,7 @@ fn convert_records_to_events(
         // `TransactionRedo` (Calvin cross-shard commit) decomposes into one event
         // per write sub-op. Raw Put/Delete records still yield at most one.
         // Numbered before the tombstone filter, as the producer numbered them.
-        let mut record_events = record_events(record, outcomes, &mut sequence)?;
+        let mut record_events = record_events(record, outcomes, &mut contents, &mut sequence)?;
         for event in &mut record_events {
             numbering.stamp(event);
         }
@@ -169,21 +176,32 @@ fn convert_records_to_events(
 fn record_events(
     record: &WalRecord,
     outcomes: &TsOutcomeIndex,
+    contents: &mut StreamContents<'_, '_, '_>,
     sequence: &mut u64,
 ) -> crate::Result<Vec<WriteEvent>> {
     let Some(record_type) = RecordType::from_raw(record.logical_record_type()) else {
         return Ok(Vec::new());
     };
     match row_kind(record_type) {
-        Some(kind) => row_record_events(record, kind, outcomes, sequence),
+        Some(kind) => row_record_events(record, kind, outcomes, contents, sequence),
         None => Ok(Vec::new()),
     }
 }
 
-/// [`record_events`] with an empty install-outcome store.
+/// [`record_events`] of `record` read alone, with an empty install-outcome
+/// store.
+#[cfg(test)]
+fn record_events_alone(record: &WalRecord, sequence: &mut u64) -> crate::Result<Vec<WriteEvent>> {
+    let mut fetch = |_: &crate::wal::RedoStreamRef| -> crate::Result<Option<Vec<u8>>> { Ok(None) };
+    let records = std::slice::from_ref(record);
+    let mut contents = StreamContents::new(records, &mut fetch);
+    record_events(record, &TsOutcomeIndex::default(), &mut contents, sequence)
+}
+
+/// [`record_events_alone`], which must succeed.
 #[cfg(test)]
 fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
-    record_events(record, &TsOutcomeIndex::default(), sequence).expect("events")
+    record_events_alone(record, sequence).expect("events")
 }
 
 /// The events of one row-write record.
@@ -198,6 +216,7 @@ fn row_record_events(
     record: &WalRecord,
     kind: RowRecord,
     outcomes: &TsOutcomeIndex,
+    contents: &mut StreamContents<'_, '_, '_>,
     sequence: &mut u64,
 ) -> crate::Result<Vec<WriteEvent>> {
     if matches!(kind, RowRecord::Put | RowRecord::Delete) && is_edge_record(&record.payload) {
@@ -232,7 +251,20 @@ fn row_record_events(
         commit_hlc: (record.header.commit_hlc != 0).then_some(record.header.commit_hlc),
     };
     match kind {
-        RowRecord::Redo => decompose_redo_to_events(&record.payload, &scope, outcomes, sequence),
+        RowRecord::Redo => {
+            let redo = crate::wal::RedoRecord::from_bytes(&record.payload)?;
+            // A stream marker's rows sit in its chunk records. Chunks below
+            // the oldest retained segment belong to a marker every engine
+            // checkpointed, whose events no catch-up reads again.
+            let redo = match crate::wal::RedoStreamRef::of_marker(&redo)? {
+                Some(reference) => match contents.installed(&redo, &reference)? {
+                    Some(installed) => installed,
+                    None => return Ok(Vec::new()),
+                },
+                None => redo,
+            };
+            decompose_redo_to_events(redo, &scope, outcomes, sequence)
+        }
         RowRecord::Group => crate::event::wal_replay_group::group_record_events(
             &record.payload,
             &scope,
@@ -292,14 +324,13 @@ pub(super) fn single_row_events(
 /// of a committed redo. A sub-op type with no Event-Plane mapping (VectorPut,
 /// SpatialPut, …) yields no event and does not touch `sequence`.
 ///
-/// A malformed redo payload returns an error without publishing partial events.
+/// A malformed sub-op returns an error without publishing partial events.
 fn decompose_redo_to_events(
-    payload: &[u8],
+    redo: crate::wal::RedoRecord,
     scope: &ReplayScope,
     outcomes: &TsOutcomeIndex,
     sequence: &mut u64,
 ) -> crate::Result<Vec<WriteEvent>> {
-    let redo = crate::wal::RedoRecord::from_bytes(payload)?;
     let mut next_sequence = *sequence;
     // A row the record lists in its row sources (a trigger body's write)
     // carries that source, as the live install emits it.
@@ -820,7 +851,7 @@ mod tests {
     fn malformed_transaction_redo_returns_an_error() {
         let record = make_record(RecordType::TransactionRedo, &[0xff, 0xff, 0xff], 1, 0, 303);
         let mut seq = 0u64;
-        assert!(record_events(&record, &TsOutcomeIndex::default(), &mut seq).is_err());
+        assert!(record_events_alone(&record, &mut seq).is_err());
         assert_eq!(seq, 0);
     }
 
@@ -1428,6 +1459,7 @@ mod tests {
             1,
             7,
             &TsOutcomeIndex::default(),
+            &mut |_| Ok(None),
         );
         assert!(result.is_err());
     }

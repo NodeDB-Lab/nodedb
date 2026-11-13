@@ -19,8 +19,8 @@ use crate::control::array_sync::raft_apply::AppliedPosition;
 use crate::control::distributed_applier::propose_tracker::{AppliedWrite, ProposeTracker};
 use crate::control::wal_replication::decode::ChunkedRedo;
 use crate::control::wal_replication::transaction_redo::RedoTarget;
+use crate::control::wal_replication::transaction_redo::StreamedFinal;
 use crate::control::wal_replication::transaction_redo::chunks::{ChunkApply, RedoChunkError};
-use crate::control::wal_replication::types::RedoContent;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoStreamId;
@@ -31,8 +31,8 @@ use super::context::{ApplyContext, FinishedApply};
 use super::proposal_gate::{EntryOutcome, HoldReason, ledger_outcome};
 use super::start::Prepared;
 use super::transaction_redo::{
-    FinalEntry, RedoApply, conclude_held, conclude_held_claimed, conclude_installed_copy,
-    enqueue_payload, report_then_conclude,
+    FinalEntry, RedoApply, RedoApplyContent, conclude_held, conclude_held_claimed,
+    conclude_installed_copy, enqueue_payload, report_then_conclude,
 };
 
 /// Prepare a committed `RedoChunk` or `RedoAbandon` entry of term `term`.
@@ -204,10 +204,11 @@ fn stream_lost_here(
     }
 }
 
-/// Prepare the final entry of a chunked redo: take its stream, assemble the
-/// content, and apply it as an inline redo. A stream that is gone or that
-/// holds other chunks than the entry names refuses the entry. In a group
-/// whose replica here owes a snapshot install, it holds the entry instead.
+/// Prepare the final entry of a chunked redo: take its stream and apply its
+/// marker, whose only sub-record names the stream's chunk records. The
+/// stream's bytes stay in the WAL. A stream that is gone or that holds other
+/// chunks than the entry names refuses the entry. In a group whose replica
+/// here owes a snapshot install, it holds the entry instead.
 pub(super) fn prepare_chunked_final<'a>(
     ctx: ApplyContext<'a>,
     pos: AppliedPosition,
@@ -238,14 +239,14 @@ pub(super) fn prepare_chunked_final<'a>(
         crate::fail_point::FailScope::Node(ctx.state.node_id),
         "redo_chunk::before_final_install"
     );
-    let assembled = match &taken {
-        Some(open) => open.assemble(chunked.count, chunked.len),
+    let referenced = match &taken {
+        Some(open) => open.stream_ref(chunked.count, chunked.len),
         None => Err(RedoChunkError::NotOpen {
             stream: chunked.stream,
         }),
     };
-    let bytes = match assembled {
-        Ok(bytes) => bytes,
+    let reference = match referenced {
+        Ok(reference) => reference,
         Err(refusal) if ctx.state.redo_chunks.owes_snapshot(pos.group_id) => {
             let error = stream_lost_here(pos, chunked.stream, LostEntry::Final, &refusal);
             let reason = HoldReason::BodyMissing;
@@ -278,29 +279,21 @@ pub(super) fn prepare_chunked_final<'a>(
             };
         }
     };
-    match RedoContent::from_framed(&bytes) {
-        Ok(content) => Prepared::Enqueue(enqueue_payload(
-            ctx,
-            pos,
-            target,
-            RedoApply {
-                payload: match mirror_database {
-                    Some(database) => chunked.payload(content).in_mirror(database),
-                    None => chunked.payload(content),
-                },
-                incarnations,
-                stream: taken,
-                calvin,
-            },
-        )),
-        Err(error) => {
-            let reason = HoldReason::Malformed;
-            match calvin {
-                Some(claim) => conclude_held_claimed(ctx, pos, reason, error, taken, claim),
-                None => conclude_held(ctx, pos, reason, error, taken),
-            }
-        }
-    }
+    Prepared::Enqueue(enqueue_payload(
+        ctx,
+        pos,
+        target,
+        RedoApply {
+            content: RedoApplyContent::Streamed(Box::new(StreamedFinal {
+                chunked,
+                reference,
+                mirror_database,
+            })),
+            incarnations,
+            stream: taken,
+            calvin,
+        },
+    ))
 }
 
 #[cfg(test)]

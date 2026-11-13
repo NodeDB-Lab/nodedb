@@ -350,7 +350,9 @@ pub enum RecordType {
 
     /// Names the replicated log position of one Raft data-group entry this
     /// node applied. Payload: `apply_key`, `group_id`, `log_index`, and the
-    /// vShard's partition epoch, each a little-endian `u64` (32 bytes). The
+    /// vShard's partition epoch, each a little-endian `u64` (32 bytes), then
+    /// a MessagePack tail that names the entry's change events: the rows the
+    /// write yields, or none for a refusal that keeps its records. The
     /// header's `apply_key` is `0`.
     ///
     /// Appended just before the records the entry's apply writes, which
@@ -411,6 +413,16 @@ pub enum RecordType {
     /// Required: skipping it loses the bytes an open stream holds, and the
     /// stream's final entry then refuses on this replica alone.
     RedoChunk = 69 | 0x8000,
+
+    /// The chunk stream that holds a chunked transaction redo's content. It
+    /// is a sub-record of a `TransactionRedo` record, never a record of its
+    /// own. Payload: a `RedoStreamRef`, which names the stream and the WAL
+    /// position, length and checksum of each `RedoChunk` record of it. Every
+    /// reader of the whole WAL rebuilds the redo's sub-records from those
+    /// chunk records. No engine replays it.
+    ///
+    /// Required: skipping it drops every row the redo writes.
+    RedoStreamRef = 70 | 0x8000,
 }
 
 impl RecordType {
@@ -471,6 +483,7 @@ impl RecordType {
             x if x == 67 | 0x8000 => Some(Self::WriteGroup),
             x if x == 68 | 0x8000 => Some(Self::GraphEdgeCut),
             x if x == 69 | 0x8000 => Some(Self::RedoChunk),
+            x if x == 70 | 0x8000 => Some(Self::RedoStreamRef),
             _ => None,
         }
     }
@@ -509,6 +522,7 @@ mod tests {
         // the refused write it names — the exact bug it exists to prevent.
         assert!(RecordType::is_required(RecordType::WriteAborted as u32));
         assert!(RecordType::is_required(RecordType::RedoChunk as u32));
+        assert!(RecordType::is_required(RecordType::RedoStreamRef as u32));
     }
 
     #[test]
@@ -563,6 +577,7 @@ mod tests {
             RecordType::WriteGroup,
             RecordType::GraphEdgeCut,
             RecordType::RedoChunk,
+            RecordType::RedoStreamRef,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

@@ -112,6 +112,7 @@ fn internal_maintenance(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Meta(
             MetaOp::WalAppend { .. }
                 | MetaOp::CalvinResolve { .. }
+                | MetaOp::ReadRedoStreamPage { .. }
                 | MetaOp::ApplyTransactionRedo { .. }
                 | MetaOp::RestoreRedo(_)
                 | MetaOp::CalvinExecuteStatic { .. }

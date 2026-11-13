@@ -14,6 +14,10 @@
 //! - after the first chunk is durable: no final entry exists, so no row
 //!   installs, and the stream drops at the group's next term. A later
 //!   chunked commit installs as usual.
+//! - after the final entry installed and before its change events staged:
+//!   the re-delivered final entry installs nothing again, and stages its
+//!   events from the marker's chunks. The change feed holds one event per
+//!   row.
 //!
 //! Requires `--features failpoints`.
 
@@ -168,5 +172,82 @@ async fn a_crash_between_chunk_entries_installs_nothing_and_frees_the_stream() {
     assert_eq!(
         count(&h, "chunk_crash").await,
         STATEMENTS * ROWS_PER_STATEMENT
+    );
+}
+
+/// Poll the change feed of `coll` until it holds `expected` events or the
+/// wait ends. HTTP needs a bearer token, minted over SQL.
+async fn poll_changes(h: &CrashHarness, coll: &str, expected: usize) -> Vec<serde_json::Value> {
+    let token = h
+        .query_col("CREATE API KEY FOR nodedb", "api_key")
+        .await
+        .into_iter()
+        .next()
+        .expect("CREATE API KEY returns the token row");
+    let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body: serde_json::Value = client
+            .get(format!(
+                "http://127.0.0.1:{}/v1/cdc/{coll}/poll?since_ms=0&limit=10000",
+                h.http_port
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("poll the change feed")
+            .json()
+            .await
+            .expect("a JSON change page");
+        let changes = body["changes"].as_array().cloned().unwrap_or_default();
+        if changes.len() >= expected || tokio::time::Instant::now() >= deadline {
+            assert_eq!(body["has_more"], serde_json::json!(false), "{body}");
+            return changes;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_before_the_change_events_stage_publishes_each_event_once() {
+    let mut h = harness();
+    crash_inside_a_chunked_commit(&mut h, "redo_chunk::before_marker_changes", None).await;
+    let expected = STATEMENTS * ROWS_PER_STATEMENT;
+    assert_eq!(
+        count(&h, "chunk_crash").await,
+        expected,
+        "the install was durable before the crash, so every row reads back once"
+    );
+    let changes = poll_changes(&h, "chunk_crash", expected).await;
+    let mut ids: Vec<&str> = changes
+        .iter()
+        .map(|change| change["document_id"].as_str().expect("a document id"))
+        .collect();
+    assert_eq!(
+        ids.len(),
+        expected,
+        "the re-delivered final entry stages one event per row\n{}",
+        diagnostics::log_tail_section(&h.server_log())
+    );
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), expected, "every row publishes exactly once");
+    assert!(
+        changes
+            .iter()
+            .all(|change| change["lsn"] == changes[0]["lsn"]),
+        "every row publishes at the commit's one position"
+    );
+
+    // A second restart finds the events in the change journal or delivers
+    // the entry again: either way each row publishes once.
+    h.kill_9();
+    h.reopen();
+    let again = poll_changes(&h, "chunk_crash", expected).await;
+    assert_eq!(
+        again.len(),
+        expected,
+        "a second restart publishes no event twice and loses none\n{}",
+        diagnostics::log_tail_section(&h.server_log())
     );
 }

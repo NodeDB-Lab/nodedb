@@ -63,6 +63,9 @@ pub(super) fn settle_lanes(ctx: ApplyContext<'_>, lanes: &mut HashMap<u64, Lane>
             // Every entry the floor covers keeps its changes on disk.
             state.change_stream.journal_group(*group_id, floor);
             record_durable_apply(state, *group_id, floor);
+            // The journal holds the events of every entry the floor covers,
+            // so no restart stages them again from a marker's chunks.
+            state.redo_chunks.release_unstaged_through(*group_id, floor);
         }
     }
 }

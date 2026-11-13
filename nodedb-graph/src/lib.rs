@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Graph engine primitives shared by Origin, Lite, and WASM: CSR adjacency
 //! index, traversal algorithms (PageRank, WCC, LabelPropagation, LCC, SSSP,
 //! Betweenness, Closeness, Harmonic, Degree, Louvain, Triangles, Diameter,

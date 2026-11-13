@@ -194,6 +194,35 @@ impl UringSeqReader {
         }
         Ok(true)
     }
+
+    /// Restart the stream at file byte `offset`, dropping the buffered bytes.
+    pub fn seek(&mut self, offset: u64) {
+        self.file_offset = offset;
+        self.pos = 0;
+        self.filled = 0;
+        self.eof = false;
+    }
+
+    /// Step over the next `len` bytes of the stream without reading them.
+    /// The bytes already buffered are dropped first, then the file offset
+    /// moves past the rest, so a skip past the buffer costs no read.
+    pub fn skip(&mut self, len: u64) -> crate::Result<()> {
+        let buffered = (self.filled - self.pos) as u64;
+        if len <= buffered {
+            // `len` is at most the buffered count, which is a `usize`.
+            self.pos += len as usize;
+            return Ok(());
+        }
+        self.pos = self.filled;
+        self.file_offset = self
+            .file_offset
+            .checked_add(len - buffered)
+            .ok_or_else(|| crate::Error::Storage {
+                engine: "wal_reader".into(),
+                detail: format!("a skip of {len} bytes passes the largest file offset"),
+            })?;
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -217,6 +246,14 @@ impl UringSeqReader {
     /// Stub so generic call sites compile on non-Linux hosts.
     pub fn read_exact(&mut self, _dst: &mut [u8]) -> crate::Result<bool> {
         Ok(false)
+    }
+
+    /// Stub so generic call sites compile on non-Linux hosts.
+    pub fn seek(&mut self, _offset: u64) {}
+
+    /// Stub so generic call sites compile on non-Linux hosts.
+    pub fn skip(&mut self, _len: u64) -> crate::Result<()> {
+        Ok(())
     }
 }
 
