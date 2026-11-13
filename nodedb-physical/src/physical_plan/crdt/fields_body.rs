@@ -13,31 +13,25 @@ use std::collections::HashMap;
 use nodedb_types::Value;
 use nodedb_types::object_msgpack::{ObjectFormat, ObjectView};
 
+use crate::error::FieldsBodyError;
+
 /// Encode `fields` as a CRDT fields body.
-pub fn encode_fields_body(fields: &HashMap<String, Value>) -> Result<Vec<u8>, String> {
-    zerompk::to_msgpack_vec(&Value::Object(fields.clone()))
-        .map_err(|e| format!("CRDT fields do not encode: {e}"))
+pub fn encode_fields_body(fields: &HashMap<String, Value>) -> Result<Vec<u8>, FieldsBodyError> {
+    zerompk::to_msgpack_vec(&Value::Object(fields.clone())).map_err(FieldsBodyError::Encode)
 }
 
 /// Decode a CRDT fields body. A body that is not a native object is refused,
 /// naming why.
-pub fn decode_fields_body(body: &[u8]) -> Result<HashMap<String, Value>, String> {
-    let view = ObjectView::new(body)
-        .map_err(|e| format!("CRDT fields are not a MessagePack object: {e}"))?;
+pub fn decode_fields_body(body: &[u8]) -> Result<HashMap<String, Value>, FieldsBodyError> {
+    let view = ObjectView::new(body).map_err(FieldsBodyError::NotAnObject)?;
     if view.format() != ObjectFormat::Native {
-        return Err("CRDT fields are a plain MessagePack map; \
-                    a fields body is a native object of tagged values"
-            .into());
+        return Err(FieldsBodyError::PlainMap);
     }
-    match view
-        .decode()
-        .map_err(|e| format!("CRDT fields do not decode: {e}"))?
-    {
+    match view.decode().map_err(FieldsBodyError::Decode)? {
         Value::Object(fields) => Ok(fields),
-        other => Err(format!(
-            "CRDT fields decode as {}, expected an object",
-            other.type_name()
-        )),
+        other => Err(FieldsBodyError::NotObject {
+            found: other.type_name(),
+        }),
     }
 }
 
@@ -59,7 +53,7 @@ mod tests {
             ("blob".to_string(), Value::Bytes(vec![0x01, 0xff])),
         ]);
         let body = encode_fields_body(&fields).expect("encode");
-        assert_eq!(decode_fields_body(&body), Ok(fields));
+        assert_eq!(decode_fields_body(&body).expect("decode"), fields);
     }
 
     #[test]

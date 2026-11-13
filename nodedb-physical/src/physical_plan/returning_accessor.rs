@@ -290,6 +290,7 @@ macro_rules! match_returning_slot {
                 | MetaOp::CalvinDrop { .. }
                 | MetaOp::ResolveTxnPart { .. }
                 | MetaOp::CalvinResolve { .. }
+                | MetaOp::ReadRedoStreamPage { .. }
                 | MetaOp::ApplyTransactionRedo { .. }
                 | MetaOp::RestoreRedo(_),
             )

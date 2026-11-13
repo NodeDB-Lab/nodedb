@@ -662,6 +662,31 @@ pub enum MetaOp {
         max_part_bytes: u64,
     },
 
+    /// Read one page of a committed chunked redo's content back from this
+    /// node's WAL, WITHOUT mutating anything.
+    ///
+    /// `stream` is the server's encoding of the redo's stream reference: the
+    /// WAL position, length and checksum of each chunk. The core reads the
+    /// chunks through its own WAL reader from content offset `from`, a
+    /// record boundary: `0`, or the `next` of the previous page. It returns
+    /// the records of `section` it meets, at most `max_page_bytes` of them,
+    /// or one record past that bound alone. It also stops after reading
+    /// `max_page_bytes` of other records, so one page reads a bounded
+    /// stretch of the content.
+    ///
+    /// The Control Plane binds a chunked redo's identities from the
+    /// `Identities` pages before the redo installs, and stages its change
+    /// events from the `RowChanges` pages once it installed.
+    ///
+    /// The response payload is a zerompk-encoded
+    /// [`super::RedoStreamPage`].
+    ReadRedoStreamPage {
+        stream: Vec<u8>,
+        section: super::RedoStreamSection,
+        from: u64,
+        max_page_bytes: u64,
+    },
+
     /// Apply one committed transaction's resolved redo record on the core that
     /// owns its vShard.
     ///

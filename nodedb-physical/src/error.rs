@@ -35,3 +35,35 @@ pub enum ConvertError {
     #[error("converter internal: {0}")]
     Other(String),
 }
+
+/// A CRDT fields body that does not encode or decode.
+#[derive(Debug, thiserror::Error)]
+pub enum FieldsBodyError {
+    /// The fields do not encode as a native MessagePack object.
+    #[error("CRDT fields do not encode: {0}")]
+    Encode(#[source] zerompk::Error),
+
+    /// The body is not a MessagePack object.
+    #[error("CRDT fields are not a MessagePack object: {0}")]
+    NotAnObject(#[source] nodedb_types::MsgpackError),
+
+    /// The body is a plain MessagePack map, not a native object.
+    #[error(
+        "CRDT fields are a plain MessagePack map; a fields body is a native object of tagged values"
+    )]
+    PlainMap,
+
+    /// The native object body does not decode.
+    #[error("CRDT fields do not decode: {0}")]
+    Decode(#[source] nodedb_types::MsgpackError),
+
+    /// The body decodes to a value that is not an object.
+    #[error("CRDT fields decode as {found}, expected an object")]
+    NotObject { found: &'static str },
+}
+
+impl From<FieldsBodyError> for ConvertError {
+    fn from(e: FieldsBodyError) -> Self {
+        ConvertError::Serialization(e.to_string())
+    }
+}

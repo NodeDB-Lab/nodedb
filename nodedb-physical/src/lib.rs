@@ -18,5 +18,5 @@ pub mod physical_plan;
 pub mod physical_task;
 pub mod visitor;
 
-pub use error::ConvertError;
+pub use error::{ConvertError, FieldsBodyError};
 pub use visitor::{PhysicalTaskVisitor, dispatch};
