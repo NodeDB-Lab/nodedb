@@ -7,31 +7,29 @@
 use std::sync::Arc;
 
 use crate::control::change_stream::journal::ChangeJournal;
+use crate::control::change_stream::journal::codec::JournalRow;
 use crate::event::cdc::CdcOffset;
 
 use super::bus::{BusState, ChangeStream};
 use super::ring::{AppendedRun, ChangeRun, PositionedChange};
 use super::{ChangePartition, SequencedChangeEvent};
 
-/// Events due for the journal, with the partition's continuity at the time.
-pub(super) struct JournalBatch {
-    partition: ChangePartition,
-    feed_after: CdcOffset,
-    through: CdcOffset,
-    events: Vec<SequencedChangeEvent>,
-}
-
 impl ChangeStream {
     /// Rebuild the replay ring from `journal`, and journal every later
     /// publish there.
+    ///
+    /// The ring takes each partition's newest journaled events, at most its
+    /// capacity. It treats the older ones as evicted, and a cursor below
+    /// them catches up from the journal.
     ///
     /// Events this process published before the journal attached, such as
     /// entries the apply loop settled first, go back on top of the rebuilt
     /// feeds and are journaled with the next batch of their feed.
     pub fn attach_journal(&self, journal: Arc<ChangeJournal>) -> crate::Result<()> {
-        let feeds = journal.load()?;
+        let feeds = journal.load(self.capacity())?;
         {
-            let mut state = self.lock();
+            let mut guard = self.lock();
+            let state = &mut *guard;
             let (early_events, early_feeds) = state.ring.drain();
             for feed in feeds {
                 state.ring.append(ChangeRun {
@@ -40,6 +38,9 @@ impl ChangeStream {
                     through: feed.through,
                     changes: feed.changes,
                 });
+                if let Some(skipped) = feed.skipped {
+                    state.ring.note_evicted(feed.partition, skipped);
+                }
             }
             for (partition, floor, through) in early_feeds {
                 let changes = early_events
@@ -58,6 +59,7 @@ impl ChangeStream {
                     changes,
                 });
                 let ChangePartition(group_id) = partition;
+                state.held.add(appended.events.len());
                 state
                     .group_pending
                     .entry(group_id)
@@ -79,6 +81,7 @@ impl ChangeStream {
         if self.journal.get().is_none() || run.events.is_empty() {
             return;
         }
+        state.held.add(run.events.len());
         state
             .group_pending
             .entry(group_id)
@@ -88,67 +91,49 @@ impl ChangeStream {
 
     /// Journal `group_id`'s changes of every entry at or below `floor`, the
     /// applied floor the apply loop is about to save. Every entry the floor
-    /// covers then has its changes on disk.
-    pub(crate) fn journal_group(&self, group_id: u64, floor: u64) {
+    /// covers then has its changes on disk: the pending ones, and the
+    /// spilled pages the journal counts from now on.
+    ///
+    /// Fails when the journal did not take them. The events stay pending,
+    /// and the floor must not save: the next pass journals them again.
+    pub(crate) fn journal_group(&self, group_id: u64, floor: u64) -> crate::Result<()> {
+        let Some(journal) = self.journal.get() else {
+            return Ok(());
+        };
         let through = CdcOffset::whole_index(floor);
         let partition = ChangePartition(group_id);
-        let batch = {
-            let mut state = self.lock();
-            if self.journal.get().is_none() {
-                return;
-            }
+        let (feed_after, events) = {
+            let mut guard = self.lock();
+            let state = &mut *guard;
+            let Some((feed_after, _)) = state.ring.feed_continuity(partition) else {
+                return Ok(());
+            };
             let pending = state.group_pending.entry(group_id).or_default();
             let covered = pending.partition_point(|event| event.position() <= through);
             let events: Vec<SequencedChangeEvent> = pending.drain(..covered).collect();
-            let Some((feed_after, _)) = state.ring.feed_continuity(partition) else {
-                return;
-            };
-            JournalBatch {
-                partition,
-                feed_after,
-                through,
-                events,
-            }
+            state.held.sub(events.len());
+            (feed_after, events)
         };
-        self.persist(batch);
-    }
-
-    /// Journal a run a forwarding leader produced, before its publisher
-    /// acknowledges it.
-    pub(super) fn journal_run(&self, run: &AppendedRun) {
-        if self.journal.get().is_none() {
-            return;
-        }
-        let Some((feed_after, _)) = self.lock().ring.feed_continuity(run.partition) else {
-            return;
-        };
-        self.persist(JournalBatch {
-            partition: run.partition,
-            feed_after,
-            through: run.through,
-            events: run.events.clone(),
-        });
-    }
-
-    /// Write `batch` to the journal. A lost batch shows as a hole in the
-    /// journal, and its cursors reset after a restart.
-    fn persist(&self, batch: JournalBatch) {
-        let Some(journal) = self.journal.get() else {
-            return;
-        };
-        let JournalBatch {
+        let written = journal.persist(
             partition,
             feed_after,
             through,
-            events,
-        } = batch;
-        if let Err(error) = journal.persist(partition, feed_after, through, &events) {
-            tracing::error!(
-                ?partition,
-                %error,
-                "journaling change-feed events failed"
-            );
+            events.iter().map(JournalRow::of_sequenced),
+        );
+        let mut guard = self.lock();
+        let state = &mut *guard;
+        match &written {
+            Ok(()) => state.debt.paid(group_id),
+            Err(error) => {
+                state.debt.failed(group_id, error);
+                state.held.add(events.len());
+                let pending = state.group_pending.entry(group_id).or_default();
+                let mut kept = events;
+                kept.append(pending);
+                *pending = kept;
+            }
         }
+        written
     }
 }
 
@@ -189,7 +174,7 @@ mod tests {
                 stream.stage(4, index, DatabaseId::DEFAULT, vec![event(document)]);
             }
             stream.settle_group(4, 1, 4);
-            stream.journal_group(4, 4);
+            stream.journal_group(4, 4).expect("journal");
             let page = stream
                 .query_changes(TenantId::new(1), None, ReplayStart::Timestamp(0), 2)
                 .expect("replay");
@@ -219,7 +204,7 @@ mod tests {
             stream.stage(4, 1, DatabaseId::DEFAULT, vec![event("g1")]);
             stream.stage(4, 2, DatabaseId::DEFAULT, vec![event("g2")]);
             stream.settle_group(4, 1, 2);
-            stream.journal_group(4, 1);
+            stream.journal_group(4, 1).expect("journal");
             stream
                 .query_changes(TenantId::new(1), None, ReplayStart::Timestamp(0), 1)
                 .expect("replay")

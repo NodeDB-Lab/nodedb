@@ -412,6 +412,7 @@ mod tests {
                 read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             },
+            change_lsn: None,
         })
     }
 

@@ -26,6 +26,7 @@
 use nodedb_wal::WalRecord;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::marker_changes_of_plan;
 use crate::control::server::wal_dispatch::{
     GroupOrigin, WalAppendRequest, WriteSetTarget, append_group_origin, append_group_parts,
     append_planned_parts, plan_group_parts,
@@ -177,7 +178,8 @@ fn complete_group(
 }
 
 /// Journal a write whose origin the crash cut: its change position marker,
-/// its origin, then every part.
+/// its origin, then every part. The crash came before the write's response,
+/// so no change event of it staged.
 fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Result<bool> {
     let inputs = &capture.origin_append;
     let appender = part_appender(wal, inputs)?;
@@ -198,11 +200,15 @@ fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Resu
             Some(hlc) => marker_appender.with_commit_hlc(hlc),
             None => marker_appender,
         };
+        // The marker names the rows the write yields, as the funnel's does:
+        // the entry's delivery after this boot stages its change events
+        // from it.
+        let changes = marker_changes_of_plan(&plan, home.tenant_id);
         marker_appender.append_change_position(
             home.tenant_id,
             home.vshard_id,
             home.database_id,
-            &marker.to_bytes(),
+            &marker.with_changes(&changes)?,
         )?;
     }
     let origin = append_group_origin(WalAppendRequest {

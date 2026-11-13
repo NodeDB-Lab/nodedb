@@ -6,10 +6,11 @@
 //! catalog (`array_catalog::ddl`). The funnel refuses it.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::change_events::{EntryChanges, PendingChanges};
 use crate::control::server::dispatch_utils::minted::{MintedRecords, RecordOwner};
 use crate::control::server::wal_dispatch::{self, WalAppendRequest};
 use crate::control::state::SharedState;
-use crate::event::cdc::position::ChangePositionMarker;
+use crate::event::cdc::position::{ChangePositionMarker, MarkerChanges};
 use crate::types::Lsn;
 use crate::wal::manager::NO_APPLY_KEY;
 
@@ -34,6 +35,18 @@ pub(super) struct WalAppendOutcome {
     /// applied or failed, so no read cut at or above the ordinal closes
     /// before then (`read_cut::reservations`).
     pub reservation: Option<crate::control::read_cut::OrdinalReservation>,
+    /// The change marker the append wrote ahead of the write's records,
+    /// when the write applies a replicated entry.
+    pub change_marker: Option<AppendedMarker>,
+    /// The write's change set, staged at the change marker's LSN.
+    pub changes: Option<PendingChanges>,
+}
+
+/// A change marker the append wrote, and its LSN.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AppendedMarker {
+    pub head: ChangePositionMarker,
+    pub lsn: Lsn,
 }
 
 /// Where and how [`authorize_and_append`] journals one write.
@@ -44,6 +57,9 @@ pub(super) struct AppendScope<'a> {
     pub event_source: crate::event::EventSource,
     pub commit_hlc: Option<u64>,
     pub groups: bool,
+    /// The change set of a write that applies a replicated entry. Its rows
+    /// ride the entry's change marker.
+    pub changes: Option<EntryChanges>,
 }
 
 /// Refuse array DDL, then make the write durable: append its WAL redo record
@@ -70,6 +86,12 @@ pub(super) struct AppendScope<'a> {
 ///
 /// `groups` is whether the write journals rows after apply. Such a write
 /// appends its group's origin (see `wal_dispatch::append_group_origin`).
+///
+/// `changes` rides the entry's change marker, which precedes every record
+/// of the write. The marker holds its place in the WAL until the entry's
+/// group saves an applied floor at or above the entry (see
+/// `change_stream::unjournaled`). A write with changes and no marker
+/// position is refused before any record is appended.
 pub(super) fn authorize_and_append(
     shared: &SharedState,
     mut plan: PhysicalPlan,
@@ -82,6 +104,7 @@ pub(super) fn authorize_and_append(
         event_source,
         commit_hlc,
         groups,
+        mut changes,
     } = scope;
     let RecordOwner {
         tenant_id,
@@ -104,8 +127,17 @@ pub(super) fn authorize_and_append(
         } => (*change_position, *system_ordinal),
         WalDurability::CallerSupplied { system_ordinal, .. } => (None, *system_ordinal),
     };
+    if changes.is_some() && marked_position.is_none() {
+        return Err(crate::Error::Internal {
+            detail: "internal invariant break: a replicated write's change set reached the WAL \
+                     append with no change position to mark"
+                .into(),
+        });
+    }
     let mut system_ordinal = carried_ordinal;
     let mut reservation = None;
+    let mut change_marker = None;
+    let mut pending_changes = None;
     let (wal_lsn, resolved_now_ms, group_origin) = match durability {
         WalDurability::AppendHere {
             now_override,
@@ -135,16 +167,24 @@ pub(super) fn authorize_and_append(
             // replay installs the same versions.
             wal_dispatch::floor_redo_stamps(&mut plan, system_ordinal)?;
             if let Some(position) = change_position {
-                let marker = ChangePositionMarker {
+                let head = ChangePositionMarker {
                     apply_key,
                     position,
                 };
-                stamped(shared.wal.appender(NO_APPLY_KEY), commit_hlc).append_change_position(
-                    tenant_id,
-                    vshard_id,
-                    database_id,
-                    &marker.to_bytes(),
-                )?;
+                let tail = changes.as_ref().map_or(
+                    MarkerChanges::Rows(Vec::new()),
+                    EntryChanges::marker_changes,
+                );
+                let lsn = append_change_marker(shared, owner, commit_hlc, head, &tail)?;
+                // The marker holds its place for the entry until a floor
+                // covers it.
+                shared.change_stream.unjournaled().note_marker(
+                    position.group_id,
+                    position.log_index,
+                    shared.wal.floor_holds().hold(lsn),
+                );
+                change_marker = Some(AppendedMarker { head, lsn });
+                pending_changes = changes.take().map(|changes| changes.at_marker(lsn));
             }
             let request = WalAppendRequest {
                 wal: stamped(
@@ -200,7 +240,26 @@ pub(super) fn authorize_and_append(
         change_position: marked_position,
         system_ordinal,
         reservation,
+        change_marker,
+        changes: pending_changes,
     })
+}
+
+/// Append the change marker `head` with `tail`. Returns its LSN.
+pub(super) fn append_change_marker(
+    shared: &SharedState,
+    owner: RecordOwner,
+    commit_hlc: Option<u64>,
+    head: ChangePositionMarker,
+    tail: &MarkerChanges,
+) -> crate::Result<Lsn> {
+    let lsn = stamped(shared.wal.appender(NO_APPLY_KEY), commit_hlc).append_change_position(
+        owner.tenant_id,
+        owner.vshard_id,
+        owner.database_id,
+        &head.with_changes(tail)?,
+    )?;
+    Ok(lsn)
 }
 
 /// `appender`, carrying `commit_hlc` when it is known.

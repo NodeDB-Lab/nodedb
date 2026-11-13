@@ -50,6 +50,9 @@ pub(super) struct ResponsePhaseInput {
     pub post_apply: Option<String>,
     pub funnel_redo_engine: Option<&'static str>,
     pub change_set: Option<PendingChanges>,
+    /// The change marker the write appended ahead of its records, when it
+    /// applies a replicated entry.
+    pub change_marker: Option<super::wal_append::AppendedMarker>,
     pub deferred_guards: super::dispatch::DeferredGuards,
     /// `Some` when the plan writes user data, so a success advances the
     /// tenant's observed write-HLC. Reads and system operations never do.
@@ -101,6 +104,7 @@ pub(super) async fn collect_classify_and_finish(
         post_apply,
         funnel_redo_engine,
         change_set,
+        change_marker,
         deferred_guards,
         user_write,
         late_parts,
@@ -204,6 +208,19 @@ pub(super) async fn collect_classify_and_finish(
         None
     };
     drop(deferred_guards);
+    // A refusal that keeps its records withholds its entry's change events
+    // from a restart, as the live write stages none.
+    let withheld_lsn = super::changes::withhold_refused_changes(
+        shared,
+        crate::control::server::dispatch_utils::minted::RecordOwner {
+            tenant_id,
+            database_id,
+            vshard_id,
+        },
+        upstream_commit_hlc,
+        change_marker,
+        &response,
+    )?;
 
     // Durable-at-ack barrier: an acknowledged write must be WAL-fsync-durable
     // before this response (the client ack) returns. `WalAppender::append_*` only
@@ -237,9 +254,9 @@ pub(super) async fn collect_classify_and_finish(
             // proves it, hence the check.
             None => assert_durable_before_ack(funnel_redo_engine),
         }
-    } else if let Some(lsn) = post_apply_lsn {
-        // The refusal reports rows that stay committed: their records are
-        // durable before the refusal returns.
+    } else if let Some(lsn) = post_apply_lsn.max(withheld_lsn) {
+        // The refusal keeps records: they, and the marker that withholds
+        // the entry's change events, are durable before the refusal returns.
         wait_durable_timed(shared, database_id, lsn).await?;
     }
     // The group's parts are durable, or its origin was cancelled: the core
@@ -260,7 +277,7 @@ pub(super) async fn collect_classify_and_finish(
     // [`super::super::params::ChangeFeedOwner`].
     if response.status == Status::Ok {
         if let Some(change_set) = change_set {
-            change_set.publish(shared, tenant_id, database_id, &response);
+            change_set.publish(shared, tenant_id, database_id);
         }
 
         // Record the write's commit HLC on the tenant's observed high-water
@@ -289,7 +306,10 @@ pub(super) async fn collect_classify_and_finish(
     }
 
     observe(shared);
-    Ok(SubmitOutcome { response })
+    Ok(SubmitOutcome {
+        response,
+        change_lsn: change_marker.map(|marker| marker.lsn),
+    })
 }
 
 /// Await WAL durability through `lsn` and record the wait against `database_id`.

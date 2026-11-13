@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Post-`SharedState::open` catalog steps: fire the catalog-open gate,
-//! replay the surrogate WAL, rebuild the open redo streams, read back the cut
-//! barriers, and bootstrap the superuser credential.
+//! replay the surrogate WAL, rebuild the open redo streams, read back the
+//! applied entries whose change events a restart stages again, read back the
+//! cut barriers, and bootstrap the superuser credential.
 
 use std::sync::Arc;
 
@@ -33,6 +34,19 @@ pub(crate) async fn run(
             open = streams.open,
             closed = streams.closed,
             "chunked redo streams rebuilt from the WAL"
+        );
+    }
+
+    // The applied entries whose change events a restart stages again,
+    // before any data group delivers one. Each holds its records in the WAL.
+    let unjournaled = shared
+        .change_stream
+        .unjournaled()
+        .recover(wal_records, shared.wal.floor_holds())?;
+    if unjournaled > 0 {
+        tracing::info!(
+            entries = unjournaled,
+            "applied entries whose change events the journal can lack read from the WAL"
         );
     }
 

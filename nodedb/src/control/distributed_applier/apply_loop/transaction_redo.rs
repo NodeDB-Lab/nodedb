@@ -7,8 +7,8 @@
 //! its header carrying the entry's idempotency key, and installed through the
 //! WAL replay arms. The key makes the record the entry's applied-marker, so an
 //! entry re-delivered after a restart is recognised by the proposal ledger and
-//! skipped before it reaches here. A skipped chunked entry stages its change
-//! events again when the journal lacks them (see [`super::marker_changes`]).
+//! skipped before it reaches here. A skipped entry stages its change events
+//! again when the journal lacks them (see [`super::marker_changes`]).
 //!
 //! A chunked body applies as its stream's marker: a record whose only
 //! sub-record names the stream's `RedoChunk` records (see
@@ -412,7 +412,7 @@ pub(super) fn enqueue_payload<'a>(
                             target,
                             pos,
                             &mut changes,
-                            outcome.response.watermark_lsn,
+                            outcome.change_lsn,
                         )
                         .await
                         .err();

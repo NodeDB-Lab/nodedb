@@ -18,6 +18,9 @@ use super::super::admission::{admit, admit_without_rate_limit};
 use super::super::auth::{ApiError, AppState, ResolvedIdentity};
 use super::super::peer::PeerAddr;
 use super::query::{DatabaseQueryParam, resolve_database_id};
+use crate::control::change_stream::stream::catch_up::{
+    CATCH_UP_EVENTS, ReplayRequest, replay_blocking,
+};
 use crate::control::change_stream::{
     ChangeCursor, CursorStep, ReplayError, ReplayStart, SequencedChangeEvent,
 };
@@ -88,37 +91,65 @@ pub async fn sse_stream(
         Some(tenant_id),
         database_id,
     );
-    // The ring is bounded, so the replay returns every event it holds. Live
-    // events the replay already covered are skipped by the running cursor.
-    let snapshot = shared
-        .change_stream
-        .query_changes_in_database(tenant_id, database_id, Some(&collection), start, usize::MAX)
+    // The replay goes page by page, from the journal for a cursor the ring
+    // no longer serves, then from the ring, so it holds one page at a time.
+    // Each page runs on the blocking pool. Live events the replay already
+    // covered are skipped by the running cursor.
+    let replayed_collection = collection.clone();
+    let request = move |start: ReplayStart| ReplayRequest {
+        tenant_id,
+        database_id,
+        collection: Some(replayed_collection.clone()),
+        start,
+        limit: CATCH_UP_EVENTS,
+    };
+    let first = replay_blocking(&shared, request(start))
+        .await
+        .map_err(ApiError::from)?
         .map_err(reset_error)?;
-    let mut cursor = snapshot.cursor;
+    let next_request = move |cursor: ChangeCursor| request(ReplayStart::Cursor(cursor));
     let binding = bind_session(
         &shared,
         SessionBindRequest::new(&identity.0, "sse", peer.as_str()).in_database(database_id),
     )
     .map_err(ApiError::from)?;
     let stream = async_stream::stream! {
-        for replayed in snapshot.events { yield Ok(format_sse_event(&replayed.event, &replayed.cursor)); }
-        loop {
+        let mut page = first;
+        let mut cursor = loop {
+            let has_more = page.has_more;
+            for replayed in page.events { yield Ok(format_sse_event(&replayed.event, &replayed.cursor)); }
+            if !has_more {
+                break Some(page.cursor);
+            }
+            match replay_blocking(&shared, next_request(page.cursor)).await {
+                Ok(Ok(next)) => page = next,
+                Ok(Err(_)) => {
+                    yield Ok(Event::default().event("reset_required").data("this node no longer holds every change past the stream position; reconnect with a fresh snapshot"));
+                    break None;
+                }
+                Err(error) => {
+                    yield Ok(Event::default().event("error").data(error.to_string()));
+                    break None;
+                }
+            }
+        };
+        while let Some(held) = cursor.as_mut() {
             match subscription.recv_sequenced().await {
-                Ok(event) => match cursor.accept(&event) {
+                Ok(event) => match held.accept(&event) {
                     CursorStep::Deliver => {
-                        yield Ok(format_sse_event(&event, &cursor));
+                        yield Ok(format_sse_event(&event, held));
                     }
                     CursorStep::Skip => {}
                     CursorStep::Reset => {
                         yield Ok(Event::default().event("reset_required").data("this node's change feed has a gap above the stream position; reconnect with a fresh snapshot"));
-                        break;
+                        cursor = None;
                     }
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     yield Ok(Event::default().event("reset_required").data("change stream lagged; reconnect with a fresh snapshot"));
-                    break;
+                    cursor = None;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => cursor = None,
             }
         }
     };
@@ -166,11 +197,19 @@ pub async fn poll_changes(
         .map(ReplayStart::Cursor)
         .unwrap_or(ReplayStart::Timestamp(params.since_ms.unwrap_or(0)));
     let limit = params.limit.unwrap_or(100).clamp(1, 10_000);
-    let snapshot = state
-        .shared
-        .change_stream
-        .query_changes_in_database(tenant_id, database_id, Some(&collection), start, limit)
-        .map_err(reset_error)?;
+    let snapshot = replay_blocking(
+        &state.shared,
+        ReplayRequest {
+            tenant_id,
+            database_id,
+            collection: Some(collection.clone()),
+            start,
+            limit,
+        },
+    )
+    .await
+    .map_err(ApiError::from)?
+    .map_err(reset_error)?;
     let changes: Vec<_> = snapshot
         .events
         .iter()

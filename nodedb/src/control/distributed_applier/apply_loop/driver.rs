@@ -85,7 +85,9 @@ pub(super) async fn drive(
         }
         let running = pipeline.has_running();
         let blocked = pipeline.awaits_install();
-        let retry_debt = pipeline.retries_debt();
+        // A change journal write that failed retries with the next pass:
+        // the timer runs one while no batch arrives.
+        let retry_debt = pipeline.retries_debt() || state.change_stream.journal_owed();
         let awaits_mirror = pipeline.awaits_mirror();
         tokio::select! {
             biased;
@@ -109,7 +111,7 @@ pub(super) async fn drive(
             },
         }
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
     }
 }
 

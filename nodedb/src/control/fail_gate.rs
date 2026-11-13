@@ -336,3 +336,31 @@ pub(crate) async fn before_catalog_ddl_apply(node_id: u64, collection: &str) {
         tokio::time::sleep(pause).await;
     }
 }
+
+/// The change stream's gate on node `state.node_id`: after a page of an
+/// installed chunked redo's change events staged, once the entry moved
+/// staged events to the change journal and before the entry settles. Named
+/// per collection, `change_stream::after_spill::<collection>`, and evaluated
+/// only once boot's data-group replay finished. A crash test parks the
+/// apply here and kills the node while no event of the entry is visible.
+pub(crate) async fn after_spill(
+    state: &crate::control::state::SharedState,
+    group_id: u64,
+    log_index: u64,
+    collections: &std::collections::BTreeSet<String>,
+) {
+    if !state
+        .data_groups_replayed
+        .load(std::sync::atomic::Ordering::Acquire)
+        || !state.change_stream.spilled(group_id, log_index)
+    {
+        return;
+    }
+    for collection in collections {
+        wait(
+            FailScope::Node(state.node_id),
+            &format!("change_stream::after_spill::{collection}"),
+        )
+        .await;
+    }
+}

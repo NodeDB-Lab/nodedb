@@ -445,11 +445,13 @@ impl Lane {
         Some(slot.proposal_key)
     }
 
-    /// Whether the durable floor moved past the floor last saved.
-    pub fn floor_pending(&self) -> bool {
-        self.prefix
-            .floor()
-            .is_some_and(|floor| self.saved_floor.is_none_or(|saved| saved < floor))
+    /// The durable floor to save, when it moved past the floor last saved,
+    /// without taking it.
+    pub fn floor_to_save(&self) -> Option<u64> {
+        let floor = self.prefix.floor()?;
+        self.saved_floor
+            .is_none_or(|saved| saved < floor)
+            .then_some(floor)
     }
 
     /// The durable floor to save, when it moved past the floor last saved.

@@ -29,7 +29,10 @@
 //!   snapshot carried: those entries never apply on this node.
 //!
 //! A duplicate delivered after a restart is recognised as long as the WAL
-//! still retains a record of its original.
+//! still retains a record of its original. The write funnel's records of an
+//! entry stay until its group's saved applied floor covers the entry (see
+//! `change_stream::unjournaled`), so the entry delivered again after a
+//! restart always finds them.
 //!
 //! ## Bound
 //!

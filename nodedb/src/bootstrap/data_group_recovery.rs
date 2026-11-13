@@ -257,6 +257,14 @@ pub async fn await_data_group_recovery(
                 );
             }
             info!("all local data raft groups replayed — opening client gateway");
+            // Every replayed group delivered each entry above its saved
+            // floor. An entry boot read that no delivery restaged sits at or
+            // below that floor, so the journal holds its events. A group
+            // awaiting a snapshot keeps its entries until the install.
+            shared
+                .change_stream
+                .unjournaled()
+                .release_recovered(|group_id| view.awaiting_snapshot.contains(&group_id));
             shared
                 .data_groups_replayed
                 .store(true, std::sync::atomic::Ordering::Release);

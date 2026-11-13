@@ -10,5 +10,6 @@ mod publish;
 mod redo;
 
 pub(crate) use publish::{
-    PendingChanges, WriteChangeSet, extract_write_change_set, publish_settled_changes,
+    EntryChanges, PendingChanges, WriteChangeSet, extract_write_change_set, marker_changes_of_plan,
+    publish_settled_changes,
 };

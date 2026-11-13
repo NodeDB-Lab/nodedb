@@ -486,8 +486,8 @@ impl<'a> Pipeline<'a> {
 
     /// Settle every group's concluded entries in log order. See
     /// [`super::settle::settle_lanes`].
-    pub fn settle(&mut self) {
-        super::settle::settle_lanes(self.ctx, &mut self.lanes);
+    pub async fn settle(&mut self) {
+        super::settle::settle_lanes(self.ctx, &mut self.lanes).await;
     }
 }
 
@@ -549,7 +549,7 @@ mod tests {
         pipeline.lanes.insert(GROUP, lane);
 
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert_eq!(
             pipeline.lanes[&GROUP].backlog.len(),
             1,
@@ -570,14 +570,14 @@ mod tests {
         // A snapshot through entry 4 installs: entry 5 still holds.
         gates.install(GROUP).await.adopted(4);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert!(pipeline.lanes[&GROUP].is_held());
         assert_eq!(watchers.get_or_create(GROUP).current(), 4);
 
         // A snapshot through entry 6 installs.
         gates.install(GROUP).await.adopted(6);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         let lane = &pipeline.lanes[&GROUP];
         assert!(!lane.is_held());
         assert!(lane.backlog.is_empty());
@@ -639,7 +639,7 @@ mod tests {
         assert!(matches!(event, LoopEvent::Panicked { log_index: 5, .. }));
         pipeline.handle(event);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
 
         let answered = waiter.await.expect("the waiter is answered");
         assert!(answered.is_err(), "a panicked apply answers with an error");

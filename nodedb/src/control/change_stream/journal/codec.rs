@@ -114,10 +114,37 @@ pub(super) struct StoredChange {
     pub lsn: u64,
 }
 
-impl StoredChange {
-    pub fn of(event: &SequencedChangeEvent) -> Self {
+/// One change the journal writes, at its position.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JournalRow<'a> {
+    pub position: CdcOffset,
+    pub database_id: DatabaseId,
+    pub event: &'a ChangeEvent,
+}
+
+impl<'a> JournalRow<'a> {
+    pub fn of_sequenced(event: &'a SequencedChangeEvent) -> Self {
         Self {
-            database_id: event.database_id().as_u64(),
+            position: event.position(),
+            database_id: event.database_id(),
+            event: event.event(),
+        }
+    }
+
+    pub fn of_positioned(change: &'a PositionedChange) -> Self {
+        Self {
+            position: change.position,
+            database_id: change.database_id,
+            event: &change.event,
+        }
+    }
+}
+
+impl StoredChange {
+    pub fn of(row: JournalRow<'_>) -> Self {
+        let event = row.event;
+        Self {
+            database_id: row.database_id.as_u64(),
             tenant_id: event.tenant_id.as_u64(),
             collection: event.collection.clone(),
             document_id: event.document_id.to_string(),

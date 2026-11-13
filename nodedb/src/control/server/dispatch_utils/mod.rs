@@ -13,7 +13,9 @@ mod types;
 mod unlogged_dispatch;
 mod write_abort;
 
-pub(crate) use change_events::{PendingChanges, WriteChangeSet, publish_settled_changes};
+pub(crate) use change_events::{
+    PendingChanges, WriteChangeSet, marker_changes_of_plan, publish_settled_changes,
+};
 pub use dispatch::{dispatch_authorized_autocommit_write, dispatch_authorized_to_data_plane};
 pub(crate) use dispatch::{
     dispatch_autocommit_write, dispatch_replayed_write_to_data_plane, dispatch_to_data_plane,

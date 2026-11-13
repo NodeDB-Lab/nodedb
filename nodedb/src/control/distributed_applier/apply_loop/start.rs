@@ -87,11 +87,15 @@ pub(super) fn prepare_entry<'a>(
     let wrote_rows = plan_writes && gate.prior_wrote_rows(applied_key);
     if gate.skip_duplicate(ctx.tracker, group_id, log_index, applied_key) {
         let repeat = EntryOutcome::Repeat { wrote_rows };
-        // The same entry delivered again after a restart, when it installed
-        // a chunked redo whose change events the journal does not hold:
-        // they stage again from the marker's chunks before it settles.
-        if let Some(replicated) = decoded.as_ref()
-            && let Some(marker) = ctx.state.redo_chunks.unstaged_marker(group_id, log_index)
+        // The same entry delivered again after a restart, whose change
+        // events the journal does not hold: they stage again from what boot
+        // read of its WAL records before it settles. A second committed copy
+        // of a proposal finds nothing at its own index.
+        if let Some(recovered) = ctx
+            .state
+            .change_stream
+            .unjournaled()
+            .take_recovered(group_id, log_index)
         {
             let pos = AppliedPosition {
                 group_id,
@@ -100,7 +104,7 @@ pub(super) fn prepare_entry<'a>(
                 commit_hlc,
                 system_ordinal: scope.system_ordinal,
             };
-            return super::marker_changes::restage_recovered(ctx, pos, replicated, marker, repeat);
+            return super::marker_changes::restage_recovered(ctx, pos, recovered, repeat);
         }
         return Prepared::Concluded(repeat);
     }

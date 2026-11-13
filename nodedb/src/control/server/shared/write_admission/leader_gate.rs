@@ -82,9 +82,10 @@ impl DataProposeGate for LeaderWriteGate {
         deadline: tokio::time::Instant,
         ordinal_floor: i64,
     ) -> nodedb_cluster::Result<Admitted> {
-        // A node that is shutting down proposes nothing its gate must order.
+        // A node that is shutting down cannot stamp. It refuses every entry
+        // that takes a stamp, and proposes the rest as sent.
         let Some(state) = self.state.upgrade() else {
-            return Ok(Admitted::default());
+            return admit_without_state(entry);
         };
         let vshard = VShardId::new(vshard_id);
         // Bytes that are not a replicated entry apply as nothing on any replica.
@@ -193,6 +194,36 @@ fn stamp_system_ordinal(
     let (ordinal, reservation) = state.read_cut.reservations.reserve(|| clock.reserve(span));
     entry.system_ordinal = ordinal;
     Ok((Some(entry.encode()?), Some(reservation)))
+}
+
+/// The gate's answer once this node's state is gone and it cannot stamp.
+///
+/// An entry that takes this leader's stamp is refused as `NotLeader` with
+/// no hint. The proposer maps that to `Error::NoLeader`
+/// (`start_raft::propose_error`) and retries against the group's next
+/// leader. Proposing it unstamped lets each replica stamp it from its
+/// own clock. Every other entry takes no stamp, so it proposes as sent:
+/// bytes that are not an entry, a mirror entry, and a write that lands no
+/// system-time version.
+fn admit_without_state(entry: &[u8]) -> nodedb_cluster::Result<Admitted> {
+    match ReplicatedEntry::from_bytes(entry) {
+        Some(entry) if takes_leader_stamp(&entry) => {
+            Err(ClusterError::Raft(nodedb_raft::RaftError::NotLeader {
+                leader_hint: None,
+                term: 0,
+            }))
+        }
+        Some(_) | None => Ok(Admitted::default()),
+    }
+}
+
+/// Whether the gate stamps `entry` with this leader's ordinals. A mirror
+/// entry keeps its source's ordinal (`fold_carried_ordinal`). Any other
+/// entry takes a stamp when its write lands a system-time version
+/// ([`ReplicatedWrite::system_ordinal_span`]), as `stamp_system_ordinal`
+/// decides.
+fn takes_leader_stamp(entry: &ReplicatedEntry) -> bool {
+    entry.mirror.is_none() && entry.write.system_ordinal_span().is_some()
 }
 
 /// An admitted entry's keys, if it holds any, and its ordinal reservation.
@@ -418,6 +449,73 @@ mod tests {
         let bytes = write(0).encode().expect("encode");
         let refused = gate.admit(2, &bytes, deadline(), 0).await;
         assert!(refused.is_err());
+    }
+
+    /// A KV delete lands a system-time version, so the gate stamps it.
+    fn user_write() -> ReplicatedEntry {
+        ReplicatedEntry::new(
+            1,
+            0,
+            2,
+            ReplicatedWrite::KvDelete {
+                collection: "c".into(),
+                keys: vec![b"k".to_vec()],
+                returning: None,
+                rls_filters: Vec::new(),
+                provenance: None,
+            },
+        )
+    }
+
+    /// A gate whose node state is gone, as at shutdown.
+    fn stateless_gate() -> LeaderWriteGate {
+        LeaderWriteGate { state: Weak::new() }
+    }
+
+    /// With its state gone the gate cannot stamp, so it refuses a write that
+    /// takes a stamp as a retryable `NotLeader`, and proposes nothing.
+    #[tokio::test]
+    async fn a_gate_without_state_refuses_a_write_that_takes_a_stamp() {
+        let bytes = user_write().encode().expect("encode");
+        let refused = stateless_gate().admit(2, &bytes, deadline(), 0).await;
+        assert!(
+            matches!(
+                refused,
+                Err(ClusterError::Raft(nodedb_raft::RaftError::NotLeader {
+                    leader_hint: None,
+                    ..
+                }))
+            ),
+            "a stamp-taking write is refused"
+        );
+    }
+
+    /// A write that lands no system-time version, and a mirror entry, take no
+    /// stamp: they pass a gate without state as sent.
+    #[tokio::test]
+    async fn a_gate_without_state_passes_an_entry_that_takes_no_stamp() {
+        let gate = stateless_gate();
+        let topic = write(0).encode().expect("encode");
+        let admitted = gate
+            .admit(2, &topic, deadline(), 0)
+            .await
+            .expect("a topic message takes no stamp");
+        assert!(admitted.entry.is_none(), "the bytes propose as sent");
+
+        let mut mirrored = user_write();
+        mirrored.system_ordinal = 41;
+        mirrored.mirror = Some(MirrorEntryStamp {
+            source_group: 1,
+            source_index: 9,
+            cut: 1,
+            epoch: 1,
+        });
+        let bytes = mirrored.encode().expect("encode");
+        let admitted = gate
+            .admit(2, &bytes, deadline(), 0)
+            .await
+            .expect("a mirror entry keeps its source's stamp");
+        assert!(admitted.entry.is_none(), "the bytes propose as sent");
     }
 
     /// A stamped entry takes no key and proposes as sent, so its ordinal stays

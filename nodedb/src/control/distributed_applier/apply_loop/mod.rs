@@ -18,7 +18,8 @@
 //!   applies.
 //! - [`pipeline`]: every group's lane and the applies that run.
 //! - [`lane`]: one group's queued and started entries, settled in log order.
-//! - [`marker_changes`]: the change events of an installed chunked redo.
+//! - [`marker_changes`]: the change events of an installed chunked redo,
+//!   and of an entry a restart delivers again.
 //! - [`settle`]: settles every group's concluded entries and saves the
 //!   floors that moved.
 //! - [`panicked`]: an entry whose enqueue or apply panicked holds its group.
