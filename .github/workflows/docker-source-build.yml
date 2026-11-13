@@ -1,0 +1,44 @@
+# Source build smoke test for the Dockerfile.
+#
+# The release pipeline overrides the `binary` stage with a prebuilt binary, so
+# the Rust compile stages never run there. A stale `FROM rust:<version>` tag
+# therefore passes the release and fails the first operator who runs
+# `docker build` from source. This workflow builds the `builder` stage from
+# source whenever the Dockerfile or the workspace manifest changes.
+
+name: Docker source build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - Cargo.toml
+      - .github/workflows/docker-source-build.yml
+  workflow_dispatch:
+
+concurrency:
+  group: docker-source-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  source-build:
+    name: Docker source build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check Dockerfile Rust version against rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          image=$(sed -n 's/^FROM rust:\([0-9.]*\)-bookworm AS chef/\1/p' Dockerfile)
+          echo "rust-version: $msrv"
+          echo "Dockerfile image: $image"
+          test -n "$msrv" && test "$msrv" = "$image"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build the builder stage from source
+        run: docker buildx build --target builder --file Dockerfile .
