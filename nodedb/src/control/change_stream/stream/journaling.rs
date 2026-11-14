@@ -193,6 +193,85 @@ mod tests {
         assert_eq!(documents, vec!["g3", "g4"]);
     }
 
+    /// The documents a cursor at entry `after` of group 4 reads, page by
+    /// page: a catch-up past what the ring evicted, then the ring.
+    fn read_group_from(stream: &ChangeStream, after: u64) -> Vec<String> {
+        let mut cursor = crate::control::change_stream::ChangeCursor::default();
+        cursor.raise(ChangePartition(4), CdcOffset::whole_index(after));
+        let mut out = Vec::new();
+        loop {
+            let page = stream
+                .query_changes(TenantId::new(1), None, ReplayStart::Cursor(cursor), 2)
+                .expect("the cursor catches up");
+            cursor = page.cursor;
+            out.extend(
+                page.events
+                    .iter()
+                    .map(|change| change.document_id.as_str().to_owned()),
+            );
+            if !page.has_more {
+                return out;
+            }
+        }
+    }
+
+    /// A journal write that fails drops no event. The ring and a live
+    /// subscriber see every event, and a cursor the ring evicted catches up
+    /// from the pending events. Each failed write keeps the events in log
+    /// order. The write that succeeds journals each event once, and the
+    /// catch-up then reads the journal with no gap and no duplicate.
+    #[test]
+    fn a_failed_journal_write_keeps_every_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stream = ChangeStream::new(2);
+        let journal = Arc::new(ChangeJournal::open(dir.path(), 64).expect("open journal"));
+        stream.attach_journal(Arc::clone(&journal)).expect("attach");
+        let mut live = stream.subscribe(None, Some(TenantId::new(1)));
+        let documents = ["g1", "g2", "g3", "g4", "g5", "g6"];
+        let mut seen_live = Vec::new();
+        let mut settle = |index: u64| {
+            let document = documents[usize::try_from(index - 1).expect("index fits")];
+            stream.stage(4, index, DatabaseId::DEFAULT, vec![event(document)]);
+            stream.settle_group(4, index, index);
+            let delivered = live.try_recv_sequenced().expect("the live event");
+            seen_live.push(delivered.document_id.as_str().to_owned());
+        };
+        for index in 1..=5 {
+            settle(index);
+        }
+
+        journal.fail_next_persists_for_test(2);
+        assert!(stream.journal_group(4, 5).is_err(), "the write fails");
+        assert!(stream.journal_owed());
+        assert_eq!(stream.held_events(), 5, "every event stays pending");
+        assert_eq!(read_group_from(&stream, 0), documents[..5]);
+
+        settle(6);
+        assert!(stream.journal_group(4, 6).is_err(), "the retry fails");
+        assert_eq!(stream.held_events(), 6);
+        assert_eq!(read_group_from(&stream, 0), documents);
+        assert_eq!(seen_live, documents, "live consumers saw every event");
+
+        stream.journal_group(4, 6).expect("the write succeeds");
+        assert!(!stream.journal_owed());
+        assert_eq!(stream.held_events(), 0, "the journal holds every event");
+        assert_eq!(read_group_from(&stream, 0), documents);
+        let read = journal
+            .read(
+                ChangePartition(4),
+                CdcOffset::whole_index(0),
+                CdcOffset::whole_index(6),
+                None,
+                64,
+            )
+            .expect("read the journal");
+        let positions: Vec<CdcOffset> = read.changes.iter().map(|change| change.position).collect();
+        let expected: Vec<CdcOffset> = (1..=6)
+            .map(|index| CdcOffset::data_event(0, index, 1))
+            .collect();
+        assert_eq!(positions, expected, "each event once, in log order");
+    }
+
     /// Settled entries above the saved applied floor are not journaled, so
     /// they are delivered again after a restart and publish again. A cursor
     /// inside the journaled stretch resumes.

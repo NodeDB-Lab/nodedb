@@ -120,6 +120,18 @@ impl ChangeJournal {
         Ok(feeds)
     }
 
+    /// The position up to which the journal holds every event of
+    /// `partition`, durably. `None` when it never journaled the partition.
+    pub(crate) fn through(&self, partition: ChangePartition) -> crate::Result<Option<CdcOffset>> {
+        let txn = self.db.begin_read().map_err(storage)?;
+        let feeds = txn.open_table(FEEDS).map_err(storage)?;
+        let stored = feeds
+            .get(partition_key(partition).as_slice())
+            .map_err(storage)?
+            .and_then(|bytes| FeedRecord::decode(bytes.value()));
+        Ok(stored.map(|feed| feed.through))
+    }
+
     /// The rows of `partition` in `(from, upto]` that `scope` admits, at
     /// most `limit`. Reads staged rows above the stored `through` too: the
     /// caller bounds `upto` by what settled.

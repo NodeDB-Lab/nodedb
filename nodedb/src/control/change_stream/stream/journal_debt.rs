@@ -3,23 +3,23 @@
 //! Settled change events the journal refused, and the halt when it keeps
 //! refusing them.
 //!
-//! A journal write that fails never drops an event. The ring takes it, so
-//! live consumers see it, and it waits in the group's pending events, which
-//! a catch-up also reads. The write retries:
+//! A journal write that fails never drops an event.
 //!
-//! - a replicated group's on every apply pass, and on the apply loop's
-//!   timer while the debt is owed: its applied floor waits until the
-//!   journal holds every event it covers;
-//! - a forwarded partition's with the next run the leader sends.
+//! - A replicated group's settled event goes to the ring, so live consumers
+//!   see it, and waits in the group's pending events, which a catch-up also
+//!   reads. The write retries on every apply pass, and on the apply loop's
+//!   timer while the debt is owed: the group's applied floor waits until
+//!   the journal holds every event it covers.
+//! - A forwarded partition takes no run its journal refuses. The leader
+//!   keeps the run's events and sends the stretch again (see
+//!   [`super::forwarded`]). Its refused events count as waiting events.
 //!
 //! A group whose writes keep failing halts: after [`HALT_FAILURES`] failed
 //! writes in a row, or once [`HALT_EVENTS`] events wait. A halted
-//! replicated group settles no more entries, and a halted forwarded
-//! partition takes no run its journal refuses, so no node delivers events
-//! without a durable copy for long. Each pass, or each run, still tries the
-//! write. The halt marks the node not ready through the
-//! node's apply wedge, the same way a cut barrier floor that keeps failing
-//! does. The first write that succeeds pays the debt and clears the halt.
+//! replicated group settles no more entries. Each pass, or each run, still
+//! tries the write. The halt marks the node not ready through the node's
+//! apply wedge, the same way a cut barrier floor that keeps failing does.
+//! The first write that succeeds pays the debt and clears the halt.
 
 use std::collections::BTreeMap;
 
@@ -102,11 +102,6 @@ impl JournalDebt {
         }
         owed.halted.clone()
     }
-
-    /// Whether `group_id` owes the journal.
-    pub fn owes_group(&self, group_id: u64) -> bool {
-        self.owed.contains_key(&group_id)
-    }
 }
 
 impl ChangeStream {
@@ -118,17 +113,28 @@ impl ChangeStream {
     /// Whether `group_id` halts: its journal writes keep failing. The first
     /// halt records itself on `wedge`, so the node reports not ready.
     pub(crate) fn journal_halts(&self, group_id: u64, wedge: &MetadataApplyWedge) -> bool {
+        self.journal_halts_with(group_id, None, wedge)
+    }
+
+    /// [`Self::journal_halts`], counting `refused` with the pending events:
+    /// the number of events of a forwarded run the node refused, and the
+    /// position of its first one. They wait at the run's sender.
+    pub(super) fn journal_halts_with(
+        &self,
+        group_id: u64,
+        refused: Option<(usize, CdcOffset)>,
+        wedge: &MetadataApplyWedge,
+    ) -> bool {
         let report = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let pending = state.group_pending.get(&group_id);
-            state.debt.halt(
-                group_id,
-                pending.map_or(0, Vec::len),
-                pending
-                    .and_then(|events| events.first())
-                    .map(|event| event.position()),
-            )
+            let oldest = pending
+                .and_then(|events| events.first())
+                .map(|event| event.position())
+                .or(refused.map(|(_, first)| first));
+            let waiting = pending.map_or(0, Vec::len) + refused.map_or(0, |(events, _)| events);
+            state.debt.halt(group_id, waiting, oldest)
         };
         let Some(report) = report else {
             return false;
@@ -178,7 +184,7 @@ mod tests {
         for _ in 1..HALT_FAILURES {
             debt.failed(4, &refused());
         }
-        assert!(debt.owes() && debt.owes_group(4) && !debt.owes_group(5));
+        assert!(debt.owes() && debt.owed.contains_key(&4) && !debt.owed.contains_key(&5));
         assert!(debt.halt(4, 10, None).is_none(), "below both bounds");
         assert!(
             debt.halt(4, HALT_EVENTS, Some(CdcOffset::data_event(0, 9, 1)))
@@ -196,5 +202,55 @@ mod tests {
             debt.halt(4, HALT_EVENTS, None).is_none(),
             "a paid group runs"
         );
+    }
+
+    /// One failed write with [`HALT_EVENTS`] settled events waiting halts
+    /// the group and marks the node not ready. The write that succeeds
+    /// journals them, and the next clear lifts the halt from the wedge.
+    #[test]
+    fn waiting_events_alone_halt_a_group_until_the_journal_takes_them() {
+        use std::sync::Arc;
+
+        use crate::control::change_stream::journal::ChangeJournal;
+        use crate::control::change_stream::{ChangeEvent, ChangeOperation};
+        use crate::types::{DatabaseId, Lsn, TenantId};
+
+        const GROUP: u64 = 4;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stream = ChangeStream::new(8);
+        let journal = Arc::new(ChangeJournal::open(dir.path(), HALT_EVENTS).expect("open"));
+        stream.attach_journal(Arc::clone(&journal)).expect("attach");
+        let wedge = MetadataApplyWedge::default();
+        let events = (0..HALT_EVENTS)
+            .map(|row| ChangeEvent {
+                lsn: Lsn::new(1),
+                tenant_id: TenantId::new(1),
+                collection: "orders".into(),
+                document_id: nodedb_types::RowIdentity::from_user_key(format!("e{row}")),
+                operation: ChangeOperation::Insert,
+                timestamp_ms: 1,
+                after: None,
+            })
+            .collect();
+        stream.stage(GROUP, 3, DatabaseId::DEFAULT, events);
+        stream.settle_group(GROUP, 3, 3);
+
+        journal.fail_next_persists_for_test(1);
+        assert!(stream.journal_group(GROUP, 3).is_err());
+        assert_eq!(stream.held_events(), HALT_EVENTS, "no event is dropped");
+        assert!(
+            stream.journal_halts(GROUP, &wedge),
+            "one failure with the bound reached halts the group"
+        );
+        let report = wedge.report().expect("the node is not ready");
+        assert_eq!(report.entry_kind, "change journal");
+        assert_eq!(report.raft_index, 3, "the oldest waiting entry");
+
+        stream.journal_group(GROUP, 3).expect("the write succeeds");
+        assert_eq!(stream.held_events(), 0);
+        assert!(!stream.journal_halts(GROUP, &wedge), "a paid group runs");
+        assert!(wedge.is_wedged(), "the halt stays until the clear");
+        stream.clear_journal_halts(&wedge);
+        assert!(!wedge.is_wedged(), "the clear lifts the halt");
     }
 }

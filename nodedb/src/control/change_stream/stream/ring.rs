@@ -175,6 +175,16 @@ impl ReplayRing {
         self.start_and_floor(run).1
     }
 
+    /// The changes of `run` that [`Self::append`] takes: those above where
+    /// the run starts on this ring. A run the ring took before has none.
+    pub fn fresh_in<'a>(&self, run: &'a ChangeRun) -> &'a [PositionedChange] {
+        let (start, _) = self.start_and_floor(run);
+        let first = run
+            .changes
+            .partition_point(|change| change.position <= start);
+        &run.changes[first..]
+    }
+
     /// Append the events of `run` the ring does not hold yet.
     pub fn append(&mut self, run: ChangeRun) -> AppendedRun {
         let (start, floor) = self.start_and_floor(&run);

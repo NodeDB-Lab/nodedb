@@ -50,7 +50,9 @@ pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, ConsumerGroupOffsetsRetained, MetadataApplyWedged,
     PurgeLogPruneNotProposed, SynonymGroupNotApplied,
 };
-pub(in crate::diag) use change_feed::{ChangeJournalFailed, ChangeJournalHalted};
+pub(in crate::diag) use change_feed::{
+    ChangeJournalFailed, ChangeJournalHalted, ChangeRunRejected,
+};
 pub(in crate::diag) use columnar::{
     ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,
     TimeseriesIdleFlushFailed, TimeseriesPartitionUnreadable,

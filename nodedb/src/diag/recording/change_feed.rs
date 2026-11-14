@@ -25,6 +25,23 @@ pub fn change_journal_failed(group_id: u64, operation: &'static str, error: &cra
     .emit();
 }
 
+/// Report that follower `peer` rejected `group_id`'s change feed, so this
+/// node stops feeding it the group. Called from the one site that reads the
+/// rejection, the leader's feed of the follower.
+pub fn change_run_rejected(peer: u64, group_id: u64, detail: &str) {
+    let ctx = context::ChangeRunRejected {
+        peer,
+        group_id,
+        detail: detail.to_owned(),
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "a follower rejected a group's change feed: the feed of the group stops",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
 /// Report that the change journal kept refusing `group_id`'s events, so the
 /// group halts and the node reports not ready. Called from the one site
 /// that decides the halt, once per halt.

@@ -51,7 +51,7 @@ pub use catalog::{
     catalog_apply_orphan_row, consumer_group_offsets_retained, metadata_apply_wedged,
     purge_log_prune_not_proposed, synonym_group_not_applied,
 };
-pub use change_feed::{change_journal_failed, change_journal_halted};
+pub use change_feed::{change_journal_failed, change_journal_halted, change_run_rejected};
 pub use columnar::{
     columnar_segment_corrupt, quarantine_record_evicted, timeseries_flush_not_installed,
     timeseries_idle_flush_failed, timeseries_partition_unreadable,

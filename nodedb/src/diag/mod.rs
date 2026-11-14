@@ -15,7 +15,7 @@ pub use recording::{
     audit_wal_not_truncated, batch_insert_without_surrogates, calvin_apply_halted,
     calvin_barrier_log_store_failed, calvin_completion_timeout, calvin_frozen_reply_store_failed,
     calvin_left_state_not_forgotten, calvin_stage_refused_internal, catalog_apply_orphan_row,
-    change_journal_failed, change_journal_halted, columnar_segment_corrupt,
+    change_journal_failed, change_journal_halted, change_run_rejected, columnar_segment_corrupt,
     constraint_install_deferred, consumer_group_offsets_retained, continuous_aggregate_not_applied,
     continuous_aggregate_state_fault, crdt_dead_letter_not_enqueued, crdt_dead_letter_not_restored,
     crdt_dead_letter_not_stored, custom_crs_set_not_applied, cut_barrier_not_placed,

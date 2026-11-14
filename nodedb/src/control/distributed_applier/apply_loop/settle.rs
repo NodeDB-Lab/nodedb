@@ -182,16 +182,116 @@ mod tests {
     use nodedb_cluster::GroupAppliedWatchers;
 
     use super::*;
-    use crate::bridge::dispatch::Dispatcher;
+    use crate::bridge::dispatch::{CoreChannelDataSide, Dispatcher};
+    use crate::control::change_stream::stream::journal_debt::HALT_FAILURES;
+    use crate::control::change_stream::{ChangeEvent, ChangeJournal, ChangeOperation, ReplayStart};
     use crate::control::cluster::calvin::BarrierEvent;
     use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
     use crate::control::distributed_applier::propose_tracker::ProposeTracker;
+    use crate::types::{DatabaseId, Lsn, TenantId};
     use crate::wal::WalManager;
 
     use super::super::lane::{Slot, SlotState};
     use super::super::proposal_gate::PrefixStep;
 
     const GROUP: u64 = 4;
+
+    /// A shared state with a change journal attached, whose applied floor
+    /// saves land in `saved`.
+    struct Harness {
+        state: Arc<SharedState>,
+        tracker: Arc<ProposeTracker>,
+        journal: Arc<ChangeJournal>,
+        saved: Arc<Mutex<Vec<(u64, u64)>>>,
+        _sides: Vec<CoreChannelDataSide>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+            let (dispatcher, sides) = Dispatcher::new(1, 64);
+            let state = SharedState::new(dispatcher, wal).expect("shared state");
+            let saved: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink_saved = Arc::clone(&saved);
+            let sink: Arc<crate::control::wal_replication::RaftAppliedIndexSink> =
+                Arc::new(move |group_id, applied_index| {
+                    sink_saved
+                        .lock()
+                        .expect("saved floors")
+                        .push((group_id, applied_index));
+                    Ok::<(), crate::Error>(())
+                });
+            assert!(state.raft_applied_index_sink.set(sink).is_ok());
+            let journal = Arc::new(
+                ChangeJournal::open(&dir.path().join("journal"), 64).expect("open journal"),
+            );
+            state
+                .change_stream
+                .attach_journal(Arc::clone(&journal))
+                .expect("attach the journal");
+            let watchers = Arc::new(GroupAppliedWatchers::new());
+            let tracker = Arc::new(ProposeTracker::new().with_group_watchers(watchers));
+            Self {
+                state,
+                tracker,
+                journal,
+                saved,
+                _sides: sides,
+                _dir: dir,
+            }
+        }
+
+        fn ctx(&self) -> ApplyContext<'_> {
+            ApplyContext {
+                state: &self.state,
+                tracker: &self.tracker,
+            }
+        }
+
+        fn saved(&self) -> Vec<(u64, u64)> {
+            self.saved.lock().expect("saved floors").clone()
+        }
+
+        /// Stage one change event under entry `log_index` of [`GROUP`], and
+        /// queue the entry on `lane` as concluded.
+        fn stage(&self, lane: &mut Lane, log_index: u64) {
+            self.state.change_stream.stage(
+                GROUP,
+                log_index,
+                DatabaseId::DEFAULT,
+                vec![ChangeEvent {
+                    lsn: Lsn::new(log_index),
+                    tenant_id: TenantId::new(1),
+                    collection: "orders".into(),
+                    document_id: nodedb_types::RowIdentity::from_user_key(format!(
+                        "row-{log_index}"
+                    )),
+                    operation: ChangeOperation::Insert,
+                    timestamp_ms: 1,
+                    after: None,
+                }],
+            );
+            lane.push(concluded(log_index));
+        }
+
+        /// The log index of every event the ring published, in order.
+        fn published(&self) -> Vec<u64> {
+            self.state
+                .change_stream
+                .query_changes(TenantId::new(1), None, ReplayStart::Timestamp(0), 64)
+                .expect("replay")
+                .events
+                .iter()
+                .map(|change| change.position().index)
+                .collect()
+        }
+
+        fn wedged(&self) -> bool {
+            self.state.metadata_apply_wedge.is_wedged()
+        }
+    }
 
     /// A concluded barrier entry at `log_index` whose row holds its event.
     fn concluded(log_index: u64) -> Slot {
@@ -209,29 +309,8 @@ mod tests {
     /// never passes the barrier entry. The next pass persists and saves it.
     #[tokio::test]
     async fn the_floor_waits_for_the_barrier_rows_to_persist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
-        let (dispatcher, _sides) = Dispatcher::new(1, 64);
-        let state = SharedState::new(dispatcher, wal).expect("shared state");
-        let saved: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink_saved = Arc::clone(&saved);
-        let sink: Arc<crate::control::wal_replication::RaftAppliedIndexSink> =
-            Arc::new(move |group_id, applied_index| {
-                sink_saved
-                    .lock()
-                    .expect("saved floors")
-                    .push((group_id, applied_index));
-                Ok::<(), crate::Error>(())
-            });
-        assert!(state.raft_applied_index_sink.set(sink).is_ok());
-        let watchers = Arc::new(GroupAppliedWatchers::new());
-        let tracker = Arc::new(ProposeTracker::new().with_group_watchers(watchers));
-        let ctx = ApplyContext {
-            state: &state,
-            tracker: &tracker,
-        };
-
-        let catalog = state.credentials.catalog();
+        let harness = Harness::new();
+        let catalog = harness.state.credentials.catalog();
         barrier_store::save_event(catalog, 7, TxnId::new(3, 0), &BarrierEvent::Timeout)
             .expect("save the row");
         let mut lane = Lane::new(GROUP);
@@ -239,15 +318,95 @@ mod tests {
         let mut lanes = HashMap::from([(GROUP, lane)]);
 
         catalog.fail_next_calvin_barrier_persist_for_test();
-        settle_lanes(ctx, &mut lanes).await;
+        settle_lanes(harness.ctx(), &mut lanes).await;
         assert!(
-            saved.lock().expect("saved floors").is_empty(),
+            harness.saved().is_empty(),
             "no floor passes a row that is not durable"
         );
         assert!(lanes[&GROUP].floor_to_save().is_some());
 
-        settle_lanes(ctx, &mut lanes).await;
-        assert_eq!(*saved.lock().expect("saved floors"), vec![(GROUP, 5)]);
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        assert_eq!(harness.saved(), vec![(GROUP, 5)]);
         assert!(lanes[&GROUP].floor_to_save().is_none());
+    }
+
+    /// A change journal write fails: the entry's event still publishes and
+    /// stays pending, and the applied floor stays where it is. The next
+    /// pass journals the event and saves the floor.
+    #[tokio::test]
+    async fn the_floor_waits_for_the_change_journal() {
+        let harness = Harness::new();
+        let mut lane = Lane::new(GROUP);
+        harness.stage(&mut lane, 5);
+        let mut lanes = HashMap::from([(GROUP, lane)]);
+
+        harness.journal.fail_next_persists_for_test(1);
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        assert!(
+            harness.saved().is_empty(),
+            "no floor passes an event the journal lacks"
+        );
+        assert_eq!(lanes[&GROUP].floor_to_save(), Some(5));
+        assert_eq!(harness.published(), vec![5], "the ring took the event");
+        assert_eq!(harness.state.change_stream.held_events(), 1);
+        assert!(harness.state.change_stream.journal_owed());
+
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        assert_eq!(harness.saved(), vec![(GROUP, 5)]);
+        assert!(lanes[&GROUP].floor_to_save().is_none());
+        assert_eq!(harness.state.change_stream.held_events(), 0);
+        assert!(!harness.state.change_stream.journal_owed());
+        assert_eq!(harness.published(), vec![5], "the event published once");
+    }
+
+    /// [`HALT_FAILURES`] failed journal writes in a row halt the group: it
+    /// settles no more entries, and the node reports not ready. Each pass
+    /// still retries the floor save. The first write that succeeds pays the
+    /// debt, and the next pass clears the wedge and settles again.
+    #[tokio::test]
+    async fn failed_journal_writes_halt_the_group_until_one_succeeds() {
+        let harness = Harness::new();
+        let mut lane = Lane::new(GROUP);
+        harness.stage(&mut lane, 5);
+        let mut lanes = HashMap::from([(GROUP, lane)]);
+
+        harness
+            .journal
+            .fail_next_persists_for_test(HALT_FAILURES + 1);
+        for _ in 0..HALT_FAILURES {
+            settle_lanes(harness.ctx(), &mut lanes).await;
+        }
+        assert!(!harness.wedged(), "below the bound the group runs");
+        assert!(harness.saved().is_empty());
+
+        let lane = lanes.get_mut(&GROUP).expect("the lane");
+        harness.stage(lane, 6);
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        let report = harness
+            .state
+            .metadata_apply_wedge
+            .report()
+            .expect("the halt marks the node not ready");
+        assert_eq!(report.entry_kind, "change journal");
+        assert_eq!(report.raft_index, 5, "the oldest waiting entry");
+        assert_eq!(lanes[&GROUP].last_settled(), Some(5), "entry 6 waits");
+        assert_eq!(harness.published(), vec![5]);
+        assert!(harness.saved().is_empty(), "the write failed again");
+
+        // The write succeeds: the floor saves, and the halt holds for the
+        // rest of the pass.
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        assert_eq!(harness.saved(), vec![(GROUP, 5)]);
+        assert_eq!(lanes[&GROUP].last_settled(), Some(5));
+        assert!(!harness.state.change_stream.journal_owed());
+        assert!(harness.wedged());
+
+        // The next pass clears the wedge and settles entry 6.
+        settle_lanes(harness.ctx(), &mut lanes).await;
+        assert!(!harness.wedged(), "the paid halt clears");
+        assert_eq!(lanes[&GROUP].last_settled(), Some(6));
+        assert_eq!(harness.published(), vec![5, 6]);
+        assert_eq!(harness.saved(), vec![(GROUP, 5), (GROUP, 6)]);
+        assert_eq!(harness.state.change_stream.held_events(), 0);
     }
 }

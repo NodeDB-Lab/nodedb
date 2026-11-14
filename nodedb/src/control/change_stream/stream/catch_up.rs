@@ -245,7 +245,7 @@ impl ChangeStream {
 
 /// `left` and `right` merged in position order, each position once. Each
 /// input is in position order.
-fn merge(
+pub(super) fn merge(
     left: Vec<SequencedChangeEvent>,
     right: Vec<SequencedChangeEvent>,
 ) -> Vec<SequencedChangeEvent> {
