@@ -256,3 +256,149 @@ async fn a_chunked_commit_binds_its_rows_and_publishes_one_event_per_row() {
     ids.dedup();
     assert_eq!(ids.len(), large, "every chunked row publishes exactly once");
 }
+
+/// Rows the commit larger than the change ring inserts: past the ring's
+/// 4096 events.
+const PAST_RING_ROWS: usize = 5_000;
+
+/// Events one poll of the large commit's feed asks for, so the read takes
+/// several pages.
+const POLL_PAGE: usize = 1_000;
+
+/// One poll of `coll`'s change feed from `cursor`.
+async fn poll_page(srv: &TestServer, coll: &str, query: &str) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://127.0.0.1:{}/v1/cdc/{coll}/poll?{query}",
+            srv.http_port
+        ))
+        .send()
+        .await
+        .expect("poll the change feed");
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.expect("a JSON change page");
+    assert!(status.is_success(), "poll {query}: {status} {body}");
+    body
+}
+
+/// The `(epoch, index, sequence)` the one partition of `cursor` names.
+fn cursor_position(cursor: &str) -> (u64, u64, u64) {
+    let entries: Vec<&str> = cursor
+        .strip_prefix("v2:")
+        .expect("a v2 cursor")
+        .split(',')
+        .collect();
+    assert_eq!(entries.len(), 1, "one partition in {cursor}");
+    let (_, position) = entries[0].split_once('@').expect("a positioned entry");
+    let parts: Vec<u64> = position
+        .split('.')
+        .map(|part| part.parse().expect("a position number"))
+        .collect();
+    assert_eq!(parts.len(), 3, "a three-part position in {cursor}");
+    (parts[0], parts[1], parts[2])
+}
+
+/// A chunked commit whose events pass the change ring's capacity reads in
+/// full through the poll. A cursor taken before it catches up from the
+/// change journal once the ring evicted its first events, then goes on from
+/// the ring. Every event comes once, in position order, at the commit's
+/// one LSN.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunked_commit_past_the_ring_reads_in_full_through_the_poll() {
+    let srv = TestServer::start_with_max_redo_entry_bytes(ENTRY_LIMIT).await;
+    srv.exec(
+        "CREATE COLLECTION past_ring (id STRING PRIMARY KEY, value STRING) \
+         WITH (engine='document_strict')",
+    )
+    .await
+    .unwrap();
+    srv.exec("INSERT INTO past_ring (id, value) VALUES ('s0', 'small')")
+        .await
+        .unwrap();
+    // A cursor that names the collection's partition, past the small write.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut cursor = loop {
+        let body = poll_page(&srv, "past_ring", "since_ms=0&limit=10").await;
+        if body["count"] == serde_json::json!(1) {
+            break body["next_cursor"]["cursor"]
+                .as_str()
+                .expect("a cursor")
+                .to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the small write never published: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+
+    let filler = "x".repeat(40);
+    srv.exec("BEGIN").await.unwrap();
+    for statement in 0..PAST_RING_ROWS / ROWS_PER_STATEMENT {
+        let values: Vec<String> = (0..ROWS_PER_STATEMENT)
+            .map(|row| {
+                let id = statement * ROWS_PER_STATEMENT + row;
+                format!("('b{id}', '{filler}')")
+            })
+            .collect();
+        srv.exec(&format!(
+            "INSERT INTO past_ring (id, value) VALUES {}",
+            values.join(", ")
+        ))
+        .await
+        .unwrap();
+    }
+    srv.exec("COMMIT").await.unwrap();
+
+    let mut changes: Vec<serde_json::Value> = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while changes.len() < PAST_RING_ROWS {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the poll read {} of {PAST_RING_ROWS} events",
+            changes.len()
+        );
+        let body = poll_page(
+            &srv,
+            "past_ring",
+            &format!("cursor={cursor}&limit={POLL_PAGE}"),
+        )
+        .await;
+        let page = body["changes"].as_array().cloned().unwrap_or_default();
+        assert!(page.len() <= POLL_PAGE, "a page holds at most its limit");
+        cursor = body["next_cursor"]["cursor"]
+            .as_str()
+            .expect("a cursor")
+            .to_owned();
+        let more = body["has_more"] == serde_json::json!(true);
+        changes.extend(page);
+        if !more && changes.len() < PAST_RING_ROWS {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    assert_eq!(changes.len(), PAST_RING_ROWS, "no event twice");
+
+    let positions: Vec<(u64, u64, u64)> = changes
+        .iter()
+        .map(|change| cursor_position(change["cursor"].as_str().expect("a cursor")))
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "events arrive in position order"
+    );
+    let lsn = changes[0]["lsn"].clone();
+    let mut ids: Vec<&str> = changes
+        .iter()
+        .map(|change| {
+            assert_eq!(change["lsn"], lsn, "every event at the commit's one LSN");
+            change["document_id"].as_str().expect("a document id")
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        PAST_RING_ROWS,
+        "every row publishes exactly once"
+    );
+}

@@ -81,7 +81,7 @@ impl CrossShardReceiver {
 
         match envelope.msg_type {
             VShardMessageType::CrossShardEvent => self.handle_write(envelope).await,
-            VShardMessageType::NotifyBroadcast => self.handle_notify_broadcast(envelope),
+            VShardMessageType::NotifyBroadcast => self.handle_notify_broadcast(envelope).await,
             other => self.error_response(
                 envelope.source_node,
                 envelope.vshard_id,
@@ -184,8 +184,9 @@ impl CrossShardReceiver {
     ///
     /// Deserializes the `NotifyBroadcastMsg` and appends it to the local
     /// `ChangeStream` before it acks, so the leader's next run for this node
-    /// lands after it.
-    fn handle_notify_broadcast(&self, envelope: VShardEnvelope) -> Vec<u8> {
+    /// lands after it. The append journals the run, so it runs on the
+    /// blocking pool.
+    async fn handle_notify_broadcast(&self, envelope: VShardEnvelope) -> Vec<u8> {
         let msg: super::types::NotifyBroadcastMsg = match zerompk::from_msgpack(&envelope.payload) {
             Ok(m) => m,
             Err(e) => {
@@ -203,14 +204,32 @@ impl CrossShardReceiver {
             return self.build_ack_response(envelope.source_node, envelope.vshard_id);
         }
 
+        let (source_node, partition_id, changes) =
+            (msg.source_node, msg.partition_id, msg.changes.len());
         // Deliver to local ChangeStream subscribers.
-        self.shared_state.change_stream.deliver_remote_notify(&msg);
+        let shared = std::sync::Arc::clone(&self.shared_state);
+        let delivered = tokio::task::spawn_blocking(move || {
+            shared
+                .change_stream
+                .deliver_remote_notify(&msg, &shared.metadata_apply_wedge)
+        })
+        .await;
+        match delivered {
+            Ok(()) => {}
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => {
+                return self.error_response(
+                    envelope.source_node,
+                    envelope.vshard_id,
+                    0,
+                    &format!("the forwarded change run did not append: {error}"),
+                );
+            }
+        }
 
         trace!(
-            source_node = msg.source_node,
-            partition_id = msg.partition_id,
-            changes = msg.changes.len(),
-            "appended a forwarded change-stream run"
+            source_node,
+            partition_id, changes, "appended a forwarded change-stream run"
         );
 
         self.build_ack_response(envelope.source_node, envelope.vshard_id)
