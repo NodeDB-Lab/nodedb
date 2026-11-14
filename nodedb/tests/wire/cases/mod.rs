@@ -471,6 +471,7 @@ mod sum_generated_column;
 mod sum_generated_join;
 mod sum_generated_join_case;
 mod sum_truncate_zero_net;
+mod sum_unbound_rewrite;
 mod timeseries_aggregate_derived_reads;
 mod timeseries_aggregate_order;
 mod timeseries_aggregate_output_shape;
