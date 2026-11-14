@@ -10,6 +10,8 @@
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
 //! - [`streamed`]: the content of a stream marker, read back from the WAL.
+//! - [`stream_validate`]: the validate of a stream marker's content, run
+//!   batch by batch over the stream.
 //! - [`document`]: document rows written while the apply scope is open.
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
@@ -37,6 +39,7 @@ mod cross_shard_fold_tests;
 mod document;
 mod entry;
 mod events;
+mod folded_store;
 #[cfg(test)]
 mod install_refusal_tests;
 mod installed_document;
@@ -46,6 +49,7 @@ mod retention_instant_tests;
 mod settle;
 mod snapshot_check;
 mod state;
+mod stream_validate;
 mod streamed;
 mod sub_ops;
 mod sum_fold_check;

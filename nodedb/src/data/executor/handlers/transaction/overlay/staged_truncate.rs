@@ -70,10 +70,13 @@ impl TxnOverlay {
         let mut batch = Vec::new();
         let mut read = 0usize;
         let mut last: Option<RowIdentity> = None;
-        for binding in overlay.doc_id_to_surrogate.scan(ScanBounds {
-            after,
-            prefix: None,
-        }) {
+        for binding in overlay.doc_id_to_surrogate.scan(
+            ScanBounds {
+                after,
+                prefix: None,
+            },
+            reader,
+        ) {
             let (doc_id, surrogate) = binding?;
             let surrogate = *surrogate;
             if matches!(

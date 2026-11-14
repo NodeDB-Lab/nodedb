@@ -84,7 +84,7 @@ fn object(fields: &[(&str, Value)]) -> Vec<u8> {
 
 // ── Document ─────────────────────────────────────────────────────────────
 
-fn document_insert() -> PhysicalPlan {
+pub(super) fn document_insert() -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointInsert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
         document_id: "n1".to_string(),
@@ -118,7 +118,7 @@ fn a_document_write_lands_and_a_refused_install_removes_it() {
 
 // ── KV predicate form ────────────────────────────────────────────────────
 
-fn seed_kv(core: &mut CoreLoop) {
+pub(super) fn seed_kv(core: &mut CoreLoop) {
     core.kv_engine
         .put(crate::engine::kv::KvPutParams {
             database_id: 0,
@@ -133,7 +133,7 @@ fn seed_kv(core: &mut CoreLoop) {
         .expect("a bound row writes");
 }
 
-fn kv_predicate_delete() -> PhysicalPlan {
+pub(super) fn kv_predicate_delete() -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::PredicateDelete {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
         filters: Vec::new(),
@@ -162,7 +162,7 @@ fn a_kv_predicate_delete_lands_and_a_refused_install_restores_the_key() {
 
 // ── Vector (vector-primary direct write) ─────────────────────────────────
 
-fn vector_direct_insert() -> PhysicalPlan {
+pub(super) fn vector_direct_insert() -> PhysicalPlan {
     PhysicalPlan::Vector(VectorOp::DirectInsert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
         field: "vec".into(),
@@ -199,7 +199,7 @@ fn a_vector_primary_write_lands_and_a_refused_install_withdraws_it() {
 
 // ── CRDT ─────────────────────────────────────────────────────────────────
 
-fn crdt_upsert() -> PhysicalPlan {
+pub(super) fn crdt_upsert() -> PhysicalPlan {
     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "tasks"),
         document_id: "t1".to_string(),
@@ -233,7 +233,7 @@ fn a_crdt_write_lands_and_a_refused_install_restores_the_document() {
 
 // ── Spatial ──────────────────────────────────────────────────────────────
 
-fn spatial_insert() -> PhysicalPlan {
+pub(super) fn spatial_insert() -> PhysicalPlan {
     PhysicalPlan::Spatial(SpatialOp::Insert {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "places"),
         field: "geom".to_string(),
@@ -274,7 +274,7 @@ fn array_id() -> ArrayId {
     ArrayId::new(TenantId::new(TID), "grid")
 }
 
-fn open_array(core: &mut CoreLoop) {
+pub(super) fn open_array(core: &mut CoreLoop) {
     let schema = ArraySchemaBuilder::new("grid")
         .dim(DimSpec::new(
             "x",
@@ -291,7 +291,7 @@ fn open_array(core: &mut CoreLoop) {
     assert_committed(&response);
 }
 
-fn array_put() -> PhysicalPlan {
+pub(super) fn array_put() -> PhysicalPlan {
     let cells = vec![ArrayPutCell {
         coord: vec![CoordValue::Int64(3)],
         attrs: vec![CellValue::Int64(9)],
@@ -328,15 +328,9 @@ fn an_array_write_lands_and_a_refused_install_restores_the_tiles() {
 
 // ── Text (full-text index) ───────────────────────────────────────────────
 
-/// A text write stages no row, so this installs its redo sub-record directly,
-/// the one resolve serializes from the plan.
-fn fts_documents(refuse: bool) -> u32 {
-    use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
-    use crate::types::Lsn;
-    use crate::wal::{RedoRecord, RedoSubRecord};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+/// The redo sub-record resolve serializes from a text index plan of
+/// `docs` row 91.
+pub(super) fn fts_index_sub_record() -> crate::wal::RedoSubRecord {
     let op = nodedb_physical::physical_plan::TextOp::FtsIndexDoc {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
         surrogate: Surrogate::new(91),
@@ -346,10 +340,22 @@ fn fts_documents(refuse: bool) -> u32 {
     let (record_type, payload) = crate::control::server::wal_dispatch::encode_text_op_record(&op)
         .expect("encode text op")
         .expect("an index op journals a record");
-    let mut ops = vec![RedoSubRecord {
+    crate::wal::RedoSubRecord {
         record_type: record_type as u32,
         payload,
-    }];
+    }
+}
+
+/// A text write stages no row, so this installs its redo sub-record directly,
+/// the one resolve serializes from the plan.
+fn fts_documents(refuse: bool) -> u32 {
+    use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
+    use crate::types::Lsn;
+    use crate::wal::{RedoRecord, RedoSubRecord};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+    let mut ops = vec![fts_index_sub_record()];
     if refuse {
         let lines = zerompk::to_msgpack_vec(&vec!["other_probe,host=a value=1 1".to_string()])
             .expect("encode lines");
@@ -412,7 +418,7 @@ fn a_text_write_lands_and_a_refused_install_removes_the_posting() {
 
 /// A document write indexes its text and its geometry as side effects. A
 /// refused install withdraws the posting and the R-tree entry with the row.
-fn indexed_document_put() -> PhysicalPlan {
+pub(super) fn indexed_document_put() -> PhysicalPlan {
     let location = serde_json::json!({"type": "Point", "coordinates": [10.0, 20.0]});
     let body = nodedb_types::json_to_msgpack(&serde_json::json!({
         "title": "quantum database sentinel",
@@ -464,18 +470,10 @@ fn a_refused_install_withdraws_the_index_side_effects_of_a_document_write() {
 
 // ── Raw CRDT delta ───────────────────────────────────────────────────────
 
-/// A committed record never carries a raw CRDT delta: a rejected delta's
-/// dead-letter entry is keyed by its record's LSN, which every sub-record of
-/// one committed record shares. The validate pass refuses such a record
-/// before anything is written.
-#[test]
-fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
-    use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
-    use crate::types::Lsn;
-    use crate::wal::{CrdtDeltaTarget, CrdtDeltaWalPayload, RedoRecord, RedoSubRecord};
+/// A raw CRDT delta sub-record, which no committed record may carry.
+pub(super) fn raw_crdt_delta_sub_record() -> crate::wal::RedoSubRecord {
+    use crate::wal::{CrdtDeltaTarget, CrdtDeltaWalPayload};
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut core, _req, _resp) = make_core_with_dir(dir.path());
     let delta = CrdtDeltaWalPayload::new(
         vec![0u8; 8],
         "tasks".to_string(),
@@ -486,12 +484,27 @@ fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
     )
     .encode()
     .expect("encode delta");
+    crate::wal::RedoSubRecord {
+        record_type: nodedb_wal::record::RecordType::CrdtDelta as u32,
+        payload: delta,
+    }
+}
+
+/// A committed record never carries a raw CRDT delta: a rejected delta's
+/// dead-letter entry is keyed by its record's LSN, which every sub-record of
+/// one committed record shares. The validate pass refuses such a record
+/// before anything is written.
+#[test]
+fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
+    use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
+    use crate::types::Lsn;
+    use crate::wal::RedoRecord;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _req, _resp) = make_core_with_dir(dir.path());
     let redo = RedoRecord {
         version: 1,
-        ops: vec![RedoSubRecord {
-            record_type: nodedb_wal::record::RecordType::CrdtDelta as u32,
-            payload: delta,
-        }],
+        ops: vec![raw_crdt_delta_sub_record()],
         calvin_stamp: None,
         cross_shard_applied: None,
         row_sources: Vec::new(),

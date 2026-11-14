@@ -33,8 +33,6 @@
 
 use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets};
 use nodedb_types::calvin::VersionedReadEntry;
-use nodedb_wal::WalRecord;
-use nodedb_wal::record::{RecordType, WalRecordArgs};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -43,10 +41,13 @@ use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::enforcement::write_hook::target_write_set;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
-use crate::wal::RedoRecord;
+use crate::wal::{RedoRecord, RedoStreamRef};
 
-use super::passes::{RedoTarget, final_refusal};
+use super::clone_copy::clone_probe_unreadable;
+use super::passes::{RedoTarget, final_refusal, redo_wal_record};
 use super::state::{DeferredNoteKind, TsInstalled};
+use super::stream_validate::{StreamLimits, StreamValidateInput};
+use super::streamed::STREAM_BATCH_BYTES;
 use super::sub_ops::{document_ops, kv_ops, label_ops};
 use super::validate::CommitBoundary;
 use crate::engine::timeseries::install_counts::TsInstallCounts;
@@ -210,12 +211,55 @@ impl CoreLoop {
             Ok(redo) => redo,
             Err(error) => return self.response_error(task, final_refusal(error.into())),
         };
+        let reference = match RedoStreamRef::of_marker(&redo) {
+            Ok(reference) => reference,
+            Err(error) => return self.response_error(task, final_refusal(error.into())),
+        };
+        // Retention is judged at an instant the entry carries: a Calvin
+        // slice's epoch instant, else the system-time ordinal the entry's
+        // leader assigned. So every replica reaches the same verdict. Only a
+        // write with neither reads the wall clock.
+        let judged_at_ms = crate::data::executor::enforcement::retention::judged_instant_ms(
+            judged_at_ms,
+            task.request.system_ordinal,
+        );
+        // A stream marker's content is validated as the stream pages in,
+        // with every check the whole-record path runs below, and the same
+        // first error. The validate and the install run in this one
+        // synchronous task on this core, with no yield between them, so no
+        // write lands between the verdict and the install. `stream_validated`
+        // holds the validate's spill directory until the install ran.
+        let stream_validated = match &reference {
+            Some(reference) => {
+                let input = StreamValidateInput {
+                    task,
+                    tid,
+                    marker: &redo,
+                    reference,
+                    origin,
+                    snapshot: snapshot.map(|snapshot| snapshot.ordinal),
+                    judged_at_ms,
+                    lsn,
+                    limits: StreamLimits {
+                        batch_bytes: STREAM_BATCH_BYTES,
+                        spill_threshold: self.query_tuning.max_txn_overlay_bytes,
+                    },
+                };
+                match self.validate_redo_stream(&input) {
+                    Ok(validated) => Some(validated),
+                    Err(code) => return self.response_error(task, code),
+                }
+            }
+            None => None,
+        };
         // A stream marker installs the content its chunk records hold, with
         // the sum targets and reads the content carries.
-        let (redo, streamed) = match self.streamed_content(&redo) {
-            Ok(Some(content)) => (content.record, Some(content.carried)),
-            Ok(None) => (redo, None),
-            Err(code) => return self.response_error(task, code),
+        let (redo, streamed) = match reference {
+            Some(reference) => match self.streamed_content(&redo, reference) {
+                Ok(content) => (content.record, Some(content.carried)),
+                Err(code) => return self.response_error(task, code),
+            },
+            None => (redo, None),
         };
         let redo_bytes = streamed
             .as_ref()
@@ -237,58 +281,32 @@ impl CoreLoop {
         let doc_ops =
             match self.without_skipped_clone_copies(database_id, tid, document_ops(&redo.ops)) {
                 Ok(ops) => ops,
-                Err(error) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::RetryableRefusal {
-                            reason: format!(
-                                "a committed redo could not read the rows its clone copies \
-                                 name: {error}"
-                            ),
-                        },
-                    );
-                }
+                Err(error) => return self.response_error(task, clone_probe_unreadable(error)),
             };
         // Nothing is written when a check refuses the record, so the refusal
         // is final on every replica. A role-guarded transition is judged
-        // against the roles the record carries. Retention is judged at an
-        // instant the entry carries: a Calvin slice's epoch instant, else the
-        // system-time ordinal the entry's leader assigned. So every replica
-        // reaches the same verdict. Only a write with neither reads the wall
-        // clock.
+        // against the roles the record carries.
         let kv_writes = kv_ops(&redo.ops);
-        if let Err(error) = self.check_commit_boundary(&CommitBoundary {
-            database_id,
-            tid,
-            documents: &doc_ops,
-            kv: &kv_writes,
-            sum_targets,
-            origin,
-            user_roles: &redo.user_roles,
-            judged_at_ms: crate::data::executor::enforcement::retention::judged_instant_ms(
+        if stream_validated.is_none()
+            && let Err(error) = self.check_commit_boundary(&CommitBoundary {
+                database_id,
+                tid,
+                documents: &doc_ops,
+                kv: &kv_writes,
+                sum_targets,
+                origin,
+                user_roles: &redo.user_roles,
                 judged_at_ms,
-                task.request.system_ordinal,
-            ),
-        }) {
+            })
+        {
             return self.response_error(task, error);
         }
         let kv_images = self.kv_prior_images(database_id, tid, kv_writes);
         let labels = label_ops(&redo.ops);
 
-        let record = match WalRecord::new(WalRecordArgs {
-            record_type: RecordType::TransactionRedo as u32,
-            lsn: lsn.as_u64(),
-            tenant_id: task.request.tenant_id.as_u64(),
-            vshard_id: task.request.vshard_id.as_u32(),
-            database_id,
-            payload: redo_bytes.to_vec(),
-            encryption_key: None,
-            preamble_bytes: None,
-        }) {
+        let record = match redo_wal_record(task, lsn, redo_bytes.to_vec()) {
             Ok(record) => record,
-            Err(error) => {
-                return self.response_error(task, final_refusal(crate::Error::from(error).into()));
-            }
+            Err(code) => return self.response_error(task, code),
         };
         let target = RedoTarget {
             record: &record,
@@ -297,16 +315,18 @@ impl CoreLoop {
             tid,
             origin,
         };
-        if let Err(refusal) = self.validate_redo_pass(&target, sum_targets) {
-            return self.response_error(task, refusal.into_code());
-        }
-        // A snapshot transaction commits only while nothing it read or
-        // replaces moved past its snapshot. Nothing is written yet.
-        if let Some(snapshot) = snapshot
-            && let Err(refusal) =
-                self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
-        {
-            return self.response_error(task, refusal);
+        if stream_validated.is_none() {
+            if let Err(refusal) = self.validate_redo_pass(&target, sum_targets) {
+                return self.response_error(task, refusal.into_code());
+            }
+            // A snapshot transaction commits only while nothing it read or
+            // replaces moved past its snapshot. Nothing is written yet.
+            if let Some(snapshot) = snapshot
+                && let Err(refusal) =
+                    self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
+            {
+                return self.response_error(task, refusal);
+            }
         }
         // The replay arms install the record. Each write they apply takes the
         // record's stamp: its vShard and its LSN.
@@ -319,6 +339,9 @@ impl CoreLoop {
         let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
         let installed = self.install_redo_pass(&target, sum_targets);
         self.kv_engine.close_write_scope(kv_scope);
+        // The install ran over the validated content: its spill directory
+        // goes.
+        drop(stream_validated);
         self.record_stamps.remove(lsn);
         let mut scope = match installed {
             Ok(scope) => scope,
@@ -403,34 +426,9 @@ impl CoreLoop {
                 return response;
             }
         }
-        // Events leave only once the record is settled. Every
-        // one names the record's LSN: the install held the watermark back.
-        // A handler stamped each with the record's source: it takes the
-        // committed source of its kind of row, or its row-source group's.
-        // A handler that ran under a replay task stamped no commit HLC or
-        // author: each takes the record's.
+        // Events leave only once the record is settled.
         let rows = crate::wal::RowSourceIndex::new(&redo.row_sources);
-        let record_source = task.request.event_source;
-        for mut event in std::mem::take(&mut scope.pending_events) {
-            event.lsn = lsn;
-            if event.commit_hlc.is_none() {
-                event.commit_hlc = task.request.commit_hlc;
-            }
-            if event.user_id.is_none() {
-                event.user_id = task.request.user_id.clone();
-            }
-            if event.statement_digest.is_none() {
-                event.statement_digest = task.request.statement_digest.clone();
-            }
-            event.source = super::events::committed_source(
-                &rows,
-                record_source,
-                record_source.committed_other_source(),
-                &event.collection,
-                event.row_id.as_str(),
-            );
-            self.send_write_event(event);
-        }
+        self.send_held_events(task, std::mem::take(&mut scope.pending_events), &rows, lsn);
         // Edge writes count only once the record settled: a rolled-back
         // install applied none.
         self.publish_edge_writes(scope.edge_writes);

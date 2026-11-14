@@ -267,6 +267,43 @@ impl CoreLoop {
             );
         }
     }
+
+    /// Send the events the install's handlers raised and held back.
+    ///
+    /// Every one names the record's LSN `lsn`: the install held the
+    /// watermark back. A handler stamped each with the record's source: it
+    /// takes the committed source of its kind of row, or its row-source
+    /// group's. A handler that ran under a replay task stamped no commit HLC
+    /// or author: each takes the record's.
+    pub(super) fn send_held_events(
+        &mut self,
+        task: &ExecutionTask,
+        events: Vec<crate::event::WriteEvent>,
+        rows: &RowSourceIndex,
+        lsn: crate::types::Lsn,
+    ) {
+        let record_source = task.request.event_source;
+        for mut event in events {
+            event.lsn = lsn;
+            if event.commit_hlc.is_none() {
+                event.commit_hlc = task.request.commit_hlc;
+            }
+            if event.user_id.is_none() {
+                event.user_id = task.request.user_id.clone();
+            }
+            if event.statement_digest.is_none() {
+                event.statement_digest = task.request.statement_digest.clone();
+            }
+            event.source = committed_source(
+                rows,
+                record_source,
+                record_source.committed_other_source(),
+                &event.collection,
+                event.row_id.as_str(),
+            );
+            self.send_write_event(event);
+        }
+    }
 }
 
 /// The source a committed row carries: its row-source group's, when the

@@ -7,6 +7,8 @@ use crate::types::Lsn;
 use crate::wal::RedoSubRecord;
 use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{StorageKey, Surrogate};
+use nodedb_wal::WalRecord;
+use nodedb_wal::record::{RecordType, WalRecordArgs};
 
 const TID: u64 = 1;
 

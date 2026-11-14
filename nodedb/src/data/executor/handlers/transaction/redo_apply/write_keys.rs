@@ -12,7 +12,7 @@ use crate::data::executor::core_loop::txn_validate::TxnWrite;
 use crate::types::KeyRepr;
 use crate::wal::RedoSubRecord;
 
-use super::sub_ops::{RedoKvOp, document_ops, kv_ops};
+use super::sub_ops::{RedoKvOp, document_op, kv_op};
 
 fn edge_write(sub: &RedoSubRecord) -> Option<TxnWrite> {
     let (collection, src, label, dst) = match RecordType::from_raw(sub.record_type)? {
@@ -41,31 +41,57 @@ fn edge_write(sub: &RedoSubRecord) -> Option<TxnWrite> {
     })
 }
 
-/// The keyed rows `ops` write, in record order.
-pub(super) fn redo_writes(ops: &[RedoSubRecord]) -> Vec<TxnWrite> {
-    let mut out: Vec<TxnWrite> = document_ops(ops)
-        .iter()
-        .map(|op| TxnWrite {
-            collection: op.collection().to_string(),
-            key: KeyRepr::Surrogate(op.surrogate()),
-        })
-        .collect();
-    for op in kv_ops(ops) {
-        match op {
-            RedoKvOp::Put {
-                collection, key, ..
-            } => out.push(TxnWrite {
-                collection,
+/// The keyed rows one sub-record writes, split by the order
+/// [`redo_writes`] lists a record's writes in: every document row first,
+/// then every KV row, then every edge.
+pub(super) struct SubRecordWrites {
+    pub(super) document: Option<TxnWrite>,
+    pub(super) kv: Vec<TxnWrite>,
+    pub(super) edge: Option<TxnWrite>,
+}
+
+/// The keyed rows `sub` writes.
+pub(super) fn sub_record_writes(sub: &RedoSubRecord) -> SubRecordWrites {
+    let document = document_op(sub).map(|op| TxnWrite {
+        collection: op.collection().to_string(),
+        key: KeyRepr::Surrogate(op.surrogate()),
+    });
+    let kv = match kv_op(sub) {
+        Some(RedoKvOp::Put {
+            collection, key, ..
+        }) => vec![TxnWrite {
+            collection,
+            key: KeyRepr::KvKey(key.into_boxed_slice()),
+        }],
+        Some(RedoKvOp::Delete { collection, keys }) => keys
+            .into_iter()
+            .map(|key| TxnWrite {
+                collection: collection.clone(),
                 key: KeyRepr::KvKey(key.into_boxed_slice()),
-            }),
-            RedoKvOp::Delete { collection, keys } => {
-                out.extend(keys.into_iter().map(|key| TxnWrite {
-                    collection: collection.clone(),
-                    key: KeyRepr::KvKey(key.into_boxed_slice()),
-                }))
-            }
-        }
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    SubRecordWrites {
+        document,
+        kv,
+        edge: edge_write(sub),
     }
-    out.extend(ops.iter().filter_map(edge_write));
-    out
+}
+
+/// The keyed rows `ops` write: the document rows in record order, then the
+/// KV rows, then the edges.
+pub(super) fn redo_writes(ops: &[RedoSubRecord]) -> Vec<TxnWrite> {
+    let mut documents = Vec::new();
+    let mut kv = Vec::new();
+    let mut edges = Vec::new();
+    for sub in ops {
+        let writes = sub_record_writes(sub);
+        documents.extend(writes.document);
+        kv.extend(writes.kv);
+        edges.extend(writes.edge);
+    }
+    documents.extend(kv);
+    documents.extend(edges);
+    documents
 }

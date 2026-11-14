@@ -21,7 +21,6 @@
 //! on the same writes, under the target rows' locks.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 
@@ -35,26 +34,17 @@ use crate::data::executor::enforcement::materialized_sum::delta::{
     fold_sum_deltas, json_to_decimal,
 };
 use crate::data::executor::enforcement::typeguard::GuardScope;
-use crate::data::executor::enforcement::unique::{PostImage, UniqueScope, check_unique_post_state};
+use crate::data::executor::enforcement::unique::{claimed_values, violation};
 use crate::data::executor::handlers::document::read::decode::decode_scanned_document;
 use crate::data::executor::handlers::point::apply_put::stored_body::StoredBodyInput;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
-use crate::engine::document::store::StorageKey;
+use crate::engine::document::store::{DocumentEngine, StorageKey};
 use crate::types::SharedInstalledDocument;
 use crate::types::{DatabaseId, TenantId};
 
+use super::folded_store::{FoldedRow, FoldedStore, FoldedTargets};
 use super::sub_ops::RedoDocOp;
 use super::validate::CollectionScope;
-
-/// A target row as the earlier folds of the record left it: its document
-/// and the bytes the install stores for it.
-type FoldedTargets = BTreeMap<(String, u32), FoldedRow>;
-
-/// One target row a fold of the record wrote.
-struct FoldedRow {
-    doc: serde_json::Value,
-    stored: Vec<u8>,
-}
 
 impl CoreLoop {
     /// Refuse `ops` of one source collection when a fold their install runs
@@ -63,6 +53,26 @@ impl CoreLoop {
         &self,
         scope: &CollectionScope<'_>,
         ops: &[&RedoDocOp],
+    ) -> crate::Result<()> {
+        if scope.config.enforcement.materialized_sum_sources.is_empty() {
+            return Ok(());
+        }
+        let mut folded = FoldedTargets::new();
+        for op in ops {
+            self.check_op_folds(scope, &mut folded, op)?;
+        }
+        Ok(())
+    }
+
+    /// Refuse `op` of one source collection when a fold its install runs on
+    /// this core would refuse, against the target rows the record's earlier
+    /// folds left in `folded`. Records the rows its folds leave there.
+    /// Reads only.
+    pub(super) fn check_op_folds(
+        &self,
+        scope: &CollectionScope<'_>,
+        folded: &mut impl FoldedStore,
+        op: &RedoDocOp,
     ) -> crate::Result<()> {
         let bindings = &scope.config.enforcement.materialized_sum_sources;
         if bindings.is_empty() {
@@ -73,63 +83,59 @@ impl CoreLoop {
             scope.collection,
         )?;
         let crs = self.crs_context();
-        let mut folded: FoldedTargets = BTreeMap::new();
-        for op in ops {
-            let key = StorageKey::for_surrogate(nodedb_types::Surrogate::new(op.surrogate()));
-            let prior =
-                self.current_row_body(scope.database_id, scope.tid, scope.collection, &key)?;
-            let old_doc = match &prior {
-                Some(bytes) => Some(self.decode_stored_document(scope.config, bytes)?),
-                None => None,
-            };
-            let new_doc = match op {
-                RedoDocOp::Put { value, .. } => Some(self.unique_image(scope.config, value)?),
-                RedoDocOp::Delete { .. } => None,
-            };
-            let images = match (old_doc.as_ref(), new_doc.as_ref()) {
-                (Some(old_doc), Some(new_doc)) => RowImages::Update { old_doc, new_doc },
-                (None, Some(new_doc)) => RowImages::Insert { new_doc },
-                (Some(old_doc), None) => RowImages::Delete { old_doc },
-                // A delete of a row that is not stored folds nothing.
-                (None, None) => continue,
-            };
-            for binding in bindings {
-                let co_resident =
-                    crate::query::sum_target_is_co_resident(source, &binding.target_collection);
-                for (join_value, delta) in coalesce(fold_sum_deltas(binding, &images, &crs)?) {
-                    if delta == Decimal::ZERO {
-                        continue;
-                    }
-                    let resolved = scope.resolved.iter().find(|target| {
-                        target.target_collection == binding.target_collection
-                            && target.join_value == join_value
-                    });
-                    // A cross-shard target with no resolution travels on its
-                    // own task.
-                    if !co_resident && resolved.is_none() {
-                        continue;
-                    }
-                    let Some(target) = resolved else {
-                        return Err(crate::Error::MaterializedSumResolutionMissing {
-                            target_collection: binding.target_collection.clone(),
-                            join_column: binding.join_column.clone(),
-                            join_value,
-                        });
-                    };
-                    self.check_one_fold(
-                        scope,
-                        &mut folded,
-                        FoldStep {
-                            target_collection: &binding.target_collection,
-                            target_column: &binding.target_column,
-                            join_column: &binding.join_column,
-                            join_value: &join_value,
-                            declared_primary_key: binding.declared_primary_key.as_deref(),
-                            surrogate: target.surrogate.as_u32(),
-                            delta,
-                        },
-                    )?;
+        let key = StorageKey::for_surrogate(nodedb_types::Surrogate::new(op.surrogate()));
+        let prior = self.current_row_body(scope.database_id, scope.tid, scope.collection, &key)?;
+        let old_doc = match &prior {
+            Some(bytes) => Some(self.decode_stored_document(scope.config, bytes)?),
+            None => None,
+        };
+        let new_doc = match op {
+            RedoDocOp::Put { value, .. } => Some(self.unique_image(scope.config, value)?),
+            RedoDocOp::Delete { .. } => None,
+        };
+        let images = match (old_doc.as_ref(), new_doc.as_ref()) {
+            (Some(old_doc), Some(new_doc)) => RowImages::Update { old_doc, new_doc },
+            (None, Some(new_doc)) => RowImages::Insert { new_doc },
+            (Some(old_doc), None) => RowImages::Delete { old_doc },
+            // A delete of a row that is not stored folds nothing.
+            (None, None) => return Ok(()),
+        };
+        for binding in bindings {
+            let co_resident =
+                crate::query::sum_target_is_co_resident(source, &binding.target_collection);
+            for (join_value, delta) in coalesce(fold_sum_deltas(binding, &images, &crs)?) {
+                if delta == Decimal::ZERO {
+                    continue;
                 }
+                let resolved = scope.resolved.iter().find(|target| {
+                    target.target_collection == binding.target_collection
+                        && target.join_value == join_value
+                });
+                // A cross-shard target with no resolution travels on its own
+                // task.
+                if !co_resident && resolved.is_none() {
+                    continue;
+                }
+                let Some(target) = resolved else {
+                    return Err(crate::Error::MaterializedSumResolutionMissing {
+                        target_collection: binding.target_collection.clone(),
+                        join_column: binding.join_column.clone(),
+                        join_value,
+                    });
+                };
+                self.check_one_fold(
+                    scope,
+                    folded,
+                    FoldStep {
+                        target_collection: &binding.target_collection,
+                        target_column: &binding.target_column,
+                        join_column: &binding.join_column,
+                        join_value: &join_value,
+                        declared_primary_key: binding.declared_primary_key.as_deref(),
+                        surrogate: target.surrogate.as_u32(),
+                        delta,
+                    },
+                )?;
             }
         }
         Ok(())
@@ -140,7 +146,7 @@ impl CoreLoop {
     fn check_one_fold(
         &self,
         scope: &CollectionScope<'_>,
-        folded: &mut FoldedTargets,
+        folded: &mut impl FoldedStore,
         step: FoldStep<'_>,
     ) -> crate::Result<()> {
         let database_id = DatabaseId::new(scope.database_id);
@@ -156,8 +162,8 @@ impl CoreLoop {
                 ),
             });
         }
-        let row_key = (step.target_collection.to_string(), step.surrogate);
-        let (mut target_doc, prior_stored) = match folded.get(&row_key) {
+        let folded_row = folded.folded(step.target_collection, step.surrogate)?;
+        let (mut target_doc, prior_stored) = match folded_row.as_deref() {
             Some(row) => (row.doc.clone(), Cow::Borrowed(row.stored.as_slice())),
             None => {
                 let key = StorageKey::for_surrogate(nodedb_types::Surrogate::new(step.surrogate));
@@ -199,15 +205,23 @@ impl CoreLoop {
             serde_json::Value::String((current + step.delta).to_string()),
         );
         let stored = self.check_folded_image_size(scope, &step, &target_doc, &prior_stored)?;
-        self.check_folded_unique(scope, folded, &row_key, &target_doc)?;
-        folded.insert(
-            row_key,
+        drop(prior_stored);
+        drop(folded_row);
+        self.check_folded_unique(
+            scope,
+            &*folded,
+            step.target_collection,
+            step.surrogate,
+            &target_doc,
+        )?;
+        folded.put(
+            step.target_collection,
+            step.surrogate,
             FoldedRow {
                 doc: target_doc,
                 stored,
             },
-        );
-        Ok(())
+        )
     }
 
     /// Refuse a folded target row whose images are over the row image
@@ -305,17 +319,24 @@ impl CoreLoop {
 
     /// Judge the UNIQUE values of one folded target row, against the stored
     /// rows and the target rows earlier folds of the record left.
+    ///
+    /// A value of the row is free when no other folded row claims it and
+    /// every stored row that holds it is a folded row: the folds replace
+    /// those rows' images. The check names the first taken value, path by
+    /// path, in value order: first among the folded rows, then among the
+    /// stored rows.
     fn check_folded_unique(
         &self,
         scope: &CollectionScope<'_>,
-        folded: &FoldedTargets,
-        row_key: &(String, u32),
+        folded: &impl FoldedStore,
+        collection: &str,
+        surrogate: u32,
         target_doc: &serde_json::Value,
     ) -> crate::Result<()> {
         let config_key = (
             DatabaseId::new(scope.database_id),
             TenantId::new(scope.tid),
-            row_key.0.clone(),
+            collection.to_string(),
         );
         let Some(config) = self.doc_configs.get(&config_key) else {
             return Ok(());
@@ -325,34 +346,26 @@ impl CoreLoop {
         }
         // The install indexes the encoded body, with its generated columns.
         let image = self.unique_image(config, &doc_format::encode_to_msgpack(target_doc))?;
-        let rows: Vec<PostImage<'_>> = folded
-            .iter()
-            .filter(|((collection, surrogate), _)| {
-                collection == &row_key.0 && *surrogate != row_key.1
-            })
-            .map(|((_, surrogate), row)| PostImage {
-                surrogate: *surrogate,
-                doc: Some(&row.doc),
-                judged: false,
-            })
-            .chain(std::iter::once(PostImage {
-                surrogate: row_key.1,
-                doc: Some(&image),
-                judged: true,
-            }))
-            .collect();
-        check_unique_post_state(
-            &UniqueScope {
-                sparse: &self.sparse,
-                database_id: scope.database_id,
-                tid: scope.tid,
-                collection: &row_key.0,
-                paths: &config.index_paths,
-                base_visible: true,
-                crs: &self.crs_context(),
-            },
-            &rows,
-        )
+        let crs = self.crs_context();
+        let doc_engine = DocumentEngine::new(&self.sparse, scope.database_id, scope.tid);
+        for path in config.index_paths.iter().filter(|path| path.unique) {
+            let needles = claimed_values(&image, path, &crs);
+            if let Some(needle) =
+                folded.first_claimed_by_other(collection, surrogate, path, &needles, &crs)?
+            {
+                return Err(violation(collection, path, &needle));
+            }
+            for needle in &needles {
+                let stored = doc_engine.index_lookup(collection, &path.path, needle, None)?;
+                for key in &stored {
+                    let holder = key.surrogate().as_u32();
+                    if holder != surrogate && !folded.holds(collection, holder)? {
+                        return Err(violation(collection, path, needle));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

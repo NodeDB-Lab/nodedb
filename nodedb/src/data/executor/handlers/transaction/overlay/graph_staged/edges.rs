@@ -179,7 +179,7 @@ impl GraphTxnOverlay {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for item in overlay.edges.scan(bounds) {
+        for item in overlay.edges.scan(bounds, self.space.reader()) {
             let (key, slot) = item?;
             if let Some(kept) = keep(key, slot) {
                 out.push(kept);

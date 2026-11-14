@@ -85,7 +85,7 @@ impl CoreLoop {
 
     /// Stage `plans` under the transaction `lsn` names and resolve them into
     /// the encoded redo record. The overlay stays for the caller to release.
-    fn stage_and_resolve_for_test(
+    pub(super) fn stage_and_resolve_for_test(
         &mut self,
         task: &ExecutionTask,
         tid: u64,

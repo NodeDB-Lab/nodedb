@@ -19,11 +19,13 @@ use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::ErrorCode;
+use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_note::{KeyRepr, WriteStamp};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
 use crate::types::document_event::DocumentPutEvent;
+use crate::wal::redo::replay_arm::RedoArm;
 
 /// Committed-redo apply state owned by one core.
 pub(in crate::data::executor) struct RedoApplyState {
@@ -88,6 +90,10 @@ pub(in crate::data::executor) struct RedoApplyScope {
     /// First error any arm hit on a sub-record. The apply reports it once
     /// every arm has run.
     pub(in crate::data::executor) error: Option<ErrorCode>,
+    /// The replay step that runs now.
+    arm: RedoArm,
+    /// The replay step that recorded `error`.
+    error_arm: RedoArm,
     /// Every array the record wrote cells to.
     pub(in crate::data::executor) arrays_written: Vec<nodedb_array::types::ArrayId>,
     /// Columnar collections the install wrote, flushed once it succeeded.
@@ -153,6 +159,8 @@ impl RedoApplyScope {
             doc_writes: Vec::new(),
             target_writes: Vec::new(),
             error: None,
+            arm: RedoArm::Reconstitute,
+            error_arm: RedoArm::Reconstitute,
             arrays_written: Vec::new(),
             columnar_written: Vec::new(),
             timeseries_written: Vec::new(),
@@ -226,10 +234,41 @@ impl RedoApplyScope {
             .unwrap_or_default()
     }
 
-    /// Keep the first error; a later one is a consequence of it.
+    /// Keep the first error, tagged with the step that recorded it. A later
+    /// one is a consequence of it.
     pub(in crate::data::executor) fn record_error(&mut self, error: impl Into<ErrorCode>) {
         if self.error.is_none() {
             self.error = Some(error.into());
+            self.error_arm = self.arm;
+        }
+    }
+
+    /// Take the first error with the step that recorded it. The scope then
+    /// keeps the next error a later pass over it hits.
+    pub(in crate::data::executor) fn take_arm_error(&mut self) -> Option<ArmError> {
+        self.error.take().map(|code| ArmError {
+            arm: self.error_arm,
+            code,
+        })
+    }
+}
+
+/// An error one replay step of a pass recorded, with the step.
+///
+/// The steps run in [`RedoArm`] order. So among the errors of a record's
+/// batches, the smallest `(arm, batch)` pair is the error a whole-record
+/// pass records first.
+pub(in crate::data::executor) struct ArmError {
+    pub arm: RedoArm,
+    pub code: ErrorCode,
+}
+
+impl CoreLoop {
+    /// Name the replay step that runs next. An open committed-redo scope
+    /// tags each error it records with it. Restart replay holds no scope.
+    pub(crate) fn enter_redo_arm(&mut self, arm: RedoArm) {
+        if let Some(scope) = self.redo_apply.scope.as_mut() {
+            scope.arm = arm;
         }
     }
 }

@@ -16,7 +16,7 @@
 //! is the same "unbalanced ledger" state the constraint exists to refuse.
 
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::data::executor::enforcement::images::RowImages;
 use nodedb_physical::physical_plan::BalancedDef;
@@ -92,15 +92,16 @@ pub fn extract_entry(def: &BalancedDef, doc: &serde_json::Value) -> Option<Balan
 /// Validate the balanced constraint across every entry a boundary produced.
 ///
 /// Groups entries by `group_key`, then for each group checks that
-/// `SUM(debit amounts) == SUM(credit amounts)`. Returns the first
-/// violation found, or `Ok(())` if all groups are balanced.
+/// `SUM(debit amounts) == SUM(credit amounts)`. Returns the violation of the
+/// first unbalanced group in group-key byte order, or `Ok(())` if all groups
+/// are balanced. The order is fixed, so every replica names the same group.
 pub fn check_balanced(
     collection: &str,
     def: &BalancedDef,
     entries: &[BalancedEntry],
 ) -> crate::Result<()> {
-    // Group by group_key → (debit_sum, credit_sum).
-    let mut groups: HashMap<&str, (Decimal, Decimal)> = HashMap::new();
+    // Group by group_key → (debit_sum, credit_sum), in key byte order.
+    let mut groups: BTreeMap<&str, (Decimal, Decimal)> = BTreeMap::new();
 
     for entry in entries {
         let (debit_sum, credit_sum) = groups.entry(&entry.group_key).or_default();
@@ -112,19 +113,27 @@ pub fn check_balanced(
         // Unknown entry_type values are ignored (not debits or credits).
     }
 
-    for (group_key, (debit_sum, credit_sum)) in &groups {
-        if debit_sum != credit_sum {
-            return Err(crate::Error::BalanceViolation {
-                collection: collection.to_string(),
-                detail: format!(
-                    "group '{}': debits {} != credits {}",
-                    group_key, debit_sum, credit_sum
-                ),
-            });
+    for (group_key, (debit_sum, credit_sum)) in groups {
+        if let Some(violation) = group_violation(collection, group_key, debit_sum, credit_sum) {
+            return Err(violation);
         }
     }
 
     Ok(())
+}
+
+/// The refusal of group `group_key` of `collection` when its summed debits
+/// differ from its summed credits. `None` when they match.
+pub(in crate::data::executor) fn group_violation(
+    collection: &str,
+    group_key: &str,
+    debit_sum: Decimal,
+    credit_sum: Decimal,
+) -> Option<crate::Error> {
+    (debit_sum != credit_sum).then(|| crate::Error::BalanceViolation {
+        collection: collection.to_string(),
+        detail: format!("group '{group_key}': debits {debit_sum} != credits {credit_sum}"),
+    })
 }
 
 /// Extract a Decimal from a JSON value (number or string).
@@ -224,6 +233,42 @@ mod tests {
             },
         ];
         assert!(check_balanced("ledger", &test_def(), &entries).is_err());
+    }
+
+    /// With several unbalanced groups, the refusal names the group whose key
+    /// sorts first by bytes, whatever order the entries came in.
+    #[test]
+    fn violation_names_the_first_group_in_key_order() {
+        let unbalanced = |group_key: &str| BalancedEntry {
+            group_key: group_key.into(),
+            entry_type: "DEBIT".into(),
+            amount: d("10.00"),
+        };
+        let keys = ["j-9", "j-10", "J-3", "j-2", "a", "j-1"];
+        for rotation in 0..keys.len() {
+            let mut order = keys.to_vec();
+            order.rotate_left(rotation);
+            let entries: Vec<_> = order.iter().map(|key| unbalanced(key)).collect();
+            let error = check_balanced("ledger", &test_def(), &entries)
+                .expect_err("every group is unbalanced");
+            let crate::Error::BalanceViolation { detail, .. } = error else {
+                panic!("expected a balance violation, got {error:?}");
+            };
+            assert_eq!(
+                detail, "group 'J-3': debits 10.00 != credits 0",
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_violation_matches_only_an_unbalanced_group() {
+        assert!(group_violation("ledger", "j-1", d("5"), d("5")).is_none());
+        let error = group_violation("ledger", "j-1", d("5"), d("4")).expect("unbalanced");
+        assert!(matches!(
+            error,
+            crate::Error::BalanceViolation { ref collection, .. } if collection == "ledger"
+        ));
     }
 
     #[test]

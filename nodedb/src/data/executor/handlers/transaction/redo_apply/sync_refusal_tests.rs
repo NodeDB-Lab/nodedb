@@ -18,7 +18,7 @@ use super::CommittedRedo;
 const PRODUCER: u64 = 71;
 const STREAM: u64 = 42;
 
-fn provenance() -> SyncProvenance {
+pub(super) fn provenance() -> SyncProvenance {
     SyncProvenance {
         producer_id: PRODUCER,
         epoch: 1,
@@ -27,7 +27,10 @@ fn provenance() -> SyncProvenance {
     }
 }
 
-fn text_record(surrogate: Surrogate, provenance: Option<SyncProvenance>) -> RedoSubRecord {
+pub(super) fn text_record(
+    surrogate: Surrogate,
+    provenance: Option<SyncProvenance>,
+) -> RedoSubRecord {
     let op = TextOp::FtsIndexDoc {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "articles"),
         surrogate,
@@ -41,7 +44,7 @@ fn text_record(surrogate: Surrogate, provenance: Option<SyncProvenance>) -> Redo
     }
 }
 
-fn sibling_vector() -> RedoSubRecord {
+pub(super) fn sibling_vector() -> RedoSubRecord {
     let payload =
         encode_vector_put_payload("vectors", &[1.0, 2.0], 2, "", Surrogate::new(92), None).unwrap();
     RedoSubRecord {
@@ -50,7 +53,7 @@ fn sibling_vector() -> RedoSubRecord {
     }
 }
 
-fn refused_vector() -> RedoSubRecord {
+pub(super) fn refused_vector() -> RedoSubRecord {
     let payload = encode_vector_put_payload(
         "vectors",
         &[],
@@ -250,7 +253,7 @@ fn reopened_transaction_and_write_groups_refuse_invalid_sync_vectors() {
     }
 }
 
-fn refused_spatial(unbound: bool) -> RedoSubRecord {
+pub(super) fn refused_spatial(unbound: bool) -> RedoSubRecord {
     let surrogate = if unbound {
         Surrogate::ZERO
     } else {

@@ -11,9 +11,18 @@
 
 use nodedb_types::{StorageKey, Surrogate};
 
+use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 
 use super::sub_ops::RedoDocOp;
+
+/// The refusal of a committed redo whose clone copies name rows this node
+/// could not read. The failure is this node's, so the refusal is retryable.
+pub(super) fn clone_probe_unreadable(error: crate::Error) -> ErrorCode {
+    ErrorCode::RetryableRefusal {
+        reason: format!("a committed redo could not read the rows its clone copies name: {error}"),
+    }
+}
 
 impl CoreLoop {
     /// Whether the document row `surrogate` of `collection` holds any

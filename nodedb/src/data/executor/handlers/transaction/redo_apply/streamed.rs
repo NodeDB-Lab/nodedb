@@ -28,7 +28,7 @@ use crate::wal::{RedoRecord, RedoStreamReader, RedoStreamRef};
 use super::passes::final_refusal;
 
 /// Bytes of whole framed records one batch of a stream read holds.
-const STREAM_BATCH_BYTES: usize = 1024 * 1024;
+pub(super) const STREAM_BATCH_BYTES: usize = 1024 * 1024;
 
 /// What a stream's content carries beside its record.
 pub(super) struct StreamCarried {
@@ -48,7 +48,7 @@ pub(super) struct StreamedContent {
 
 /// A read of the stream that failed on this node. The failure is no verdict
 /// on the record, so the refusal is retryable.
-fn unreadable(reference: &RedoStreamRef, error: crate::Error) -> ErrorCode {
+pub(super) fn unreadable(reference: &RedoStreamRef, error: crate::Error) -> ErrorCode {
     ErrorCode::RetryableRefusal {
         reason: format!(
             "the chunk records of redo stream {:?} could not be read back from this node's \
@@ -104,17 +104,12 @@ impl CoreLoop {
 }
 
 impl CoreLoop {
-    /// The content `redo` names when it is a stream marker. `Ok(None)` for a
-    /// record that holds its content inline.
+    /// The content the stream marker `redo` names through `reference`.
     pub(super) fn streamed_content(
         &self,
         redo: &RedoRecord,
-    ) -> Result<Option<StreamedContent>, ErrorCode> {
-        let reference = match RedoStreamRef::of_marker(redo) {
-            Ok(Some(reference)) => reference,
-            Ok(None) => return Ok(None),
-            Err(error) => return Err(final_refusal(error.into())),
-        };
+        reference: RedoStreamRef,
+    ) -> Result<StreamedContent, ErrorCode> {
         let reader = RedoStreamReader::<UringWalCursor>::open(&self.wal_source, reference.clone())
             .map_err(|error| unreadable(&reference, error))?;
         let mut batcher = FrameBatcher::new(reader, STREAM_BATCH_BYTES);
@@ -142,13 +137,13 @@ impl CoreLoop {
         let bytes = record
             .to_bytes()
             .map_err(|error| final_refusal(error.into()))?;
-        Ok(Some(StreamedContent {
+        Ok(StreamedContent {
             record,
             carried: StreamCarried {
                 bytes,
                 sum_targets,
                 reads,
             },
-        }))
+        })
     }
 }

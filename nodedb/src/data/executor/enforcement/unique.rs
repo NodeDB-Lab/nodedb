@@ -127,7 +127,7 @@ pub(in crate::data::executor) fn check_unique_post_state(
 
 /// The values `doc` claims under `path`: the stored, case-folded index keys.
 /// A row the partial-index predicate rejects claims none.
-fn claimed_values(
+pub(in crate::data::executor) fn claimed_values(
     doc: &serde_json::Value,
     path: &IndexPath,
     crs: &nodedb_crs::CrsContext<'_>,
@@ -149,7 +149,12 @@ fn claimed_values(
         .collect()
 }
 
-fn violation(collection: &str, path: &IndexPath, needle: &str) -> crate::Error {
+/// The refusal of a write that gives `needle` a second owner under `path`.
+pub(in crate::data::executor) fn violation(
+    collection: &str,
+    path: &IndexPath,
+    needle: &str,
+) -> crate::Error {
     crate::Error::RejectedConstraint {
         collection: collection.to_string(),
         constraint: "unique".to_string(),

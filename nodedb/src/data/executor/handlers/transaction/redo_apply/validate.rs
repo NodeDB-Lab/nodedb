@@ -144,90 +144,133 @@ impl CoreLoop {
         scope: &CollectionScope<'_>,
         ops: &[&RedoDocOp],
     ) -> crate::Result<()> {
+        let mut balanced_entries: Vec<BalancedEntry> = Vec::new();
+        for op in ops {
+            balanced_entries.extend(self.check_op_enforcement(scope, op)?);
+        }
+        if let Some(def) = &scope.config.enforcement.balanced {
+            balanced::check_balanced(scope.collection, def, &balanced_entries)?;
+        }
+        Ok(())
+    }
+
+    /// Judge `op` by the stateless rules against the row stored now, and
+    /// answer the BALANCED entries it contributes to its collection.
+    pub(super) fn check_op_enforcement(
+        &self,
+        scope: &CollectionScope<'_>,
+        op: &RedoDocOp,
+    ) -> crate::Result<Vec<BalancedEntry>> {
         let enforcement = &scope.config.enforcement;
         let needs_prior = enforcement.has_put_checks()
             || enforcement.balanced.is_some()
             || enforcement.retention.is_some()
             || enforcement.has_legal_hold;
-        let mut balanced_entries: Vec<BalancedEntry> = Vec::new();
-        for op in ops {
-            let prior = if needs_prior {
-                self.stored_prior(scope, op.surrogate())?
-            } else {
-                None
-            };
-            match op {
-                RedoDocOp::Put { value, .. } => {
-                    // The install writes the chain fields; a submitted value
-                    // for either is refused before anything is written.
-                    if enforcement.hash_chain {
-                        let doc = doc_format::decode_document(value)?;
-                        hash_chain::refuse_supplied_link(scope.collection, &doc)?;
-                    }
-                    self.check_stateless_put_enforcement(
-                        true,
-                        PutEnforcement {
-                            config_key: scope.config_key,
-                            database_id: scope.database_id,
-                            tid: scope.tid,
-                            collection: scope.collection,
-                            value,
-                            old_value: &prior,
-                            user_roles: scope.user_roles,
-                            resolved_targets: scope.resolved,
-                        },
-                    )?;
-                    if let Some(def) = &enforcement.balanced {
-                        let new_doc = doc_format::decode_document(value).ok();
-                        let old_doc = match &prior {
-                            Some(bytes) => Some(self.decode_stored_document(scope.config, bytes)?),
-                            None => None,
-                        };
-                        let images = match (old_doc.as_ref(), new_doc.as_ref()) {
-                            (Some(old_doc), Some(new_doc)) => {
-                                Some(RowImages::Update { old_doc, new_doc })
-                            }
-                            (None, Some(new_doc)) => Some(RowImages::Insert { new_doc }),
-                            // A post-image with no readable document carries no
-                            // column the definition can read.
-                            (_, None) => None,
-                        };
-                        if let Some(images) = images {
-                            balanced_entries.extend(balanced::entries_for(def, &images));
-                        }
-                    }
-                }
-                RedoDocOp::Delete { .. } => {
-                    // A bitemporal delete judges only a row that exists; a plain
-                    // delete judges whatever is stored, as the delete path does.
-                    if !scope.bitemporal || prior.is_some() {
-                        run_delete_enforcement(
-                            self,
-                            DeleteEnforcement {
-                                database_id: scope.database_id,
-                                tid: scope.tid,
-                                collection: scope.collection,
-                                config: scope.config,
-                                old_value: prior.as_deref(),
-                                resolved_targets: scope.resolved,
-                                judged_at_ms: scope.judged_at_ms,
-                            },
-                        )?;
-                    }
-                    if let (Some(def), Some(bytes)) = (&enforcement.balanced, &prior) {
-                        let old_doc = self.decode_stored_document(scope.config, bytes)?;
-                        balanced_entries.extend(balanced::entries_for(
-                            def,
-                            &RowImages::Delete { old_doc: &old_doc },
-                        ));
-                    }
-                }
+        let prior = if needs_prior {
+            self.stored_prior(scope, op.surrogate())?
+        } else {
+            None
+        };
+        match op {
+            RedoDocOp::Put { value, .. } => self.check_put_enforcement(scope, value, &prior)?,
+            RedoDocOp::Delete { .. } => self.check_delete_enforcement(scope, prior.as_deref())?,
+        }
+        self.balanced_op_entries(scope, op, prior.as_deref())
+    }
+
+    /// The stateless PUT rules for the post-image `value` over the stored
+    /// row `prior`: a supplied hash-chain link, append-only, period lock,
+    /// state transitions and transition checks.
+    pub(super) fn check_put_enforcement(
+        &self,
+        scope: &CollectionScope<'_>,
+        value: &[u8],
+        prior: &Option<Vec<u8>>,
+    ) -> crate::Result<()> {
+        // The install writes the chain fields; a submitted value for either
+        // is refused before anything is written.
+        if scope.config.enforcement.hash_chain {
+            let doc = doc_format::decode_document(value)?;
+            hash_chain::refuse_supplied_link(scope.collection, &doc)?;
+        }
+        self.check_stateless_put_enforcement(
+            true,
+            PutEnforcement {
+                config_key: scope.config_key,
+                database_id: scope.database_id,
+                tid: scope.tid,
+                collection: scope.collection,
+                value,
+                old_value: prior,
+                user_roles: scope.user_roles,
+                resolved_targets: scope.resolved,
+            },
+        )
+    }
+
+    /// The DELETE rules, retention and legal hold, for the stored row
+    /// `prior`. A bitemporal delete judges only a row that exists. A plain
+    /// delete judges whatever is stored, as the delete path does.
+    pub(super) fn check_delete_enforcement(
+        &self,
+        scope: &CollectionScope<'_>,
+        prior: Option<&[u8]>,
+    ) -> crate::Result<()> {
+        if scope.bitemporal && prior.is_none() {
+            return Ok(());
+        }
+        run_delete_enforcement(
+            self,
+            DeleteEnforcement {
+                database_id: scope.database_id,
+                tid: scope.tid,
+                collection: scope.collection,
+                config: scope.config,
+                old_value: prior,
+                resolved_targets: scope.resolved,
+                judged_at_ms: scope.judged_at_ms,
+            },
+        )
+    }
+
+    /// The signed BALANCED entries `op` contributes over the stored row
+    /// `prior`. None when the collection declares no BALANCED constraint.
+    pub(super) fn balanced_op_entries(
+        &self,
+        scope: &CollectionScope<'_>,
+        op: &RedoDocOp,
+        prior: Option<&[u8]>,
+    ) -> crate::Result<Vec<BalancedEntry>> {
+        let Some(def) = &scope.config.enforcement.balanced else {
+            return Ok(Vec::new());
+        };
+        match op {
+            RedoDocOp::Put { value, .. } => {
+                let new_doc = doc_format::decode_document(value).ok();
+                let old_doc = match prior {
+                    Some(bytes) => Some(self.decode_stored_document(scope.config, bytes)?),
+                    None => None,
+                };
+                let images = match (old_doc.as_ref(), new_doc.as_ref()) {
+                    (Some(old_doc), Some(new_doc)) => RowImages::Update { old_doc, new_doc },
+                    (None, Some(new_doc)) => RowImages::Insert { new_doc },
+                    // A post-image with no readable document carries no
+                    // column the definition can read.
+                    (_, None) => return Ok(Vec::new()),
+                };
+                Ok(balanced::entries_for(def, &images))
+            }
+            RedoDocOp::Delete { .. } => {
+                let Some(bytes) = prior else {
+                    return Ok(Vec::new());
+                };
+                let old_doc = self.decode_stored_document(scope.config, bytes)?;
+                Ok(balanced::entries_for(
+                    def,
+                    &RowImages::Delete { old_doc: &old_doc },
+                ))
             }
         }
-        if let Some(def) = &enforcement.balanced {
-            balanced::check_balanced(scope.collection, def, &balanced_entries)?;
-        }
-        Ok(())
     }
 
     /// Every unique index value the record's post-state holds has one owner.
@@ -291,48 +334,61 @@ impl CoreLoop {
         ops: &[RedoDocOp],
     ) -> crate::Result<()> {
         for op in ops {
-            let RedoDocOp::Put {
-                collection,
-                value,
-                surrogate,
-                ..
-            } = op
-            else {
-                continue;
-            };
-            if value.len() <= nodedb_types::MAX_ROW_IMAGE_BYTES {
-                continue;
-            }
-            let column = self.identity_column(database_id, tid, collection);
-            let identity = nodedb_types::RowIdentity::of_stored_row(
-                value,
-                Some(column.as_str()),
-                StorageKey::for_surrogate(Surrogate::new(*surrogate)),
-            );
-            return Err(crate::Error::DataPlane(
-                crate::data::executor::row_image_limit::row_image_too_large(
-                    collection,
-                    identity.as_str(),
-                    value.len(),
-                ),
-            ));
+            self.check_doc_row_image(database_id, tid, op)?;
         }
         Ok(())
+    }
+
+    /// Refuse a document put whose post-image is over the row image limit.
+    pub(super) fn check_doc_row_image(
+        &self,
+        database_id: u64,
+        tid: u64,
+        op: &RedoDocOp,
+    ) -> crate::Result<()> {
+        let RedoDocOp::Put {
+            collection,
+            value,
+            surrogate,
+            ..
+        } = op
+        else {
+            return Ok(());
+        };
+        if value.len() <= nodedb_types::MAX_ROW_IMAGE_BYTES {
+            return Ok(());
+        }
+        let column = self.identity_column(database_id, tid, collection);
+        let identity = nodedb_types::RowIdentity::of_stored_row(
+            value,
+            Some(column.as_str()),
+            StorageKey::for_surrogate(Surrogate::new(*surrogate)),
+        );
+        Err(crate::Error::DataPlane(
+            crate::data::executor::row_image_limit::row_image_too_large(
+                collection,
+                identity.as_str(),
+                value.len(),
+            ),
+        ))
     }
 }
 
 /// Refuse the record when a KV row it puts holds a key and value over the
 /// row image limit, before any of its rows is written.
 fn check_redo_kv_row_images(ops: &[RedoKvOp]) -> crate::Result<()> {
-    for op in ops {
-        if let RedoKvOp::Put {
-            collection,
-            key,
-            value,
-        } = op
-        {
-            crate::engine::kv::KvRowTooLarge::check(collection, key, value)?;
-        }
+    ops.iter().try_for_each(check_kv_row_image)
+}
+
+/// Refuse a KV put whose key and value are over the row image limit.
+pub(super) fn check_kv_row_image(op: &RedoKvOp) -> crate::Result<()> {
+    if let RedoKvOp::Put {
+        collection,
+        key,
+        value,
+    } = op
+    {
+        crate::engine::kv::KvRowTooLarge::check(collection, key, value)?;
     }
     Ok(())
 }
@@ -353,7 +409,10 @@ pub(super) struct CollectionScope<'a> {
 }
 
 /// The sum targets writes to `collection` fold on this core.
-fn sum_targets_for(sum_targets: &[RedoSumTargets], collection: &str) -> Vec<ResolvedSumTarget> {
+pub(super) fn sum_targets_for(
+    sum_targets: &[RedoSumTargets],
+    collection: &str,
+) -> Vec<ResolvedSumTarget> {
     sum_targets
         .iter()
         .filter(|targets| targets.collection == collection)

@@ -49,7 +49,8 @@ pub(in crate::data::executor) fn document_ops(ops: &[RedoSubRecord]) -> Vec<Redo
     ops.iter().filter_map(document_op).collect()
 }
 
-fn document_op(sub: &RedoSubRecord) -> Option<RedoDocOp> {
+/// The document write `sub` holds, `None` for any other sub-record.
+pub(super) fn document_op(sub: &RedoSubRecord) -> Option<RedoDocOp> {
     match RecordType::from_raw(sub.record_type) {
         Some(RecordType::Put) => DocumentPutRedo::decode(&sub.payload).map(|put| RedoDocOp::Put {
             collection: put.collection,
@@ -89,12 +90,14 @@ pub(in crate::data::executor) fn kv_ops(ops: &[RedoSubRecord]) -> Vec<RedoKvOp> 
     ops.iter().filter_map(kv_op).collect()
 }
 
-fn kv_op(sub: &RedoSubRecord) -> Option<RedoKvOp> {
+/// The KV point write `sub` holds, `None` for any other sub-record and for a
+/// `kv_truncate`.
+pub(super) fn kv_op(sub: &RedoSubRecord) -> Option<RedoKvOp> {
     match RecordType::from_raw(sub.record_type) {
         Some(RecordType::Put) => zerompk::from_msgpack::<KvPut>(&sub.payload)
             .ok()
             .filter(|(disc, ..)| disc == "kv_put")
-            .map(|(_, collection, key, value, _, _, _)| RedoKvOp::Put {
+            .map(|(_, collection, key, value, ..)| RedoKvOp::Put {
                 collection,
                 key,
                 value,
@@ -135,21 +138,22 @@ pub(super) struct RedoLabelOp {
 
 /// The node-label deltas in `ops`, in record order.
 pub(super) fn label_ops(ops: &[RedoSubRecord]) -> Vec<RedoLabelOp> {
-    ops.iter()
-        .filter_map(|sub| {
-            let is_set = match RecordType::from_raw(sub.record_type) {
-                Some(RecordType::GraphNodeLabelSet) => true,
-                Some(RecordType::GraphNodeLabelRemove) => false,
-                _ => return None,
-            };
-            let op = crate::wal::NodeLabelRedo::decode(&sub.payload).ok()?;
-            Some(RedoLabelOp {
-                node_id: op.node_id,
-                labels: op.labels,
-                is_set,
-            })
-        })
-        .collect()
+    ops.iter().filter_map(label_op).collect()
+}
+
+/// The node-label delta `sub` holds, `None` for any other sub-record.
+pub(super) fn label_op(sub: &RedoSubRecord) -> Option<RedoLabelOp> {
+    let is_set = match RecordType::from_raw(sub.record_type) {
+        Some(RecordType::GraphNodeLabelSet) => true,
+        Some(RecordType::GraphNodeLabelRemove) => false,
+        _ => return None,
+    };
+    let op = crate::wal::NodeLabelRedo::decode(&sub.payload).ok()?;
+    Some(RedoLabelOp {
+        node_id: op.node_id,
+        labels: op.labels,
+        is_set,
+    })
 }
 
 #[cfg(test)]
