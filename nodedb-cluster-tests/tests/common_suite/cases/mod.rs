@@ -142,6 +142,7 @@ mod native_write_drain_gate;
 mod node_labels_replicate_to_followers;
 mod ordinal_floor_leader_change;
 mod owner_read_on_non_replica;
+mod period_lock_cross_node;
 mod pgwire_gateway_migration;
 mod planner_local_only;
 mod prepared_cache_invalidation;
