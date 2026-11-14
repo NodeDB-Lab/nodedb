@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Streaming read of a sorted run from a block onward. One refill buffer and
-//! one record are resident, never the run.
+//! one record are resident, never the run or its index. The stream skips
+//! the bloom and index page frames between records.
 
+use super::block::{FrameKind, frame_kind};
+use super::block_reader::BlockReader;
 use super::record::RunRecord;
 use super::sorted_run::SortedRun;
 use crate::data::executor::handlers::join::FrameStreamReader;
@@ -18,16 +21,24 @@ pub(in crate::data::executor) struct RunStream {
 }
 
 impl RunStream {
-    /// Stream `run` from the block a scan from `from_key` starts at, or from
-    /// the first record when `from_key` is `None`. Records before
-    /// `from_key` can come first: the caller skips them.
-    pub(in crate::data::executor) fn open(
+    /// Stream `run` from its first record.
+    pub(in crate::data::executor) fn from_start(run: &SortedRun) -> crate::Result<Self> {
+        Self::at(run, 0)
+    }
+
+    /// Stream `run` from the block a scan from `key` starts at. Finding the
+    /// block reads one index page through `reader`. Records before `key`
+    /// can come first: the caller skips them.
+    pub(in crate::data::executor) fn from_key(
         run: &SortedRun,
-        from_key: Option<&[u8]>,
+        key: &[u8],
+        reader: &BlockReader,
     ) -> crate::Result<Self> {
-        let block = from_key.map_or(0, |key| run.start_block(key));
-        let reader =
-            FrameStreamReader::open_at(run.path(), run.block_offset(block), STREAM_CHUNK_BYTES)?;
+        Self::at(run, run.scan_offset(key, reader)?)
+    }
+
+    fn at(run: &SortedRun, offset: u64) -> crate::Result<Self> {
+        let reader = FrameStreamReader::open_at(run.path(), offset, STREAM_CHUNK_BYTES)?;
         Ok(Self {
             reader,
             path: run.path().to_path_buf(),
@@ -36,9 +47,12 @@ impl RunStream {
 
     /// The next record, or `None` at the run's end.
     pub(in crate::data::executor) fn next_record(&mut self) -> crate::Result<Option<RunRecord>> {
-        match self.reader.next_row()? {
-            Some(body) => Ok(Some(RunRecord::decode(&self.path, &body)?)),
-            None => Ok(None),
+        while let Some(body) = self.reader.next_row()? {
+            match frame_kind(&body) {
+                FrameKind::Record => return Ok(Some(RunRecord::decode(&self.path, &body)?)),
+                FrameKind::Bloom | FrameKind::Page => {}
+            }
         }
+        Ok(None)
     }
 }

@@ -39,7 +39,7 @@ impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
                 .map(|(key, hot)| Ok((encode_key(key)?, hot)))
                 .collect::<crate::Result<_>>()?;
             keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            let mut writer = SortedRunWriter::create(path, keyed.len(), 0)?;
+            let mut writer = SortedRunWriter::create(path, 0)?;
             for (key_bytes, hot) in &keyed {
                 let value = encode_value(std::path::Path::new(super::map::HOT_TIER), &hot.value)?;
                 writer.push(RunRecordRef {
@@ -138,8 +138,8 @@ fn filter_run(
     bound: u64,
     path: std::path::PathBuf,
 ) -> crate::Result<Option<SortedRun>> {
-    let mut stream = RunStream::open(run, None)?;
-    let mut writer = SortedRunWriter::create(path, run.records() as usize, run.level())?;
+    let mut stream = RunStream::from_start(run)?;
+    let mut writer = SortedRunWriter::create(path, run.level())?;
     while let Some(record) = stream.next_record()? {
         if record.seq < bound {
             writer.push(record.as_ref())?;
@@ -155,11 +155,10 @@ fn merge_runs(
     path: std::path::PathBuf,
     level: u8,
 ) -> crate::Result<Option<SortedRun>> {
-    let expected: u64 = runs.iter().map(SortedRun::records).sum();
-    let mut writer = SortedRunWriter::create(path, expected as usize, level)?;
+    let mut writer = SortedRunWriter::create(path, level)?;
     let mut cursors: Vec<(RunStream, Option<RunRecord>)> = Vec::with_capacity(runs.len());
     for run in runs {
-        let mut stream = RunStream::open(run, None)?;
+        let mut stream = RunStream::from_start(run)?;
         let head = stream.next_record()?;
         cursors.push((stream, head));
     }
@@ -205,6 +204,116 @@ mod tests {
         SpillSpace::new(dir.join("txn"), "t", 0)
     }
 
+    type PairKey = (u32, String);
+
+    fn pair_key(state: &mut u64) -> PairKey {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let a = (*state >> 40) as u32 % 40;
+        let b = (*state >> 20) as u32 % 12;
+        (a, format!("s{b}"))
+    }
+
+    fn scan_all(
+        map: &TieredMap<PairKey, u64>,
+        bounds: crate::data::executor::handlers::spill::tiered::ScanBounds,
+        reader: &crate::data::executor::handlers::spill::run::BlockReader,
+    ) -> Vec<(PairKey, u64)> {
+        map.scan(bounds, reader)
+            .map(|item| item.map(|(k, v)| (k, *v)))
+            .collect::<crate::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_map_spilled_at_threshold_zero_answers_like_an_unspilled_map() {
+        use crate::data::executor::handlers::spill::tiered::ScanBounds;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut space = space(dir.path());
+        let mut never = SpillSpace::never_spills();
+        let mut spilled: TieredMap<PairKey, u64> = TieredMap::default();
+        let mut resident: TieredMap<PairKey, u64> = TieredMap::default();
+        let mut history: std::collections::HashMap<PairKey, Vec<(u64, u64)>> =
+            std::collections::HashMap::new();
+        let mut state = 7u64;
+        for seq in 0..3_000u64 {
+            let key = pair_key(&mut state);
+            let value = seq * 3;
+            history.entry(key.clone()).or_default().push((seq, value));
+            spilled.insert(key.clone(), value, seq);
+            resident.insert(key, value, seq);
+            if spilled.hot_bytes() > space.threshold() {
+                spilled.spill(&mut space, "v").unwrap();
+            }
+            if resident.hot_bytes() > never.threshold() {
+                resident.spill(&mut never, "v").unwrap();
+            }
+        }
+        assert!(spilled.has_runs());
+        assert!(!resident.has_runs());
+        assert!(spilled.runs.len() < MERGE_FANOUT * 4);
+        let reader = space.reader();
+        let resident_reader = never.reader();
+
+        for a in 0..42u32 {
+            for b in 0..13u32 {
+                let key = (a, format!("s{b}"));
+                let want = resident.get(&key, resident_reader).unwrap().map(|v| *v);
+                assert_eq!(spilled.get(&key, reader).unwrap().map(|v| *v), want);
+                assert_eq!(spilled.contains(&key, reader).unwrap(), want.is_some());
+                for bound in [0u64, 1, 500, 1_500, 2_999, u64::MAX] {
+                    let before = history.get(&key).and_then(|versions| {
+                        versions
+                            .iter()
+                            .rev()
+                            .find(|(seq, _)| *seq < bound)
+                            .map(|(_, v)| *v)
+                    });
+                    assert_eq!(spilled.get_before(&key, bound, reader).unwrap(), before);
+                }
+            }
+        }
+
+        let all = |map: &TieredMap<PairKey, u64>| -> Vec<(PairKey, u64)> {
+            map.iter()
+                .map(|item| item.map(|(k, v)| (k, *v)))
+                .collect::<crate::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(all(&spilled), all(&resident));
+
+        for a in [0u32, 7, 39, 41] {
+            let mut prefix = vec![0x92];
+            prefix.extend(encode_key(&a).unwrap());
+            let bounds = ScanBounds {
+                after: None,
+                prefix: Some(prefix),
+            };
+            assert_eq!(
+                scan_all(&spilled, bounds.clone(), reader),
+                scan_all(&resident, bounds, resident_reader),
+                "prefix {a}"
+            );
+        }
+        for after in [
+            (0u32, "s0".to_string()),
+            (20, "s5".into()),
+            (39, "s9".into()),
+        ] {
+            let bounds = ScanBounds {
+                after: Some(encode_key(&after).unwrap()),
+                prefix: None,
+            };
+            assert_eq!(
+                scan_all(&spilled, bounds.clone(), reader),
+                scan_all(&resident, bounds, resident_reader),
+                "after {after:?}"
+            );
+        }
+    }
+
     #[test]
     fn spill_then_get_reads_runs_newest_first() {
         let dir = tempfile::tempdir().unwrap();
@@ -225,38 +334,32 @@ mod tests {
     }
 
     #[test]
-    fn a_lookup_the_bloom_rejects_reads_no_block() {
+    fn a_lookup_reads_nothing_outside_a_run_and_one_page_and_block_inside() {
         let dir = tempfile::tempdir().unwrap();
         let mut space = space(dir.path());
         let mut map: TieredMap<u32, u32> = TieredMap::default();
-        for key in 0..200u32 {
+        for key in (0..400u32).step_by(2) {
             map.insert(key, key, u64::from(key));
         }
         map.spill(&mut space, "v").unwrap();
-        let run = &map.runs[0];
         let reader = space.reader();
 
-        let mut rejected = 0;
+        // Keys past the run's last key cost no read.
         for key in 10_000..10_200u32 {
-            let key_bytes = encode_key(&key).unwrap();
-            if run.may_contain(&key_bytes) {
-                continue;
-            }
-            rejected += 1;
             let before = reader.reads();
             assert!(map.get(&key, reader).unwrap().is_none());
             assert!(!map.contains(&key, reader).unwrap());
             assert!(map.get_before(&key, u64::MAX, reader).unwrap().is_none());
             assert_eq!(reader.reads(), before, "key {key} read a block");
         }
-        assert!(
-            rejected > 150,
-            "the bloom rejects most absent keys: {rejected}"
-        );
 
-        let before = reader.reads();
-        assert_eq!(*map.get(&42, reader).unwrap().unwrap(), 42);
-        assert!(reader.reads() > before, "a present key reads its block");
+        // A key inside the range reads one index page and one block.
+        for key in [1u32, 41, 42, 201, 398] {
+            let before = reader.reads();
+            let found = map.get(&key, reader).unwrap().map(|v| *v);
+            assert_eq!(found, (key % 2 == 0).then_some(key));
+            assert_eq!(reader.reads() - before, 2, "key {key}");
+        }
     }
 
     #[test]

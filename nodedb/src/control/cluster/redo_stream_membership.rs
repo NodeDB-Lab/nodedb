@@ -34,6 +34,12 @@ pub fn reconcile_redo_streams(shared: &SharedState, multi_raft: &Mutex<MultiRaft
 fn drop_unmounted(shared: &SharedState, multi_raft: &Mutex<MultiRaft>) {
     let dropped = {
         let multi_raft = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        // This node publishes no event of a group it left, so no entry of
+        // one keeps its records for a restart.
+        shared
+            .change_stream
+            .unjournaled()
+            .release_unhosted(|group_id| multi_raft.contains_group(group_id));
         shared.redo_chunks.drop_unhosted_groups(
             |group_id| multi_raft.contains_group(group_id),
             shared.credentials.catalog(),

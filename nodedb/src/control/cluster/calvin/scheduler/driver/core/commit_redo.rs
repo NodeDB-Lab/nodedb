@@ -3,20 +3,21 @@
 //! Redo resolution for a committed Calvin slice on the data-group leader.
 //!
 //! Once the global verdict is COMMIT, the leader dispatches
-//! `MetaOp::CalvinResolve` to reconstitute the staged post-images as one
-//! replayable `RedoRecord`. It stamps the record with the slice's sequencer
-//! position, attaches the transaction's messages and dedup key on the
-//! participant that carries them, and proposes the record to the vShard's
-//! data group (see [`super::redo_propose`]). Every replica, this one
+//! `MetaOp::CalvinResolve` to reconstitute the staged post-images as the
+//! parts of one replayable `RedoRecord`. It stamps the record's header with
+//! the slice's sequencer position, attaches the transaction's messages and
+//! dedup key on the participant that carries them, and proposes the record
+//! to the vShard's data group as its parts arrive (see
+//! [`super::redo_propose`] and `redo_stream`). Every replica, this one
 //! included, installs it from the log.
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
-use super::super::types::CommitState;
 use super::deferred::{DispatchOutcome, DispatchStep};
 use super::halt::{HaltReason, HaltStep, error_response_text};
 use super::redo_propose::OwedRedo;
+use super::redo_stream::OwedBody;
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -26,11 +27,13 @@ use crate::control::wal_replication::transaction_redo::{CalvinSlice, Transaction
 use crate::control::wal_replication::types::CalvinRedoMeta;
 use crate::types::VShardId;
 use crate::wal::{CalvinStamp, RedoRecord};
+use nodedb_physical::physical_plan::CalvinResolvedPart;
 
 impl Scheduler {
-    /// Handle the `MetaOp::CalvinResolve` response: decode the resolved
-    /// `RedoRecord`, stamp it, attach the transaction's messages and dedup
-    /// key on the participant that carries them, and propose it.
+    /// Handle a `MetaOp::CalvinResolve` response: one part of the resolved
+    /// redo. Part `0` builds the stamped redo the slice owes, with the
+    /// transaction's messages and dedup key on the participant that carries
+    /// them, and starts its proposal. A later part advances the stream.
     ///
     /// The verdict is already COMMIT, so a skipped resolve tears the
     /// committed txn. A non-`Ok` response or a record that cannot be read
@@ -55,36 +58,42 @@ impl Scheduler {
             );
             return;
         }
-        match self.owed_redo(txn_id, &response) {
-            Ok(owed) => {
-                if let Some(pending) = self.pending.get_mut(&txn_id) {
-                    pending.redo = Some(owed);
-                    pending.commit_state = CommitState::AwaitingRedoApply { proposed: None };
-                }
-                self.propose_calvin_redo(txn_id);
+        let taken = decode_part(&response).and_then(|answer| {
+            if answer.part.index == 0 {
+                self.open_owed_redo(txn_id, answer)
+            } else {
+                self.continue_owed_redo(txn_id, answer)
             }
-            Err(error) => self.halt_apply(
+        });
+        if let Err(error) = taken {
+            self.halt_apply(
                 txn_id,
                 HaltReason::ResolveFailed,
                 HaltStep::Resolve,
                 error.to_string(),
-            ),
+            );
         }
     }
 
-    /// The stamped redo the committed slice `txn_id` proposes, from its
-    /// resolve answer `response`.
-    fn owed_redo(&self, txn_id: TxnId, response: &Response) -> crate::Result<OwedRedo> {
-        // The answer carries the slice's staged reply beside the record. Every
-        // replica renders the reply after its install.
-        let resolved = zerompk::from_msgpack::<nodedb_physical::physical_plan::CalvinResolved>(
-            response.payload.as_bytes(),
-        )
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("CalvinResolve answer: {e}"),
-        })?;
-        let mut redo = RedoRecord::from_bytes(&resolved.redo)?;
+    /// The stamped redo the committed slice `txn_id` owes, with the header
+    /// fields alone and the staged `reply` part `0` answered. Every replica
+    /// renders the reply after its install. A later attempt keeps the
+    /// attempt count of the earlier one.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn owed_redo(
+        &self,
+        txn_id: TxnId,
+        staged_reply: nodedb_physical::physical_plan::CalvinReplySpec,
+    ) -> crate::Result<OwedRedo> {
+        let mut redo = RedoRecord {
+            version: 1,
+            ops: Vec::new(),
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+        };
         let pending = self
             .pending
             .get(&txn_id)
@@ -122,7 +131,8 @@ impl Scheduler {
             redo.cross_shard_applied = Some(key);
         }
         let scope = &pending.scope;
-        let reply = frozen_or_staged_reply(pending, resolved.reply);
+        let reply = frozen_or_staged_reply(pending, staged_reply);
+        let attempts = pending.redo.as_ref().map_or(0, |owed| owed.attempts);
         let payload = TransactionRedoPayload::from_calvin(
             redo,
             CalvinSlice {
@@ -169,7 +179,8 @@ impl Scheduler {
                 database_id: tx_class.database_id,
                 vshard_id: VShardId::new(self.vshard_id),
             },
-            attempts: 0,
+            attempts,
+            body: OwedBody::Streamed(None),
         })
     }
 
@@ -190,14 +201,34 @@ impl Scheduler {
         };
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
+        // The open attempt's next part, or part 0 for a new attempt. A part
+        // holds up to one entry's bytes, so a redo that fits one entry
+        // arrives in part 0.
+        let part = match pending.redo.as_ref().map(|owed| &owed.body) {
+            Some(OwedBody::Streamed(Some(progress))) => progress.next_part(),
+            Some(OwedBody::Streamed(None) | OwedBody::Inline) | None => 0,
+        };
+        let max_part_bytes = self.shared.redo_chunks.limits().max_entry_bytes as u64;
         let request_id = self.next_request_id();
         let plan = PhysicalPlan::Meta(MetaOp::CalvinResolve {
             epoch: txn_id.epoch,
             position: txn_id.position,
+            part,
+            max_part_bytes,
         });
         let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
         self.dispatch_sequenced(txn_id, DispatchStep::Resolve, request)
     }
+}
+
+/// The resolve part a `MetaOp::CalvinResolve` response carries.
+fn decode_part(response: &Response) -> crate::Result<CalvinResolvedPart> {
+    zerompk::from_msgpack::<CalvinResolvedPart>(response.payload.as_bytes()).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("CalvinResolve answer: {e}"),
+        }
+    })
 }
 
 /// The reply `pending`'s redo carries. A slice that holds a plan of the

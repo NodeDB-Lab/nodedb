@@ -381,7 +381,8 @@ mod tests {
                 p,
                 PhysicalPlan::Meta(MetaOp::CalvinResolve {
                     epoch: 20,
-                    position: 0
+                    position: 0,
+                    ..
                 })
             )),
             "the committed slice resolves its redo"

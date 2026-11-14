@@ -10,7 +10,8 @@
 //!
 //! A redo whose entry passes `tuning.calvin.max_redo_entry_bytes` travels
 //! as chunk entries under a stream that names its position and attempt,
-//! then a final entry naming the stream.
+//! then a final entry naming the stream. The leader reads it from the core
+//! in parts and proposes each chunk as it fills (see `redo_stream`).
 //!
 //! The txn completes once its redo applies. Until then:
 //!
@@ -40,18 +41,23 @@ use crate::control::wal_replication::encode::{
 };
 use crate::wal::RedoStreamId;
 
+use super::redo_stream::{OwedBody, StreamStep};
+
 /// A committed slice's redo, kept while it is proposed.
 #[derive(Debug, Clone)]
 pub(in crate::control::cluster::calvin::scheduler::driver) struct OwedRedo {
+    /// The whole redo for an inline body, the header fields alone for a
+    /// streamed one.
     pub payload: crate::control::wal_replication::transaction_redo::TransactionRedoPayload,
     pub stamps: CalvinEntryStamps,
     pub target: RedoEntryTarget,
     /// Proposals made so far. Each names its own chunk stream.
     pub attempts: u32,
+    pub body: OwedBody,
 }
 
 /// Why a proposal did not reach the log.
-enum ProposeRefusal {
+pub(in crate::control::cluster::calvin::scheduler::driver::core) enum ProposeRefusal {
     /// This node does not lead the vShard's data group.
     NotLeader,
     /// The group cannot take it now. The stall tick proposes again.
@@ -102,9 +108,42 @@ impl Scheduler {
             );
             return;
         }
-        let proposed = self
-            .attempt_entries(txn_id)
-            .and_then(|entries| self.propose_entries(entries));
+        let streamed = self
+            .pending
+            .get(&txn_id)
+            .and_then(|pending| pending.redo.as_ref())
+            .and_then(|owed| match &owed.body {
+                OwedBody::Inline => None,
+                OwedBody::Streamed(progress) => Some(progress.is_some()),
+            });
+        let proposed = match streamed {
+            // A streamed redo with no attempt open starts one from part 0.
+            Some(false) => {
+                self.start_resolve(txn_id);
+                return;
+            }
+            Some(true) => match self.advance_stream(txn_id) {
+                Ok(StreamStep::Final(at)) => Ok(at),
+                Ok(StreamStep::NeedPart) => {
+                    self.start_resolve(txn_id);
+                    return;
+                }
+                Ok(StreamStep::Held) => {
+                    tracing::debug!(
+                        node_id = self.shared.node_id,
+                        vshard_id = self.vshard_id,
+                        epoch = txn_id.epoch,
+                        position = txn_id.position,
+                        "calvin: redo stream held at a fail point before its second chunk"
+                    );
+                    return;
+                }
+                Err(refusal) => Err(refusal),
+            },
+            None => self
+                .attempt_entries(txn_id)
+                .and_then(|entries| self.propose_entries(entries)),
+        };
         match proposed {
             Ok(proposed) => {
                 self.shared
@@ -228,7 +267,10 @@ impl Scheduler {
 
     /// Append `entries` to this vShard's data-group log, in order. Returns
     /// `(group_id, log_index)` of the last.
-    fn propose_entries(&self, entries: Vec<Vec<u8>>) -> Result<(u64, u64), ProposeRefusal> {
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_entries(
+        &self,
+        entries: Vec<Vec<u8>>,
+    ) -> Result<(u64, u64), ProposeRefusal> {
         let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
         let mut last = None;
         for bytes in entries {
@@ -308,7 +350,6 @@ mod tests {
         build_test_scheduler_with_data_side, make_sequenced_txn, staged_pending, staged_response,
     };
     use crate::control::wal_replication::ReplicatedEntry;
-    use crate::wal::RedoRecord;
 
     const VSHARD: u32 = 7;
 
@@ -326,19 +367,20 @@ mod tests {
 
     /// A resolve answer whose redo record carries no ops.
     fn resolved_answer() -> Response {
-        let redo = RedoRecord {
-            version: 1,
-            ops: Vec::new(),
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        let resolved = nodedb_physical::physical_plan::CalvinResolved {
-            redo: redo.to_bytes().expect("encode redo"),
-            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+        let resolved = nodedb_physical::physical_plan::CalvinResolvedPart {
+            part: nodedb_physical::physical_plan::ResolvedTxnPart {
+                index: 0,
+                bytes: Vec::new(),
+                done: true,
+                opened: Some(nodedb_physical::physical_plan::ResolvedTxnOpen {
+                    len: 0,
+                    op_count: 0,
+                    ts_rejected: Vec::new(),
+                }),
+            },
+            reply: Some(nodedb_physical::physical_plan::CalvinReplySpec::Count(
+                Vec::new(),
+            )),
         };
         let mut response = staged_response(Status::Ok, None);
         response.payload =
@@ -524,5 +566,124 @@ mod tests {
         );
         assert!(!scheduler.is_apply_halted());
         assert!(!scheduler.applied.is_applied(14, 2));
+    }
+
+    /// Part `index` of a streamed resolve answer over `parts`.
+    fn part_answer(parts: &[Vec<u8>], index: usize, len: u64, op_count: u64) -> Response {
+        let resolved = nodedb_physical::physical_plan::CalvinResolvedPart {
+            part: nodedb_physical::physical_plan::ResolvedTxnPart {
+                index: index as u32,
+                bytes: parts[index].clone(),
+                done: index + 1 == parts.len(),
+                opened: (index == 0).then(|| nodedb_physical::physical_plan::ResolvedTxnOpen {
+                    len,
+                    op_count,
+                    ts_rejected: Vec::new(),
+                }),
+            },
+            reply: (index == 0)
+                .then(|| nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new())),
+        };
+        let mut response = staged_response(Status::Ok, None);
+        response.payload =
+            Payload::from_vec(zerompk::to_msgpack_vec(&resolved).expect("encode resolved"));
+        response
+    }
+
+    /// A slice redo past the entry limit, resolved in several parts, travels
+    /// as chunk entries proposed as each part arrives, then one stamped final
+    /// entry. Between parts the slice awaits its next part. The chunks join
+    /// to the slice's whole framed content.
+    #[tokio::test]
+    async fn a_streamed_slice_redo_proposes_its_chunks_as_its_parts_arrive() {
+        let txn_id = TxnId::new(14, 2);
+        let (mut scheduler, _dir, _data_side) = resolving_leader(txn_id);
+        let max_entry_bytes = scheduler.shared.redo_chunks.limits().max_entry_bytes;
+        let ops: Vec<crate::wal::RedoSubRecord> = (0..5u8)
+            .map(|byte| crate::wal::RedoSubRecord {
+                record_type: nodedb_wal::record::RecordType::Put as u32,
+                payload: vec![byte; max_entry_bytes / 2],
+            })
+            .collect();
+        let framed = crate::wal::redo::frame::frame_resolved_lists(
+            Vec::new(),
+            ops.clone(),
+            Vec::new(),
+            max_entry_bytes,
+        )
+        .expect("frame the parts");
+        let parts: Vec<Vec<u8>> = framed.parts.into_iter().collect();
+        assert!(parts.len() > 2, "{} parts", parts.len());
+        let group_id = {
+            let mr = scheduler
+                .multi_raft
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            mr.routing()
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .group_for_vshard(VSHARD)
+                .expect("the fixture routes every vShard")
+        };
+        let last_before = scheduler
+            .multi_raft
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .last_log_index(group_id)
+            .expect("the group is mounted");
+
+        for index in 0..parts.len() {
+            scheduler.finish_redo_resolve(
+                txn_id,
+                part_answer(&parts, index, framed.len, ops.len() as u64),
+            );
+            assert!(!scheduler.is_apply_halted(), "part {index}");
+            if index + 1 < parts.len() {
+                assert_eq!(
+                    scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+                    Some(CommitState::AwaitingRedoResolve),
+                    "the slice asks for part {}",
+                    index + 1
+                );
+            }
+        }
+        let (_, last) = proposed_at(&scheduler, txn_id).expect("the final entry is in the log");
+        let mut joined = Vec::new();
+        let mut chunks = 0u32;
+        for index in last_before + 1..last {
+            let entry = ReplicatedEntry::from_bytes(&committed_entry(&scheduler, group_id, index))
+                .expect("a replicated entry");
+            match entry.write {
+                ReplicatedWrite::RedoChunk {
+                    index: at, bytes, ..
+                } => {
+                    assert_eq!(at, chunks, "chunks enter the log in order");
+                    assert!(bytes.len() <= max_entry_bytes);
+                    joined.extend_from_slice(&bytes);
+                    chunks += 1;
+                }
+                other => panic!("entry {index} is no chunk: {other:?}"),
+            }
+        }
+        let last_entry = ReplicatedEntry::from_bytes(&committed_entry(&scheduler, group_id, last))
+            .expect("the final entry");
+        assert!(
+            matches!(
+                last_entry.write,
+                ReplicatedWrite::TransactionRedo {
+                    body: crate::control::wal_replication::types::RedoBody::Chunked { count, .. },
+                    calvin: Some(_),
+                    ..
+                } if count == chunks
+            ),
+            "the final entry names its {chunks} chunks"
+        );
+        let content = crate::control::wal_replication::types::RedoContent::from_framed(&joined)
+            .expect("the chunks join to framed content");
+        assert_eq!(content.redo.ops, ops);
+        assert!(
+            content.redo.calvin_stamp.is_some(),
+            "the header carries the stamp"
+        );
     }
 }

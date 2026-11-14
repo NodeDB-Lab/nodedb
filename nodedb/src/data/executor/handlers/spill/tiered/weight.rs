@@ -21,6 +21,12 @@ impl SpillWeight for u32 {
     }
 }
 
+impl SpillWeight for u64 {
+    fn spill_weight(&self) -> usize {
+        std::mem::size_of::<u64>()
+    }
+}
+
 impl SpillWeight for i64 {
     fn spill_weight(&self) -> usize {
         std::mem::size_of::<i64>()
@@ -51,8 +57,38 @@ impl SpillWeight for nodedb_types::RowIdentity {
     }
 }
 
+impl<A: SpillWeight, B: SpillWeight> SpillWeight for (A, B) {
+    fn spill_weight(&self) -> usize {
+        self.0.spill_weight() + self.1.spill_weight()
+    }
+}
+
 impl<A: SpillWeight, B: SpillWeight, C: SpillWeight> SpillWeight for (A, B, C) {
     fn spill_weight(&self) -> usize {
         self.0.spill_weight() + self.1.spill_weight() + self.2.spill_weight()
+    }
+}
+
+impl<A: SpillWeight, B: SpillWeight, C: SpillWeight, D: SpillWeight> SpillWeight for (A, B, C, D) {
+    fn spill_weight(&self) -> usize {
+        self.0.spill_weight()
+            + self.1.spill_weight()
+            + self.2.spill_weight()
+            + self.3.spill_weight()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tuple_weights_sum_their_fields() {
+        assert_eq!(7u64.spill_weight(), 8);
+        assert_eq!((1u32, 2u64).spill_weight(), 12);
+        assert_eq!(
+            (1u8, 2u32, 3u64, String::from("ab")).spill_weight(),
+            1 + 4 + 8 + HEADER + 2
+        );
     }
 }

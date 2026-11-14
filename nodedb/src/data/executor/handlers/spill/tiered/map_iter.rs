@@ -5,14 +5,15 @@
 //! The scan yields each key once, with its newest version, in key-byte
 //! order. It streams every run through one bounded buffer and holds one
 //! record per run. Runs open on the first `next`, so building a scan does
-//! no I/O.
+//! no I/O. A scan with a start key reads one index page per run through the
+//! map's block reader to find its start block.
 
 use std::borrow::Cow;
 use std::path::Path;
 
 use super::map::{Hot, TieredKey, TieredMap, TieredValue, encode_key};
 use crate::data::executor::handlers::spill::run::record::decode_value;
-use crate::data::executor::handlers::spill::run::{RunRecord, RunStream, SortedRun};
+use crate::data::executor::handlers::spill::run::{BlockReader, RunRecord, RunStream, SortedRun};
 
 /// Which keys a scan yields.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +61,9 @@ pub(in crate::data::executor) struct TieredIter<'a, K, V> {
     hot: std::vec::IntoIter<(Vec<u8>, &'a K, &'a Hot<V>)>,
     hot_head: Option<(Vec<u8>, &'a K, &'a Hot<V>)>,
     runs: &'a [SortedRun],
+    /// Reads the index page a start key needs. `None` for a scan with no
+    /// start key.
+    reader: Option<&'a BlockReader>,
     cursors: Vec<Cursor>,
     bounds: ScanBounds,
     state: State,
@@ -68,23 +72,37 @@ pub(in crate::data::executor) struct TieredIter<'a, K, V> {
 }
 
 impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
-    /// Scan every key within `bounds`.
-    pub(in crate::data::executor) fn scan(&self, bounds: ScanBounds) -> TieredIter<'_, K, V> {
+    /// Scan every key within `bounds`. `reader` reads the index page each
+    /// run needs to start at the bounds' start key.
+    pub(in crate::data::executor) fn scan<'a>(
+        &'a self,
+        bounds: ScanBounds,
+        reader: &'a BlockReader,
+    ) -> TieredIter<'a, K, V> {
+        self.iter_with(bounds, Some(reader))
+    }
+
+    /// Scan every key.
+    pub(in crate::data::executor) fn iter(&self) -> TieredIter<'_, K, V> {
+        self.iter_with(ScanBounds::default(), None)
+    }
+
+    fn iter_with<'a>(
+        &'a self,
+        bounds: ScanBounds,
+        reader: Option<&'a BlockReader>,
+    ) -> TieredIter<'a, K, V> {
         TieredIter {
             hot: Vec::new().into_iter(),
             hot_head: None,
             runs: &self.runs,
+            reader,
             cursors: Vec::new(),
             bounds,
             state: State::Fresh,
             hot_error: None,
         }
         .with_hot(&self.hot)
-    }
-
-    /// Scan every key.
-    pub(in crate::data::executor) fn iter(&self) -> TieredIter<'_, K, V> {
-        self.scan(ScanBounds::default())
     }
 }
 
@@ -116,7 +134,12 @@ impl<'a, K: TieredKey, V: TieredValue> TieredIter<'a, K, V> {
         }
         let start = self.bounds.start_key().map(<[u8]>::to_vec);
         for run in self.runs {
-            let mut stream = RunStream::open(run, start.as_deref())?;
+            // With no reader the stream starts at the run's first record,
+            // and `first_admitted` skips the records before the bounds.
+            let mut stream = match (start.as_deref(), self.reader) {
+                (Some(key), Some(reader)) => RunStream::from_key(run, key, reader)?,
+                _ => RunStream::from_start(run)?,
+            };
             let head = Self::first_admitted(&mut stream, &self.bounds)?;
             self.cursors.push(Cursor { stream, head });
         }
@@ -291,10 +314,13 @@ mod tests {
         let mut prefix = vec![0x93];
         prefix.extend(encode_key(&"b".to_string()).unwrap());
         let b: Vec<_> = map
-            .scan(ScanBounds {
-                after: None,
-                prefix: Some(prefix),
-            })
+            .scan(
+                ScanBounds {
+                    after: None,
+                    prefix: Some(prefix),
+                },
+                space.reader(),
+            )
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(b.len(), 3);
@@ -302,10 +328,13 @@ mod tests {
 
         let first = map.iter().next().unwrap().unwrap().0;
         let rest = map
-            .scan(ScanBounds {
-                after: Some(encode_key(&first).unwrap()),
-                prefix: None,
-            })
+            .scan(
+                ScanBounds {
+                    after: Some(encode_key(&first).unwrap()),
+                    prefix: None,
+                },
+                space.reader(),
+            )
             .count();
         assert_eq!(rest, 6);
     }

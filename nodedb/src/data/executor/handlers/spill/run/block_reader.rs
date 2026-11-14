@@ -10,8 +10,10 @@
 //!
 //! Each spill file is a [`RunFile`]: its owner opens the file on its first
 //! read and keeps the handle until the owner drops. A block read fills the
-//! reader's one reused buffer and hands it to the caller. The reader also
-//! keeps one reused buffer for the encoded key of a point lookup.
+//! reader's reused block buffer and hands it to the caller. An index page
+//! read fills a second reused buffer, so a lookup can read data blocks while
+//! it walks a page. The reader also keeps one reused buffer for the encoded
+//! key of a point lookup.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs::File;
@@ -80,9 +82,11 @@ pub(in crate::data::executor) struct BlockReader {
     ring: RefCell<Ring>,
     /// The block buffer every read reuses.
     block: RefCell<Vec<u8>>,
+    /// The index page buffer every page read reuses.
+    page: RefCell<Vec<u8>>,
     /// The encoded-key buffer every point lookup reuses.
     key: RefCell<Vec<u8>>,
-    /// Blocks read so far.
+    /// Blocks and index pages read so far.
     reads: Cell<u64>,
 }
 
@@ -93,7 +97,7 @@ impl std::fmt::Debug for BlockReader {
 }
 
 impl BlockReader {
-    /// Number of blocks this reader read.
+    /// Number of blocks and index pages this reader read.
     #[cfg(test)]
     pub(in crate::data::executor) fn reads(&self) -> u64 {
         self.reads.get()
@@ -136,6 +140,24 @@ impl BlockReader {
             .block
             .try_borrow_mut()
             .map_err(|_| SpillError::BufferBusy { buffer: "block" })?;
+        self.fill(file, offset, len, &mut buf)?;
+        visit(&buf)
+    }
+
+    /// Read `len` bytes of `file` at `offset` into the reused page buffer
+    /// and hand them to `visit`. `visit` can read blocks through
+    /// [`read_with`](Self::read_with) but must not read another page.
+    pub(in crate::data::executor) fn read_page_with<T>(
+        &self,
+        file: &RunFile,
+        offset: u64,
+        len: usize,
+        visit: impl FnOnce(&[u8]) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        let mut buf = self
+            .page
+            .try_borrow_mut()
+            .map_err(|_| SpillError::BufferBusy { buffer: "page" })?;
         self.fill(file, offset, len, &mut buf)?;
         visit(&buf)
     }

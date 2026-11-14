@@ -45,6 +45,7 @@ pub mod read_result;
 mod read_timeout;
 pub mod redo_applied;
 pub mod redo_propose;
+pub mod redo_stream;
 pub mod request;
 pub mod resolve_turn;
 mod restage;

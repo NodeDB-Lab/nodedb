@@ -523,6 +523,12 @@ impl nodedb_cluster::SnapshotApplier for DataPlaneSnapshotApplier {
             self.shared
                 .change_stream
                 .install_group_floor(group_id, covered);
+            // The install holds every covered entry's state: none of them
+            // stages its events on this node again.
+            self.shared
+                .change_stream
+                .unjournaled()
+                .release_through(group_id, covered);
         }
         crate::event::cdc::position::record_install_floor(&self.shared, group_id, covered);
     }

@@ -111,32 +111,56 @@ impl RunRecord {
     }
 }
 
-/// Split a block of whole frames into frame bodies. A frame cut short is
-/// corruption.
-pub(in crate::data::executor) fn frame_bodies<'a>(
-    path: &Path,
+/// The frame bodies of a block of whole frames, in order. A frame cut
+/// short yields one error and ends the iteration.
+pub(in crate::data::executor) struct Frames<'p, 'a> {
+    path: &'p Path,
     block: &'a [u8],
-) -> Result<Vec<&'a [u8]>, SpillError> {
-    let mut bodies = Vec::new();
-    let mut at = 0usize;
-    while at < block.len() {
-        let header = block.get(at..at + 4).ok_or_else(|| SpillError::Corrupt {
-            path: path.to_path_buf(),
-            detail: format!("frame header cut short at block byte {at}"),
-        })?;
+    at: usize,
+}
+
+impl<'p, 'a> Frames<'p, 'a> {
+    pub(in crate::data::executor) fn new(path: &'p Path, block: &'a [u8]) -> Self {
+        Self { path, block, at: 0 }
+    }
+
+    fn read_frame(&mut self) -> Result<&'a [u8], SpillError> {
+        let at = self.at;
+        let header = self
+            .block
+            .get(at..at + 4)
+            .ok_or_else(|| SpillError::Corrupt {
+                path: self.path.to_path_buf(),
+                detail: format!("frame header cut short at block byte {at}"),
+            })?;
         let mut len_bytes = [0u8; 4];
         len_bytes.copy_from_slice(header);
         let len = u32::from_le_bytes(len_bytes) as usize;
-        let body = block
+        let body = self
+            .block
             .get(at + 4..at + 4 + len)
             .ok_or_else(|| SpillError::Corrupt {
-                path: path.to_path_buf(),
+                path: self.path.to_path_buf(),
                 detail: format!("frame body of {len} bytes cut short at block byte {at}"),
             })?;
-        bodies.push(body);
-        at += 4 + len;
+        self.at = at + 4 + len;
+        Ok(body)
     }
-    Ok(bodies)
+}
+
+impl<'a> Iterator for Frames<'_, 'a> {
+    type Item = Result<&'a [u8], SpillError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.at >= self.block.len() {
+            return None;
+        }
+        let frame = self.read_frame();
+        if frame.is_err() {
+            self.at = self.block.len();
+        }
+        Some(frame)
+    }
 }
 
 /// Encode `value` as MessagePack for a run record or a journal entry.
@@ -164,6 +188,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Split a block of whole frames into frame bodies.
+    fn frame_bodies<'a>(path: &Path, block: &'a [u8]) -> Result<Vec<&'a [u8]>, SpillError> {
+        Frames::new(path, block).collect()
+    }
 
     #[test]
     fn record_round_trips_and_frames_split() {

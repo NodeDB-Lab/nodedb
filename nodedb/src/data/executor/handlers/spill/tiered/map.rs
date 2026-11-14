@@ -8,7 +8,9 @@
 //! For any key, versions grow newer from the oldest run to the newest run,
 //! and the hot tier is newer than every run. A lookup probes the hot tier,
 //! then the runs from newest to oldest, and the first version found wins.
-//! A run whose key bloom rejects the key is skipped without a read.
+//! A run whose key range excludes the key is skipped without a read. In any
+//! other run the lookup reads one index page and one block, and decodes the
+//! block only when the block's bloom admits the key.
 //! A tombstone is a value like any other, so a tombstone hides every older
 //! version.
 //!
@@ -113,9 +115,9 @@ impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
         self.hot_bytes
     }
 
-    /// Heap bytes the runs keep in RAM: blooms and indexes.
+    /// Bytes the runs keep in RAM: one summary per index page of each run.
     pub(in crate::data::executor) fn run_heap_bytes(&self) -> usize {
-        self.runs.iter().map(SortedRun::heap_bytes).sum()
+        self.runs.iter().map(SortedRun::resident_bytes).sum()
     }
 
     /// The hot version of `key`, a borrowed form of `K`.
@@ -175,7 +177,7 @@ impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
     /// and encodes to the same MessagePack bytes, so a lookup builds no
     /// owned key. The hot tier is probed by hash. Only when it misses and a
     /// run exists, the key is encoded once into the reader's reused buffer
-    /// and every run the bloom admits is probed with those bytes.
+    /// and the runs are probed with those bytes.
     pub(in crate::data::executor) fn get<'a, Q>(
         &'a self,
         key: &Q,
@@ -257,10 +259,10 @@ impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
     }
 
     /// Probe the runs newest first for `key_bytes`. A run is skipped
-    /// without a read when its bloom rejects the key or `admit` refuses its
-    /// oldest version: every `admit` here is `seq < bound` or always true,
-    /// so a refused oldest version means no version of the run passes.
-    /// `take` receives the first admitted version's value bytes.
+    /// without a read when `admit` refuses its oldest version: every
+    /// `admit` here is `seq < bound` or always true, so a refused oldest
+    /// version means no version of the run passes. `take` receives the
+    /// first admitted version's value bytes.
     fn probe_runs<T>(
         &self,
         key_bytes: &[u8],
@@ -269,7 +271,7 @@ impl<K: TieredKey, V: TieredValue> TieredMap<K, V> {
         take: impl Fn(&SortedRun, &[u8]) -> crate::Result<T>,
     ) -> crate::Result<Option<T>> {
         for run in self.runs.iter().rev() {
-            if !admit(run.min_seq()) || !run.may_contain(key_bytes) {
+            if !admit(run.min_seq()) {
                 continue;
             }
             if let Some(found) = run.find(key_bytes, reader, admit, |_, value| take(run, value))? {
