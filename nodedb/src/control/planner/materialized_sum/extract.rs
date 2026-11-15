@@ -17,6 +17,8 @@ use memchr::memmem;
 /// participate in this binding. A present-but-empty string IS a join value and
 /// is returned as one — the emptiness is the caller's to judge.
 ///
+/// A repeated key resolves to its last entry.
+///
 /// A cheap byte pre-filter skips the decode when the column name does not occur
 /// in the body at all.
 pub fn join_value_from_body(value: &[u8], join_column: &str) -> Option<String> {
@@ -27,19 +29,13 @@ pub fn join_value_from_body(value: &[u8], join_column: &str) -> Option<String> {
         return None;
     };
 
-    for (k, v) in &entries {
-        let key = match k {
-            rmpv::Value::String(s) => match s.as_str() {
-                Some(s) => s,
-                None => continue,
-            },
-            _ => continue,
-        };
-        if key == join_column {
-            return render_key(v);
-        }
-    }
-    None
+    // A repeated key resolves to its last entry, the same rule the Data Plane
+    // decoder applies.
+    let last = entries.iter().rev().find_map(|(k, v)| match k {
+        rmpv::Value::String(s) if s.as_str() == Some(join_column) => Some(v),
+        _ => None,
+    })?;
+    render_key(last)
 }
 
 /// Render a msgpack scalar the way the document engine renders a primary key.
@@ -115,6 +111,27 @@ mod tests {
             "account_id",
             rmpv::Value::Array(vec![rmpv::Value::Integer(1.into())]),
         )]);
+        assert!(join_value_from_body(&v, "account_id").is_none());
+    }
+
+    #[test]
+    fn repeated_join_key_takes_the_last_value() {
+        let v = doc(&[
+            ("account_id", rmpv::Value::Nil),
+            ("account_id", rmpv::Value::String("acc".into())),
+        ]);
+        assert_eq!(
+            join_value_from_body(&v, "account_id"),
+            Some("acc".to_string())
+        );
+    }
+
+    #[test]
+    fn repeated_join_key_ending_in_null_yields_none() {
+        let v = doc(&[
+            ("account_id", rmpv::Value::String("acc".into())),
+            ("account_id", rmpv::Value::Nil),
+        ]);
         assert!(join_value_from_body(&v, "account_id").is_none());
     }
 }
