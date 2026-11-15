@@ -92,6 +92,15 @@ pub(super) async fn alter_table_add_column(
                             format!("column '{}' already exists", column.name),
                         ));
                     }
+                    if column.generated_expr.is_some() {
+                        super::super::generated_join::refuse_bound_generated_join_column(
+                            catalog,
+                            database_id,
+                            tenant_id.as_u64(),
+                            table_name,
+                            std::slice::from_ref(&column.name),
+                        )?;
+                    }
                     let new_version = schema.version.saturating_add(1);
                     let mut col = column;
                     col.added_at_version = new_version;

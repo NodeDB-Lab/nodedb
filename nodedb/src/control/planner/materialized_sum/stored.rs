@@ -11,6 +11,11 @@
 //! resolves from the plan; the one the row is leaving is readable only from
 //! the stored image.
 //!
+//! An insert that skips a conflict (`if_absent`) has a third gap: the plan
+//! cannot tell whether its row lands. A stored row skips the write, and an
+//! absent row takes the submitted body. The stored read decides which, so a
+//! cross-shard balance settles only for a row that lands.
+//!
 //! [`recon_point_row`] is the only plan-time source read: two readers can
 //! disagree about where a collection lives, and the Data Plane never
 //! resolves this itself (the pk→surrogate map is catalog state, off-limits
@@ -29,13 +34,14 @@ use nodedb_types::id::TxnId;
 use super::recon::{read_cut, recon_point_row};
 use super::resolve::lookup_join_value;
 use super::resolve_target::ResolvedTargets;
+use super::unbound_key::refuse_key_bound_since_planning;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
 /// How a point-shaped write's POST-image is formed.
 ///
-/// The four shapes form it four different ways, and the difference decides what
-/// a cross-shard balance is settled from — so it is spelled out rather than
+/// Each shape forms it its own way, and the difference decides what a
+/// cross-shard balance is settled from — so it is spelled out rather than
 /// inferred from whether a body or an assignment list happens to be empty. An
 /// `ON CONFLICT DO UPDATE` with no assignment and a whole-row `PUT` are
 /// indistinguishable by that test, and they produce different post-images.
@@ -52,6 +58,9 @@ pub(super) enum PostImage<'a> {
     /// row rewritten by those assignments (with the body answering
     /// `EXCLUDED.col`) when it does.
     BodyOrAssigned(&'a [u8]),
+    /// The submitted body when no row is stored. A stored row skips the write:
+    /// there is no image pair, and the row owes nothing.
+    BodyIfAbsent(&'a [u8]),
 }
 
 /// The one stored row a point-shaped write rewrites or removes.
@@ -62,7 +71,9 @@ pub(super) struct StoredRowScope<'a> {
     /// for storage addressing is `surrogate` and only `surrogate`.
     pub document_id: &'a str,
     /// Catalog-bound identity of the row, which is what actually addresses it.
-    pub surrogate: Surrogate,
+    /// `None` when the key was unbound at planning: no row exists to read, and
+    /// the settlement's read is collection-scoped.
+    pub surrogate: Option<Surrogate>,
     /// The statement's assignments, so a write that rewrites the join column
     /// resolves the target it moves the row ONTO as well as the one it moves it
     /// off. Empty for the shapes that carry no assignments — a delete, and a put
@@ -82,7 +93,8 @@ pub(super) struct StoredRowScope<'a> {
 pub(super) struct StoredImages {
     /// One pair per row this write touches — at most one, for a point shape.
     pub images: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>,
-    /// The ordinal of the read cut taken before the read.
+    /// The ordinal of the read cut taken before the op's first read. Every row
+    /// of one op shares it.
     pub observed_at: i64,
 }
 
@@ -90,8 +102,9 @@ pub(super) struct StoredImages {
 /// rewrites none. Exhaustive so a new `DocumentOp` variant must state which
 /// side it is on. Covers all four point shapes, including `PointPut`/
 /// `Upsert` (a join-column rewrite debits the leaving target, named only by
-/// the stored image). `PointInsert`/`BatchInsert` are absent: rows are new
-/// by construction, so there's no pre-image to read.
+/// the stored image). A `PointInsert` with `if_absent` names its row too: a
+/// stored row skips the write. A plain `PointInsert` names none: a stored key
+/// fails it, so its row has no pre-image.
 ///
 /// `txn_id` is the open transaction the write runs in, `None` outside a
 /// transaction block.
@@ -100,17 +113,18 @@ pub(super) fn stored_row_scope(
     txn_id: Option<TxnId>,
 ) -> Option<StoredRowScope<'_>> {
     match op {
-        // A key unbound in its database names no stored row.
+        // A key unbound at planning has no row yet, but an insert can bind it
+        // before this write applies, so the write still settles.
         DocumentOp::PointUpdate {
             collection,
             document_id,
             surrogate,
             updates,
             ..
-        } => surrogate.map(|surrogate| StoredRowScope {
+        } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate,
+            surrogate: *surrogate,
             updates: updates.as_slice(),
             post_image: PostImage::Assigned,
             txn_id,
@@ -122,10 +136,10 @@ pub(super) fn stored_row_scope(
             document_id,
             surrogate,
             ..
-        } => surrogate.map(|surrogate| StoredRowScope {
+        } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate,
+            surrogate: *surrogate,
             updates: &[],
             post_image: PostImage::Removed,
             txn_id,
@@ -142,7 +156,7 @@ pub(super) fn stored_row_scope(
         } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate: *surrogate,
+            surrogate: Some(*surrogate),
             updates: &[],
             post_image: PostImage::Body(value.as_slice()),
             txn_id,
@@ -161,15 +175,39 @@ pub(super) fn stored_row_scope(
         } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate: *surrogate,
+            surrogate: Some(*surrogate),
             updates: on_conflict_updates.as_slice(),
             post_image: PostImage::BodyOrAssigned(value.as_slice()),
             txn_id,
         }),
+        // A stored row skips the write. An absent row takes the submitted body
+        // and owes its target the row's whole value.
+        DocumentOp::PointInsert {
+            collection,
+            document_id,
+            surrogate,
+            value,
+            if_absent: true,
+            ..
+        } => Some(StoredRowScope {
+            collection: collection.as_str(),
+            document_id: document_id.as_str(),
+            surrogate: Some(*surrogate),
+            updates: &[],
+            post_image: PostImage::BodyIfAbsent(value.as_slice()),
+            txn_id,
+        }),
         // A page names one stored row per document: see `stored_row_scopes`.
-        DocumentOp::BatchUpsert { .. } => None,
-        DocumentOp::PointInsert { .. }
-        | DocumentOp::BatchInsert { .. }
+        DocumentOp::BatchUpsert { .. }
+        | DocumentOp::BatchInsert {
+            if_absent: true, ..
+        } => None,
+        DocumentOp::PointInsert {
+            if_absent: false, ..
+        }
+        | DocumentOp::BatchInsert {
+            if_absent: false, ..
+        }
         | DocumentOp::ResolveWrite(_)
         | DocumentOp::PointGet { .. }
         | DocumentOp::Scan { .. }
@@ -193,9 +231,9 @@ pub(super) fn stored_row_scope(
     }
 }
 
-/// Every stored row an op rewrites or removes: one per row of a
-/// `BatchUpsert` page, each judged as its `Upsert` is, else the one
-/// [`stored_row_scope`] names.
+/// Every stored row an op addresses: one per row of a `BatchUpsert` page, each
+/// judged as its `Upsert` is, one per row of an `if_absent` `BatchInsert` page,
+/// else the one [`stored_row_scope`] names.
 pub(super) fn stored_row_scopes(op: &DocumentOp, txn_id: Option<TxnId>) -> Vec<StoredRowScope<'_>> {
     match op {
         DocumentOp::BatchUpsert {
@@ -210,14 +248,73 @@ pub(super) fn stored_row_scopes(op: &DocumentOp, txn_id: Option<TxnId>) -> Vec<S
             .map(|((document_id, value), surrogate)| StoredRowScope {
                 collection: collection.as_str(),
                 document_id: document_id.as_str(),
-                surrogate: *surrogate,
+                surrogate: Some(*surrogate),
                 updates: on_conflict_updates.as_slice(),
                 post_image: PostImage::BodyOrAssigned(value.as_slice()),
                 txn_id,
             })
             .collect(),
+        DocumentOp::BatchInsert {
+            collection,
+            documents,
+            surrogates,
+            if_absent: true,
+            ..
+        } => documents
+            .iter()
+            .zip(surrogates)
+            .map(|((document_id, value), surrogate)| StoredRowScope {
+                collection: collection.as_str(),
+                document_id: document_id.as_str(),
+                surrogate: Some(*surrogate),
+                updates: &[],
+                post_image: PostImage::BodyIfAbsent(value.as_slice()),
+                txn_id,
+            })
+            .collect(),
         other => stored_row_scope(other, txn_id).into_iter().collect(),
     }
+}
+
+/// [`extend_with_stored_row`] for every row of one op, in `scopes` order.
+///
+/// The op takes ONE read cut, before its first read, and every row's images
+/// carry it. A write that commits after the cut moves a version above it, so
+/// the apply aborts the statement whether the write landed before or after the
+/// row's read. A cut per row grows with the page and misses the statement
+/// deadline on a large page.
+pub(super) async fn extend_with_stored_rows(
+    state: &SharedState,
+    bindings: &Arc<Vec<MaterializedSumBinding>>,
+    scopes: &[StoredRowScope<'_>],
+    resolved: &mut ResolvedTargets,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    trace_id: TraceId,
+) -> crate::Result<Vec<StoredImages>> {
+    if scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The cut the stored images are validated at, taken before any read.
+    let observed_at = read_cut(state).await?;
+    let mut all = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let images = extend_with_stored_row(
+            state,
+            bindings,
+            scope,
+            resolved,
+            tenant_id,
+            database_id,
+            trace_id,
+        )
+        .await?;
+        all.push(StoredImages {
+            images,
+            observed_at,
+        });
+    }
+    Ok(all)
 }
 
 /// Add every target the stored row addresses to `resolved`, and return the
@@ -229,8 +326,16 @@ pub(super) fn stored_row_scopes(op: &DocumentOp, txn_id: Option<TxnId>) -> Vec<S
 /// no target anything. That is the ordinary answer, not a failure — the write
 /// path reaches the same conclusion about the same absent row. A put or upsert
 /// with no stored row still writes: it INSERTS, and its post-image is the
-/// submitted body, so it still owes its target the row's whole value.
-pub(super) async fn extend_with_stored_row(
+/// submitted body, so it still owes its target the row's whole value. An insert
+/// that skips a conflict owes the same when no row is stored. A stored row skips
+/// that insert, which then owes nothing.
+///
+/// The caller takes the read cut before this read ([`extend_with_stored_rows`]).
+///
+/// An unbound key has no row to read. [`refuse_key_bound_since_planning`] covers
+/// an insert that bound it before the cut, and the settlement's read covers one
+/// after.
+async fn extend_with_stored_row(
     state: &SharedState,
     bindings: &Arc<Vec<MaterializedSumBinding>>,
     scope: &StoredRowScope<'_>,
@@ -238,33 +343,50 @@ pub(super) async fn extend_with_stored_row(
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
-) -> crate::Result<StoredImages> {
-    // The cut the stored image is validated at, taken before the read.
-    let observed_at = read_cut(state).await?;
-    let row = recon_point_row(
-        state,
-        tenant_id,
-        database_id,
-        scope.txn_id,
-        scope.collection,
-        scope.document_id,
-        scope.surrogate,
-    )
-    .await?;
-
-    let outcome = StoredImages {
-        images: images_of(
-            scope,
-            row.as_ref(),
-            &crate::control::crs_context::crs_context_for(state),
-        )?,
-        observed_at,
+) -> crate::Result<Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>> {
+    let row = match scope.surrogate {
+        Some(surrogate) => {
+            recon_point_row(
+                state,
+                tenant_id,
+                database_id,
+                scope.txn_id,
+                scope.collection,
+                scope.document_id,
+                surrogate,
+            )
+            .await?
+        }
+        None => {
+            refuse_key_bound_since_planning(
+                state,
+                bindings,
+                scope,
+                (tenant_id, database_id),
+                trace_id,
+            )
+            .await?;
+            None
+        }
     };
+
+    let mut images = images_of(
+        scope,
+        row.as_ref(),
+        &crate::control::crs_context::crs_context_for(state),
+    )?;
+    // The Data Plane recomputes generated columns on the row it stores, so the
+    // post-image does too. Join values below are read off these images.
+    super::generated::source_generated(state, scope.collection, tenant_id, database_id)?
+        .recompute_post_images(
+            &mut images,
+            &crate::control::crs_context::crs_context_for(state),
+        )?;
 
     if row.is_none() {
         // Nothing stored: the body-driven resolution already covers the only
         // target such a write can address.
-        return Ok(outcome);
+        return Ok(images);
     }
 
     // Both sides of every image pair, so a write that rewrites the join column
@@ -274,8 +396,8 @@ pub(super) async fn extend_with_stored_row(
     // post-image from the body as well as from the assignments, and a
     // re-derivation that saw only the assignments will resolve a target the
     // fold never addresses — or miss the one it does.
-    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(outcome.images.len() * 2);
-    for (old, new) in &outcome.images {
+    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(images.len() * 2);
+    for (old, new) in &images {
         rows.extend(old.iter().cloned());
         rows.extend(new.iter().cloned());
     }
@@ -302,13 +424,14 @@ pub(super) async fn extend_with_stored_row(
                 .await?;
         }
     }
-    Ok(outcome)
+    Ok(images)
 }
 
 /// The pre-/post-image pairs `scope` produces against `stored`.
 ///
 /// One pair at most: a point write touches one row. An empty result is a write
-/// that rewrites nothing at all — an update or delete whose key matched no row.
+/// that rewrites nothing at all: an update or delete whose key matched no row,
+/// or an insert that skips a stored row.
 fn images_of(
     scope: &StoredRowScope<'_>,
     stored: Option<&serde_json::Value>,
@@ -344,6 +467,9 @@ fn images_of(
             )]
         }
         (PostImage::BodyOrAssigned(body), None) => vec![(None, decode_body(body))],
+        (PostImage::BodyIfAbsent(body), None) => vec![(None, decode_body(body))],
+        // A stored row skips the insert, so the write owes nothing.
+        (PostImage::BodyIfAbsent(_), Some(_)) => Vec::new(),
         // Nothing stored and nothing submitted: the write rewrites no row.
         (PostImage::Removed | PostImage::Assigned, None) => Vec::new(),
     })
@@ -456,7 +582,8 @@ mod tests {
             assert_eq!(scope.collection, "entries");
             assert_eq!(scope.document_id, "e1");
             assert_eq!(
-                scope.surrogate, ROW,
+                scope.surrogate,
+                Some(ROW),
                 "the row is addressed by its surrogate, never by the primary-key string"
             );
         }
@@ -658,5 +785,55 @@ mod tests {
 
         assert_eq!(images[0].0.as_ref(), Some(&stored));
         assert_eq!(amount_of(images[0].1.as_ref()), Some(60));
+    }
+
+    fn skip_insert() -> DocumentOp {
+        DocumentOp::PointInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "entries"),
+            document_id: "e1".to_string(),
+            value: nodedb_types::json_to_msgpack(
+                &serde_json::json!({"account_id": "acc-1", "amount": 5}),
+            )
+            .expect("encode body"),
+            if_absent: true,
+            surrogate: ROW,
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: Vec::new(),
+        }
+    }
+
+    /// A skipped insert writes nothing, so an image pair credits a row that
+    /// never lands.
+    #[test]
+    fn a_skip_insert_of_a_stored_row_owes_nothing() {
+        let op = skip_insert();
+        let scope = stored_row_scope(&op, None).expect("a skip insert names its row");
+        let stored = serde_json::json!({"account_id": "acc-1", "amount": 9});
+        let images = images_of(
+            &scope,
+            Some(&stored),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("images");
+        assert!(images.is_empty());
+    }
+
+    /// An absent row lands the submitted body, so the pair carries that body
+    /// and no pre-image.
+    #[test]
+    fn a_skip_insert_of_an_absent_row_owes_its_body() {
+        let op = skip_insert();
+        let scope = stored_row_scope(&op, None).expect("a skip insert names its row");
+        let images =
+            images_of(&scope, None, &nodedb_crs::CrsContext::builtin_only()).expect("images");
+        assert_eq!(
+            images,
+            vec![(
+                None,
+                Some(serde_json::json!({"account_id": "acc-1", "amount": 5}))
+            )]
+        );
     }
 }

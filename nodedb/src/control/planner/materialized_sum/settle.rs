@@ -90,7 +90,9 @@ pub(super) struct SettleInput<'a> {
     pub images: &'a [(Option<serde_json::Value>, Option<serde_json::Value>)],
     /// The ONE source row a point-shaped write rewrites, so the OCC entry names
     /// that row. `None` for a predicate-shaped write, whose observation is the
-    /// whole collection and whose entry is collection-scoped accordingly.
+    /// whole collection, and for a point write of an unbound key: an insert of
+    /// that key mints a surrogate no point entry can name. Both entries are
+    /// collection-scoped.
     pub source_row: Option<Surrogate>,
     /// The ordinal of the read cut the images' read took before it read.
     pub observed_at: i64,
@@ -148,6 +150,7 @@ pub(super) fn settle_cross_shard_images(
     database_id: DatabaseId,
 ) -> crate::Result<Settlement> {
     let mut settlement = Settlement::empty();
+    let mut cross_shard = false;
     let source = CollectionKey::from_qualified_str(database_id, input.source_collection)?;
     for binding in bindings {
         if sum_target_is_co_resident(source, &binding.target_collection) {
@@ -155,6 +158,7 @@ pub(super) fn settle_cross_shard_images(
             // transaction and is atomic for free.
             continue;
         }
+        cross_shard = true;
         let mut folded: Vec<crate::query::BindingDelta> = Vec::new();
         for (old, new) in input.images {
             folded.extend(crate::query::binding_image_deltas(
@@ -198,7 +202,11 @@ pub(super) fn settle_cross_shard_images(
         }
     }
 
-    if !settlement.tasks.is_empty() || !settlement.shipped.is_empty() {
+    // A settlement that folded nothing still observed the source: the row was
+    // absent, held no join value, or no row matched. A write that creates that
+    // row or joins that match set before this write applies owes a delta, so
+    // the empty observation is stamped too.
+    if cross_shard {
         settlement
             .reads
             .push(image_read_entry(input, tenant_id, database_id));
@@ -253,10 +261,10 @@ pub(super) fn balance_task(spec: BalanceTaskSpec<'_>) -> PhysicalTask {
 /// The read-set entry covering the images a settlement was folded from.
 ///
 /// A point-shaped write names the ONE row it rewrites, so the entry is that
-/// row's surrogate and only a write to THAT row invalidates it. A
-/// predicate-shaped write observed which rows matched, which is a
-/// collection-scoped observation: any write to the source collection can add a
-/// row the scan never saw or move one it did, so the entry is the
+/// row's surrogate and only a write to THAT row invalidates it. A write that
+/// names no surrogate observed which rows matched, or that a key has no row,
+/// which is a collection-scoped observation: any write to the source collection
+/// can add a row the scan never saw or move one it did, so the entry is the
 /// collection-scoped predicate — the phantom-safe floor, never an
 /// under-approximation.
 fn image_read_entry(
@@ -306,6 +314,20 @@ pub(super) fn omit_shipped(
         !shipped.iter().any(|key| entry.matches_key(key))
             || still_needed.iter().any(|key| entry.matches_key(key))
     });
+}
+
+/// Remove every entry whose target homes off `source_collection`'s vShard.
+///
+/// Call it after the settlement of a whole op. A cross-shard delta moves only on
+/// its own `ApplyBalanceDelta` task, so the source's core folds none of them.
+pub(super) fn keep_co_resident_targets(
+    resolved: &mut Vec<ResolvedSumTarget>,
+    source_collection: &str,
+    database_id: DatabaseId,
+) -> crate::Result<()> {
+    let source = CollectionKey::from_qualified_str(database_id, source_collection)?;
+    resolved.retain(|entry| sum_target_is_co_resident(source, &entry.target_collection));
+    Ok(())
 }
 
 /// The `(target collection, join value)` pairs the CO-RESIDENT bindings of
@@ -548,6 +570,17 @@ mod tests {
         assert!(settlement.tasks.is_empty());
         assert!(settlement.shipped.is_empty());
         assert!(settlement.reads.is_empty());
+    }
+
+    /// A cross-shard entry left on a settled op folds a sibling row on the
+    /// wrong core, so only the co-resident entry stays.
+    #[test]
+    fn a_settled_op_keeps_only_co_resident_targets() {
+        let (source, target) = cross_shard_pair();
+        let mut resolved = resolution(&target, &[("acc-1", 500)]);
+        resolved.extend(resolution(&source, &[("acc-1", 501)]));
+        keep_co_resident_targets(&mut resolved, &source, DB).expect("keep");
+        assert_eq!(resolved, resolution(&source, &[("acc-1", 501)]));
     }
 
     /// The settled images are stamped as a read of the ONE source row, so a

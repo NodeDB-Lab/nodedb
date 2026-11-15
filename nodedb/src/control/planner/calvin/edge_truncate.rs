@@ -38,6 +38,7 @@ use crate::control::server::dispatch_utils::{
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
+use crate::control::server::shared::session::commit::restart_identity::restart_truncated_identities;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
@@ -67,7 +68,26 @@ pub(super) struct TruncateOutcome {
 ///
 /// With `identity`, each TRUNCATE passes the clone-write gate and
 /// authorization. Without it, the caller already authorized it.
+///
+/// A `TRUNCATE ... RESTART IDENTITY` restarts its collection's sequences once
+/// the TRUNCATE has committed.
 pub(super) async fn dispatch_truncate(
+    state: &SharedState,
+    tasks: &[PhysicalTask],
+    identity: Option<&AuthenticatedIdentity>,
+    tenant_id: TenantId,
+    user_roles: &[String],
+    settled: SettledReads<'_>,
+) -> crate::Result<Option<TruncateOutcome>> {
+    let outcome = commit_truncates(state, tasks, identity, tenant_id, user_roles, settled).await?;
+    if outcome.is_some() {
+        restart_truncated_identities(state, tenant_id, tasks);
+    }
+    Ok(outcome)
+}
+
+/// Commit the TRUNCATEs among `tasks`, with the rest of the set beside them.
+async fn commit_truncates(
     state: &SharedState,
     tasks: &[PhysicalTask],
     identity: Option<&AuthenticatedIdentity>,

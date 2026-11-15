@@ -19,6 +19,7 @@ use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::metering::PlanMeteringInfo;
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::commit::restart_identity::restart_truncated_identity;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
 use super::super::super::super::auth::{ApiError, AppState};
@@ -70,6 +71,7 @@ pub(super) async fn run_task_loop(
         // Captured before dispatch moves `task.plan`. Resolved once per task,
         // reused for every payload it produced.
         let plan_for_shape = task.plan.clone();
+        let task_database_id = task.database_id;
         let redaction =
             QueryRedaction::for_plan(tenant_id, task.database_id, scope.auth(), &plan_for_shape);
         let append = ShapedAppend {
@@ -143,6 +145,8 @@ pub(super) async fn run_task_loop(
             .execute(&gw_ctx, checked)
             .await
             .map_err(gateway_error)?;
+        // Autocommit: the TRUNCATE is durable, so its sequences restart now.
+        restart_truncated_identity(&state.shared, task_database_id, tenant_id, &plan_for_shape);
         for payload in &payloads {
             append_payload(&mut result_rows, payload, &append).await?;
         }

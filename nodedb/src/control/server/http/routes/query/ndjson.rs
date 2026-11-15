@@ -20,6 +20,7 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::commit::restart_identity::restart_after_ok;
 use crate::control::server::shared::session::{read_consistency, read_scope};
 use crate::control::server::shared::statement_exec::{
     AtomicStatement, StatementExec, authorize_one_task,
@@ -423,7 +424,9 @@ async fn ndjson_at_consistency(
                                 txn_id: None,
                                 linearizable: read_scope::linearizable(),
                             };
-                            gateway.execute(&gw_ctx, checked).await
+                            let result = gateway.execute(&gw_ctx, checked).await;
+                            restart_after_ok(&state.shared, &gw_ctx, Some(&plan_for_shape), &result);
+                            result
                         }
                         Err(error) => Err(error),
                     },

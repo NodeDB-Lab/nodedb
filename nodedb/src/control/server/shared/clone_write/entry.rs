@@ -5,7 +5,7 @@
 //! of those protocols claims is refused outright on a `Shadowed`/
 //! `Materializing` clone (see [`refuse_unsupported_clone_write`]).
 
-use nodedb_types::{CloneStatus, CollectionType, Lsn, TenantId};
+use nodedb_types::{CloneStatus, CollectionType, DatabaseId, Lsn, TenantId};
 
 use crate::bridge::envelope::Response;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -181,22 +181,88 @@ fn refuse_unsupported_clone_write(
         return Ok(CloneWriteOutcome::Passthrough);
     };
 
-    let db_id = task.database_id;
     // A plan names a collection qualified and an array bare.
-    let coll_name = nodedb_types::CollectionKey::from_relation_name(db_id, qualified)?.name();
+    let coll_name =
+        nodedb_types::CollectionKey::from_relation_name(task.database_id, qualified)?.name();
+    refuse_unmaterialized_clone(
+        state,
+        task.database_id,
+        tenant_id,
+        coll_name,
+        unsupported_shape_reason,
+    )?;
+    Ok(CloneWriteOutcome::Passthrough)
+}
+
+/// Refuse every write in `tasks` that targets a `Shadowed`/`Materializing`
+/// clone. A settled single-shard set commits through Calvin, the static route
+/// or the coordinator, without [`super::intercept_and_authorize`], so it skips
+/// copy-up and tombstones. A write naming no single collection passes.
+pub(crate) fn refuse_clone_write_on_settled_route(
+    state: &SharedState,
+    tasks: &[PhysicalTask],
+    tenant_id: TenantId,
+) -> crate::Result<()> {
+    for task in tasks {
+        if !plan_is_write(&task.plan) {
+            continue;
+        }
+        let Some(qualified) = extract_collection(&task.plan) else {
+            continue;
+        };
+        // A plan names a collection qualified and an array bare.
+        let coll_name =
+            nodedb_types::CollectionKey::from_relation_name(task.database_id, qualified)?.name();
+        refuse_unmaterialized_clone(
+            state,
+            task.database_id,
+            tenant_id,
+            coll_name,
+            |_| "cannot be written on a settled Calvin route, which skips copy-on-write",
+        )?;
+    }
+    Ok(())
+}
+
+/// The reason a write shape outside the copy-on-write protocols is refused.
+///
+/// Document/KV DO have a CoW module (`document.rs`/`kv.rs`) — reaching
+/// here for one of them means the op shape is outside its point-op
+/// protocol, not that the engine lacks support. Columnar (plain,
+/// timeseries, spatial) has no CoW module at all. Exhaustive: a third
+/// `CollectionType` forces a decision here too.
+fn unsupported_shape_reason(collection_type: &CollectionType) -> &'static str {
+    match collection_type {
+        CollectionType::Document(_) | CollectionType::KeyValue(_) => {
+            "supports copy-on-write for point writes only; this write's shape is outside that protocol"
+        }
+        CollectionType::Columnar(_) => "has no copy-on-write support",
+    }
+}
+
+/// Refuse a write to `coll_name` when it is a `Shadowed`/`Materializing`
+/// clone, with the `reason` the caller derives from the collection type. A
+/// missing collection, a non-clone and a `Materialized` clone pass.
+fn refuse_unmaterialized_clone(
+    state: &SharedState,
+    db_id: DatabaseId,
+    tenant_id: TenantId,
+    coll_name: &str,
+    reason: impl FnOnce(&CollectionType) -> &'static str,
+) -> crate::Result<()> {
     let catalog = state.credentials.catalog();
 
     let Some(desc) = catalog
         .get_collection(db_id, tenant_id.as_u64(), coll_name)
         .map_err(|e| write_err(format!("clone write gate: get_collection: {e}")))?
     else {
-        return Ok(CloneWriteOutcome::Passthrough);
+        return Ok(());
     };
     if desc.cloned_from.is_none() {
-        return Ok(CloneWriteOutcome::Passthrough);
+        return Ok(());
     }
     match desc.clone_status {
-        CloneStatus::Materialized => return Ok(CloneWriteOutcome::Passthrough),
+        CloneStatus::Materialized => return Ok(()),
         CloneStatus::Shadowed | CloneStatus::Materializing { .. } => {}
     }
 
@@ -206,22 +272,10 @@ fn refuse_unsupported_clone_write(
         .map(|d| d.name)
         .unwrap_or_else(|| db_id.to_string());
 
-    // Document/KV DO have a CoW module (`document.rs`/`kv.rs`) — reaching
-    // here for one of them means the op shape is outside its point-op
-    // protocol, not that the engine lacks support. Columnar (plain,
-    // timeseries, spatial) has no CoW module at all. Exhaustive: a third
-    // `CollectionType` forces a decision here too.
-    let reason = match desc.collection_type {
-        CollectionType::Document(_) | CollectionType::KeyValue(_) => {
-            "supports copy-on-write for point writes only; this write's shape is outside that protocol"
-        }
-        CollectionType::Columnar(_) => "has no copy-on-write support",
-    };
-
     Err(crate::Error::CloneWriteRequiresMaterialize {
         collection: coll_name.to_string(),
         engine: desc.collection_type.as_str().to_string(),
         database,
-        reason,
+        reason: reason(&desc.collection_type),
     })
 }

@@ -5,6 +5,7 @@ mod native_backup_database;
 mod native_check_constraints;
 mod native_clone_read_intercept;
 mod native_clone_write_intercept;
+mod native_clone_write_settled_route;
 mod native_create_then_dml;
 mod native_database_collection_key_placement;
 mod native_direct_op_block_routing;

@@ -24,6 +24,12 @@ statements.";
 pub const SAME_ROW_WRITES_REFUSAL: &str = "several writes of one request rewrite the same source \
 row of a materialized sum; run them as separate statements.";
 
+/// The refusal of a request in which a predicate write or a TRUNCATE follows a
+/// write that can move what it settles from. The wire tests match this text.
+pub const SAME_SOURCE_WRITES_REFUSAL: &str = "a predicate write or a TRUNCATE follows another \
+write of the same materialized-sum source in one request, and every write settles before any \
+write stages; run them as separate statements.";
+
 /// The refusal of a Calvin task set with several `RETURNING` tasks.
 pub const SEVERAL_RETURNING_REFUSAL: &str = "several writes of one request carry RETURNING and \
 commit through one Calvin transaction, which answers one write's rows; run them as separate \
@@ -51,10 +57,10 @@ pub fn refuse_several_returning_tasks(tasks: &[PhysicalTask]) -> crate::Result<(
 ///
 /// Every write of a task set settles before any write stages, so a later write
 /// of a row folds its delta from an image the earlier write changes. `reads`
-/// names each settled point write by its source row, so a row that ships no
-/// delta does not count. Two writes of different rows each fold their own image
-/// and pass. The rows of one `BatchUpsert` page settle the same way, so a page
-/// that names a row twice is refused too.
+/// names each settled point write by its source row, absent rows included. Two
+/// writes of different rows each fold their own image and pass. The rows of one
+/// `BatchUpsert` page settle the same way, so a page that names a row twice is
+/// refused too.
 pub fn refuse_repeated_settled_rows(reads: &[ReadSetEntry]) -> crate::Result<()> {
     let mut settled_rows = BTreeSet::new();
     for read in reads {
@@ -70,6 +76,72 @@ pub fn refuse_repeated_settled_rows(reads: &[ReadSetEntry]) -> crate::Result<()>
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+/// Refuse a write that rewrites a key an earlier write of the same request
+/// inserts.
+///
+/// The insert binds a surrogate when the request plans, but the row does not
+/// exist until the request applies. The later update or delete reads no stored
+/// row and settles nothing, while both writes apply: the balance falls behind
+/// the source sum. `inserted` collects the keys the writes so far insert, and
+/// the caller passes each write of a sum-driving collection in task order.
+pub fn refuse_rewrite_of_inserted_key(
+    inserted: &mut BTreeSet<(String, String)>,
+    op: &DocumentOp,
+) -> crate::Result<()> {
+    match op {
+        DocumentOp::PointInsert {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::PointPut {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::Upsert {
+            collection,
+            document_id,
+            ..
+        } => {
+            inserted.insert((collection.as_str().to_owned(), document_id.clone()));
+        }
+        DocumentOp::BatchInsert {
+            collection,
+            documents,
+            ..
+        }
+        | DocumentOp::BatchUpsert {
+            collection,
+            documents,
+            ..
+        } => {
+            for (document_id, _) in documents {
+                inserted.insert((collection.as_str().to_owned(), document_id.clone()));
+            }
+        }
+        DocumentOp::PointUpdate {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::PointDelete {
+            collection,
+            document_id,
+            ..
+        } if inserted.contains(&(collection.as_str().to_owned(), document_id.clone())) => {
+            return Err(Error::FeatureNotSupported {
+                detail: format!(
+                    "{SAME_ROW_WRITES_REFUSAL} Collection: {}, row key: {document_id}.",
+                    collection.as_str()
+                ),
+            });
+        }
+        _ => {}
     }
     Ok(())
 }

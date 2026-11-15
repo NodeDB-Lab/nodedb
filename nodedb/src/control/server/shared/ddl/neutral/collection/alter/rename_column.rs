@@ -60,6 +60,15 @@ pub(super) async fn alter_collection_rename_column(
                 format!("column '{old_name}' does not exist on '{name}'"),
             )
         })?;
+    if col.generated_expr.is_some() {
+        super::super::generated_join::refuse_bound_generated_join_column(
+            state.credentials.catalog(),
+            database_id,
+            tenant_id.as_u64(),
+            name,
+            &[new_name.to_string()],
+        )?;
+    }
     col.name = new_name.to_string();
     schema.version = schema.version.saturating_add(1);
 

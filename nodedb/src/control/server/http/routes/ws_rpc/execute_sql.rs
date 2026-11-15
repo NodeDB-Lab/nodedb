@@ -17,6 +17,9 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::commit::restart_identity::{
+    restart_after_ok, restart_plan_of,
+};
 use crate::control::server::shared::statement_exec::{
     AtomicStatement, StatementExec, authorize_one_task,
 };
@@ -368,6 +371,7 @@ pub async fn execute_sql(
                 shared, identity, task,
             )
             .await?;
+            let restart_plan = restart_plan_of(&task.plan);
             // Clone CoW write-path interception, then authorization, run once per
             // task before dispatch — same protocol-neutral gate every transport runs.
             let emitter =
@@ -428,6 +432,7 @@ pub async fn execute_sql(
                 Ok(gateway) => gateway.execute(&gw_ctx, checked).await,
                 Err(error) => Err(error),
             };
+            restart_after_ok(shared, &gw_ctx, restart_plan.as_ref(), &payloads);
 
             match payloads {
                 Ok(vecs) => {

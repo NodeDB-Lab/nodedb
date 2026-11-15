@@ -10,7 +10,8 @@
 //! leaves its mirrored CSR edges dangling.
 //!
 //! A recon plan on one vShard that holds settlement reads takes the same
-//! coordinator, so the reads guard its write.
+//! coordinator, so the reads guard its write. A write of it to an
+//! unmaterialized clone is refused first.
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use crate::control::planner::calvin::{
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
+use crate::control::server::shared::clone_write::refuse_clone_write_on_settled_route;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
@@ -108,6 +110,8 @@ pub(crate) async fn try_settled_recon(
     else {
         return Ok(EdgeRecon::NotFired(tasks, authorized));
     };
+    // The coordinator skips the per-task clone copy-on-write.
+    refuse_clone_write_on_settled_route(state, &tasks, identity.tenant_id)?;
     run_recon(state, identity, tasks, authorized, database_id, reads).await
 }
 
