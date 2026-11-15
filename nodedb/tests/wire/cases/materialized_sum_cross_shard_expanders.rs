@@ -20,7 +20,7 @@ use crate::harness::TestServer;
 /// The sum's target collection.
 const ACCOUNTS: &str = "ptv_acct";
 /// The sum's source collection.
-const POSTINGS: &str = "ptv_post";
+pub(super) const POSTINGS: &str = "ptv_post";
 /// Rows the statements copy or join from. Its home does not matter.
 const FEED: &str = "ptv_feed";
 /// Data Plane cores the server runs.
@@ -167,6 +167,19 @@ pub(super) async fn balance(server: &TestServer, account: &str) -> String {
         [value] => value.clone(),
         other => panic!("one balance row for {account}, got {other:?}"),
     }
+}
+
+/// The sum of the `acc` postings, read from the source rows.
+pub(super) async fn source_sum(server: &TestServer) -> i64 {
+    server
+        .query_text(&format!(
+            "SELECT amount FROM {POSTINGS} WHERE account_id = 'acc'"
+        ))
+        .await
+        .expect("read the source postings")
+        .iter()
+        .map(|amount| amount.parse::<i64>().expect("a numeric amount"))
+        .sum()
 }
 
 pub(super) const INSERT_SELECT: &str = "INSERT INTO ptv_post (id, account_id, amount) \

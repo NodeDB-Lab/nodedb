@@ -64,6 +64,20 @@ pub(in crate::data::executor) struct RedoSnapshot<'a> {
     pub ordinal: i64,
 }
 
+/// What the install of a committed redo record judges before it writes,
+/// beyond the commit-boundary checks its origin names.
+#[derive(Clone, Copy)]
+enum RedoJudge<'a> {
+    /// Every check, against this core's current state.
+    Current,
+    /// [`Self::Current`], then the snapshot of a single-shard snapshot
+    /// commit.
+    Snapshot(RedoSnapshot<'a>),
+    /// A Calvin slice. Its stage vote validated its snapshot, and its
+    /// coordinator judged its period-lock reference rows.
+    CalvinSlice,
+}
+
 impl CoreLoop {
     /// Apply one committed redo record. The request carries the LSN of the
     /// `TransactionRedo` WAL record the funnel appended for it.
@@ -77,9 +91,9 @@ impl CoreLoop {
         self.install_redo(task, tid, committed, RedoOrigin::Commit)
     }
 
-    /// [`Self::install_redo`] for a committed record from `origin` that also
-    /// hands back what each resolved timeseries batch of the record stored,
-    /// in `ts_installs`.
+    /// [`Self::install_redo`] for the committed record of a Calvin slice
+    /// from `origin` that also hands back what each resolved timeseries
+    /// batch of the record stored, in `ts_installs`.
     pub(in crate::data::executor) fn install_committed_redo_into(
         &mut self,
         task: &ExecutionTask,
@@ -88,8 +102,14 @@ impl CoreLoop {
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
     ) -> Response {
-        // A Calvin slice's stage vote validated its snapshot.
-        self.install_redo_into(task, tid, committed, origin, ts_installs, None)
+        self.install_redo_into(
+            task,
+            tid,
+            committed,
+            origin,
+            ts_installs,
+            RedoJudge::CalvinSlice,
+        )
     }
 
     /// Install one committed redo record at the LSN the request carries:
@@ -104,7 +124,14 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
     ) -> Response {
-        self.install_redo_into(task, tid, committed, origin, &mut Vec::new(), None)
+        self.install_redo_into(
+            task,
+            tid,
+            committed,
+            origin,
+            &mut Vec::new(),
+            RedoJudge::Current,
+        )
     }
 
     /// [`Self::install_redo`] for a single-shard snapshot commit: the record
@@ -125,7 +152,7 @@ impl CoreLoop {
             committed,
             origin,
             &mut Vec::new(),
-            Some(snapshot),
+            RedoJudge::Snapshot(snapshot),
         )
     }
 
@@ -139,7 +166,7 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
-        snapshot: Option<RedoSnapshot<'_>>,
+        judge: RedoJudge<'_>,
     ) -> Response {
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
@@ -176,8 +203,9 @@ impl CoreLoop {
             };
         // Nothing is written when a check refuses the record, so the refusal
         // is final on every replica.
-        let check_scope =
+        let mut check_scope =
             RedoApplyScope::new(RedoApplyPass::Validate, committed.sum_targets.to_vec());
+        check_scope.period_row_judged_at_coordinator = matches!(judge, RedoJudge::CalvinSlice);
         // A role-guarded transition is judged against the roles the record
         // carries, so every replica reaches the same verdict.
         if let Err(error) = self.validate_redo_document_ops(
@@ -220,7 +248,7 @@ impl CoreLoop {
         }
         // A snapshot transaction commits only while nothing it read or
         // replaces moved past its snapshot. Nothing is written yet.
-        if let Some(snapshot) = snapshot
+        if let RedoJudge::Snapshot(snapshot) = judge
             && let Err(refusal) =
                 self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
         {

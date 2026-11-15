@@ -30,6 +30,8 @@ mod sql_fold;
 mod sql_gateway;
 mod sql_loop;
 mod sql_planned;
+mod sql_sequential;
+mod sql_txn_request;
 mod streaming;
 mod transaction;
 mod transaction_savepoint;

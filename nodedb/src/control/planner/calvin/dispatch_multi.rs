@@ -23,6 +23,7 @@ use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, build_single_vshard_tx_class,
     classify_dispatch, read_vshards_of, submit_calvin_routed,
 };
+use crate::control::planner::period_lock::{JudgedReads, judge_period_references};
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
 use crate::control::server::shared::session::read_set::{ReadSetEntry, read_snapshot_ordinal};
 use crate::control::state::SharedState;
@@ -109,7 +110,9 @@ impl TxnProvenance {
 /// an affected-row envelope and callers must apply their own operation semantics.
 ///
 /// Every participant stamps `provenance` on the transaction's writes, and
-/// validates the `reads` homed on it at their snapshot ordinal.
+/// validates the `reads` homed on it at their snapshot ordinal. The reads
+/// also hold the reference row of each period-locked write (see
+/// [`judge_period_references`]).
 pub(crate) async fn dispatch_strict_atomic_tasks_to_calvin(
     state: &SharedState,
     tasks: &[PhysicalTask],
@@ -121,6 +124,8 @@ pub(crate) async fn dispatch_strict_atomic_tasks_to_calvin(
 ) -> crate::Result<Option<Response>> {
     let resolved = crate::control::write_resolve::resolve_tasks_for_log(state, tasks).await?;
     let tasks = resolved.as_deref().unwrap_or(tasks);
+    let judged = judge_period_references(state, tasks, reads).await?;
+    let reads = judged.as_ref().map_or(reads, JudgedReads::txn_reads);
     let mut tx_class = admit_strict_atomic_tasks(tasks, tenant_id, position, reads.entries)?;
     tx_class.snapshot_ordinal = reads.snapshot_ordinal;
     tx_class.set_lock_owner(lock_owner);

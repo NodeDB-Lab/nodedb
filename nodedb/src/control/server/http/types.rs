@@ -136,6 +136,14 @@ pub struct HttpError {
     /// when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<Box<HttpError>>,
+    /// The 1-based statement the error stopped. Present only for a request
+    /// of several statements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<usize>,
+    /// The 1-based character offset in the request text where that statement
+    /// starts. Present only beside `statement`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<usize>,
 }
 
 impl HttpError {
@@ -144,6 +152,8 @@ impl HttpError {
             error: error.into(),
             code: None,
             cause: None,
+            statement: None,
+            position: None,
         }
     }
 
@@ -152,6 +162,8 @@ impl HttpError {
             error: error.into(),
             code: Some(code.into()),
             cause: None,
+            statement: None,
+            position: None,
         }
     }
 
@@ -161,6 +173,14 @@ impl HttpError {
             cause.message(),
             cause.code().to_string(),
         )));
+        self
+    }
+
+    /// Name the 1-based `statement` this error stopped and the `position`
+    /// where it starts.
+    pub fn at_statement(mut self, statement: usize, position: Option<usize>) -> Self {
+        self.statement = Some(statement);
+        self.position = position;
         self
     }
 }
@@ -194,6 +214,14 @@ mod tests {
         assert_eq!(v["error"], "something went wrong");
         // `code` must be absent when None (skip_serializing_if).
         assert!(v.get("code").is_none());
+        assert_eq!(json, r#"{"error":"something went wrong"}"#);
+    }
+
+    #[test]
+    fn http_error_shape_at_statement() {
+        let e = HttpError::new("bad").at_statement(2, Some(11));
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(json, r#"{"error":"bad","statement":2,"position":11}"#);
     }
 
     #[test]

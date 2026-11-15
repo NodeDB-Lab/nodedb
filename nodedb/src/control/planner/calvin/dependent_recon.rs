@@ -25,6 +25,7 @@ use crate::control::planner::calvin::{
 use crate::control::planner::implicit_edges::{
     EdgeUpdateCtx, append_implicit_edge_delete_tasks, append_implicit_edge_update_tasks,
 };
+use crate::control::planner::period_lock::{JudgedReads, judge_period_references};
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
@@ -155,6 +156,8 @@ async fn dispatch_dependent_edge_recon_inner(
     reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
     super::settling_writes::refuse_several_returning_tasks(&tasks)?;
+    let judged = judge_period_references(state, &tasks, TxnReads::autocommit(reads)?).await?;
+    let reads = judged.as_ref().map_or(reads, JudgedReads::entries);
     // A stage validates nothing without a snapshot ordinal, so every route
     // below stamps this one on its transaction.
     let snapshot_ordinal = TxnReads::autocommit(reads)?.snapshot_ordinal;

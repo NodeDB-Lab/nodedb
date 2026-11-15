@@ -6,35 +6,35 @@ use axum::extract::{Query as QueryParams, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::sequence::SessionSequenceAccess;
-use crate::control::server::exchange::resolve::materialize_task_providers;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::authorization::authorize_database;
-use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
 use crate::control::server::shared::session::{read_consistency, read_scope};
-use crate::control::server::shared::statement_exec::{
-    AtomicStatement, StatementExec, authorize_one_task,
-};
+use crate::control::server::shared::sql_split::split_statements;
+use crate::control::server::shared::statement_exec::{AtomicStatement, StatementAt, StatementExec};
 
 use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve_auth_parts};
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
-use super::super::atomic_statement::{RoutedStatement, route_http_statement};
-use super::super::ndjson_error::error_line;
+use super::super::atomic_statement::{
+    HttpSequential, RoutedStatement, route_http_statement, run_http_sequential,
+};
+use super::super::ndjson_error::{error_line, statement_error_line};
 use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
 use super::ndjson_response::{
     ndjson_response, quota_rejection, rows_to_ndjson, stream_meter_guard, sync_timeout_line,
 };
+use super::ndjson_task::dispatch_ndjson_task;
 use super::{DatabaseQueryParam, resolve_database_id};
 
 /// POST /v1/query/stream — execute SQL, return results as NDJSON.
@@ -131,6 +131,32 @@ async fn ndjson_at_consistency(
     let rate_limit_headers =
         super::super::super::rate_limit_headers::rate_limit_headers(&rate_limit_result);
 
+    // A request of several statements that holds DDL or a statement the DDL
+    // router runs takes the sequential request runner. It answers one
+    // materialized body, as any request of several statements does.
+    let statements = split_statements(sql);
+    let route = select_route(
+        &statements,
+        RequestPolicy::stateless(&state.shared.sql_policy),
+    );
+    if route == RequestRoute::Sequential {
+        let run = HttpSequential {
+            state: &state.shared,
+            identity: &identity,
+            scope: &scope,
+            database_id,
+            trace_id: crate::types::TraceId::ZERO,
+        };
+        let ndjson = match run_http_sequential(&run, &statements).await {
+            Ok(rows) => rows_to_ndjson(rows),
+            Err(error) => {
+                state.shared.database_metrics.record_error(database_id);
+                statement_error_line(&error.error, error.at, &body.sql)
+            }
+        };
+        return ndjson_response(ndjson, rate_limit_headers);
+    }
+
     // Planning and lease admission run as one retried unit; a denied request never
     // acquires a lease.
     let admission = match plan_authorize_and_admit(PlanAdmissionRequest {
@@ -138,14 +164,21 @@ async fn ndjson_at_consistency(
         query_ctx,
         scope: &scope,
         sql,
+        statements: &statements,
+        route,
         trace_id: crate::types::TraceId::ZERO,
     })
     .await
     {
         Ok(admission) => admission,
-        Err(error) => return ApiError::from(error).into_response(),
+        Err(error) => return ApiError::from_request(error, &body.sql).into_response(),
     };
+    if admission.rolls_back {
+        return ndjson_response(String::new(), rate_limit_headers);
+    }
+    let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
 
     let trace_id = crate::control::trace_context::generate_trace_id();
 
@@ -161,7 +194,7 @@ async fn ndjson_at_consistency(
         state: &state.shared,
         identity: &identity,
         scope: &scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -169,13 +202,18 @@ async fn ndjson_at_consistency(
         &exec,
         AtomicStatement {
             tasks: admission.tasks,
+            statement_map: admission.statement_map,
             lease_scope: admission.lease_scope,
             sum_target_reads: admission.sum_target_reads,
         },
     )
     .await;
-    let (tasks, lease_scope) = match routed {
-        Ok(RoutedStatement::PerTask(statement)) => (statement.tasks, statement.lease_scope),
+    let (tasks, statement_map, lease_scope) = match routed {
+        Ok(RoutedStatement::PerTask(statement)) => (
+            statement.tasks,
+            statement.statement_map,
+            statement.lease_scope,
+        ),
         Ok(RoutedStatement::Answered(rows)) => {
             return ndjson_response(rows_to_ndjson(rows), rate_limit_headers);
         }
@@ -183,23 +221,29 @@ async fn ndjson_at_consistency(
         // stopped in the loop below does.
         Err(error) => {
             state.shared.database_metrics.record_error(database_id);
-            return ndjson_response(error_line(&error), rate_limit_headers);
+            let line = statement_error_line(&error.error, error.at, &body.sql);
+            return ndjson_response(line, rate_limit_headers);
         }
     };
     let mut lease_scope = Some(lease_scope);
 
     // `Body::from_stream` polls the data-plane stream under normal HTTP backpressure
     // while its captured lease scope stays alive until body completion or disconnect.
-    match try_open_stream(
-        &state,
-        &tasks,
-        &identity,
-        database_id,
-        &output_schema,
-        trace_id,
-    )
-    .await
-    {
+    // A request of several statements answers one materialized body.
+    let opened = if several_statements {
+        Ok(None)
+    } else {
+        try_open_stream(
+            &state,
+            &tasks,
+            &identity,
+            database_id,
+            &output_schema,
+            trace_id,
+        )
+        .await
+    };
+    match opened {
         Ok(Some((stream, limit))) => {
             let Some(lease_scope) = lease_scope.take() else {
                 return ApiError::from(crate::Error::Internal {
@@ -260,7 +304,12 @@ async fn ndjson_at_consistency(
     // Checked once, not per task: keeps per-task extraction a no-op when metering is
     // disabled. This fallback fully materializes the body, so it meters like `/v1/query`.
     let metering_enabled = state.shared.metering_config.enabled;
-    for task in tasks {
+    for (index, task) in tasks.into_iter().enumerate() {
+        // Each task shapes against its own statement's schema.
+        let projection = statement_map
+            .statement_of(index)
+            .and_then(|statement| output_schemas.get(statement as usize))
+            .unwrap_or(&output_schema);
         // A lease this node lost ends the body with a retryable error line
         // before the next task dispatches.
         if let Err(revoked) = lease_scope.check_not_revoked() {
@@ -290,148 +339,14 @@ async fn ndjson_at_consistency(
         // holds. A write is not: its outcome will be unknown to the client.
         let task_is_write =
             crate::control::server::shared::write_admission::plan_is_write(&task.plan);
-        let dispatch = async {
-            // A provider relation's rows are filled here, where the identity is.
-            let task = materialize_task_providers(&state.shared, &identity, task).await?;
-            let result: crate::Result<Vec<Vec<u8>>> =
-                if crate::control::array_catalog::ddl::is_array_ddl(&task.plan) {
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                        Ok(authorized_task) => {
-                            crate::control::array_catalog::ddl::run_authorized_array_ddl(
-                                &state.shared,
-                                authorized_task,
-                            )
-                            .await
-                            .map(|response| vec![response.payload.to_vec()])
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else if is_cluster_array(&task.plan) {
-                    // This node's array coordinator routes the op to the
-                    // shards that own its cells.
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                        Ok(authorized_task) => run_cluster_array(&state.shared, authorized_task)
-                            .await
-                            .map(|payload| vec![payload]),
-                        Err(e) => Err(e),
-                    }
-                } else if matches!(
-                    &task.plan,
-                    crate::bridge::envelope::PhysicalPlan::Document(
-                        nodedb_physical::physical_plan::DocumentOp::InsertSelect { .. }
-                    )
-                ) {
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                        Ok(authorized_task) => {
-                            crate::control::insert_select::run_authorized_insert_select(
-                                &state.shared,
-                                authorized_task,
-                            )
-                            .await
-                            .map(|response| vec![response.payload.to_vec()])
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else if matches!(
-                    &task.plan,
-                    crate::bridge::envelope::PhysicalPlan::Document(
-                        nodedb_physical::physical_plan::DocumentOp::Merge {
-                            resolved_inserts: None,
-                            ..
-                        }
-                    )
-                ) {
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                        Ok(authorized_task) => {
-                            crate::control::merge_orchestrator::run_authorized_merge(
-                                &state.shared,
-                                authorized_task,
-                            )
-                            .await
-                            .map(|response| vec![response.payload.to_vec()])
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else if matches!(
-                    &task.plan,
-                    crate::bridge::envelope::PhysicalPlan::Document(
-                        nodedb_physical::physical_plan::DocumentOp::UpdateFromJoin {
-                            source_rows: None,
-                            ..
-                        }
-                    )
-                ) {
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                    Ok(authorized_task) => {
-                        crate::control::update_from_join_orchestrator::run_authorized_update_from_join(
-                            &state.shared,
-                            authorized_task,
-                        )
-                        .await
-                        .map(|response| vec![response.payload.to_vec()])
-                    }
-                    Err(e) => Err(e),
-                }
-                } else if let Some(resolver) =
-                    crate::control::write_resolve::resolver_for_plan(&task.plan)
-                {
-                    // A governed columnar predicate UPDATE/DELETE resolves to a concrete row set
-                    // before proposing.
-                    match authorize_one_task(&state.shared, &identity, &task) {
-                        Ok(authorized_task) => {
-                            crate::control::write_resolve::run_authorized_write_resolve(
-                                &state.shared,
-                                authorized_task,
-                                resolver,
-                            )
-                            .await
-                            .map(|response| vec![response.payload.to_vec()])
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    // Clone CoW write-path interception, then authorization, run once
-                    // per task before dispatch — same protocol-neutral gate every
-                    // transport runs.
-                    let emitter = crate::control::security::audit::ArcAuditEmitter(
-                        std::sync::Arc::clone(&state.shared.audit),
-                    );
-                    match crate::control::server::shared::clone_write::intercept_and_authorize(
-                    crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
-                        state: &state.shared,
-                        task,
-                        identity: &identity,
-                        tenant_id,
-                        permissions: &state.shared.permissions,
-                        roles: &state.shared.roles,
-                        emitter: &emitter,
-                    },
-                )
-                .await
-                {
-                    Ok(crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(
-                        resp,
-                    )) => Ok(vec![resp.payload.to_vec()]),
-                    Ok(crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(
-                        checked,
-                    )) => match state.shared.installed_gateway() {
-                        Ok(gateway) => {
-                            let gw_ctx = QueryContext {
-                                tenant_id: checked.tenant_id(),
-                                trace_id,
-                                database_id,
-                                txn_id: None,
-                                linearizable: read_scope::linearizable(),
-                            };
-                            gateway.execute(&gw_ctx, checked).await
-                        }
-                        Err(error) => Err(error),
-                    },
-                    Err(e) => Err(e),
-                }
-                };
-            result
-        };
+        let dispatch = dispatch_ndjson_task(
+            &state.shared,
+            &identity,
+            task,
+            tenant_id,
+            database_id,
+            trace_id,
+        );
         let dispatch_result = if task_is_write {
             dispatch.await
         } else {
@@ -461,7 +376,7 @@ async fn ndjson_at_consistency(
                             payload,
                             plan: &plan_for_shape,
                             plan_kind,
-                            projection: Some(&output_schema),
+                            projection: Some(projection),
                             state: &state.shared,
                             database_id,
                             tenant_id,
@@ -476,7 +391,8 @@ async fn ndjson_at_consistency(
                 }
             }
             Err(e) => {
-                ndjson.push_str(&error_line(&e));
+                let at = StatementAt::of_task(&statement_map, index, output_schemas.len());
+                ndjson.push_str(&statement_error_line(&e, at, &body.sql));
                 failed = true;
             }
         }

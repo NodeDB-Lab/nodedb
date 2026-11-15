@@ -16,6 +16,7 @@ use super::env::parse_memory_size;
 use super::log_format::LogFormat;
 use super::paths::default_data_dir;
 use super::ports::PortsConfig;
+use super::sql::SqlSection;
 use super::tls::TlsSettings;
 
 /// Server-level (process/runtime) configuration. Lives under the
@@ -93,6 +94,11 @@ pub struct ServerSection {
     /// Reports are written under `<data_dir>/diagnostics`, owner-only.
     #[serde(default)]
     pub native_crash_dumps: bool,
+
+    /// Transaction control inside one request of several statements. Lives
+    /// under `[server.sql]`. A missing section leaves every policy on.
+    #[serde(default)]
+    pub sql: SqlSection,
 }
 
 impl Default for ServerSection {
@@ -108,6 +114,7 @@ impl Default for ServerSection {
             log_format: LogFormat::Text,
             tls: None,
             native_crash_dumps: false,
+            sql: SqlSection::default(),
         }
     }
 }

@@ -14,11 +14,11 @@
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::append_only;
+use crate::data::executor::enforcement::period_lock::PeriodCheck;
 use crate::data::executor::enforcement::update_transitions::{
     UpdateTransitionRules, check_update_transitions,
 };
 use crate::types::{DatabaseId, TenantId};
-use nodedb_physical::physical_plan::ResolvedSumTarget;
 
 use super::types::map_enforcement_error;
 
@@ -34,11 +34,8 @@ pub(in crate::data::executor) struct PutEnforcement<'a> {
     /// The row as currently stored, when one exists.
     pub(in crate::data::executor) old_value: &'a Option<Vec<u8>>,
     pub(in crate::data::executor) user_roles: &'a [String],
-    /// `(target collection, join-key value)` → target row surrogate, resolved
-    /// on the Control Plane at plan time. A period-lock check reads its
-    /// reference row's surrogate off this slice, keyed by
-    /// `(config.ref_table, period value)`.
-    pub(in crate::data::executor) resolved_targets: &'a [ResolvedSumTarget],
+    /// How the period-lock check judges this write.
+    pub(in crate::data::executor) period: PeriodCheck<'a>,
 }
 
 impl CoreLoop {
@@ -65,7 +62,7 @@ impl CoreLoop {
             value,
             old_value,
             user_roles,
-            resolved_targets,
+            period,
         } = p;
         if !enforce {
             return Ok(());
@@ -77,7 +74,7 @@ impl CoreLoop {
         append_only::check_point_put(collection, &config.enforcement, old_value)
             .map_err(map_enforcement_error)?;
         if let Some(ref pl) = config.enforcement.period_lock {
-            self.check_period_lock_at(database_id, tid, collection, value, pl, resolved_targets)
+            self.check_period_lock_as(database_id, tid, collection, value, pl, period)
                 .map_err(map_enforcement_error)?;
         }
         // Both images must be readable whenever a transition rule is

@@ -10,13 +10,12 @@ use std::sync::Arc;
 
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
-use crate::control::server::shared::check_constraint::{
-    enforce_statement_checks, enforce_statement_enum_labels,
-};
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit_in_txn,
 };
+use crate::control::server::shared::request_route::RequestRoute;
 use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
+use crate::control::server::shared::sql_split::Statement;
 use crate::control::server::shared::statement_exec::{
     AtomicRoute, AtomicStatement, StatementExec, route_atomic_statement,
 };
@@ -26,7 +25,7 @@ use super::sql::resp;
 use super::sql_fold::{answer_to_native, statement_error_to_native};
 use super::sql_loop::{PlannedStatement, run_dispatch_loop, session_sequences};
 use super::streaming::{SqlOutcome, try_open_sql_stream};
-use super::{DispatchCtx, ddl_result_to_native, error_to_native};
+use super::{DispatchCtx, error_to_native};
 
 /// Plan SQL via DataFusion and dispatch tasks to the Data Plane.
 ///
@@ -35,10 +34,15 @@ use super::{DispatchCtx, ddl_result_to_native, error_to_native};
 /// [`SqlOutcome::Stream`] for lazy frame emission. Every other case — writes,
 /// in-block buffering, multi-task, set-ops, errors — collapses to a single
 /// [`SqlOutcome::Response`].
+///
+/// `statements` is `sql` split once, and `route` is the route `select_route`
+/// picked for it.
 pub(super) async fn execute_planned(
     ctx: &DispatchCtx<'_>,
     seq: u64,
     sql: &str,
+    statements: &[Statement],
+    route: RequestRoute,
     database_id: crate::types::DatabaseId,
     allow_stream: bool,
 ) -> SqlOutcome {
@@ -84,25 +88,8 @@ pub(super) async fn execute_planned(
         Err(error) => return resp(error_to_native(seq, &error)),
     }
 
-    // General CHECK constraints and enum labels on an INSERT or UPDATE are
-    // enforced before planning, by the same code pgwire runs.
-    if let Err(error) = enforce_statement_checks(
-        ctx.state,
-        ctx.identity,
-        ctx.tenant_id(),
-        database_id,
-        scope.auth(),
-        ctx.sessions.tx_id(ctx.peer_addr),
-        &clean_sql,
-    )
-    .await
-    .and_then(|()| {
-        enforce_statement_enum_labels(ctx.state, ctx.tenant_id(), database_id, &clean_sql)
-    }) {
-        return resp(ddl_result_to_native(seq, Err(error)));
-    }
-
-    // Planning, authorization, implicit-edge extraction (pgwire parity: a
+    // Planning, authorization, the CHECK and enum-label checks of every
+    // statement, implicit-edge extraction (pgwire parity: a
     // schemaless document carrying `_from`/`_to` is mirrored as a
     // `GraphOp::EdgePut` task so the classify/Calvin/single-shard logic below
     // routes it like an explicit edge) and lease admission run as ONE retried
@@ -120,6 +107,8 @@ pub(super) async fn execute_planned(
             query_ctx: ctx.query_ctx,
             scope: &scope,
             sql: &clean_sql,
+            statements,
+            route,
             trace_id: TraceId::ZERO,
         },
         ctx.sessions.tx_id(ctx.peer_addr),
@@ -127,10 +116,14 @@ pub(super) async fn execute_planned(
     .await
     {
         Ok(admission) => admission,
-        Err(error) => return resp(error_to_native(seq, &error)),
+        // A plan, CHECK or enum-label error of a request of several
+        // statements names its statement in the message prefix.
+        Err(error) => return resp(statement_error_to_native(seq, error.into())),
     };
 
+    let several_statements = admission.holds_several_statements();
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
     if admission.tasks.is_empty() {
         return resp(NativeResponse::status_row(seq, "OK"));
     }
@@ -156,7 +149,7 @@ pub(super) async fn execute_planned(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -164,6 +157,7 @@ pub(super) async fn execute_planned(
         &exec,
         AtomicStatement {
             tasks: admission.tasks,
+            statement_map: admission.statement_map,
             lease_scope: admission.lease_scope,
             // Covers the images every cross-shard materialized-sum balance in
             // the tasks was settled from, so Calvin's OCC check aborts rather
@@ -176,11 +170,15 @@ pub(super) async fn execute_planned(
     .await;
     let AtomicStatement {
         tasks,
+        statement_map,
         lease_scope,
         sum_target_reads,
     } = match routed {
         Ok(AtomicRoute::Implicit(answer)) => {
-            let response = answer_to_native(seq, answer);
+            let response = match answer.summed() {
+                Ok(answer) => answer_to_native(seq, answer),
+                Err(error) => statement_error_to_native(seq, error),
+            };
             return resp(mirror_confirmed(ctx, seq, sync_database, response).await);
         }
         // A RETURNING write surfaces its rows from the applied response. A
@@ -209,7 +207,8 @@ pub(super) async fn execute_planned(
     // A native lazy stream outlives this handler, so transfer its descriptor
     // leases to the session-owned `SqlStream` before returning it. The session
     // loop retains that owner through final emission or connection teardown.
-    if allow_stream {
+    // A request of several statements answers one materialized response.
+    if allow_stream && !several_statements {
         match try_open_sql_stream(ctx, seq, &tasks, database_id, Some(&output_schema)).await {
             Ok(Some(mut stream)) => {
                 let Some(scope) = lease_scope.take() else {
@@ -253,7 +252,8 @@ pub(super) async fn execute_planned(
         seq,
         PlannedStatement {
             tasks,
-            output_schema: Some(&output_schema),
+            statement_map,
+            schemas: &output_schemas,
             database_id,
             plan_lease_scope: lease_scope,
             sum_target_reads,

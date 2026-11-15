@@ -363,6 +363,12 @@ pub(super) async fn try_string(
     None
 }
 
+/// Whether an arm of this cluster that reads tokens, not a prefix, takes
+/// `sql`. The router gate in `claims` reads it.
+pub(super) fn shape_claims(sql: &str) -> bool {
+    is_sorted_index_range(sql) || is_convert_collection(sql)
+}
+
 fn crdt_apply_forbidden_in_transaction(txn_ctx: &DmlTxnCtx<'_>) -> bool {
     txn_ctx.sessions.transaction_state(txn_ctx.session_id)
         != crate::control::server::shared::session::TransactionState::Idle

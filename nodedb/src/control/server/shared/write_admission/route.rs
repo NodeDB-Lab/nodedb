@@ -39,9 +39,10 @@ use std::pin::Pin;
 
 use crate::bridge::envelope::Response;
 use crate::control::planner::calvin::{
-    build_single_vshard_tx_class, dispatch_dependent_edge_recon, is_dependent_predicate,
+    TxnReads, build_single_vshard_tx_class, dispatch_dependent_edge_recon, is_dependent_predicate,
     submit_calvin_routed,
 };
+use crate::control::planner::period_lock::{JudgedReads, judge_period_references};
 use crate::control::state::SharedState;
 use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
@@ -143,8 +144,13 @@ pub fn route_write_to_calvin<'a>(
         // (spuriously) single-vshard multi-shard dispatch. The gate never
         // routes an append (timeseries ingest, columnar insert), so no
         // unresolved ingest reaches the builder.
-        let mut tx_class =
-            build_single_vshard_tx_class(std::slice::from_ref(&task), tenant_id, &[])?;
+        let tasks = std::slice::from_ref(&task);
+        let judged = judge_period_references(shared, tasks, TxnReads::none()).await?;
+        let reads = judged
+            .as_ref()
+            .map_or_else(TxnReads::none, JudgedReads::txn_reads);
+        let mut tx_class = build_single_vshard_tx_class(tasks, tenant_id, reads.entries)?;
+        tx_class.snapshot_ordinal = reads.snapshot_ordinal;
         tx_class.set_event_source(event_source.wal_code());
         tx_class.set_user_roles(user_roles);
         submit_calvin_routed(shared, tx_class).await

@@ -10,6 +10,7 @@ use super::super::auth::{ApiError, AppState};
 mod materialized;
 mod ndjson;
 mod ndjson_response;
+mod ndjson_task;
 
 pub use materialized::query;
 pub use ndjson::query_ndjson;

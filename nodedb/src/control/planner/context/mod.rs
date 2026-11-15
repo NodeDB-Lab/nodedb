@@ -11,6 +11,8 @@ pub mod query;
 pub mod security;
 pub mod system_security;
 
-pub use query::{BulkLoadRoute, PlanSqlWithRlsParams, QueryContext, SYSTEM_FUNCTION_NAMES};
+pub use query::{
+    BulkLoadRoute, PlanSqlWithRlsParams, QueryContext, RequestPlan, SYSTEM_FUNCTION_NAMES,
+};
 pub use security::{PermissionTreeSource, PlanSecurityContext};
 pub use system_security::SystemPlanSecurity;

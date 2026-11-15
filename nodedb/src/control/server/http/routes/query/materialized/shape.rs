@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The per-task dispatch loop: runs each admitted task, then shapes each
-//! response into the JSON row set.
+//! response into the JSON row set. A request of several statements shapes
+//! each task against its own statement's schema.
 //!
 //! A Control-Plane orchestrated plan runs in `orchestrated`. Every other
 //! task takes the clone-write gate, then the gateway route to its owner.
@@ -19,6 +20,7 @@ use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::metering::PlanMeteringInfo;
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::statement_exec::{StatementAt, StatementMap};
 use crate::types::{DatabaseId, TenantId, TraceId};
 
 use super::super::super::super::auth::{ApiError, AppState};
@@ -31,13 +33,24 @@ pub(super) struct TaskLoopParams<'a> {
     pub(super) state: &'a AppState,
     pub(super) identity: &'a AuthenticatedIdentity,
     pub(super) scope: RequestAuthScope<'a>,
+    /// The schema a task with no statement schema shapes against.
     pub(super) output_schema: OutputSchema,
+    /// One schema per statement. Each task shapes against its own
+    /// statement's schema.
+    pub(super) output_schemas: &'a [OutputSchema],
+    /// The statement of each task, one entry per task.
+    pub(super) statement_map: StatementMap,
+    /// The request text. An error's statement position counts in it.
+    pub(super) sql: &'a str,
     pub(super) database_id: DatabaseId,
     pub(super) tenant_id: TenantId,
     pub(super) trace_id: TraceId,
 }
 
-/// Run every admitted task and return the statement's JSON rows.
+/// Run every admitted task and return the request's JSON rows.
+///
+/// An error of a task of a request of several statements names the task's
+/// statement.
 pub(super) async fn run_task_loop(
     tasks: Vec<PhysicalTask>,
     params: TaskLoopParams<'_>,
@@ -47,6 +60,9 @@ pub(super) async fn run_task_loop(
         identity,
         scope,
         output_schema,
+        output_schemas,
+        statement_map,
+        sql,
         database_id,
         tenant_id,
         trace_id,
@@ -57,102 +73,122 @@ pub(super) async fn run_task_loop(
     // no-op when metering is disabled (the default).
     let metering_enabled = state.shared.metering_config.enabled;
 
-    for task in tasks {
-        // Extracted before `task.plan` is cloned/moved into any branch below.
-        let plan_metering_info = metering_enabled.then(|| PlanMeteringInfo::extract(&task.plan));
-        // A spent hard quota refuses the task before it runs; charging below is
-        // success-path only and never refuses.
-        if let Some(info) = &plan_metering_info {
-            admit_quota_for_dispatch(&state.shared, &scope, info).map_err(gateway_error)?;
-        }
-        let rows_before = result_rows.len();
-
-        // Captured before dispatch moves `task.plan`. Resolved once per task,
-        // reused for every payload it produced.
-        let plan_for_shape = task.plan.clone();
-        let redaction =
-            QueryRedaction::for_plan(tenant_id, task.database_id, scope.auth(), &plan_for_shape);
-        let append = ShapedAppend {
-            plan: &plan_for_shape,
-            plan_kind: describe_plan(&plan_for_shape),
-            output_schema: &output_schema,
-            state,
-            database_id,
-            tenant_id,
-            redaction: &redaction,
-        };
-
-        if let Some(orchestrated) = run_orchestrated(&state.shared, identity, &task).await? {
-            append_payload(&mut result_rows, &orchestrated.payload, &append).await?;
-            if orchestrated.metered {
-                meter_task_dispatch(
-                    &state.shared,
-                    &scope,
-                    &plan_metering_info,
-                    rows_before,
-                    &result_rows,
-                );
+    for (index, task) in tasks.into_iter().enumerate() {
+        let ran: Result<(), ApiError> = async {
+            let schema = statement_map
+                .statement_of(index)
+                .and_then(|statement| output_schemas.get(statement as usize))
+                .unwrap_or(&output_schema);
+            // Extracted before `task.plan` is cloned/moved into any branch below.
+            let plan_metering_info =
+                metering_enabled.then(|| PlanMeteringInfo::extract(&task.plan));
+            // A spent hard quota refuses the task before it runs; charging below is
+            // success-path only and never refuses.
+            if let Some(info) = &plan_metering_info {
+                admit_quota_for_dispatch(&state.shared, &scope, info).map_err(gateway_error)?;
             }
-            continue;
-        }
+            let rows_before = result_rows.len();
 
-        // Clone CoW write-path interception, then authorization, run once
-        // per task before dispatch — same protocol-neutral gate every
-        // transport runs.
-        let emitter = ArcAuditEmitter(Arc::clone(&state.shared.audit));
-        let checked = match crate::control::server::shared::clone_write::intercept_and_authorize(
-            crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
-                state: &state.shared,
-                task,
-                identity,
+            // Captured before dispatch moves `task.plan`. Resolved once per task,
+            // reused for every payload it produced.
+            let plan_for_shape = task.plan.clone();
+            let redaction = QueryRedaction::for_plan(
                 tenant_id,
-                permissions: &state.shared.permissions,
-                roles: &state.shared.roles,
-                emitter: &emitter,
-            },
-        )
-        .await
-        .map_err(gateway_error)?
-        {
-            crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(resp) => {
-                append_response(&mut result_rows, resp, &append).await?;
-                meter_task_dispatch(
-                    &state.shared,
-                    &scope,
-                    &plan_metering_info,
-                    rows_before,
-                    &result_rows,
-                );
-                continue;
-            }
-            crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(checked) => {
-                checked
-            }
-        };
+                task.database_id,
+                scope.auth(),
+                &plan_for_shape,
+            );
+            let append = ShapedAppend {
+                plan: &plan_for_shape,
+                plan_kind: describe_plan(&plan_for_shape),
+                output_schema: schema,
+                state,
+                database_id,
+                tenant_id,
+                redaction: &redaction,
+            };
 
-        // The gateway routes the task to its owner and owns WAL durability there.
-        let gateway = state.shared.installed_gateway().map_err(gateway_error)?;
-        let gw_ctx = QueryContext {
-            tenant_id: checked.tenant_id(),
-            trace_id,
-            database_id,
-            txn_id: None,
-            linearizable: crate::control::server::shared::session::read_scope::linearizable(),
-        };
-        let payloads = gateway
-            .execute(&gw_ctx, checked)
-            .await
-            .map_err(gateway_error)?;
-        for payload in &payloads {
-            append_payload(&mut result_rows, payload, &append).await?;
+            if let Some(orchestrated) = run_orchestrated(&state.shared, identity, &task).await? {
+                append_payload(&mut result_rows, &orchestrated.payload, &append).await?;
+                if orchestrated.metered {
+                    meter_task_dispatch(
+                        &state.shared,
+                        &scope,
+                        &plan_metering_info,
+                        rows_before,
+                        &result_rows,
+                    );
+                }
+                return Ok(());
+            }
+
+            // Clone CoW write-path interception, then authorization, run once
+            // per task before dispatch — same protocol-neutral gate every
+            // transport runs.
+            let emitter = ArcAuditEmitter(Arc::clone(&state.shared.audit));
+            let checked =
+                match crate::control::server::shared::clone_write::intercept_and_authorize(
+                    crate::control::server::shared::clone_write::InterceptAndAuthorizeParams {
+                        state: &state.shared,
+                        task,
+                        identity,
+                        tenant_id,
+                        permissions: &state.shared.permissions,
+                        roles: &state.shared.roles,
+                        emitter: &emitter,
+                    },
+                )
+                .await
+                .map_err(gateway_error)?
+                {
+                    crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(
+                        resp,
+                    ) => {
+                        append_response(&mut result_rows, resp, &append).await?;
+                        meter_task_dispatch(
+                            &state.shared,
+                            &scope,
+                            &plan_metering_info,
+                            rows_before,
+                            &result_rows,
+                        );
+                        return Ok(());
+                    }
+                    crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(
+                        checked,
+                    ) => checked,
+                };
+
+            // The gateway routes the task to its owner and owns WAL durability there.
+            let gateway = state.shared.installed_gateway().map_err(gateway_error)?;
+            let gw_ctx = QueryContext {
+                tenant_id: checked.tenant_id(),
+                trace_id,
+                database_id,
+                txn_id: None,
+                linearizable: crate::control::server::shared::session::read_scope::linearizable(),
+            };
+            let payloads = gateway
+                .execute(&gw_ctx, checked)
+                .await
+                .map_err(gateway_error)?;
+            for payload in &payloads {
+                append_payload(&mut result_rows, payload, &append).await?;
+            }
+            meter_task_dispatch(
+                &state.shared,
+                &scope,
+                &plan_metering_info,
+                rows_before,
+                &result_rows,
+            );
+            Ok(())
         }
-        meter_task_dispatch(
-            &state.shared,
-            &scope,
-            &plan_metering_info,
-            rows_before,
-            &result_rows,
-        );
+        .await;
+        if let Err(error) = ran {
+            let at = StatementAt::of_task(&statement_map, index, output_schemas.len());
+            return Err(error.at_statement(at, sql));
+        }
     }
 
     Ok(result_rows)

@@ -271,6 +271,15 @@ fn restore_forbidden_in_transaction(txn_ctx: &DmlTxnCtx<'_>) -> bool {
     txn_ctx.sessions.transaction_state(txn_ctx.session_id) != TransactionState::Idle
 }
 
+/// Whether an arm of this cluster that reads tokens, not a prefix, takes
+/// `sql`. The router gate in `claims` reads it.
+pub(super) fn shape_claims(sql: &str) -> bool {
+    is_select_at_version(sql)
+        || is_restore_set_version(sql)
+        || alter_vector_index_clause(sql).is_some()
+        || is_set_vector_metadata(sql)
+}
+
 /// `SELECT ... FROM <collection> AT VERSION '<checkpoint>' ...`: the clause
 /// follows the collection name.
 fn is_select_at_version(sql: &str) -> bool {

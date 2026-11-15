@@ -91,7 +91,8 @@ pub enum TxnTaskOutcome {
 }
 
 /// The collections and events a statement's writes named, for its SYNC
-/// AFTER STATEMENT bodies. Each `(collection, event)` fires once.
+/// AFTER STATEMENT bodies. Each `(collection, event)` fires once per
+/// statement. A request of several statements keeps one set per statement.
 #[derive(Default)]
 pub struct StatementEvents {
     named: Vec<(TriggerScope, String, DmlEvent)>,

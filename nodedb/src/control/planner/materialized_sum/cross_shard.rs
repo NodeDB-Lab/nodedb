@@ -46,6 +46,19 @@ pub fn append_cross_shard_balance_tasks(
     tenant_id: TenantId,
     database_id: DatabaseId,
 ) -> crate::Result<()> {
+    append_cross_shard_balance_tasks_traced(state, tasks, tenant_id, database_id, &mut Vec::new())
+}
+
+/// [`append_cross_shard_balance_tasks`] that also records each appended
+/// task's parent: the index of the insert whose balance it ships. Appended
+/// tasks go to the end, so each parent sits before its child.
+pub fn append_cross_shard_balance_tasks_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<()> {
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
     let crs = crate::control::crs_context::crs_context_for(state);
@@ -124,6 +137,7 @@ pub fn append_cross_shard_balance_tasks(
             // instruction that stops the source core applying it too.
             defer_binding(&mut tasks[index].plan, delta.binding_target);
             tasks.push(delta.task);
+            parents.push(index);
         }
     }
 

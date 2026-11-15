@@ -17,6 +17,7 @@ use nodedb_types::protocol::NativeResponse;
 use crate::control::lease::QueryLeaseScope;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
+use crate::control::server::shared::statement_exec::StatementMap;
 use crate::control::server::shared::txn_route::unbufferable_joined_statement;
 use crate::control::server::shared::write_admission::all_writes_bufferable;
 use nodedb_physical::physical_task::PhysicalTask;
@@ -45,9 +46,12 @@ pub(super) async fn dispatch_direct_in_txn(
         sum_target_reads,
         lease,
     } = write;
+    // A direct write is one statement.
     let statement = PlannedStatement {
+        statement_map: StatementMap::single(tasks.len()),
         tasks,
-        output_schema: None,
+        // A direct write announces no output columns.
+        schemas: &[],
         database_id: ctx.database_id(),
         plan_lease_scope: lease,
         sum_target_reads,

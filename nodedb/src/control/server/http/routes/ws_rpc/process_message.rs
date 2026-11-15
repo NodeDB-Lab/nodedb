@@ -17,7 +17,7 @@ use crate::types::{DatabaseId, ReadConsistency, TraceId};
 use super::execute_sql::execute_sql;
 use super::format::{
     error_response, extract_collection_from_sql, format_resume_notification,
-    format_sequenced_live_notification, ws_error_from_gateway,
+    format_sequenced_live_notification, ws_error_from_gateway, ws_error_from_request,
 };
 
 pub fn extract_session_id(req: &serde_json::Value) -> Option<String> {
@@ -145,7 +145,7 @@ pub(super) async fn process_message(
                 Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
                 Err(error) => {
                     shared.database_metrics.record_error(database_id);
-                    ws_error_from_gateway(&id, &error)
+                    ws_error_from_request(&id, &error, sql)
                 }
             };
             (response, false)

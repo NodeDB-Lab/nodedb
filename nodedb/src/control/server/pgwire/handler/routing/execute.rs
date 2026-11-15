@@ -12,10 +12,12 @@ use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
-use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::session::{SessionId, TransactionState};
-use crate::control::server::shared::write_admission::{all_writes_bufferable, plan_is_write};
+use crate::control::server::shared::session::{DmlTxnCtx, SessionId, TransactionState};
+use crate::control::server::shared::statement_exec::{
+    AutocommitRoute, ImplicitTxnRoute, autocommit_route, implicit_txn_route,
+};
+use crate::control::server::shared::write_admission::plan_is_write;
 use crate::types::TenantId;
 
 use super::super::super::types::error_to_sqlstate;
@@ -188,41 +190,38 @@ impl NodeDbPgHandler {
             // A statement outside a transaction block whose writes fire a
             // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
             // edge-bearing collection, or an INSERT ... SELECT, UPDATE ... FROM
-            // or MERGE into the source of a cross-shard materialized sum,
-            // runs in an implicit transaction,
-            // ahead of every autocommit route:
-            // its writes stage on their vShards' leaders and commit together
-            // at its end.
+            // or MERGE into the source of a cross-shard materialized sum, runs
+            // in an implicit transaction ahead of every autocommit route: its
+            // writes stage on their vShards' leaders and commit together at its
+            // end. The decision is shared with the other transports, so only
+            // the dispatch below is pgwire's own.
             let tx_state = self.sessions.transaction_state(session_id);
-            if tx_state != TransactionState::InBlock
-                && crate::control::server::shared::txn_route::statement_needs_implicit_txn(
-                    &self.state,
-                    &tasks,
-                )
-                .map_err(|error| sql_error(&error))?
-            {
-                if !all_writes_bufferable(&tasks) {
-                    return Err(sql_error(
-                        &crate::control::server::shared::txn_route::unbufferable_joined_statement(),
-                    ));
-                }
-                return self
-                    .dispatch_task_loop_implicit(
-                        tasks,
-                        DispatchTaskContext {
-                            plan_lease_scope: Arc::clone(&plan_lease_scope),
-                            tenant_id,
-                            identity,
-                            auth_ctx: &auth_ctx,
-                            session_id,
-                            shaping: ResultShaping {
-                                projection: effective_schema,
-                                formats: shaping.formats,
+            let dml_txn = DmlTxnCtx {
+                sessions: self.sessions.as_ref(),
+                session_id,
+            };
+            match implicit_txn_route(&self.state, &tasks, &dml_txn) {
+                ImplicitTxnRoute::Implicit => {
+                    return self
+                        .dispatch_task_loop_implicit(
+                            tasks,
+                            DispatchTaskContext {
+                                plan_lease_scope: Arc::clone(&plan_lease_scope),
+                                tenant_id,
+                                identity,
+                                auth_ctx: &auth_ctx,
+                                session_id,
+                                shaping: ResultShaping {
+                                    projection: effective_schema,
+                                    formats: shaping.formats,
+                                },
+                                sum_target_reads,
                             },
-                            sum_target_reads,
-                        },
-                    )
-                    .await;
+                        )
+                        .await;
+                }
+                ImplicitTxnRoute::Refuse(error) => return Err(sql_error(&error)),
+                ImplicitTxnRoute::Autocommit => {}
             }
 
             // Implicit-edge dependent predicates must be preempted onto the
@@ -273,86 +272,28 @@ impl NodeDbPgHandler {
 
             // Autocommit statement routing: the only reads to widen with are the
             // ones the materialized-sum settlement stamped on the source rows its
-            // shipped balances were folded from.
-            let sum_read_vshards =
-                match crate::control::planner::calvin::read_vshards_of(&sum_target_reads) {
-                    Ok(vshards) => vshards,
-                    Err(error) => {
-                        let (severity, code, message) = error_to_sqlstate(&error);
-                        return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                            severity.to_owned(),
-                            code.to_owned(),
-                            message,
-                        ))));
-                    }
-                };
-            match classify_dispatch(&tasks, &sum_read_vshards) {
-                DispatchClass::SingleShard { .. } => {
-                    // A single-shard dependent-predicate write (e.g. `DELETE ...
-                    // WHERE <non-pk>`) doesn't need OLLP/Calvin: one shard is one
-                    // Raft group, so the normal replicated-write dispatch path
-                    // applies it deterministically. Edge-bearing dependent
-                    // predicates are already preempted onto Calvin above; only
-                    // genuine multi-shard bulk writes need OLLP. Fall through.
-                    //
-                    // A zero-net settlement is the exception: it ships no task,
-                    // and only Calvin checks its reads.
-                    if tx_state != TransactionState::InBlock && !sum_target_reads.is_empty() {
-                        return self
-                            .dispatch_calvin_multishard(
-                                tasks,
-                                tenant_id,
-                                super::calvin_dispatch::CalvinDispatchSession {
-                                    identity,
-                                    session_id,
-                                    result_formats: shaping.formats,
-                                    auth: &auth_ctx,
-                                    projection: effective_schema,
-                                },
-                                &sum_target_reads,
-                            )
-                            .await;
-                    }
+            // shipped balances were folded from. A single-shard statement takes
+            // the per-task loop, except a zero-net settlement: it ships no task,
+            // and only Calvin checks its reads.
+            match autocommit_route(&tasks, &sum_target_reads, &dml_txn) {
+                AutocommitRoute::SettledCalvin | AutocommitRoute::Calvin => {
+                    return self
+                        .dispatch_calvin_multishard(
+                            tasks,
+                            tenant_id,
+                            super::calvin_dispatch::CalvinDispatchSession {
+                                identity,
+                                session_id,
+                                result_formats: shaping.formats,
+                                auth: &auth_ctx,
+                                projection: effective_schema,
+                            },
+                            &sum_target_reads,
+                        )
+                        .await;
                 }
-                DispatchClass::MultiShard { .. } => {
-                    // Dispatching to Calvin here will apply the statement durably
-                    // at statement time, escaping the transaction buffer. Inside a
-                    // block, fall through to the per-task staging gate when the gate
-                    // can buffer every write — COMMIT then flushes the whole buffer
-                    // through Calvin. Anything else is refused, never applied.
-                    if tx_state == TransactionState::InBlock {
-                        if !all_writes_bufferable(&tasks) {
-                            let (severity, code, message) =
-                                error_to_sqlstate(&crate::Error::CrossShardInExplicitTransaction);
-                            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                                severity.to_owned(),
-                                code.to_owned(),
-                                message,
-                            ))));
-                        }
-                        // Bufferable: fall through to the staging gate below.
-                    } else {
-                        let cross_shard_mode = self.sessions.cross_shard_txn_mode(session_id);
-                        if cross_shard_mode
-                            == crate::control::server::shared::session::cross_shard_mode::CrossShardTxnMode::Strict
-                        {
-                            return self
-                                .dispatch_calvin_multishard(
-                                    tasks,
-                                    tenant_id,
-                                    super::calvin_dispatch::CalvinDispatchSession {
-                                        identity,
-                                        session_id,
-                                        result_formats: shaping.formats,
-                                        auth: &auth_ctx,
-                                        projection: effective_schema,
-                                    },
-                                    &sum_target_reads,
-                                )
-                                .await;
-                        }
-                    }
-                }
+                AutocommitRoute::Refuse(error) => return Err(sql_error(&error)),
+                AutocommitRoute::PerTask => {}
             }
 
             self.dispatch_task_loop(

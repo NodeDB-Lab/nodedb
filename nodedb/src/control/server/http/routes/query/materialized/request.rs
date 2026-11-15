@@ -12,8 +12,10 @@ use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
+use crate::control::server::shared::request_route::{RequestPolicy, RequestRoute, select_route};
 use crate::control::server::shared::session::read_consistency::parse_request_field;
 use crate::control::server::shared::session::read_scope::with_request_consistency;
+use crate::control::server::shared::sql_split::split_statements;
 use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
@@ -22,7 +24,9 @@ use super::super::super::super::auth::{
 use super::super::super::super::peer::PeerAddr;
 use super::super::super::super::transport::ClientTransport;
 use super::super::super::super::types::{HttpQueryRequest, HttpQueryResponse};
-use super::super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::super::atomic_statement::{
+    HttpSequential, RoutedStatement, route_http_statement, run_http_sequential,
+};
 use super::super::super::result_shape::ddl_results_to_json;
 use super::super::{DatabaseQueryParam, resolve_database_id};
 use super::encode::ddl_error_to_api;
@@ -99,16 +103,48 @@ async fn query_at_consistency(
     let http_scope = crate::control::server::shared::session::DetachedTxnScope::new();
     let txn_ctx = http_scope.ctx();
 
+    // A request of several statements that holds DDL or a statement the DDL
+    // router runs takes the sequential request runner. Each statement runs
+    // in order on one implicit transaction.
+    let statements = split_statements(sql);
+    let route = select_route(
+        &statements,
+        RequestPolicy::stateless(&state.shared.sql_policy),
+    );
+    if route == RequestRoute::Sequential {
+        state
+            .shared
+            .check_tenant_quota(identity.tenant_id)
+            .map_err(|e| ApiError::RateLimited {
+                message: e.to_string(),
+                retry_after_secs: 1,
+            })?;
+        let run = HttpSequential {
+            state: &state.shared,
+            identity: &identity,
+            scope: &scope,
+            database_id,
+            trace_id: crate::types::TraceId::ZERO,
+        };
+        let rows = run_http_sequential(&run, &statements)
+            .await
+            .map_err(|error| ApiError::from_request(error, sql))?;
+        return Ok((rate_limit_headers, axum::Json(HttpQueryResponse::ok(rows))));
+    }
+
     // Try DDL commands first. Reached only after the admission call above, so
     // `shared::ddl::user_dispatch` must not admit this request a second time.
-    if let Some(result) = crate::control::server::shared::ddl::dispatch(
-        &state.shared,
-        &identity,
-        sql.trim(),
-        database_id,
-        &txn_ctx,
-    )
-    .await
+    // A request of several statements the gate declines skips the router:
+    // the request planner plans each statement and refuses DDL beside DML.
+    if route == RequestRoute::Lone
+        && let Some(result) = crate::control::server::shared::ddl::dispatch(
+            &state.shared,
+            &identity,
+            sql.trim(),
+            database_id,
+            &txn_ctx,
+        )
+        .await
     {
         return match result {
             Ok(results) => {
@@ -143,14 +179,18 @@ async fn query_at_consistency(
         query_ctx: &state.query_ctx,
         scope: &scope,
         sql: &clean_sql,
+        statements: &statements,
+        route,
         trace_id: crate::types::TraceId::ZERO,
     })
     .await
-    .map_err(ApiError::from)?;
+    .map_err(|error| ApiError::from_request(error, sql))?;
     let tasks = admission.tasks;
     let output_schema = admission.output_schema;
+    let output_schemas = admission.output_schemas;
     let lease_scope = admission.lease_scope;
 
+    // A rolled-back wrapper plans no task, so it answers here.
     if tasks.is_empty() {
         return Ok((
             rate_limit_headers,
@@ -175,7 +215,7 @@ async fn query_at_consistency(
         state: &state.shared,
         identity: &identity,
         scope: &scope,
-        output_schema: Some(&output_schema),
+        schemas: &output_schemas,
         database_id,
         sequences: &sequences,
     };
@@ -183,14 +223,18 @@ async fn query_at_consistency(
         &exec,
         AtomicStatement {
             tasks,
+            statement_map: admission.statement_map,
             lease_scope,
             sum_target_reads: admission.sum_target_reads,
         },
     )
     .await
-    .map_err(ApiError::from)?;
+    .map_err(|error| ApiError::from_request(error, sql))?;
     let AtomicStatement {
-        tasks, lease_scope, ..
+        tasks,
+        statement_map,
+        lease_scope,
+        ..
     } = match routed {
         RoutedStatement::Answered(rows) => {
             return Ok((rate_limit_headers, axum::Json(HttpQueryResponse::ok(rows))));
@@ -210,6 +254,9 @@ async fn query_at_consistency(
             identity: &identity,
             scope,
             output_schema,
+            output_schemas: &output_schemas,
+            statement_map,
+            sql,
             database_id,
             tenant_id,
             trace_id,

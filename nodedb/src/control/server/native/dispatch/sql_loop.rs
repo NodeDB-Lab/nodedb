@@ -14,7 +14,7 @@ use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
-use crate::control::server::shared::statement_exec::{self, StatementExec};
+use crate::control::server::shared::statement_exec::{self, StatementExec, StatementMap};
 use crate::types::DatabaseId;
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -25,7 +25,11 @@ use super::streaming::SqlOutcome;
 /// A planned statement the loop dispatches.
 pub(super) struct PlannedStatement<'a> {
     pub tasks: Vec<PhysicalTask>,
-    pub output_schema: Option<&'a OutputSchema>,
+    /// The statement of each task in `tasks`, one entry per task.
+    pub statement_map: StatementMap,
+    /// Each statement's announced output columns. Index `k` is statement
+    /// `k`. A statement with no entry announced none.
+    pub schemas: &'a [OutputSchema],
     pub database_id: DatabaseId,
     pub plan_lease_scope: Arc<crate::control::lease::QueryLeaseScope>,
     /// The row images the statement's cross-shard balances were settled
@@ -58,7 +62,8 @@ pub(super) async fn run_dispatch_loop(
 ) -> SqlOutcome {
     let PlannedStatement {
         tasks,
-        output_schema,
+        statement_map,
+        schemas,
         database_id,
         plan_lease_scope,
         sum_target_reads,
@@ -68,7 +73,7 @@ pub(super) async fn run_dispatch_loop(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema,
+        schemas,
         database_id,
         sequences: &sequences,
     };
@@ -76,6 +81,7 @@ pub(super) async fn run_dispatch_loop(
         &exec,
         statement_exec::PlannedStatement {
             tasks,
+            statement_map,
             plan_lease_scope,
             sum_target_reads,
         },
@@ -94,7 +100,8 @@ pub(super) async fn run_implicit_statement(
 ) -> SqlOutcome {
     let PlannedStatement {
         tasks,
-        output_schema,
+        statement_map,
+        schemas,
         database_id,
         plan_lease_scope,
         sum_target_reads,
@@ -104,7 +111,7 @@ pub(super) async fn run_implicit_statement(
         state: ctx.state,
         identity: ctx.identity,
         scope: &ctx.scope,
-        output_schema,
+        schemas,
         database_id,
         sequences: &sequences,
     };
@@ -116,6 +123,7 @@ pub(super) async fn run_implicit_statement(
         &exec,
         statement_exec::PlannedStatement {
             tasks,
+            statement_map,
             plan_lease_scope,
             sum_target_reads,
         },

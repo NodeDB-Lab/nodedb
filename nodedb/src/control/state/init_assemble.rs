@@ -342,6 +342,7 @@ impl SharedState {
             limits: nodedb_types::protocol::Limits::default(),
             tuning,
             scheduler_config: crate::config::server::SchedulerConfig::default(),
+            sql_policy: crate::config::server::SqlSection::default(),
             data_dir,
             trigger_dlq: std::sync::OnceLock::new(),
             action_requeue: std::sync::OnceLock::new(),

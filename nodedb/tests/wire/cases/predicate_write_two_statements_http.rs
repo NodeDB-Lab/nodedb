@@ -9,6 +9,7 @@
 
 use nodedb_types::id::DatabaseId;
 
+use super::wire_support::exec;
 use crate::harness::TestServer;
 
 /// Data Plane cores the server runs.
@@ -29,13 +30,6 @@ fn collections_on_two_cores() -> (String, String) {
         .find(|name| core_of(name) != core_of(&first))
         .expect("a name on the other core");
     (first, second)
-}
-
-async fn exec(server: &TestServer, sql: &str) {
-    server
-        .exec(sql)
-        .await
-        .unwrap_or_else(|e| panic!("run {sql}: {e}"));
 }
 
 async fn values(server: &TestServer, collection: &str) -> Vec<String> {

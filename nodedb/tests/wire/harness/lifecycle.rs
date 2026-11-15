@@ -32,6 +32,30 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_multicores`] with a lowered query result limit.
+    pub async fn start_multicores_with_result_limit(cores: usize, bytes: u64) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::result_limit(bytes),
+            cores,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// [`Self::start_multicores`] with usage metering on.
+    pub async fn start_multicores_metered(cores: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::metering(),
+            cores,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
     /// test whose collections must land on different cores.
     #[cfg(feature = "failpoints")]
@@ -218,6 +242,32 @@ impl TestServer {
         let placeholder = tempfile::tempdir().expect("placeholder tempdir");
         let server = Self::connect_and_build(spawned, placeholder, AuthMode::Trust).await;
         (server, dir)
+    }
+
+    /// Spawn a single-core NodeDB server with `[server.sql]
+    /// txn_wrapper_stateless = false`.
+    pub async fn start_with_txn_wrapper_off() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::txn_wrapper_off(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// Spawn a single-core NodeDB server with `[server.sql]
+    /// txn_control_native = false`.
+    pub async fn start_with_txn_control_native_off() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::txn_control_native_off(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
     /// Spawn a single-core NodeDB server that pushes OTLP metrics every

@@ -380,6 +380,13 @@ pub(super) async fn try_string(
     None
 }
 
+/// Whether an arm of this cluster that reads tokens, not a prefix, takes
+/// `sql`. The router gate in `claims` reads it. `upper` is `sql` trimmed
+/// and upper-cased.
+pub(super) fn shape_claims(sql: &str, upper: &str) -> bool {
+    parse_drop_index(sql, upper, DatabaseId::DEFAULT).is_some()
+}
+
 /// Parse `DROP [<KIND>] INDEX [IF EXISTS] <name>`, returning `None` when the
 /// statement is not a drop-index statement at all.
 ///

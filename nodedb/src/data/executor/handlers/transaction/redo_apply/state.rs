@@ -108,6 +108,9 @@ pub(in crate::data::executor) struct RedoApplyScope {
     /// Who committed the record: a restore's document puts carry their
     /// source chain link, which the install relinks instead of refusing.
     pub(in crate::data::executor) origin: nodedb_physical::physical_plan::RedoOrigin,
+    /// The coordinator judged the record's period-lock reference rows, so
+    /// the validate pass does not read them.
+    pub(in crate::data::executor) period_row_judged_at_coordinator: bool,
 }
 
 /// What one resolved timeseries batch a committed redo install stored.
@@ -163,6 +166,7 @@ impl RedoApplyScope {
             edge_writes: Default::default(),
             deferred_notes: Vec::new(),
             origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            period_row_judged_at_coordinator: false,
         }
     }
 

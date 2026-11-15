@@ -7,9 +7,11 @@ mod gate;
 mod lookup;
 mod point_update;
 mod predicate;
+mod reads;
 mod resolve;
 mod singular;
 
+pub(crate) use reads::{JudgedReads, judge_period_references};
 pub use resolve::{
     resolve_period_lock_targets, resolve_period_lock_targets_for_bodies,
     target_declares_period_lock,

@@ -68,10 +68,17 @@ pub fn extract_and_apply_on_deny(
 /// rather than a mutable `AuthContext` apply the override via
 /// `RequestAuthScope::with_on_deny_override` instead of mutating a field
 /// directly.
+///
+/// A text of several statements comes back unchanged with no override. The
+/// request planner reads each statement's own clause. A clause read off the
+/// joined text swallows every later statement.
 pub fn extract_on_deny(sql: &str) -> (String, Option<crate::control::security::deny::DenyMode>) {
     let Some(idx) = rfind_ascii_case_insensitive(sql, "on deny ") else {
         return (sql.to_string(), None);
     };
+    if crate::control::server::shared::sql_split::holds_several_statements(sql) {
+        return (sql.to_string(), None);
+    }
 
     // Only strip ON DENY from SELECT/WITH queries (not CREATE RLS POLICY).
     let trimmed = sql.trim_start();

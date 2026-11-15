@@ -64,6 +64,17 @@ pub(super) struct TuningOverrides {
     /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
     /// so a superseded version leaves about 12 s after its successor.
     pub(super) fast_version_cleanup: bool,
+    /// Writes `[server.sql]` with `txn_wrapper_stateless = false`, so a test
+    /// reads the refusal HTTP, NDJSON and WebSocket answer then.
+    pub(super) txn_wrapper_off: bool,
+    /// Writes `[server.sql]` with `txn_control_native = false`, so a test
+    /// reads the refusal native answers then.
+    pub(super) txn_control_native_off: bool,
+    /// Overrides `[tuning.network] max_query_result_bytes`.
+    pub(super) max_query_result_bytes: Option<u64>,
+    /// Writes `[auth.metering] enabled = true`, so usage and scope quotas
+    /// account the work a test runs.
+    pub(super) metering: bool,
 }
 
 impl TuningOverrides {
@@ -136,6 +147,38 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with the stateless transaction wrapper switched off.
+    pub(super) fn txn_wrapper_off() -> Self {
+        Self {
+            txn_wrapper_off: true,
+            ..Self::default()
+        }
+    }
+
+    /// Boot with native transaction control switched off.
+    pub(super) fn txn_control_native_off() -> Self {
+        Self {
+            txn_control_native_off: true,
+            ..Self::default()
+        }
+    }
+
+    /// Boot with a lowered query result limit.
+    pub(super) fn result_limit(bytes: u64) -> Self {
+        Self {
+            max_query_result_bytes: Some(bytes),
+            ..Self::default()
+        }
+    }
+
+    /// Boot with usage metering on.
+    pub(super) fn metering() -> Self {
+        Self {
+            metering: true,
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -167,6 +210,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.
     toml.push_str("\n[tuning.network]\ndrain_timeout_secs = 2\n");
+    if let Some(bytes) = tuning.max_query_result_bytes {
+        toml.push_str(&format!("max_query_result_bytes = {bytes}\n"));
+    }
     if tuning.fast_version_cleanup {
         toml.push_str(
             "txn_snapshot_max_age_secs = 5\ndefault_deadline_secs = 5\ncopy_deadline_secs = 5\n\
@@ -197,6 +243,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     if let Some(vectors) = tuning.vector_seal_threshold {
         toml.push_str(&format!("\n[tuning.vector]\nseal_threshold = {vectors}\n"));
     }
+    if tuning.metering {
+        toml.push_str("\n[auth.metering]\nenabled = true\n");
+    }
     if let Some(bytes) = tuning.max_redo_entry_bytes {
         toml.push_str(&format!(
             "\n[tuning.calvin]\nmax_redo_entry_bytes = {bytes}\n"
@@ -218,6 +267,12 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
             toml_quote(&token_path),
             toml_quote(&blob_path)
         ));
+    }
+    if tuning.txn_wrapper_off {
+        toml.push_str("\n[server.sql]\ntxn_wrapper_stateless = false\n");
+    }
+    if tuning.txn_control_native_off {
+        toml.push_str("\n[server.sql]\ntxn_control_native = false\n");
     }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",

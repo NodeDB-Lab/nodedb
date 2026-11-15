@@ -6,6 +6,9 @@
 //! return-on-first-match), then the typed parse gate, then the typed family
 //! clusters; every other statement returns `None` so the transitional pgwire
 //! delegation in `super::super::super::dispatch` handles it.
+//!
+//! Which statements it takes is decided in the `claims` module. The request
+//! planner reads the same decision.
 
 use nodedb_sql::ddl_ast::statement::{GraphStmt, NodedbStatement};
 
@@ -21,7 +24,7 @@ use super::super::graph_ops;
 use super::super::match_ops;
 use super::super::query_functions;
 
-use super::route_tokens::RouteTokens;
+use super::claims::{UntypedClaim, string_arm_claims, untyped_claim};
 use super::{
     string_admin, string_engine_ops, string_introspection, string_schema, string_streaming,
     string_versioning, sync_wait, typed_auth, typed_automation, typed_collection, typed_database,
@@ -45,31 +48,36 @@ pub async fn try_dispatch(
     // match a statement that arrives with leading whitespace or a newline.
     let upper = sql.trim().to_uppercase();
 
-    if let Some(r) = string_admin::try_string(state, identity, sql, &upper, database_id).await {
-        return Some(r);
-    }
-    if let Some(r) = string_schema::try_string(state, identity, sql, &upper, database_id).await {
-        return Some(r);
-    }
-    if let Some(r) =
-        string_streaming::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
-    {
-        return Some(r);
-    }
-    if let Some(r) =
-        string_versioning::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
-    {
-        return Some(r);
-    }
-    if let Some(r) =
-        string_engine_ops::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
-    {
-        return Some(r);
-    }
-    if let Some(r) =
-        string_introspection::try_string(state, identity, sql, &upper, database_id).await
-    {
-        return Some(r);
+    // The string arms run only for a statement `claims` gives them. So the
+    // router and the request planner read one decision.
+    if string_arm_claims(sql, &upper) {
+        if let Some(r) = string_admin::try_string(state, identity, sql, &upper, database_id).await {
+            return Some(r);
+        }
+        if let Some(r) = string_schema::try_string(state, identity, sql, &upper, database_id).await
+        {
+            return Some(r);
+        }
+        if let Some(r) =
+            string_streaming::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
+        {
+            return Some(r);
+        }
+        if let Some(r) =
+            string_versioning::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
+        {
+            return Some(r);
+        }
+        if let Some(r) =
+            string_engine_ops::try_string(state, identity, sql, &upper, database_id, txn_ctx).await
+        {
+            return Some(r);
+        }
+        if let Some(r) =
+            string_introspection::try_string(state, identity, sql, &upper, database_id).await
+        {
+            return Some(r);
+        }
     }
 
     // Parse errors surface as a typed `DdlError` here, with the SQLSTATE the
@@ -89,49 +97,40 @@ pub async fn try_dispatch(
         // parse refusal answers one class wherever it is raised.
         Some(Err(e)) => return Some(Err(DdlError::from_sql_error(e, identity.tenant_id))),
         None => {
-            // Only a statement that can open with COPY, INSERT, or UPSERT is
-            // tokenized for the routing checks below. A plain query skips the
-            // tokenizer, whose cost grows with the statement's length.
-            if may_lead_with_write_or_copy(&upper) {
-                // Bulk import: a `COPY … FROM STDIN` whose relation is more than
-                // one name, such as `COPY tenant_restore(1) FROM STDIN` on a
-                // transport with no COPY stream. The file-path form parses into
-                // `MiscStmt::CopyFromFile` and a one-name STDIN form into
-                // `MiscStmt::CopyFromStdin`, both handled by the typed arms, so
-                // neither reaches this arm.
-                let tokens = RouteTokens::new(sql);
-                if is_copy_from(&tokens) {
-                    let parts: Vec<&str> = sql.split_whitespace().collect();
-                    return Some(bulk::copy_from(state, identity, &parts).await);
-                }
+            // Bulk import: a `COPY … FROM STDIN` whose relation is more than
+            // one name, such as `COPY tenant_restore(1) FROM STDIN` on a
+            // transport with no COPY stream. The file-path form parses into
+            // `MiscStmt::CopyFromFile` and a one-name STDIN form into
+            // `MiscStmt::CopyFromStdin`, both handled by the typed arms, so
+            // neither reaches this arm.
+            let claim = untyped_claim(sql);
+            if claim == Some(UntypedClaim::CopyFrom) {
+                let parts: Vec<&str> = sql.split_whitespace().collect();
+                return Some(bulk::copy_from(state, identity, &parts).await);
+            }
 
-                // INSERT INTO x { } — object literal syntax; intercept for
-                // trigger/sequence handling. It runs after the typed-AST parse
-                // gate, in the `None` branch.
-                if is_object_literal_write(&tokens, "INSERT")
-                    && let Some(result) =
-                        collection::insert_document(state, identity, database_id, sql, txn_ctx)
-                            .await
-                {
-                    return Some(
-                        sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result)
-                            .await,
-                    );
-                }
+            // INSERT INTO x { } — object literal syntax; intercept for
+            // trigger/sequence handling. It runs after the typed-AST parse
+            // gate, in the `None` branch.
+            if claim == Some(UntypedClaim::ObjectLiteralInsert)
+                && let Some(result) =
+                    collection::insert_document(state, identity, database_id, sql, txn_ctx).await
+            {
+                return Some(
+                    sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result).await,
+                );
+            }
 
-                // UPSERT INTO — same as INSERT but merges into existing document
-                // if it exists. Handles both (cols) VALUES (vals) and { } object
-                // literal forms.
-                if (is_upsert_values(&tokens) || is_object_literal_write(&tokens, "UPSERT"))
-                    && let Some(result) =
-                        collection::upsert_document(state, identity, database_id, sql, txn_ctx)
-                            .await
-                {
-                    return Some(
-                        sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result)
-                            .await,
-                    );
-                }
+            // UPSERT INTO — same as INSERT but merges into existing document
+            // if it exists. Handles both (cols) VALUES (vals) and { } object
+            // literal forms.
+            if claim == Some(UntypedClaim::Upsert)
+                && let Some(result) =
+                    collection::upsert_document(state, identity, database_id, sql, txn_ctx).await
+            {
+                return Some(
+                    sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result).await,
+                );
             }
 
             return query_functions::try_dispatch(state, identity, database_id, sql).await;
@@ -228,91 +227,5 @@ fn graph_stmt_writes(stmt: &GraphStmt) -> bool {
         | GraphStmt::MatchQuery { .. }
         | GraphStmt::GraphRagFusion { .. }
         | GraphStmt::ShowGraphStats { .. } => false,
-    }
-}
-
-/// Whether a statement, upper-cased, can open with `COPY`, `INSERT`, or
-/// `UPSERT` once comments are skipped. A leading comment answers `true`: the
-/// routing tokens skip it, so the first word is not known without them.
-fn may_lead_with_write_or_copy(upper: &str) -> bool {
-    let head = upper.trim_start();
-    if head.starts_with("--") || head.starts_with("/*") {
-        return true;
-    }
-    let word_end = head
-        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .unwrap_or(head.len());
-    matches!(&head[..word_end], "COPY" | "INSERT" | "UPSERT")
-}
-
-/// `COPY <collection> FROM ...`: the clause follows the collection name.
-fn is_copy_from(tokens: &RouteTokens) -> bool {
-    tokens.leads_with(&["COPY"]) && tokens.phrase_at(tokens.skip_name(1), &["FROM"])
-}
-
-/// `<verb> INTO <collection> { ... }`, the object-literal write form.
-fn is_object_literal_write(tokens: &RouteTokens, verb: &str) -> bool {
-    tokens.leads_with(&[verb, "INTO"]) && tokens.phrase_at(tokens.skip_name(2), &["{"])
-}
-
-/// `UPSERT INTO <collection> [(columns)] VALUES (...)`.
-fn is_upsert_values(tokens: &RouteTokens) -> bool {
-    tokens.leads_with(&["UPSERT", "INTO"]) && tokens.has_word_from(tokens.skip_name(2), "VALUES")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_possible_write_or_copy_is_tokenized() {
-        assert!(may_lead_with_write_or_copy("INSERT INTO T { ID: 1 }"));
-        assert!(may_lead_with_write_or_copy(
-            "  UPSERT INTO T (A) VALUES (1)"
-        ));
-        assert!(may_lead_with_write_or_copy("COPY T FROM STDIN"));
-        assert!(may_lead_with_write_or_copy(
-            "-- NOTE\nINSERT INTO T { ID: 1 }"
-        ));
-        assert!(may_lead_with_write_or_copy("/* NOTE */ COPY T FROM STDIN"));
-        assert!(!may_lead_with_write_or_copy("SELECT * FROM T"));
-        assert!(!may_lead_with_write_or_copy("INSERTED"));
-        assert!(!may_lead_with_write_or_copy("COPYRIGHT"));
-        assert!(!may_lead_with_write_or_copy(""));
-    }
-
-    #[test]
-    fn copy_from_is_routed_on_the_clause_after_the_collection() {
-        assert!(is_copy_from(&RouteTokens::new("COPY orders FROM STDIN")));
-        assert!(!is_copy_from(&RouteTokens::new(
-            "COPY (SELECT 'x FROM y') TO STDOUT"
-        )));
-    }
-
-    #[test]
-    fn object_literal_writes_are_routed_on_the_brace_after_the_collection() {
-        let insert = RouteTokens::new("INSERT INTO docs { id: 'a' }");
-        assert!(is_object_literal_write(&insert, "INSERT"));
-        assert!(!is_object_literal_write(&insert, "UPSERT"));
-        // A brace inside a literal is data.
-        assert!(!is_object_literal_write(
-            &RouteTokens::new("INSERT INTO docs (body) VALUES ('{ }')"),
-            "INSERT"
-        ));
-        assert!(is_object_literal_write(
-            &RouteTokens::new("upsert into docs {id: 'a'}"),
-            "UPSERT"
-        ));
-    }
-
-    #[test]
-    fn upsert_values_is_routed_on_a_top_level_values_clause() {
-        assert!(is_upsert_values(&RouteTokens::new(
-            "UPSERT INTO docs (id, n) VALUES ('a', 1)"
-        )));
-        // `VALUES` inside a string literal is data.
-        assert!(!is_upsert_values(&RouteTokens::new(
-            "UPSERT INTO docs SELECT 'VALUES' AS id"
-        )));
     }
 }

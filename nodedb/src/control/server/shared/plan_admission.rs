@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Protocol-neutral statement setup: plan, authorize, extract implicit edges,
-//! resolve materialized-sum targets, authorize again, and admit the descriptor
-//! leases — as ONE retried unit.
+//! Protocol-neutral statement setup: enforce CHECK and enum labels, then plan,
+//! authorize, extract implicit edges, resolve materialized-sum targets,
+//! authorize again, and admit the descriptor leases — as ONE retried unit.
+//!
+//! A request of several statements plans each statement alone and joins the
+//! tasks into one set. Every later step runs once over that set.
 //!
 //! Planning reads the catalog and records a descriptor version; the lease that
 //! pins that version is only acquired afterwards. A descriptor drain that starts
@@ -26,8 +29,12 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
+use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
+use crate::control::server::shared::plan_admission_request::{PlannedRequest, RequestText};
+use crate::control::server::shared::request_route::RequestRoute;
 use crate::control::server::shared::retry::retry_on_schema_change;
-use crate::control::server::shared::returning;
+use crate::control::server::shared::sql_split::Statement;
+use crate::control::server::shared::statement_exec::{RequestError, StatementMap};
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -39,8 +46,15 @@ pub struct PlanAdmission {
     /// this set is NOT pre-authorized, so a batch-authorize-then-loop will
     /// retarget before the clone check.
     pub tasks: Vec<PhysicalTask>,
-    /// Output schema for the planned statement.
+    /// The statement of each task in `tasks`, one entry per task. A derived
+    /// task takes the statement of the task it derives from.
+    pub statement_map: StatementMap,
+    /// The output schema the response folds read. For a request of several
+    /// statements, the last statement's schema that announces columns, else
+    /// the first statement's.
     pub output_schema: OutputSchema,
+    /// One output schema per statement. Index `k` is statement `k`.
+    pub output_schemas: Vec<OutputSchema>,
     /// Descriptor versions this statement was planned against.
     pub versions: DescriptorVersionSet,
     /// Descriptor lease holds; must stay alive for the whole execution.
@@ -54,6 +68,19 @@ pub struct PlanAdmission {
     /// written since. Empty for every statement that settled no cross-shard
     /// balance, which is every statement on a collection with no binding.
     pub sum_target_reads: Vec<crate::control::server::shared::session::read_set::ReadSetEntry>,
+    /// True for a request `BEGIN; ..; ROLLBACK` the wrapper policy accepted.
+    /// Its inner statements planned and passed authorization, CHECK and enum
+    /// labels. `tasks` is empty and no lease is held. The caller must apply
+    /// nothing and answer no row.
+    pub rolls_back: bool,
+}
+
+impl PlanAdmission {
+    /// Whether the request holds more than one statement. Such a request
+    /// never opens a lazy stream.
+    pub fn holds_several_statements(&self) -> bool {
+        self.output_schemas.len() > 1
+    }
 }
 
 /// Inputs for [`plan_authorize_and_admit`].
@@ -68,6 +95,12 @@ pub struct PlanAdmissionRequest<'a> {
     /// `RETURNING` clause stays in the text: admission splits it off and
     /// plans it.
     pub sql: &'a str,
+    /// `sql` split once by the transport. Admission never splits again.
+    pub statements: &'a [Statement],
+    /// The route `select_route` picked for `statements`. A transport with no
+    /// session selects it with the stateless wrapper policy. A route of
+    /// `WrapperRefused` answers 0A000. See `RequestText::for_route`.
+    pub route: RequestRoute,
     pub trace_id: TraceId,
 }
 
@@ -78,9 +111,12 @@ pub struct PlanAdmissionRequest<'a> {
 /// For a transport with no transaction block: every derived read sees
 /// committed base only. A session transport uses
 /// [`plan_authorize_and_admit_in_txn`].
+///
+/// A plan, CHECK or enum-label error of statement `k` in a request of
+/// several statements carries `k`. Every other error carries no statement.
 pub async fn plan_authorize_and_admit(
     request: PlanAdmissionRequest<'_>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
     plan_authorize_and_admit_in_txn(request, None).await
 }
 
@@ -94,7 +130,21 @@ pub async fn plan_authorize_and_admit(
 pub async fn plan_authorize_and_admit_in_txn(
     request: PlanAdmissionRequest<'_>,
     read_txn: Option<crate::types::TxnId>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
+    // CHECK constraints and enum labels of every statement, before planning.
+    // pgwire checks per statement in its own route and does not come here.
+    enforce_request_checks(
+        &RequestChecks {
+            state: request.state,
+            identity: request.scope.identity(),
+            tenant_id: request.scope.tenant_id(),
+            database_id: request.scope.database_id(),
+            auth: request.scope.auth(),
+            txn_id: read_txn,
+        },
+        request.sql,
+    )
+    .await?;
     let request = &request;
     retry_on_schema_change(&request.state.lease_drain, move || {
         plan_authorize_and_admit_once(request, read_txn)
@@ -107,24 +157,28 @@ pub async fn plan_authorize_and_admit_in_txn(
 async fn plan_authorize_and_admit_once(
     request: &PlanAdmissionRequest<'_>,
     read_txn: Option<crate::types::TxnId>,
-) -> crate::Result<PlanAdmission> {
+) -> Result<PlanAdmission, RequestError> {
     let state = request.state;
     let query_ctx = request.query_ctx;
     let identity = request.scope.identity();
     let auth_ctx = request.scope.auth();
-    // The planner does not parse a DML `RETURNING` clause, so it is split off
-    // here. The item text resolves inside the planner against the planned
-    // target, which announces the projection and attaches the Data-Plane spec
-    // to every task. Planned with the clause still in the text, the statement
-    // drops it and answers a count with no rows.
-    let (sql, returning_items) = returning::strip_returning(request.sql)?;
+    // A text of one statement plans whole, as one statement. A text of
+    // several plans each statement alone. Each splits off its own `RETURNING`.
+    let (text, rolls_back) =
+        RequestText::for_route(request.sql, request.statements, request.route)?;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;
 
     // Re-read per attempt: a retry must plan against the catalog and permission
     // state as they are NOW, not as they were when the drained attempt started.
-    let (mut tasks, output_schema, versions) = {
+    let PlannedRequest {
+        mut tasks,
+        mut statement_map,
+        output_schema,
+        output_schemas,
+        versions,
+    } = {
         crate::control::security::auth_fence::admit_permission_view(state, tenant_id).await?;
         let security = PlanSecurityContext {
             identity,
@@ -137,16 +191,8 @@ async fn plan_authorize_and_admit_once(
                 &state.permission_cache,
             ),
         };
-        let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
-            .plan_sql_with_rls_and_versions(
-                &sql,
-                tenant_id,
-                database_id,
-                &security,
-                returning_items.as_deref(),
-            )
-            .await?;
-        (tasks, output_schema, versions)
+        text.plan(query_ctx, tenant_id, database_id, &security)
+            .await?
     };
 
     let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
@@ -154,23 +200,44 @@ async fn plan_authorize_and_admit_once(
     // Implicit-edge extraction marks catalog state and allocates surrogates, so
     // the originally planned tasks must clear authorization before it runs.
     let _preauthorized_tasks =
-        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
+        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)
+            .map_err(crate::Error::from)?;
 
-    let sum_target_reads = append_derived_tasks(
+    // A rolled-back wrapper stops after the checks: no derived write marks
+    // catalog state, and no lease is held.
+    if rolls_back {
+        return Ok(PlanAdmission {
+            tasks: Vec::new(),
+            statement_map: StatementMap::default(),
+            output_schema,
+            output_schemas,
+            versions,
+            lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+            sum_target_reads: Vec::new(),
+            rolls_back,
+        });
+    }
+
+    let mut parents = Vec::new();
+    let sum_target_reads = append_derived_tasks_traced(
         state,
         &mut tasks,
         tenant_id,
         database_id,
         read_txn,
         trace_id,
+        &mut parents,
     )
     .await?;
+    statement_map.push_derived(&parents)?;
+    statement_map.debug_check_covers(&tasks);
 
     // Deliberate gate: proves the final task set is authorizable before a
     // descriptor lease is acquired. The caller re-derives the capability per
     // task through the clone-check gate, immediately before each dispatch.
     let _authorized_tasks =
-        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
+        authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)
+            .map_err(crate::Error::from)?;
 
     // Admission follows authorization so a denied statement never consumes a
     // descriptor lease.
@@ -178,10 +245,13 @@ async fn plan_authorize_and_admit_once(
 
     Ok(PlanAdmission {
         tasks,
+        statement_map,
         output_schema,
+        output_schemas,
         versions,
         lease_scope,
         sum_target_reads,
+        rolls_back,
     })
 }
 
@@ -204,22 +274,59 @@ pub async fn append_derived_tasks(
     read_txn: Option<crate::types::TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
-    crate::control::planner::implicit_edges::append_implicit_edge_tasks(
+    append_derived_tasks_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`append_derived_tasks`] that also records each derived task's parent.
+///
+/// For each appended task, in append order, this pushes onto `parents` the
+/// index of the task whose processing appended it. Each pass appends at the
+/// end, so a parent always sits before its child. The caller can extend a
+/// [`StatementMap`] with [`StatementMap::push_derived`].
+pub async fn append_derived_tasks_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
+    crate::control::planner::implicit_edges::append_implicit_edge_tasks_traced(
         state,
         tasks,
         tenant_id,
         database_id,
         trace_id,
+        parents,
     )
     .await?;
-    append_sum_and_period_targets(state, tasks, tenant_id, database_id, read_txn, trace_id).await
+    append_sum_and_period_targets_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        parents,
+    )
+    .await
 }
 
 /// Resolve every write's materialized-sum targets, append one
 /// `ApplyBalanceDelta` task per cross-shard balance, and resolve every
 /// write's period-lock reference row.
 ///
-/// A plain statement runs this through [`append_derived_tasks`]. The
+/// A plain statement runs this through [`append_derived_tasks_traced`]. The
 /// in-transaction expanders run it on the point writes they emit. So every
 /// write that moves a sum source ships its cross-shard balance on a task
 /// homed on the target's vShard.
@@ -238,24 +345,50 @@ pub async fn append_sum_and_period_targets(
     read_txn: Option<crate::types::TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
+    append_sum_and_period_targets_traced(
+        state,
+        tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// [`append_sum_and_period_targets`] that also records each appended
+/// balance task's parent onto `parents`, as
+/// [`append_derived_tasks_traced`] does.
+pub async fn append_sum_and_period_targets_traced(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
+    trace_id: TraceId,
+    parents: &mut Vec<usize>,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
     let sum_target_reads =
-        crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
+        crate::control::planner::materialized_sum::resolve_materialized_sum_targets_traced(
             state,
             tasks,
             tenant_id,
             database_id,
             read_txn,
             trace_id,
+            parents,
         )
         .await?;
 
     // Follows the resolution: it consumes the surrogates that pass bound, and
     // issues no lookup of its own.
-    crate::control::planner::materialized_sum::append_cross_shard_balance_tasks(
+    crate::control::planner::materialized_sum::append_cross_shard_balance_tasks_traced(
         state,
         tasks,
         tenant_id,
         database_id,
+        parents,
     )?;
 
     // Resolves each write's period-lock reference row into the same slot the

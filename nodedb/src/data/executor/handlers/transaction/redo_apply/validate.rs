@@ -19,6 +19,14 @@
 //!   the stored pre-image. A put to a `HASH_CHAIN` collection that sets a
 //!   chain field is refused.
 //!
+//! The record of a Calvin slice does not read a period lock's reference row.
+//! That row lives on another vShard, so this core sees it at whatever point
+//! that vShard's log reached, and replicas can read it differently. The
+//! coordinator judged the row before the transaction was sequenced, and the
+//! transaction's read of it orders the transaction against every close. The
+//! slice still refuses a period the plan resolved to no row: that verdict
+//! depends on the record alone.
+//!
 //! A [`RedoOrigin::Restore`] record re-installs rows a backup captured. Each
 //! row passed BALANCED and the stateless rules when it was first written, and
 //! a bitemporal row's earlier versions are history. So a restore runs UNIQUE
@@ -34,6 +42,7 @@ use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::balanced::{self, BalancedEntry};
 use crate::data::executor::enforcement::hash_chain;
 use crate::data::executor::enforcement::images::RowImages;
+use crate::data::executor::enforcement::period_lock::PeriodCheck;
 use crate::data::executor::enforcement::unique::{PostImage, UniqueScope, check_unique_post_state};
 use crate::data::executor::handlers::point::apply_delete::run_delete_enforcement;
 use crate::data::executor::handlers::point::apply_put::PutEnforcement;
@@ -80,6 +89,7 @@ impl CoreLoop {
                 bitemporal,
                 resolved: &resolved,
                 user_roles,
+                read_period_row: !apply_scope.period_row_judged_at_coordinator,
             };
             if origin == RedoOrigin::Commit {
                 self.check_collection_ops(&scope, &collection_ops)?;
@@ -125,7 +135,7 @@ impl CoreLoop {
                             value,
                             old_value: &prior,
                             user_roles: scope.user_roles,
-                            resolved_targets: scope.resolved,
+                            period: scope.period_check(),
                         },
                     )?;
                     if let Some(def) = &enforcement.balanced {
@@ -159,7 +169,7 @@ impl CoreLoop {
                             scope.collection,
                             scope.config,
                             prior.as_deref(),
-                            scope.resolved,
+                            scope.period_check(),
                         )?;
                     }
                     if let (Some(def), Some(bytes)) = (&enforcement.balanced, &prior) {
@@ -242,4 +252,15 @@ struct CollectionScope<'a> {
     resolved: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
     /// Roles of the identity that committed the record.
     user_roles: &'a [String],
+    /// Whether the record's period-lock checks read the reference row.
+    read_period_row: bool,
+}
+
+impl<'a> CollectionScope<'a> {
+    fn period_check(&self) -> PeriodCheck<'a> {
+        PeriodCheck {
+            resolved: self.resolved,
+            read_row: self.read_period_row,
+        }
+    }
 }

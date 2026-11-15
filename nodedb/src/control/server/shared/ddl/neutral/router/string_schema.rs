@@ -171,6 +171,12 @@ enum AlterCollectionArm {
     DropPeriodLock,
 }
 
+/// Whether an arm of this cluster that reads tokens, not a prefix, takes
+/// `sql`. The router gate in `claims` reads it.
+pub(super) fn shape_claims(sql: &str) -> bool {
+    alter_collection_arm(sql).is_some()
+}
+
 /// Recognize an `ALTER COLLECTION <name> <clause>` form by the clause that
 /// follows the name. A keyword inside the name, a literal, or a parenthesized
 /// predicate never selects an arm.

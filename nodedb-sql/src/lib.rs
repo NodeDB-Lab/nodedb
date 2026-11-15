@@ -81,6 +81,11 @@ pub fn plan_sql(sql: &str, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     if let Some(stmt) = try_parse_array_statement(sql)? {
         return plan_array_statement(stmt, catalog);
     }
+    // Refused before the parser: such a text does not parse, and the caller
+    // must learn it is unsupported rather than read a syntax error.
+    if let Some(statements) = preprocess::rewritten_batch(sql)? {
+        refuse_rewritten_batch(true, statements)?;
+    }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
     let is_upsert = preprocessed.as_ref().is_some_and(|p| p.is_upsert);
@@ -90,6 +95,7 @@ pub fn plan_sql(sql: &str, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
         .unwrap_or_default();
 
     let statements = parse_sql(effective_sql)?;
+    refuse_rewritten_batch(preprocessed.is_some(), statements.len())?;
     plan_statements(&statements, is_upsert, temporal, catalog)
 }
 
@@ -111,6 +117,10 @@ pub fn plan_sql_with_params(
         let _ = params; // arrays don't accept bound params today
         return plan_array_statement(stmt, catalog);
     }
+    // Refused before the parser, exactly as the no-params path does.
+    if let Some(statements) = preprocess::rewritten_batch(sql)? {
+        refuse_rewritten_batch(true, statements)?;
+    }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
     let is_upsert = preprocessed.as_ref().is_some_and(|p| p.is_upsert);
@@ -120,10 +130,28 @@ pub fn plan_sql_with_params(
         .unwrap_or_default();
 
     let mut statements = parse_sql(effective_sql)?;
+    refuse_rewritten_batch(preprocessed.is_some(), statements.len())?;
     for stmt in &mut statements {
         params::bind_params(stmt, params);
     }
     plan_statements(&statements, is_upsert, temporal, catalog)
+}
+
+/// Refuse a text of several statements that the preprocess rewrote.
+///
+/// The rewrite flags (`is_upsert`, `temporal`) describe one statement but
+/// apply to every statement of the text. A caller plans each statement of a
+/// request alone, so a rewritten batch here is a caller error.
+fn refuse_rewritten_batch(rewritten: bool, statements: usize) -> Result<()> {
+    if rewritten && statements > 1 {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "a text of {statements} statements holds an UPSERT, an object literal or a \
+                 temporal clause. Plan each statement alone"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Plan a list of parsed statements.
