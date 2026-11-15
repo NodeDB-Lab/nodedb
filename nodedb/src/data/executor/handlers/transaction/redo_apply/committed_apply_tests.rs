@@ -31,6 +31,7 @@ fn redo_bytes(ops: Vec<RedoSubRecord>) -> Vec<u8> {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo")
@@ -102,6 +103,7 @@ fn an_installed_record_emits_one_publish_event_per_message() {
         }],
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo");

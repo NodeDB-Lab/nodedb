@@ -383,6 +383,7 @@ fn fts_documents(refuse: bool) -> u32 {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo");
@@ -511,6 +512,7 @@ fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo");

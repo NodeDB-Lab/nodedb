@@ -154,6 +154,19 @@ pub struct CalvinEntryStamps {
     pub incarnations: Vec<CollectionIncarnation>,
 }
 
+/// `last`, the final entry of a committed Calvin slice's redo, with the
+/// leader's stamps.
+pub fn stamp_calvin_final(
+    mut last: ReplicatedEntry,
+    stamps: &CalvinEntryStamps,
+) -> ReplicatedEntry {
+    last.write_hlc = stamps.write_hlc;
+    last.restore_id = stamps.restore_id;
+    last.metadata_floor = stamps.metadata_floor;
+    last.incarnations = stamps.incarnations.clone();
+    last
+}
+
 /// The entries of a committed Calvin slice's redo, for one proposal
 /// attempt. The redo travels inline when its entry fits `max_entry_bytes`,
 /// else chunked under `stream`.
@@ -165,13 +178,7 @@ pub fn calvin_redo_proposal(
     max_entry_bytes: usize,
 ) -> crate::Result<RedoProposal> {
     let proposal = redo_proposal(target, payload, max_entry_bytes, |_| stream)?;
-    let stamp = |mut last: ReplicatedEntry| {
-        last.write_hlc = stamps.write_hlc;
-        last.restore_id = stamps.restore_id;
-        last.metadata_floor = stamps.metadata_floor;
-        last.incarnations = stamps.incarnations.clone();
-        last
-    };
+    let stamp = |last: ReplicatedEntry| stamp_calvin_final(last, stamps);
     Ok(match proposal {
         RedoProposal::Inline(last) => RedoProposal::Inline(stamp(last)),
         RedoProposal::Chunked {
@@ -328,6 +335,17 @@ pub fn chunk_count(len: u64, max_entry_bytes: usize) -> crate::Result<u32> {
     })
 }
 
+/// Whether `carried` more bytes push a stream past its declared `len`.
+pub fn chunks_overrun(proposed: u64, carried: u64, len: u64) -> bool {
+    proposed.saturating_add(carried) > len
+}
+
+/// Whether a stream proposed exactly its declared `len` bytes in its
+/// declared `count` of chunks.
+pub fn chunks_complete(proposed: u64, next_index: u32, len: u64, count: u32) -> bool {
+    proposed == len && next_index == count
+}
+
 /// Where one chunk sits in its stream.
 #[derive(Debug, Clone, Copy)]
 pub struct RedoChunkSlot {
@@ -389,6 +407,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             },
             collections: vec!["orders".into()],
             incarnation_names: vec![(

@@ -41,6 +41,7 @@ impl CoreLoop {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: header.user_roles.clone(),
+            sum_targets: Vec::new(),
         };
         let payload = match redo.to_bytes() {
             Ok(payload) => payload,

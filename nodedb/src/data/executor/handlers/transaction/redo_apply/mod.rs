@@ -12,7 +12,9 @@
 //! - [`streamed`]: the content of a stream marker, read back from the WAL.
 //! - [`stream_validate`]: the validate of a stream marker's content, run
 //!   batch by batch over the stream.
-//! - [`document`]: document rows written while the apply scope is open.
+//! - [`document`]: document rows written while the apply scope is open, or
+//!   while restart replay folds a record whose install never became durable.
+//! - [`replay_fold`]: restart replay's fold of such a record.
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
@@ -44,6 +46,7 @@ mod folded_store;
 mod install_refusal_tests;
 mod installed_document;
 mod passes;
+mod replay_fold;
 #[cfg(test)]
 mod retention_instant_tests;
 mod settle;

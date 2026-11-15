@@ -472,7 +472,11 @@ fn a_part_boot_journals_never_regresses_a_later_write_of_its_row() {
         .write_set_capture(&task_a, group_a, &response_a)
         .expect("capture a");
     let records = live.wal.replay().expect("replay");
-    assert!(settle_against(&live.wal, &records, &[stored_a]).expect("settle"));
+    assert!(
+        settle_against(&live.wal, &records, &[stored_a])
+            .expect("settle")
+            .appended
+    );
     live.wal.sync().expect("sync");
     let records = live.wal.replay().expect("replay");
     let tail = records.iter().map(|r| r.header.lsn).max().unwrap_or(0);
@@ -494,7 +498,9 @@ fn a_settled_group_needs_nothing_at_boot() {
     let stores = live.crash_image();
     let stored = StoredWriteSets::read(stores.path()).expect("read");
     assert!(
-        !settle_against(&live.wal, &records, &stored.captures).expect("settle"),
+        !settle_against(&live.wal, &records, &stored.captures)
+            .expect("settle")
+            .appended,
         "a whole WAL needs no record"
     );
 }

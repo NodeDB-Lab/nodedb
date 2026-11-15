@@ -249,6 +249,7 @@ fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     let origin = appender
         .append_transaction_redo(t, v, d, &redo)
@@ -269,7 +270,11 @@ fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
     wal.sync().expect("sync");
 
     let records = wal.replay().expect("replay");
-    assert!(settle_against(&wal, &records, &[]).expect("settle"));
+    assert!(
+        settle_against(&wal, &records, &[])
+            .expect("settle")
+            .appended
+    );
     wal.sync().expect("sync");
     let settled = wal.replay().expect("replay");
 

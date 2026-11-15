@@ -29,6 +29,7 @@ fn redo_of_parts(framed: &[u8]) -> Vec<u8> {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     for frame in RedoFrames::new(framed) {
         let (tag, body) = frame.expect("resolve frame");

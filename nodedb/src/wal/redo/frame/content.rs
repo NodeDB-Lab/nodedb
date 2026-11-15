@@ -154,6 +154,9 @@ impl FramedRedo {
             publishes,
             row_changes: self.row_changes,
             user_roles: self.header.user_roles,
+            // The install folds with the targets the header carries, so a
+            // reader of the installed record folds with the same ones.
+            sum_targets: self.header.sum_targets,
         };
         if let Some(floor) = reference.stamp_floor {
             record.raise_stamps_to(floor)?;

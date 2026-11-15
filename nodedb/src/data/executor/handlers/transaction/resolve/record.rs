@@ -63,6 +63,7 @@ impl CoreLoop {
             // The commit stamps the committing identity's roles on the
             // record it resolves here.
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         match record.to_bytes() {
             Ok(bytes) => self.response_with_payload(task, bytes),

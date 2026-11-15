@@ -157,6 +157,7 @@ fn restored_kv(value_len: usize) -> PhysicalPlan {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode restored rows");

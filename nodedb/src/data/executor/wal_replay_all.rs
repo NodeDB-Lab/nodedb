@@ -274,6 +274,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo")

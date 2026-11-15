@@ -12,6 +12,9 @@
 //! decodes, routes and checks every sub-record and writes nothing. The
 //! [`RedoApplyPass::Install`] pass writes, and records the undo entries that
 //! reverse each write, so a failure part way through rolls the record back.
+//!
+//! Restart replay opens no scope. It folds only a record whose install
+//! never became durable (see `replay_fold`).
 
 use std::collections::HashMap;
 
@@ -34,6 +37,9 @@ pub(in crate::data::executor) struct RedoApplyState {
     pub(in crate::data::executor) num_cores: usize,
     /// `Some` only while one committed redo record applies on this core.
     pub(in crate::data::executor) scope: Option<RedoApplyScope>,
+    /// Restart replay's folds of the records whose install never became
+    /// durable.
+    pub(in crate::data::executor) replay_folds: super::replay_fold::ReplayFolds,
 }
 
 impl RedoApplyState {
@@ -43,6 +49,7 @@ impl RedoApplyState {
         Self {
             num_cores: 1,
             scope: None,
+            replay_folds: Default::default(),
         }
     }
 }

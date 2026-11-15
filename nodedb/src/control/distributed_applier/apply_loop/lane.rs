@@ -754,6 +754,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             },
             collections: vec!["orders".into()],
             incarnation_names: Vec::new(),

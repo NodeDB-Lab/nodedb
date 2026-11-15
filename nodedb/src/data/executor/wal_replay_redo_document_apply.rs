@@ -260,6 +260,30 @@ impl CoreLoop {
             }
         }
     }
+
+    /// Settle an unstamped document `kind` record (`put` or `delete`).
+    /// Restart replay skips it: it is a point write's pre-dispatch record,
+    /// whose stamped image carries the row. A committed-redo install refuses
+    /// it: no producer writes an unstamped row into a redo.
+    pub(super) fn unstamped_document_record(
+        &mut self,
+        kind: &str,
+        record_lsn: u64,
+        collection: &str,
+        document_id: &str,
+    ) {
+        if self.applying_committed_redo() {
+            self.replay_record_unapplied(
+                "document",
+                "unstamped_version",
+                record_lsn,
+                &format!(
+                    "document {kind} of '{document_id}' in '{collection}' carries no version \
+                     stamp"
+                ),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +345,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo");

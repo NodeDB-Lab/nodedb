@@ -41,8 +41,10 @@ pub(crate) struct DataPlaneBootstrap {
     pub(crate) _core_handles: Vec<std::thread::JoinHandle<()>>,
     /// Per-core WAL-replay-completion signals. Boot awaits every one before
     /// firing the gateway readiness gate so `/healthz` reports ready only once
-    /// every core has rebuilt its in-memory indexes from the WAL.
-    pub(crate) replay_done: Vec<tokio::sync::oneshot::Receiver<nodedb::Result<()>>>,
+    /// every core has rebuilt its in-memory indexes from the WAL. Each
+    /// carries the fold rows its replay stored, which boot journals.
+    pub(crate) replay_done:
+        Vec<tokio::sync::oneshot::Receiver<nodedb::Result<nodedb::wal::ReplayedCaptures>>>,
 }
 
 /// Run the full Data Plane bootstrap phase. Runs between WAL init and
@@ -70,7 +72,12 @@ pub(crate) async fn bootstrap_data_plane(
         }
         None => None,
     };
-    let (wal, wal_records, replay_tombstones) = bootstrap::wal_init::init_wal(config, wal_key)?;
+    let bootstrap::wal_init::RecoveredWal {
+        wal,
+        records: wal_records,
+        tombstones: replay_tombstones,
+        never_durable,
+    } = bootstrap::wal_init::init_wal(config, wal_key)?;
     wal_gate.fire();
 
     // Create SPSC bridge: Dispatcher (Control Plane) + CoreChannelDataSide (Data Plane).
@@ -158,6 +165,7 @@ pub(crate) async fn bootstrap_data_plane(
             columnar_schema_seed: Arc::clone(&columnar_schema_seed),
             crs_set_seed: Arc::clone(&crs_set_seed),
             wal_source: wal.read_source(),
+            never_durable: Arc::new(never_durable),
         },
     )?;
 

@@ -69,6 +69,9 @@ use crate::data::io::uring_wal_cursor::UringWalCursor;
 struct ReconstitutedReplay {
     records: Vec<WalRecord>,
     grouped_origins: GroupedReplayOrigins,
+    /// The sum targets each committed record's install folded with, by the
+    /// record's LSN. Only records that carry targets appear.
+    sum_targets: Vec<(u64, Vec<nodedb_physical::physical_plan::RedoSumTargets>)>,
 }
 
 /// Reconstitute every sub-record of every `TransactionRedo` record into a flat,
@@ -105,24 +108,31 @@ struct ReconstitutedReplay {
 /// (see [`super::stream_expand`]). A marker whose chunks lie below the
 /// oldest retained segment was checkpointed by every engine, so it
 /// reconstitutes no sub-record.
+///
+/// A committed record's sum targets come from where its install read them:
+/// a whole record's WAL copy, or a stream marker's content header.
 fn reconstitute_redo_records(
     records: &[WalRecord],
     contents: &mut StreamContents<'_, '_, '_>,
 ) -> crate::Result<ReconstitutedReplay> {
     let mut out = Vec::new();
     let mut grouped_origins = GroupedReplayOrigins::default();
+    let mut sum_targets = Vec::new();
     for record in records {
         let (lsn, ops) = match RecordType::from_raw(record.logical_record_type()) {
             Some(RecordType::TransactionRedo) => {
                 let redo = RedoRecord::from_bytes(&record.payload)?;
-                let ops = match RedoStreamRef::of_marker(&redo)? {
+                let installed = match RedoStreamRef::of_marker(&redo)? {
                     Some(reference) => match contents.installed(&redo, &reference)? {
-                        Some(installed) => installed.ops,
+                        Some(installed) => installed,
                         None => continue,
                     },
-                    None => redo.ops,
+                    None => redo,
                 };
-                (record.header.lsn, ops)
+                if !installed.sum_targets.is_empty() {
+                    sum_targets.push((record.header.lsn, installed.sum_targets));
+                }
+                (record.header.lsn, installed.ops)
             }
             Some(RecordType::WriteGroup) => {
                 let group = WriteGroupRecord::from_bytes(&record.payload)?;
@@ -166,6 +176,7 @@ fn reconstitute_redo_records(
     Ok(ReconstitutedReplay {
         records: out,
         grouped_origins,
+        sum_targets,
     })
 }
 
@@ -244,7 +255,10 @@ impl CoreLoop {
         let ReconstitutedReplay {
             records: redo_ops,
             grouped_origins,
+            sum_targets,
         } = reconstitute_redo_records(records, &mut contents)?;
+        // A never-durable record folds with the targets its install used.
+        self.keep_replay_fold_targets(sum_targets);
         let ordered = merge_by_lsn(records, &redo_ops);
 
         self.enter_redo_arm(RedoArm::Vector);

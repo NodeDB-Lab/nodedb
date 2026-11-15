@@ -36,6 +36,7 @@ pub fn spawn_core(
         wal_source,
         wal_records,
         tombstones,
+        never_durable,
         num_cores,
         compaction_config,
         system_metrics,
@@ -131,6 +132,10 @@ pub fn spawn_core(
             // 2g. The commit snapshot window, before any apply: every replica
             // refuses a commit whose snapshot trails its ordinal past it.
             core.set_commit_snapshot_window(compaction_config.commit_snapshot_window);
+
+            // 2h. The committed records whose install never became durable,
+            // before replay: replay folds each one this core owns.
+            core.set_never_durable_redos(&never_durable);
 
             // 3 → 3b → 4. Boot recovery runs in exactly this order and no other:
             // restore the checkpoints, THEN seed the catalog state, THEN replay
@@ -256,6 +261,7 @@ mod tests {
             wal_source: crate::wal::WalReadSource::unencrypted(data_dir.join("wal")),
             wal_records: Arc::from(Vec::new()),
             tombstones: nodedb_wal::TombstoneSet::default(),
+            never_durable: Arc::new(crate::wal::NeverDurableRedos::default()),
             num_cores: 1,
             compaction_config: crate::data::runtime::CoreCompactionConfig::default(),
             system_metrics: None,

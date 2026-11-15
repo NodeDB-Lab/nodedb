@@ -18,6 +18,11 @@
 //!   transaction record is the exception: it always applies, so it stays,
 //!   its group closes with one part with no rows, and replay runs its
 //!   install.
+//! - A committed record that folds sums and has no stored write set and no
+//!   part gets the never-durable verdict (see `verdict`). Its group stays
+//!   open through replay. Replay folds the record and stores the fold rows
+//!   as a write set. [`close_replayed_groups`] then journals them as the
+//!   group's parts before the node serves.
 //!
 //! Restart replay, a point-in-time restore of the archived WAL, and the event
 //! stream rebuilt from it then agree with the stores. Boot makes the appended
@@ -35,26 +40,37 @@ use crate::event::EventSource;
 use crate::event::cdc::position::{ChangePositionMarker, ReplicatedPosition};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::{WalAppender, WalManager};
-use crate::wal::{OriginAppend, WriteSetCapture};
+use crate::wal::{NeverDurableRedos, OriginAppend, WriteSetCapture};
 
 use super::scan::WalGroups;
 use super::stores::StoredWriteSets;
+use super::verdict::never_durable_redos;
+
+/// What the settle did.
+#[derive(Debug, Default)]
+pub struct SettleOutcome {
+    /// Whether it appended a record. The caller then reads the stream
+    /// again.
+    pub appended: bool,
+    /// The committed records replay folds. Their groups stay open until
+    /// [`close_replayed_groups`] runs.
+    pub never_durable: NeverDurableRedos,
+}
 
 /// Settle every broken group of `records`, the stream replay read from
-/// `wal`, against the write sets stored under `data_dir`. Returns whether it
-/// appended a record, in which case the caller reads the stream again.
+/// `wal`, against the write sets stored under `data_dir`.
 pub fn settle_write_groups(
     wal: &WalManager,
     data_dir: &std::path::Path,
     records: &[WalRecord],
-) -> crate::Result<bool> {
+) -> crate::Result<SettleOutcome> {
     let stored = StoredWriteSets::read(data_dir)?;
-    let appended = settle_against(wal, records, &stored.captures)?;
-    if appended {
+    let outcome = settle_against(wal, records, &stored.captures)?;
+    if outcome.appended {
         wal.sync()?;
     }
     stored.clear()?;
-    Ok(appended)
+    Ok(outcome)
 }
 
 /// The settle itself, over write sets already read.
@@ -62,7 +78,7 @@ pub(crate) fn settle_against(
     wal: &WalManager,
     records: &[WalRecord],
     captures: &[WriteSetCapture],
-) -> crate::Result<bool> {
+) -> crate::Result<SettleOutcome> {
     let scanned = WalGroups::scan(records)?;
     let wal_end = wal.next_lsn().as_u64();
     let mut appended = false;
@@ -75,8 +91,9 @@ pub(crate) fn settle_against(
             complete_group(wal, &scanned, capture)?
         };
     }
+    let never_durable = never_durable_redos(records, &scanned, &captured)?;
     for (&origin, scan) in &scanned.groups {
-        if scan.is_whole() || captured.contains(&origin) {
+        if scan.is_whole() || captured.contains(&origin) || never_durable.contains(origin) {
             continue;
         }
         if scanned.committed.contains(&origin) {
@@ -103,7 +120,37 @@ pub(crate) fn settle_against(
             appended = true;
         }
     }
-    Ok(appended)
+    Ok(SettleOutcome {
+        appended,
+        never_durable,
+    })
+}
+
+/// Journal the fold rows restart replay stored for each never-durable
+/// record as the parts of its group, then make them durable. The group of
+/// each record is open with no part, so every part is appended. Returns
+/// whether it appended a record.
+///
+/// A crash before the sync leaves each write set stored, and the next boot
+/// journals its parts from it. The cores drop the write sets once their
+/// parts are durable.
+pub fn close_replayed_groups(
+    wal: &WalManager,
+    captures: &[WriteSetCapture],
+) -> crate::Result<bool> {
+    for capture in captures {
+        let appender = part_appender(wal, &capture.origin_append)?;
+        append_group_parts(
+            appender,
+            target(capture, Lsn::new(capture.origin)),
+            &capture.write_set()?,
+        )?;
+    }
+    if captures.is_empty() {
+        return Ok(false);
+    }
+    wal.sync()?;
+    Ok(true)
 }
 
 /// Close the group of the committed transaction record at `origin` with one

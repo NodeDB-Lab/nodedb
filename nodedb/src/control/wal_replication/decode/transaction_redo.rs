@@ -187,6 +187,7 @@ mod tests {
                 }],
                 row_changes: Vec::new(),
                 user_roles: vec!["approver".into()],
+                sum_targets: Vec::new(),
             },
             collections: vec!["accounts".into(), "entries".into()],
             incarnation_names: vec![

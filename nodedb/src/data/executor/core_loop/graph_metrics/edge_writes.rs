@@ -344,6 +344,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = WalRecord::new(WalRecordArgs {
             record_type: RecordType::TransactionRedo as u32,

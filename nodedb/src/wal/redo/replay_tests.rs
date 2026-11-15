@@ -3,6 +3,24 @@
 use super::*;
 use crate::wal::{RedoRecord, RedoSubRecord};
 
+/// Why a fetch from disk refuses in a read that holds no WAL.
+fn no_wal_to_fetch(reference: &RedoStreamRef) -> crate::Result<Option<Vec<u8>>> {
+    Err(crate::Error::Internal {
+        detail: format!(
+            "this read holds no WAL on disk, so stream {:?} cannot be fetched",
+            reference.stream
+        ),
+    })
+}
+
+/// Reconstitute `records`, a read with no WAL behind it: a marker whose
+/// chunks the read lacks fails loudly.
+fn reconstitute(records: &[WalRecord]) -> crate::Result<ReconstitutedReplay> {
+    let mut fetch = no_wal_to_fetch;
+    let mut contents = StreamContents::new(records, &mut fetch);
+    reconstitute_redo_records(records, &mut contents)
+}
+
 fn redo_wal_record(lsn: u64, tenant_id: u64, vshard_id: u32, record: &RedoRecord) -> WalRecord {
     WalRecord::new(WalRecordArgs {
         record_type: RecordType::TransactionRedo as u32,
@@ -37,11 +55,11 @@ fn reconstitute_preserves_type_payload_and_header() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     let outer = redo_wal_record(77, 9, 3, &redo);
 
-    let reconstituted =
-        reconstitute_redo_records(std::slice::from_ref(&outer)).expect("well-formed redo");
+    let reconstituted = reconstitute(std::slice::from_ref(&outer)).expect("well-formed redo");
     assert!(reconstituted.grouped_origins.contains(77));
     assert!(!reconstituted.grouped_origins.contains(78));
     let recon = reconstituted.records;
@@ -83,6 +101,7 @@ fn reconstitute_carries_the_record_system_ordinal() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     let outer = WalRecord::new_stamped(
         WalRecordArgs {
@@ -102,7 +121,7 @@ fn reconstitute_carries_the_record_system_ordinal() {
     )
     .expect("wal record");
 
-    let recon = reconstitute_redo_records(std::slice::from_ref(&outer))
+    let recon = reconstitute(std::slice::from_ref(&outer))
         .expect("well-formed redo")
         .records;
     assert_eq!(recon.len(), 2);
@@ -125,7 +144,7 @@ fn reconstitute_skips_non_redo_records() {
     })
     .expect("wal record");
 
-    let recon = reconstitute_redo_records(&[put])
+    let recon = reconstitute(&[put])
         .expect("non-redo records are ignored")
         .records;
     assert!(recon.is_empty());
@@ -172,6 +191,7 @@ fn lower_lsn_redo_op_is_ordered_before_a_higher_lsn_autocommit() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     // The transaction committed at LSN 50; an autocommit overwrote the same
     // key at LSN 100.
@@ -179,9 +199,7 @@ fn lower_lsn_redo_op_is_ordered_before_a_higher_lsn_autocommit() {
         redo_wal_record(50, 0, 0, &redo),
         put_wal_record(100, vec![0xBB]),
     ];
-    let redo_ops = reconstitute_redo_records(&standalone)
-        .expect("well-formed redo")
-        .records;
+    let redo_ops = reconstitute(&standalone).expect("well-formed redo").records;
     let merged = merge_by_lsn(&standalone, &redo_ops);
 
     let applied: Vec<(u64, Vec<u8>)> = merged
@@ -222,11 +240,10 @@ fn merge_preserves_intra_transaction_order() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     let standalone = vec![redo_wal_record(7, 0, 0, &redo)];
-    let redo_ops = reconstitute_redo_records(&standalone)
-        .expect("well-formed redo")
-        .records;
+    let redo_ops = reconstitute(&standalone).expect("well-formed redo").records;
     let merged = merge_by_lsn(&standalone, &redo_ops);
     let payloads: Vec<Vec<u8>> = merged
         .iter()
@@ -252,15 +269,14 @@ fn merge_is_deterministic_across_repeated_replays() {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     };
     let standalone = vec![
         put_wal_record(1, vec![1]),
         redo_wal_record(2, 0, 0, &redo),
         put_wal_record(3, vec![3]),
     ];
-    let redo_ops = reconstitute_redo_records(&standalone)
-        .expect("well-formed redo")
-        .records;
+    let redo_ops = reconstitute(&standalone).expect("well-formed redo").records;
     let first: Vec<u64> = merge_by_lsn(&standalone, &redo_ops)
         .iter()
         .map(|r| r.header.lsn)
@@ -293,7 +309,7 @@ fn malformed_redo_payload_aborts_replay() {
     bad.verify_checksum().expect("record bytes are consistent");
 
     assert!(
-        reconstitute_redo_records(&[bad]).is_err(),
+        reconstitute(&[bad]).is_err(),
         "a committed redo group that cannot be decoded must abort recovery"
     );
 }
@@ -320,8 +336,147 @@ fn write_group_origin_uses_the_effective_lsn_instead_of_its_part_lsn() {
         preamble_bytes: None,
     })
     .unwrap();
-    let reconstituted = reconstitute_redo_records(&[outer]).unwrap();
+    let reconstituted = reconstitute(&[outer]).unwrap();
     assert_eq!(reconstituted.records[0].header.lsn, 7);
     assert!(reconstituted.grouped_origins.contains(7));
     assert!(!reconstituted.grouped_origins.contains(40));
+}
+
+/// A WAL holding one stream marker, its content's sub-records, and the
+/// marker's LSN.
+struct MarkerWal {
+    _dir: tempfile::TempDir,
+    wal: crate::wal::WalManager,
+    ops: Vec<RedoSubRecord>,
+    marker: u64,
+}
+
+/// Append a stream's content as chunks of 64 bytes, then its marker.
+fn marker_wal() -> MarkerWal {
+    use crate::types::{DatabaseId, TenantId, VShardId};
+    use crate::wal::manager::RedoChunkPlacement;
+    use crate::wal::redo::frame::{RedoContentHeader, RedoFrameTag, push_frame};
+    use crate::wal::{RedoChunkHeader, RedoChunkRef, RedoStreamId, chunk_crc};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal = crate::wal::WalManager::open_for_testing(&dir.path().join("wal")).expect("wal");
+    let ops: Vec<RedoSubRecord> = (0..4u8)
+        .map(|byte| RedoSubRecord {
+            record_type: RecordType::Put as u32,
+            payload: vec![byte; 30],
+        })
+        .collect();
+    let mut content = Vec::new();
+    let header = RedoContentHeader {
+        version: 1,
+        calvin_stamp: None,
+        cross_shard_applied: None,
+        user_roles: Vec::new(),
+        sum_targets: Vec::new(),
+    };
+    push_frame(&mut content, RedoFrameTag::Header, &header).expect("header");
+    for op in &ops {
+        push_frame(&mut content, RedoFrameTag::Op, op).expect("op");
+    }
+    let stream = RedoStreamId::Session {
+        vshard: 0,
+        idempotency_key: 9,
+    };
+    let placement = RedoChunkPlacement {
+        tenant_id: TenantId::new(1),
+        vshard_id: VShardId::new(0),
+        database_id: DatabaseId::DEFAULT,
+    };
+    let mut chunks = Vec::new();
+    for (index, bytes) in (0u32..).zip(content.chunks(64)) {
+        let chunk_header = RedoChunkHeader {
+            stream,
+            group_id: 1,
+            term: 1,
+            len: content.len() as u64,
+            index,
+        };
+        let lsns = wal
+            .append_redo_chunk(1 + u64::from(index), placement, chunk_header, bytes)
+            .expect("chunk");
+        chunks.push(RedoChunkRef {
+            index,
+            first_lsn: lsns.first.as_u64(),
+            last_lsn: lsns.last.as_u64(),
+            len: bytes.len() as u64,
+            crc: chunk_crc(bytes),
+        });
+    }
+    let reference = RedoStreamRef {
+        stream,
+        len: content.len() as u64,
+        chunks,
+        publish_position: None,
+        entry: None,
+        stamp_floor: None,
+    };
+    let marker = wal
+        .appender(9)
+        .with_event_source(crate::event::EventSource::User)
+        .append_transaction_redo(
+            TenantId::new(1),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            &reference.marker(None, None, Vec::new()).expect("marker"),
+        )
+        .expect("marker record")
+        .as_u64();
+    wal.sync().expect("sync");
+    MarkerWal {
+        _dir: dir,
+        wal,
+        ops,
+        marker,
+    }
+}
+
+/// Reconstitute `records` read from `wal`, fetching a marker's missing
+/// chunks from it.
+fn reconstitute_from(
+    wal: &crate::wal::WalManager,
+    records: &[WalRecord],
+) -> crate::Result<ReconstitutedReplay> {
+    let mut fetch = |reference: &RedoStreamRef| wal.fetch_stream_content(reference);
+    let mut contents = StreamContents::new(records, &mut fetch);
+    reconstitute_redo_records(records, &mut contents)
+}
+
+/// A marker reconstitutes its content's sub-records at its own LSN, from the
+/// chunk records its read holds.
+#[test]
+fn a_stream_marker_reconstitutes_its_content_from_the_read() {
+    let marked = marker_wal();
+    let records = marked.wal.replay().expect("replay");
+    let recon = reconstitute_from(&marked.wal, &records).expect("reconstitute");
+    let payloads: Vec<Vec<u8>> = recon.records.iter().map(|r| r.payload.clone()).collect();
+    assert_eq!(
+        payloads,
+        marked
+            .ops
+            .iter()
+            .map(|op| op.payload.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(recon.records.iter().all(|r| r.header.lsn == marked.marker));
+    assert!(recon.grouped_origins.contains(marked.marker));
+}
+
+/// A read that starts at the marker lacks the chunks: the fetch reads them
+/// from the WAL on disk, and the result matches the whole read's.
+#[test]
+fn a_stream_marker_past_its_chunks_fetches_them_from_disk() {
+    let marked = marker_wal();
+    let records = marked
+        .wal
+        .replay_from(crate::types::Lsn::new(marked.marker))
+        .expect("replay from the marker");
+    let recon = reconstitute_from(&marked.wal, &records).expect("reconstitute");
+    assert_eq!(recon.records.len(), marked.ops.len());
+    // With no WAL to fetch from, the same read fails loudly.
+    assert!(reconstitute(&records).is_err());
 }

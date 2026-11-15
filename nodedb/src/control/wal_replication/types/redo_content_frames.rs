@@ -128,6 +128,7 @@ impl RedoContent {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: header.user_roles,
+                sum_targets: Vec::new(),
             },
             sum_targets: header.sum_targets,
             identities: Vec::new(),
@@ -196,6 +197,7 @@ mod tests {
                     kind: RedoRowKind::Insert,
                 }],
                 user_roles: vec!["writer".into()],
+                sum_targets: Vec::new(),
             },
             sum_targets: Vec::new(),
             identities: vec![ReplicatedIdentity {

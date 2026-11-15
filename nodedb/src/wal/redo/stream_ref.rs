@@ -201,6 +201,7 @@ impl RedoStreamRef {
             publishes: Vec::new(),
             row_changes,
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         })
     }
 

@@ -140,7 +140,9 @@ fn a_stored_write_set_at_the_row_limit_completes_and_boot_proceeds() {
         "the crash left the group broken"
     );
     assert!(
-        settle_against(&wal, &records, &[stored]).expect("settle"),
+        settle_against(&wal, &records, &[stored])
+            .expect("settle")
+            .appended,
         "boot journals the missing part"
     );
     wal.sync().expect("sync");
@@ -157,7 +159,9 @@ fn a_stored_write_set_at_the_row_limit_completes_and_boot_proceeds() {
         "the part journals every image of the row"
     );
     assert!(
-        !settle_against(&wal, &records, &[]).expect("settle again"),
+        !settle_against(&wal, &records, &[])
+            .expect("settle again")
+            .appended,
         "a settled WAL needs nothing at the next boot"
     );
 

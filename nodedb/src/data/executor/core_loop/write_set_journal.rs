@@ -342,7 +342,12 @@ impl CoreLoop {
         self.store_encoded_write_sets(&encoded)
     }
 
-    fn store_encoded_write_sets(&mut self, captures: &[(u64, Vec<u8>)]) -> crate::Result<()> {
+    /// Store `captures` in one durable sparse commit, which persists every
+    /// deferred commit before it, then persist the edge store.
+    pub(in crate::data::executor) fn store_encoded_write_sets(
+        &mut self,
+        captures: &[(u64, Vec<u8>)],
+    ) -> crate::Result<()> {
         let settled = std::mem::take(&mut self.write_set_journal.settled);
         let txn = self.sparse.begin_durable_write()?;
         self.sparse

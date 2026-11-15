@@ -10,6 +10,7 @@ pub mod frame;
 pub mod group;
 pub mod installed_document;
 pub mod kv_restore;
+pub mod never_durable;
 pub mod node_label;
 pub mod record;
 pub mod replay;
@@ -38,6 +39,7 @@ pub use continuation::{ContinuedRedo, SplitRedo, split_redo};
 pub use document::{DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp};
 pub use group::{GroupMembership, WriteGroup, WriteGroupRecord};
 pub use kv_restore::{KV_RESTORE, KvRestoreLive, KvRestoreRedo, KvRestoreVersion};
+pub use never_durable::{NeverDurableRedos, ReplayedCaptures};
 pub use node_label::NodeLabelRedo;
 pub use record::{
     CalvinStamp, CrossShardAppliedKey, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, PublishPosition,

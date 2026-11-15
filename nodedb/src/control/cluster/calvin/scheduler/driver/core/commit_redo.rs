@@ -93,6 +93,7 @@ impl Scheduler {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let pending = self
             .pending

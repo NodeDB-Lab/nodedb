@@ -319,9 +319,11 @@ pub struct SpawnedDataPlaneCores {
     /// Held only to keep the Data Plane core threads alive; never read.
     pub handles: Vec<std::thread::JoinHandle<()>>,
     /// Per-core one-shot that resolves when the core finishes `replay_all_wal`
-    /// (before entering its event loop), carrying the replay's outcome. Boot
-    /// awaits every one before opening the client gateway.
-    pub replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<()>>>,
+    /// (before entering its event loop), carrying the replay's outcome: the
+    /// fold rows it stored for the never-durable records. Boot awaits every
+    /// one before opening the client gateway.
+    pub replay_done:
+        Vec<tokio::sync::oneshot::Receiver<crate::Result<crate::wal::ReplayedCaptures>>>,
 }
 
 /// Shared Arc resources passed to each Data Plane core at spawn time.
@@ -348,6 +350,9 @@ pub struct CoreSharedResources {
     /// The node's WAL directory and key ring, for each core's reads of a
     /// committed chunked redo's stream.
     pub wal_source: crate::wal::WalReadSource,
+    /// The committed records boot settle judged never durable. Each core's
+    /// replay folds the ones it owns.
+    pub never_durable: Arc<crate::wal::NeverDurableRedos>,
 }
 
 /// Spawn all Data Plane cores, wire dispatcher notifiers, and return core
@@ -380,6 +385,7 @@ pub fn spawn_data_plane_cores(
         columnar_schema_seed,
         crs_set_seed,
         wal_source,
+        never_durable,
     } = resources;
     let num_cores = config.server.data_plane_cores;
     let node_id = crate::control::cluster::configured_node_id(config);
@@ -411,6 +417,7 @@ pub fn spawn_data_plane_cores(
             wal_source: wal_source.clone(),
             wal_records: Arc::clone(&wal_records),
             tombstones: replay_tombstones.clone(),
+            never_durable: Arc::clone(&never_durable),
             num_cores,
             compaction_config: compaction_cfg.clone(),
             system_metrics: Some(Arc::clone(&system_metrics)),

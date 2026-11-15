@@ -110,6 +110,9 @@ fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayl
             row_changes: Vec::new(),
             // A copy writes as the system, which holds no role.
             user_roles: Vec::new(),
+            // Only the installed WAL record carries sum targets, and a copy
+            // derives none.
+            sum_targets: Vec::new(),
         },
         collections: vec![stored.to_string()],
         // A copy writes rows of one user collection.

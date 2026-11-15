@@ -23,6 +23,9 @@ use crate::data::executor::core_loop::CoreLoop;
 /// The vector rebuild backstop runs after the replay within this function for
 /// the same reason it is an idempotent overlay — see the comment at the call.
 ///
+/// Returns the write sets replay stored for the never-durable records this
+/// core folded. Boot journals them as their groups' parts.
+///
 /// `Err` when replay cannot bring the core to the state the WAL holds, or the
 /// rebuild cannot read the store. The core then must not serve.
 pub(super) fn replay_wal_and_rebuild_indexes(
@@ -31,7 +34,7 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     num_cores: usize,
     tombstones: &nodedb_wal::TombstoneSet,
     vector_index_param_seed: &[nodedb_types::StoredVectorIndexParams],
-) -> crate::Result<()> {
+) -> crate::Result<crate::wal::ReplayedCaptures> {
     // Tombstones are pre-built by the caller from
     // (persisted `_system.wal_tombstones` ∪
     // `extract_tombstones(&wal_records)`). The persisted half
@@ -41,6 +44,7 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // must still be skipped. Every per-engine replay method
     // consults the merged set.
     core.replay_all_wal(wal_records, num_cores, tombstones)?;
+    let captures = core.take_replay_captures();
 
     // The document history the store kept across the restart, plus every
     // version replay wrote, is charged to the document budget before the
@@ -78,5 +82,5 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // restored in `load_boot_checkpoints`. Columnar-family (`engine='spatial'`)
     // geometry is re-derived from the restored columnar rows by
     // `restore_columnar_geometry_indexes` during checkpoint restore.
-    Ok(())
+    Ok(captures)
 }

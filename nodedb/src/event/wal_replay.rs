@@ -612,6 +612,7 @@ mod tests {
                 change("o2", RedoRowKind::NoChange),
             ],
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -682,6 +683,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             };
             let record = make_record(
                 RecordType::TransactionRedo,
@@ -722,6 +724,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -784,6 +787,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,
@@ -828,6 +832,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1080,6 +1085,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1256,6 +1262,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1377,6 +1384,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = redo.to_bytes().unwrap();
         for (source, document, other) in [
@@ -1432,6 +1440,7 @@ mod tests {
             }],
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,

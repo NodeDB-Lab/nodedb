@@ -178,6 +178,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let origin = appender
             .append_whole_transaction_redo(t, v, d, &record)

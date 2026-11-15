@@ -11,6 +11,8 @@
 //! - [`abandon`]: the retry of a failed stream abandon.
 //! - [`sum_targets`]: what the payload derives from the commit's buffered
 //!   plans.
+//! - [`stream_header`]: the Control Plane's reads of a chunked redo's
+//!   content, one page at a time.
 
 pub mod abandon;
 pub mod apply;
@@ -18,6 +20,7 @@ pub mod chunks;
 pub mod payload;
 pub mod propose;
 pub mod propose_stream;
+pub mod stream_header;
 pub mod sum_targets;
 
 pub(crate) use abandon::spawn_redo_abandoner;
@@ -27,3 +30,7 @@ pub use chunks::{RedoChunkError, RedoChunkStore};
 pub use payload::{CalvinSlice, TransactionRedoPayload};
 pub(crate) use propose::{propose_inline_redo, propose_transaction_redo};
 pub(crate) use propose_stream::RedoStreamProposal;
+pub use stream_header::StreamedFinal;
+pub(crate) use stream_header::{
+    ChangesAt, StreamedChanges, stage_streamed_changes, streamed_payload,
+};
