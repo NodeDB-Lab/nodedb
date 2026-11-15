@@ -152,6 +152,7 @@ mod graph_edge_predicate;
 mod graph_edge_write_metrics;
 mod graph_insert_edges_batch;
 mod graph_match_authorization;
+mod graph_match_property_projection;
 mod graph_rag_fusion;
 mod graph_rag_fusion_naming;
 mod graph_timeseries_rls_probe;

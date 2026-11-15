@@ -43,6 +43,8 @@ mod graph_implicit_reverse_cross_node;
 mod graph_match_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_label_as_of_cross_node.rs"]
 mod graph_match_label_as_of_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/graph_match_projection_cross_node.rs"]
+mod graph_match_projection_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_read_set_cross_node.rs"]
 mod graph_match_read_set_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_ryow_cross_node.rs"]
