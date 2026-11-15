@@ -144,7 +144,7 @@ impl CalvinCuts {
             tokio::pin!(changed);
             changed.as_mut().enable();
             if let Some(instant) = self.instant(hlc)
-                && self.lagging(hlc).is_empty()
+                && self.all_passed(hlc)
             {
                 return Some(instant);
             }
@@ -189,6 +189,18 @@ impl CalvinCuts {
             .is_empty()
     }
 
+    /// Whether every registered scheduler passed exactly the marker `hlc`.
+    /// The same answer as `lagging(hlc).is_empty()`, with no allocation, and
+    /// a size check first: fewer passes than schedulers means some lag.
+    fn all_passed(&self, hlc: u64) -> bool {
+        let registered = self.registered.lock().unwrap_or_else(|p| p.into_inner());
+        let recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+        match recent.get(&hlc).map(|marker| &marker.passed) {
+            Some(passed) => passed.len() >= registered.len() && registered.is_subset(passed),
+            None => registered.is_empty(),
+        }
+    }
+
     /// The registered vShards whose scheduler has not passed exactly the
     /// marker `hlc`. A different marker passing says nothing of this one:
     /// two cuts can place their markers in either log order.
@@ -231,9 +243,8 @@ impl CalvinCuts {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let lagging = self.lagging(hlc);
-            if lagging.is_empty() {
-                return lagging;
+            if self.all_passed(hlc) {
+                return Vec::new();
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 return self.lagging(hlc);
@@ -245,6 +256,29 @@ impl CalvinCuts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `all_passed` agrees with `lagging(..).is_empty()` for every mix of
+    /// registered and passed vShards, including a pass by an unregistered one.
+    #[test]
+    fn all_passed_agrees_with_lagging() {
+        let cuts = CalvinCuts::default();
+        assert!(cuts.all_passed(7), "no scheduler: nothing lags");
+        for vshard in [1, 2, 3] {
+            cuts.register(vshard);
+        }
+        assert!(!cuts.all_passed(7));
+        cuts.note_passed(1, 7);
+        cuts.note_passed(2, 7);
+        assert!(!cuts.all_passed(7));
+        assert_eq!(cuts.all_passed(7), cuts.lagging(7).is_empty());
+        cuts.note_passed(9, 7);
+        assert!(!cuts.all_passed(7), "an unregistered pass does not count");
+        assert_eq!(cuts.all_passed(7), cuts.lagging(7).is_empty());
+        cuts.note_passed(3, 7);
+        assert!(cuts.all_passed(7));
+        assert_eq!(cuts.all_passed(7), cuts.lagging(7).is_empty());
+        assert!(!cuts.all_passed(8), "another marker passed nothing");
+    }
 
     #[tokio::test]
     async fn a_cut_waits_for_every_registered_scheduler() {
