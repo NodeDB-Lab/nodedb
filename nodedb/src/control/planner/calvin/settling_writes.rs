@@ -74,6 +74,72 @@ pub fn refuse_repeated_settled_rows(reads: &[ReadSetEntry]) -> crate::Result<()>
     Ok(())
 }
 
+/// Refuse a write that rewrites a key an earlier write of the same request
+/// inserts.
+///
+/// The insert binds a surrogate when the request plans, but the row does not
+/// exist until the request applies. The later update or delete reads no stored
+/// row and settles nothing, while both writes apply: the balance falls behind
+/// the source sum. `inserted` collects the keys the writes so far insert, and
+/// the caller passes each write of a sum-driving collection in task order.
+pub fn refuse_rewrite_of_inserted_key(
+    inserted: &mut BTreeSet<(String, String)>,
+    op: &DocumentOp,
+) -> crate::Result<()> {
+    match op {
+        DocumentOp::PointInsert {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::PointPut {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::Upsert {
+            collection,
+            document_id,
+            ..
+        } => {
+            inserted.insert((collection.as_str().to_owned(), document_id.clone()));
+        }
+        DocumentOp::BatchInsert {
+            collection,
+            documents,
+            ..
+        }
+        | DocumentOp::BatchUpsert {
+            collection,
+            documents,
+            ..
+        } => {
+            for (document_id, _) in documents {
+                inserted.insert((collection.as_str().to_owned(), document_id.clone()));
+            }
+        }
+        DocumentOp::PointUpdate {
+            collection,
+            document_id,
+            ..
+        }
+        | DocumentOp::PointDelete {
+            collection,
+            document_id,
+            ..
+        } if inserted.contains(&(collection.as_str().to_owned(), document_id.clone())) => {
+            return Err(Error::FeatureNotSupported {
+                detail: format!(
+                    "{SAME_ROW_WRITES_REFUSAL} Collection: {}, row key: {document_id}.",
+                    collection.as_str()
+                ),
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Refuse a request in which a predicate write or a TRUNCATE moves one balance
 /// beside another write.
 ///

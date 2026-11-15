@@ -3,6 +3,7 @@
 //! The Control-Plane pass that resolves each planned write's materialized-sum
 //! target rows and writes them onto the plan.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use nodedb_physical::physical_plan::{
@@ -62,6 +63,8 @@ pub async fn resolve_materialized_sum_targets(
     let catalog = state.credentials.catalog();
     let mut appended: Vec<PhysicalTask> = Vec::new();
     let mut reads: Vec<ReadSetEntry> = Vec::new();
+    // The keys the writes so far insert, in sum-driving collections.
+    let mut inserted_keys: BTreeSet<(String, String)> = BTreeSet::new();
 
     for task in tasks.iter_mut() {
         let txn_id = task.txn_id;
@@ -115,6 +118,10 @@ pub async fn resolve_materialized_sum_targets(
             else {
                 continue;
             };
+            crate::control::planner::calvin::refuse_rewrite_of_inserted_key(
+                &mut inserted_keys,
+                op,
+            )?;
 
             let mut resolved = match &carried {
                 Some((_, bodies)) => {
