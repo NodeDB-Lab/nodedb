@@ -436,8 +436,8 @@ impl NodeDbPgHandler {
             )
             .await
         {
-            return crate::control::server::pgwire::ddl_encode::ddl_results_to_pgwire(
-                result, requested,
+            return crate::control::server::pgwire::ddl_encode::ddl_router_results_to_pgwire(
+                &txn_ctx, result, requested,
             );
         }
 
@@ -456,8 +456,8 @@ impl NodeDbPgHandler {
                     self.sessions.push_notice(session_id, notice);
                 }
             }
-            return crate::control::server::pgwire::ddl_encode::ddl_results_to_pgwire(
-                result, requested,
+            return crate::control::server::pgwire::ddl_encode::ddl_router_results_to_pgwire(
+                &txn_ctx, result, requested,
             );
         }
 
