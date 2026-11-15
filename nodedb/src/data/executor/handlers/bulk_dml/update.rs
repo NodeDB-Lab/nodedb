@@ -267,6 +267,7 @@ impl CoreLoop {
                     deferred_sum_targets: &[],
                     wal_lsn: task.wal_lsn(),
                 },
+                &task.request.user_roles,
             );
             let target_writes = match persisted {
                 Ok(persisted) => persisted.target_writes,
