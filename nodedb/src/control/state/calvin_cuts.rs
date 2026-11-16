@@ -144,7 +144,7 @@ impl CalvinCuts {
             tokio::pin!(changed);
             changed.as_mut().enable();
             if let Some(instant) = self.instant(hlc)
-                && self.lagging(hlc).is_empty()
+                && self.all_passed(hlc)
             {
                 return Some(instant);
             }
@@ -208,6 +208,24 @@ impl CalvinCuts {
             .collect()
     }
 
+    /// Whether every registered scheduler passed exactly the marker `hlc`.
+    ///
+    /// A waiter runs this on every pass of every vShard. While fewer
+    /// vShards passed than are registered, it answers from the two counts
+    /// alone. The subset check runs once the counts allow it: a retired
+    /// scheduler's pass still counts in `passed`.
+    fn all_passed(&self, hlc: u64) -> bool {
+        let registered = self.registered.lock().unwrap_or_else(|p| p.into_inner());
+        let recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(marker) = recent.get(&hlc) else {
+            return registered.is_empty();
+        };
+        marker.passed.len() >= registered.len()
+            && registered
+                .iter()
+                .all(|vshard_id| marker.passed.contains(vshard_id))
+    }
+
     /// The vShards of `vshards` whose scheduler runs here and has not passed
     /// exactly the marker `hlc`. A vShard with no scheduler here never lags.
     pub fn lagging_among(&self, hlc: u64, vshards: &[u32]) -> Vec<u32> {
@@ -231,9 +249,8 @@ impl CalvinCuts {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let lagging = self.lagging(hlc);
-            if lagging.is_empty() {
-                return lagging;
+            if self.all_passed(hlc) {
+                return Vec::new();
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 return self.lagging(hlc);
