@@ -84,6 +84,26 @@ impl CoreLoop {
         }
     }
 
+    /// The strict schema of the node collection a MATCH reads properties from,
+    /// or `None` when its documents are msgpack.
+    fn node_strict_schema(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: Option<&str>,
+    ) -> Option<nodedb_types::columnar::StrictSchema> {
+        use crate::data::executor::sparse_body_format::SparseBodyFormat;
+        let collection = collection?;
+        match self.sparse_body_format(
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection,
+        ) {
+            SparseBodyFormat::Strict(schema) => Some(schema),
+            SparseBodyFormat::Document | SparseBodyFormat::VectorSidecar => None,
+        }
+    }
+
     pub(in crate::data::executor) fn execute_graph_match(
         &mut self,
         task: &ExecutionTask,
@@ -145,6 +165,7 @@ impl CoreLoop {
         // Property predicates (`WHERE a.field = 'v'`) resolve each bound node's
         // document from the sparse engine, keyed by node-id within the query's
         // `IN '<collection>'`.
+        let strict_schema = self.node_strict_schema(task, tid, view.collection.as_deref());
         let props = PropertyLookup {
             sparse: &self.sparse,
             csr: partition,
@@ -152,6 +173,7 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            strict_schema: strict_schema.as_ref(),
         };
         let overlay = view.overlay;
         match crate::engine::graph::pattern::executor::execute(
@@ -262,6 +284,7 @@ impl CoreLoop {
         let varlen_caps = crate::engine::graph::pattern::executor::VarLenCaps::from_graph_tuning(
             &self.graph_tuning,
         );
+        let strict_schema = self.node_strict_schema(task, tid, view.collection.as_deref());
         let props = PropertyLookup {
             sparse: &self.sparse,
             csr: partition,
@@ -269,6 +292,7 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            strict_schema: strict_schema.as_ref(),
         };
         // The transaction's staged edge overlay (a live read whose task
         // carries a `txn_id`) lets the resumed pattern observe
@@ -370,6 +394,7 @@ impl CoreLoop {
         let varlen_caps = crate::engine::graph::pattern::executor::VarLenCaps::from_graph_tuning(
             &self.graph_tuning,
         );
+        let strict_schema = self.node_strict_schema(task, tid, view.collection.as_deref());
         let props = PropertyLookup {
             sparse: &self.sparse,
             csr: partition,
@@ -377,6 +402,7 @@ impl CoreLoop {
             tenant_id: tid,
             collection: view.collection.as_deref(),
             document_cut: view.document_cut,
+            strict_schema: strict_schema.as_ref(),
         };
         // The transaction's staged edge overlay (a live read whose task
         // carries a `txn_id`) lets the resumed variable-length expansion

@@ -65,6 +65,10 @@ pub(super) fn run_chain_from(
     Ok(rows)
 }
 
+/// Prefix of the keys that carry a projected row's match. Callers read the
+/// columns a query names and never these.
+pub(crate) const MATCH_KEY_PREFIX: &str = "\u{1}match:";
+
 /// Apply the query tail — WHERE predicates, LIMIT, RETURN projection, and
 /// DISTINCT — to a fully-expanded set of binding rows.
 ///
@@ -98,7 +102,21 @@ pub(super) fn finalize_rows(
     }
 
     if !query.return_columns.is_empty() {
+        // A projection can make two different matches look alike, and the
+        // coordinator drops equal rows that come from two shards. Without
+        // `DISTINCT`, each projected row carries its match under a reserved
+        // prefix so the coordinator tells a repeated shard answer from a
+        // second match. `DISTINCT` keeps the projected row alone: equal rows
+        // are meant to merge.
+        let matches = (!query.distinct).then(|| rows.clone());
         rows = predicates::project_columns(&rows, &query.return_columns, props)?;
+        if let Some(matches) = matches {
+            for (row, source) in rows.iter_mut().zip(matches) {
+                for (name, value) in source {
+                    row.insert(format!("{MATCH_KEY_PREFIX}{name}"), value);
+                }
+            }
+        }
     }
 
     if query.distinct {

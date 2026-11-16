@@ -36,6 +36,9 @@ pub struct PropertyLookup<'a> {
     /// Where the node collection keeps its documents, and the cut a
     /// versioned read takes.
     pub document_cut: DocumentCut,
+    /// The node collection's schema when it stores strict rows (Binary
+    /// Tuples). `None` reads a node document as msgpack.
+    pub strict_schema: Option<&'a nodedb_types::columnar::StrictSchema>,
 }
 
 /// How a node's document is read.
@@ -295,6 +298,13 @@ fn fetch_node_doc(
     let Some(bytes) = stored else {
         return Ok(None);
     };
+
+    if let Some(schema) = props.strict_schema
+        && let Some(doc) =
+            crate::data::executor::strict_format::binary_tuple_to_value(&bytes, schema)
+    {
+        return Ok(Some(doc));
+    }
 
     let doc =
         nodedb_types::value_from_msgpack(&bytes).map_err(|e| crate::Error::Serialization {

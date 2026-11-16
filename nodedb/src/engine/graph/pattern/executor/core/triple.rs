@@ -296,6 +296,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: Some("col"),
             document_cut: Default::default(),
+            strict_schema: None,
         }
     }
 
@@ -1091,6 +1092,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: None,
             document_cut: Default::default(),
+            strict_schema: None,
         };
         put_node_doc(
             &sparse,
@@ -1291,6 +1293,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: None,
             document_cut: Default::default(),
+            strict_schema: None,
         };
         put_node_doc(
             &sparse,
@@ -1372,6 +1375,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
                 tenant_id: 1,
                 collection,
                 document_cut: Default::default(),
+                strict_schema: None,
             };
             execute(
                 &bare,
