@@ -195,6 +195,10 @@ impl NodeDbPgHandler {
             };
             let effective_schema = Some(&effective_schema_owned);
 
+            // The statement is planned. Every route below runs after this gate.
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_route(self.state.node_id).await;
+
             // A statement outside a transaction block whose writes fire a
             // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
             // edge-bearing collection, an INSERT ... SELECT, UPDATE ... FROM
@@ -297,9 +301,6 @@ impl NodeDbPgHandler {
                     )
                     .await;
             }
-
-            #[cfg(feature = "failpoints")]
-            crate::control::fail_gate::before_route(self.state.node_id).await;
 
             // Read once, ahead of the gateway gate: an in-block write must never
             // forward here, or it applies durably outside the transaction. A
