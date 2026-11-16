@@ -13,11 +13,12 @@ use crate::control::state::SharedState;
 /// The metadata group's leader and term, as this node sees them. A leader
 /// id of `0` means none is known.
 pub(crate) fn metadata_leader(state: &SharedState) -> Option<(u64, u64)> {
-    let status = state.raft_status_fn.get()?;
-    status()
-        .into_iter()
-        .find(|group| group.group_id == METADATA_GROUP_ID)
-        .map(|group| (group.leader_id, group.term))
+    metadata_status(state).map(|group| (group.leader_id, group.term))
+}
+
+/// The status of this node's metadata group replica.
+fn metadata_status(state: &SharedState) -> Option<nodedb_cluster::GroupStatus> {
+    state.raft_group_status(METADATA_GROUP_ID)
 }
 
 /// The term this node leads the metadata group in, if it does.
@@ -34,10 +35,7 @@ pub(crate) fn leading_term(state: &SharedState) -> Option<u64> {
 /// call and applies it at once. A second voter therefore ends this before it
 /// can vote. No other node can lead the group while this returns a term.
 pub(crate) fn sole_voter_term(state: &SharedState) -> Option<u64> {
-    let status = state.raft_status_fn.get()?;
-    status()
-        .into_iter()
-        .find(|group| group.group_id == METADATA_GROUP_ID)
+    metadata_status(state)
         .filter(|group| {
             group.role == "Leader" && group.leader_id == state.node_id && group.member_count == 1
         })

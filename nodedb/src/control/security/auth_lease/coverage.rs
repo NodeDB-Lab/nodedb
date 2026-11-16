@@ -61,11 +61,7 @@ fn read_raw(state: &SharedState) -> RawCoverage {
 
 /// The sequencer index this node's Calvin replicas cover.
 fn sequencer_coverage(state: &SharedState) -> u64 {
-    let hosts_sequencer = state.raft_status_fn.get().is_some_and(|status| {
-        status()
-            .iter()
-            .any(|group| group.group_id == SEQUENCER_GROUP_ID)
-    });
+    let hosts_sequencer = state.raft_group_status(SEQUENCER_GROUP_ID).is_some();
     let Some(registry) = state.calvin_completion_registry.get() else {
         return u64::MAX;
     };

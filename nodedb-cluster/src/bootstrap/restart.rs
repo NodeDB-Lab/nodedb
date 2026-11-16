@@ -83,6 +83,7 @@ pub(super) fn restart(
             multi_raft.add_group_as_learner(group_id, voters, other_learners)?;
         }
     }
+    multi_raft.elect_sole_voter_groups_now();
 
     // Register all known peers in the transport.
     for node in topology.all_nodes() {

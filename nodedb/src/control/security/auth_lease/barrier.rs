@@ -125,14 +125,8 @@ pub async fn calvin_write_barrier(
 ) -> crate::Result<()> {
     lease_timing(state)?;
     let commit_index = state
-        .raft_status_fn
-        .get()
-        .and_then(|status| {
-            status()
-                .into_iter()
-                .find(|group| group.group_id == SEQUENCER_GROUP_ID)
-                .map(|group| group.commit_index)
-        })
+        .raft_group_status(SEQUENCER_GROUP_ID)
+        .map(|group| group.commit_index)
         .ok_or_else(|| committed_but_pending("this node does not replicate the sequencer group"))?;
     authorization_barrier(
         state,
