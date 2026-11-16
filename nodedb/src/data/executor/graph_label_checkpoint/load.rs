@@ -209,6 +209,7 @@ mod tests {
             tenant_id: TID,
             collection: Some(COLL),
             document_cut: Default::default(),
+            strict_schema: None,
         };
         let parsed = compiler::parse(query).expect("parse MATCH");
         let mut sources: Vec<String> = execute(

@@ -201,7 +201,7 @@ pub async fn match_query(
                 if outcome.partial {
                     Err(DdlError::new("54001", MATCH_INCOMPLETE_MESSAGE))
                 } else {
-                    match_payload_to_rows(&outcome.rows_payload, &column_names)
+                    match_payload_to_rows(&outcome.rows_payload, &column_names, query.limit)
                 }
             }
             Err(e) => Err(DdlError::from_error(&e)),
@@ -236,7 +236,7 @@ pub async fn match_query(
             if outcome.partial {
                 Err(DdlError::new("54001", MATCH_INCOMPLETE_MESSAGE))
             } else {
-                match_payload_to_rows(&outcome.rows_payload, &column_names)
+                match_payload_to_rows(&outcome.rows_payload, &column_names, query.limit)
             }
         }
         Err(e) => Err(DdlError::from_error(&e)),
@@ -247,6 +247,7 @@ pub async fn match_query(
 fn match_payload_to_rows(
     payload: &crate::bridge::envelope::Payload,
     column_names: &[String],
+    limit: Option<usize>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let columns = column_names.to_vec();
 
@@ -258,8 +259,13 @@ fn match_payload_to_rows(
     }
 
     let json_text = response_codec::decode_payload_to_json(payload);
-    let rows: Vec<serde_json::Value> = sonic_rs::from_str(&json_text)
+    let mut rows: Vec<serde_json::Value> = sonic_rs::from_str(&json_text)
         .map_err(|e| DdlError::internal(format!("invalid match result JSON: {e}")))?;
+    // Each core and shard bounds its own rows by `LIMIT`. The merged answer is
+    // bounded once more here.
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
 
     let mut out_rows = Vec::with_capacity(rows.len());
     for row in &rows {
