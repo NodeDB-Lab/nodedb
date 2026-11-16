@@ -7,11 +7,17 @@
 //! node bound to the row's surrogate. It keeps the nodes `restore_key_plan`
 //! chooses, and names the ordinal the destination's live nodes of the row
 //! end at: the first kept node's start, or the stamp a set-again state takes.
+//!
+//! A vector-primary row's sidecar versions plan as their own key against
+//! the destination's sparse store: the destination's newest sidecar version
+//! is the key's newest ordinal. A sidecar version spans from its `sys_from`
+//! to the next version's. A row whose nodes the destination keeps can still
+//! install sidecar versions, and the reverse.
 
 use nodedb_types::{StorageKey, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::wal::{RedoRowKind, RedoSubRecord, VectorRestoreRedo};
+use crate::wal::{RedoRowKind, RedoSubRecord, VectorRestoreRedo, VectorSidecarVersion};
 
 use super::restore_changes::RestoreChanges;
 use super::restore_key_plan::{BackedUpSpan, KeyRestore, plan_key};
@@ -31,6 +37,62 @@ fn spans(redo: &VectorRestoreRedo) -> Vec<BackedUpSpan> {
             sys_to: None,
         }))
         .collect()
+}
+
+/// The spans of the live sidecar versions of `versions`, ascending. Each
+/// ends at the next version's `sys_from`, a tombstone's included.
+fn sidecar_spans(versions: &[VectorSidecarVersion]) -> Vec<BackedUpSpan> {
+    versions
+        .iter()
+        .enumerate()
+        .filter(|(_, version)| version.body.is_some())
+        .map(|(at, version)| BackedUpSpan {
+            sys_from: version.sys_from,
+            sys_to: versions.get(at + 1).map(|next| next.sys_from),
+        })
+        .collect()
+}
+
+/// The sidecar versions `plan` installs. `dest_newest` is the system time
+/// of the destination's newest sidecar version.
+fn plan_sidecar(
+    mut versions: Vec<VectorSidecarVersion>,
+    plan: KeyRestore,
+    dest_newest: Option<i64>,
+) -> Vec<VectorSidecarVersion> {
+    match plan {
+        KeyRestore::Keep => Vec::new(),
+        KeyRestore::Versions { .. } => {
+            versions.retain(|version| dest_newest.is_none_or(|dest| version.sys_from > dest));
+            versions
+        }
+        KeyRestore::SetAgain { at } => versions
+            .pop()
+            .map(|mut newest| {
+                newest.sys_from = at;
+                newest
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// `redo` with no node to install and no sidecar version.
+fn without_nodes(redo: &VectorRestoreRedo) -> VectorRestoreRedo {
+    VectorRestoreRedo {
+        collection: redo.collection.clone(),
+        field_name: redo.field_name.clone(),
+        surrogate: redo.surrogate,
+        dim: redo.dim,
+        multi: redo.multi,
+        ended: Vec::new(),
+        live: None,
+        end_live_at: None,
+        vector_primary: redo.vector_primary,
+        sidecar: Vec::new(),
+        primary_index: redo.primary_index.clone(),
+        clone_copy_at: redo.clone_copy_at,
+    }
 }
 
 /// Rewrite `redo` to the nodes `plan` installs. `None` when nothing
@@ -67,15 +129,52 @@ pub(super) fn apply_plan(
 }
 
 impl CoreLoop {
+    /// The sidecar versions of row `surrogate` of `collection` that install:
+    /// those the plan for the row's sparse-store key keeps.
+    fn restored_sidecar(
+        &self,
+        scope: RestoreScope,
+        collection: &str,
+        surrogate: u32,
+        versions: Vec<VectorSidecarVersion>,
+    ) -> crate::Result<Vec<VectorSidecarVersion>> {
+        if versions.is_empty() {
+            return Ok(versions);
+        }
+        let database_id = scope.database_id.as_u64();
+        let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let dest_newest =
+            self.sparse
+                .versioned_latest_sys_from(database_id, scope.tid, collection, &key)?;
+        let dest_live = self
+            .sparse
+            .versioned_get_current(database_id, scope.tid, collection, &key)?
+            .is_some();
+        let plan = plan_key(
+            &sidecar_spans(&versions),
+            dest_newest,
+            dest_live,
+            scope.applied,
+            scope.cut,
+        );
+        Ok(plan_sidecar(versions, plan, dest_newest))
+    }
+
     /// The sub-record that installs the restored vector row `redo`, or
     /// `None` when the destination keeps its own state.
     pub(super) fn resolve_restored_vector_row(
         &self,
         scope: RestoreScope,
         record_type: u32,
-        redo: VectorRestoreRedo,
+        mut redo: VectorRestoreRedo,
         changes: &mut RestoreChanges,
     ) -> crate::Result<Option<RedoSubRecord>> {
+        let sidecar = self.restored_sidecar(
+            scope,
+            &redo.collection,
+            redo.surrogate,
+            std::mem::take(&mut redo.sidecar),
+        )?;
         let index_key = CoreLoop::vector_index_key(
             scope.database_id.as_u64(),
             scope.tid,
@@ -95,9 +194,18 @@ impl CoreLoop {
             scope.applied,
             scope.cut,
         );
-        let Some(redo) = apply_plan(redo, plan) else {
-            return Ok(None);
+        let shell = without_nodes(&redo);
+        let (mut redo, live_after) = match apply_plan(redo, plan) {
+            Some(kept) => {
+                let live = kept.live.is_some();
+                (kept, live)
+            }
+            None if sidecar.is_empty() => return Ok(None),
+            // The destination keeps the row's nodes: only its sidecar
+            // versions install.
+            None => (shell, dest_live),
         };
+        redo.sidecar = sidecar;
         // A vector-primary row publishes its change by its surrogate's
         // identity, as its live writes do.
         if redo.vector_primary {
@@ -107,7 +215,7 @@ impl CoreLoop {
                     .to_identity()
                     .as_str()
                     .to_owned(),
-                RedoRowKind::net(dest_live, redo.live.is_some()),
+                RedoRowKind::net(dest_live, live_after),
             );
         }
         Ok(Some(RedoSubRecord {
@@ -140,7 +248,71 @@ mod tests {
             }),
             end_live_at: None,
             vector_primary: false,
+            sidecar: Vec::new(),
+            primary_index: None,
+            clone_copy_at: None,
         }
+    }
+
+    fn version(sys_from: i64, body: Option<&[u8]>) -> VectorSidecarVersion {
+        VectorSidecarVersion {
+            sys_from,
+            valid_from_ms: i64::MIN,
+            valid_until_ms: i64::MAX,
+            body: body.map(<[u8]>::to_vec),
+        }
+    }
+
+    /// A live sidecar version spans to the next version, a tombstone's
+    /// included. A tombstone spans nothing.
+    #[test]
+    fn sidecar_versions_span_to_their_successor() {
+        let versions = [
+            version(10, Some(b"a")),
+            version(20, None),
+            version(30, Some(b"b")),
+        ];
+        assert_eq!(
+            sidecar_spans(&versions),
+            vec![
+                BackedUpSpan {
+                    sys_from: 10,
+                    sys_to: Some(20),
+                },
+                BackedUpSpan {
+                    sys_from: 30,
+                    sys_to: None,
+                },
+            ]
+        );
+    }
+
+    /// Every sidecar version above the destination's newest installs at its
+    /// own system time. One set again installs the backup's newest version
+    /// at the stamp. A write after the cut keeps the destination's sidecar.
+    #[test]
+    fn sidecar_versions_install_as_their_plan_chooses() {
+        let versions = vec![
+            version(10, Some(b"a")),
+            version(20, None),
+            version(30, Some(b"b")),
+        ];
+        let spans = sidecar_spans(&versions);
+
+        let plan = plan_key(&spans, None, false, 5_000, 3_000);
+        assert_eq!(plan_sidecar(versions.clone(), plan, None), versions);
+
+        let plan = plan_key(&spans, Some(15), true, 5_000, 3_000);
+        let kept = plan_sidecar(versions.clone(), plan, Some(15));
+        let kept: Vec<i64> = kept.iter().map(|v| v.sys_from).collect();
+        assert_eq!(kept, vec![20, 30]);
+
+        let plan = plan_key(&spans, Some(2_500), true, 5_000, 3_000);
+        let again = plan_sidecar(versions.clone(), plan, Some(2_500));
+        assert_eq!(again, vec![version(5_000, Some(b"b"))]);
+
+        let plan = plan_key(&spans, Some(3_001), true, 5_000, 3_000);
+        assert!(plan_sidecar(versions, plan, Some(3_001)).is_empty());
     }
 
     /// A client write after the cut survives: nothing installs.

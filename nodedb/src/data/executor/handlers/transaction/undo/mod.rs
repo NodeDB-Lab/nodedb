@@ -25,6 +25,7 @@ pub(super) mod stats;
 pub(super) mod sync_hwm;
 pub(super) mod timeseries;
 pub(super) mod truncate_columnar;
+pub(in crate::data::executor) mod vector_payload;
 pub(in crate::data::executor) mod vector_truncate;
 pub(in crate::data::executor) mod vector_write;
 

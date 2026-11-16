@@ -94,7 +94,7 @@ fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayl
     let mut ops = Vec::with_capacity(parts.len());
     let mut identities = Vec::with_capacity(parts.len());
     for part in parts {
-        ops.push(part.op);
+        ops.extend(part.ops);
         identities.push(part.identity);
     }
     TransactionRedoPayload {

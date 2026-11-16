@@ -110,6 +110,10 @@ impl CoreLoop {
             UndoEntry::MarkNodeDeleted { .. } => self.apply_undo_mark_node(entry_index, entry),
             UndoEntry::SpatialRow(undo) => self.apply_undo_spatial_row(entry_index, *undo),
             UndoEntry::VectorWrite(undo) => self.apply_undo_vector_write(entry_index, *undo),
+            UndoEntry::VectorPayloadRows(undo) => {
+                self.apply_undo_vector_payload_rows(*undo);
+                Ok(())
+            }
             UndoEntry::CrdtCollection(undo) => self.apply_undo_crdt_collection(entry_index, *undo),
             UndoEntry::ArrayTiles { array_id, snapshot } => self
                 .array_engine

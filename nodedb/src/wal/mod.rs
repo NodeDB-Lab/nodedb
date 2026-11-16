@@ -32,8 +32,9 @@ pub use redo::{
     RedoStreamRef, RedoSubRecord, ReplayedCaptures, RowSourceIndex, SplitRedo,
     TIMESERIES_ENDED_PARTITION, TIMESERIES_RESTORE, TIMESERIES_SERIES_CATALOG,
     TimeseriesEndedPartitionRedo, TimeseriesRestoreRedo, TimeseriesSeriesCatalogRedo,
-    VECTOR_RESTORE, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo, WalReadSource,
-    WriteGroup, WriteGroupRecord, WriteSetCapture, chunk_crc, split_redo,
+    VECTOR_RESTORE, VectorRestoreIndex, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo,
+    VectorSidecarVersion, WalReadSource, WriteGroup, WriteGroupRecord, WriteSetCapture, chunk_crc,
+    split_redo,
 };
 pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;

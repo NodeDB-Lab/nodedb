@@ -149,7 +149,10 @@ pub(super) async fn reissue_database(
     // Every surrogate the re-issue binds, checked against this node and each
     // one's home leader before any bind: another key holding one fails the
     // re-issue with nothing bound.
-    let documents = super::super::redo_reissue::prepare_documents(
+    let super::super::redo_reissue::PreparedDocuments {
+        rows: documents,
+        sidecars: vector_sidecars,
+    } = super::super::redo_reissue::prepare_documents(
         state,
         tenant_id,
         target,
@@ -239,7 +242,8 @@ pub(super) async fn reissue_database(
     .await?;
 
     // Vector rows, each with every node at its backed-up span, as Calvin
-    // transactions. A multi-vector document's nodes travel together.
+    // transactions. A multi-vector document's nodes travel together. A
+    // vector-primary row's sidecar versions travel with its nodes.
     stats.vectors_reissued += super::super::redo_reissue::reissue_vector_rows(
         state,
         tenant_id,
@@ -248,6 +252,7 @@ pub(super) async fn reissue_database(
             vectors: vector_snapshots,
             history: vector_history,
             multi_documents: vector_multi_documents,
+            sidecars: vector_sidecars,
         },
         &surrogate_binds,
     )

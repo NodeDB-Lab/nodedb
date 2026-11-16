@@ -190,17 +190,9 @@ impl CoreLoop {
 
         // Derive payload bitmap (node-id space) from `(field, value)`
         // equalities by intersecting per-field equality bitmaps. Returns
-        // `None` when no payload filters were requested or any filter
-        // references a field with no registered payload index.
-        // The payload bitmap indexes describe live nodes only. A search at a
-        // cut evaluates the payload predicates against the bodies at the cut.
-        let cut_payload: Vec<nodedb_query::scan_filter::ScanFilter> = match cut.at {
-            Some(_) => match super::search_cut::payload_atoms_as_filters(payload_filters) {
-                Ok(filters) => filters,
-                Err(e) => return self.response_error(task, e),
-            },
-            None => Vec::new(),
-        };
+        // `None` when no payload filters were requested, the search reads at
+        // a cut, or any filter references a field the index's bitmaps do not
+        // cover.
         let payload_bm: Option<RoaringBitmap> = if payload_filters.is_empty() || cut.at.is_some() {
             None
         } else {
@@ -238,6 +230,19 @@ impl CoreLoop {
             let conj = nodedb_vector::collection::FilterPredicate::And(preds);
             collection_ref.payload.pre_filter(&conj)
         };
+        // Payload predicates no bitmap answers are evaluated against each
+        // candidate's body, so a payload filter always restricts the hits.
+        // The bitmaps describe live nodes only, so a search at a cut
+        // evaluates every payload predicate against the bodies at the cut.
+        let body_payload: Vec<nodedb_query::scan_filter::ScanFilter> =
+            if payload_filters.is_empty() || payload_bm.is_some() {
+                Vec::new()
+            } else {
+                match super::search_cut::payload_atoms_as_filters(payload_filters) {
+                    Ok(filters) => filters,
+                    Err(e) => return self.response_error(task, e),
+                }
+            };
 
         // A search at a cut admits each prefiltered row's node visible there.
         let cut_allow: Option<RoaringBitmap> = match (cut.at, filter_bitmap) {
@@ -288,10 +293,10 @@ impl CoreLoop {
         // pure-vector fast path fetches no body.
         let attach = !skip_payload_fetch || !rls_filters.is_empty();
         let window_residual: std::borrow::Cow<'_, [nodedb_query::scan_filter::ScanFilter]> =
-            if cut_payload.is_empty() {
+            if body_payload.is_empty() {
                 std::borrow::Cow::Borrowed(&residual)
             } else {
-                std::borrow::Cow::Owned(residual.iter().chain(&cut_payload).cloned().collect())
+                std::borrow::Cow::Owned(residual.iter().chain(&body_payload).cloned().collect())
             };
         // Outside a transaction the filter drops candidates here, so they
         // carry only the fields it reads. A transaction's hits keep whole
@@ -312,7 +317,7 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                attach: attach || !cut_payload.is_empty(),
+                attach: attach || !body_payload.is_empty(),
                 at: cut.at,
                 filter_columns: filter_columns.as_deref(),
             },
@@ -326,15 +331,14 @@ impl CoreLoop {
             Ok(window) => window,
             Err(e) => return self.response_error(task, e),
         };
-        // The payload predicates of a search at a cut drop the hits whose
-        // body at the cut fails them. A pure-vector projection then returns
-        // no body.
-        if !cut_payload.is_empty() {
+        // The payload predicates evaluated against bodies drop the hits whose
+        // body fails them. A pure-vector projection then returns no body.
+        if !body_payload.is_empty() {
             let crs = self.crs_context();
             hits.retain(|hit| {
                 hit.body.as_deref().is_some_and(|body| {
                     nodedb_query::scan_filter::ScanFilter::all_match_binary(
-                        &cut_payload,
+                        &body_payload,
                         body,
                         &crs,
                     )

@@ -6,6 +6,9 @@
 //! installed as copies at the source versions' own stamps. A progress
 //! checkpoint follows each page.
 //!
+//! Each row copies with its nodes in every vector index of the collection.
+//! A vector-primary row copies its stored sidecar with its primary node.
+//!
 //! A re-run after a crash copies the same versions at the same stamps, so a
 //! row already copied is written again in place.
 
@@ -15,10 +18,10 @@ use nodedb_types::{DatabaseId, Lsn, Surrogate, TenantId};
 
 use super::document::{SourcePage, SourceRow, scan_page};
 use super::status::{check_bound_surrogates, checkpoint_progress};
-use crate::control::clone::copy::{CopyTarget, DocCopy, commit_doc_copies};
+use crate::control::clone::copy::{CopyTarget, DocCopy, VectorPrimaryCopy, commit_doc_copies};
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
-use crate::types::DocVersionStamp;
+use crate::types::{CopiedVectorNodes, DocVersionStamp};
 
 /// One source row to copy, with the pk bytes it keys under.
 struct PendingRow {
@@ -26,6 +29,7 @@ struct PendingRow {
     pk_bytes: Vec<u8>,
     value_bytes: Vec<u8>,
     stamp: DocVersionStamp,
+    vectors: Vec<CopiedVectorNodes>,
 }
 
 /// The row copy of one non-chained Document clone collection.
@@ -96,6 +100,7 @@ impl RowCopy<'_> {
                 source_surrogate,
                 body,
                 stamp,
+                vectors,
             } = row;
             if self.tombstoned.contains(&source_surrogate)
                 || self
@@ -122,6 +127,7 @@ impl RowCopy<'_> {
                 pk_bytes,
                 value_bytes: body,
                 stamp,
+                vectors,
             });
         }
         Ok(pending)
@@ -179,10 +185,13 @@ impl RowCopy<'_> {
             target_surrogates.len(),
             pending.len(),
         )?;
+        let vector_primary = VectorPrimaryCopy::of(self.coll);
         let copies: Vec<DocCopy> = pending
             .into_iter()
             .zip(target_surrogates)
-            .map(|(row, target_surrogate)| self.copy_of(row, target_surrogate))
+            .map(|(row, target_surrogate)| {
+                self.copy_of(row, target_surrogate, vector_primary.clone())
+            })
             .collect();
         let copied = copies.len() as u64;
         commit_doc_copies(
@@ -198,17 +207,28 @@ impl RowCopy<'_> {
         Ok(copied)
     }
 
-    /// The copy of one row under `target_surrogate`.
-    fn copy_of(&self, row: PendingRow, target_surrogate: Surrogate) -> DocCopy {
+    /// The copy of one row under `target_surrogate`. `vector_primary` is
+    /// the clone collection's primary index, when it is vector-primary.
+    fn copy_of(
+        &self,
+        row: PendingRow,
+        target_surrogate: Surrogate,
+        vector_primary: Option<VectorPrimaryCopy>,
+    ) -> DocCopy {
         let PendingRow {
             doc_id_hex,
             pk_bytes,
             value_bytes,
             stamp,
+            vectors,
         } = row;
         // The copy keeps the row's client identity under its new surrogate,
-        // so a clone read matches it to its source row by primary key.
-        let body = match nodedb_types::StorageKey::parse(&doc_id_hex) {
+        // so a clone read matches it to its source row by primary key. A
+        // vector-primary sidecar is copied as stored: it carries its primary
+        // key as a column.
+        let parsed =
+            nodedb_types::StorageKey::parse(&doc_id_hex).filter(|_| vector_primary.is_none());
+        let body = match parsed {
             Some(storage_key) => {
                 let identity = nodedb_types::RowIdentity::of_stored_row(
                     &value_bytes,
@@ -229,6 +249,8 @@ impl RowCopy<'_> {
             target_surrogate,
             body,
             stamp,
+            vectors,
+            vector_primary,
         }
     }
 }

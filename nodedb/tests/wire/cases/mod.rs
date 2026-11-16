@@ -318,6 +318,7 @@ mod sql_backup_restore_timeseries;
 mod sql_backup_restore_timeseries_history;
 mod sql_backup_restore_triggers;
 mod sql_backup_restore_vector_params;
+mod sql_backup_restore_vector_primary;
 mod sql_backup_restore_vector_restart;
 mod sql_backup_restore_verify;
 mod sql_backup_restore_wire;

@@ -36,7 +36,6 @@ use nodedb_types::calvin::VersionedReadEntry;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::enforcement::write_hook::target_write_set;
 use crate::data::executor::task::ExecutionTask;
@@ -45,7 +44,7 @@ use crate::wal::{RedoRecord, RedoStreamRef};
 
 use super::clone_copy::clone_probe_unreadable;
 use super::passes::{RedoTarget, final_refusal, redo_wal_record};
-use super::state::{DeferredNoteKind, TsInstalled};
+use super::state::TsInstalled;
 use super::stream_validate::{StreamLimits, StreamValidateInput};
 use super::streamed::STREAM_BATCH_BYTES;
 use super::sub_ops::{document_ops, kv_ops, label_ops};
@@ -347,6 +346,21 @@ impl CoreLoop {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
+        // A crash test kills the process here: the install folded its sums
+        // into deferred store commits, and its write set is not stored. Each
+        // collection the record writes has its own point, taken in name
+        // order.
+        #[cfg(feature = "failpoints")]
+        {
+            let mut collections: Vec<&String> = committed.collections.iter().collect();
+            collections.sort();
+            for collection in collections {
+                crate::fail_point!(
+                    self.fail_scope,
+                    &format!("redo_apply::after_install_pass::{collection}")
+                );
+            }
+        }
         let write_set = target_write_set(&scope.target_writes);
         if let Some(permit) = permit {
             let capture = match self.prepare_redo_capture(task, permit, &write_set) {
@@ -387,44 +401,14 @@ impl CoreLoop {
         // The settle cannot be rolled back once it started, so a failure
         // leaves live state restart replay does not rebuild: the core
         // fail-stops. The funnel keeps the record for restart replay.
-        let settled = self.settle_redo_install(task, &mut scope);
-        if let Err(error) = settled {
-            self.seal_journalled();
-            self.fail_stop_core(
-                FailStopCause::PostInstallFailed,
-                &format!(
-                    "committed redo record at lsn {} installed, then failed: {error:?}",
-                    lsn.as_u64()
-                ),
-            );
-            let mut response = self.response_error(task, error);
-            response.write_set = write_set;
-            return response;
+        if let Err(error) = self.settle_redo_install(task, &mut scope) {
+            return self.fail_after_install(task, lsn, error, write_set);
         }
         // Write notes and the watermark move only once the record is
         // settled.
-        for note in std::mem::take(&mut scope.deferred_notes) {
-            let published = match note.kind {
-                DeferredNoteKind::Wipe => {
-                    self.publish_collection_wipe(note.db, note.tenant, &note.collection, note.stamp)
-                }
-                DeferredNoteKind::Row(key) => {
-                    self.publish_write(note.db, note.tenant, &note.collection, key, note.stamp)
-                }
-            };
-            if let Err(error) = published {
-                self.seal_journalled();
-                self.fail_stop_core(
-                    FailStopCause::PostInstallFailed,
-                    &format!(
-                        "committed redo record at lsn {} installed, then failed: {error:?}",
-                        lsn.as_u64()
-                    ),
-                );
-                let mut response = self.response_error(task, error);
-                response.write_set = write_set;
-                return response;
-            }
+        let notes = std::mem::take(&mut scope.deferred_notes);
+        if let Err(error) = self.publish_deferred_notes(notes) {
+            return self.fail_after_install(task, lsn, error, write_set);
         }
         // Events leave only once the record is settled.
         let rows = crate::wal::RowSourceIndex::new(&redo.row_sources);
@@ -448,17 +432,7 @@ impl CoreLoop {
             } else if let Err(error) =
                 self.note_settled_collection(task.request.database_id, tenant, collection, stamp)
             {
-                self.seal_journalled();
-                self.fail_stop_core(
-                    FailStopCause::PostInstallFailed,
-                    &format!(
-                        "committed redo record at lsn {} installed, then failed: {error:?}",
-                        lsn.as_u64()
-                    ),
-                );
-                let mut response = self.response_error(task, error);
-                response.write_set = write_set;
-                return response;
+                return self.fail_after_install(task, lsn, error, write_set);
             }
         }
         self.emit_committed_redo_events(task, scope.doc_writes, kv_images, labels, &rows);

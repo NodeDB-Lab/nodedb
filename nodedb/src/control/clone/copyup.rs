@@ -28,7 +28,9 @@ use crate::control::catalog_entry::CatalogEntry;
 use crate::control::maintenance::clone_materializer::{SourceKey, SourceRow};
 use crate::control::state::SharedState;
 
-use super::copy::{CopyTarget, DocCopy, KvCopy, commit_doc_copies, commit_kv_copies};
+use super::copy::{
+    CopyTarget, DocCopy, KvCopy, VectorPrimaryCopy, commit_doc_copies, commit_kv_copies,
+};
 
 /// Parameters for a KV copy-up operation.
 pub(crate) struct KvCopyUpParams<'a> {
@@ -156,13 +158,19 @@ pub(crate) async fn perform_clone_copyup(params: CopyUpParams<'_>) -> crate::Res
     .await
     .map_err(|e| copy_error(format!("surrogate alloc failed: {e}")))?;
 
-    let body = match state.credentials.catalog().get_collection(
+    let target = state.credentials.catalog().get_collection(
         target_db_id,
         tenant_id.as_u64(),
         target_collection,
-    )? {
-        Some(coll) => super::identity::carry_identity(&coll, source_row.body, &source_doc_id),
-        None => source_row.body,
+    )?;
+    let vector_primary = target.as_ref().and_then(VectorPrimaryCopy::of);
+    // A vector-primary sidecar is copied as stored: it carries its primary
+    // key as a column.
+    let body = match (&target, &vector_primary) {
+        (Some(coll), None) => {
+            super::identity::carry_identity(coll, source_row.body, &source_doc_id)
+        }
+        (Some(_), Some(_)) | (None, _) => source_row.body,
     };
     commit_doc_copies(
         state,
@@ -177,6 +185,8 @@ pub(crate) async fn perform_clone_copyup(params: CopyUpParams<'_>) -> crate::Res
             target_surrogate,
             body,
             stamp,
+            vectors: source_row.vectors,
+            vector_primary,
         }],
     )
     .await

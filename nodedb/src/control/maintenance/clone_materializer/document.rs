@@ -13,7 +13,7 @@
 
 use nodedb_types::{DatabaseId, SystemTimeScope, TenantId};
 
-use crate::types::{DocVersionStamp, TxnId};
+use crate::types::{CopiedVectorNodes, DocVersionStamp, TxnId};
 
 use super::dispatch::{dispatch_local, dispatch_to_owner};
 use super::document_copy::RowCopy;
@@ -50,7 +50,10 @@ pub(super) async fn materialize_document_collection(
         origin.as_of_lsn,
     );
 
-    if coll.hash_chain {
+    // A vector-primary row is written by the vector engine, which links no
+    // chain, so it copies as a plain row with its node and sidecar.
+    let vector_primary = crate::control::clone::copy::VectorPrimaryCopy::of(coll).is_some();
+    if coll.hash_chain && !vector_primary {
         let copied = super::chained::materialize_chained_collection(
             state,
             catalog,
@@ -100,6 +103,9 @@ pub(crate) struct SourceRow {
     /// The stamps of the source version read. `None` for a row a
     /// transaction overlay supplied.
     pub stamp: Option<DocVersionStamp>,
+    /// The row's nodes in each vector index of the collection, as the read
+    /// sees them. Only a raw scan carries them.
+    pub vectors: Vec<CopiedVectorNodes>,
 }
 
 /// The rows of one scan page and the cursor of the next page.
@@ -232,7 +238,8 @@ pub(super) async fn scan_page(
 }
 
 /// Parse the msgpack payload emitted by `execute_document_materialize_scan`:
-///   `[next_cursor: bin, entries: [[doc_id: str, surrogate: u32, value_bytes: bin, stamp], ...]]`.
+///   `[next_cursor: bin, entries: [[doc_id: str, surrogate: u32, value_bytes: bin, stamp,
+///   vectors: bin], ...]]`.
 fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     use nodedb_query::msgpack_scan;
 
@@ -262,7 +269,7 @@ fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     for _ in 0..entry_count {
         let (entry_len, mut field_off) =
             msgpack_scan::array_header(payload, entry_off).ok_or_else(bad)?;
-        if entry_len != 4 {
+        if entry_len != 5 {
             return Err(bad());
         }
         let doc_id_hex = msgpack_scan::read_str_advance(payload, &mut field_off)
@@ -274,11 +281,15 @@ fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
             .ok_or_else(bad)?
             .to_vec();
         let stamp = DocVersionStamp::read(payload, &mut field_off).ok_or_else(bad)?;
+        let vectors = CopiedVectorNodes::decode(
+            msgpack_scan::read_bin_advance(payload, &mut field_off).ok_or_else(bad)?,
+        )?;
         entries.push(SourceRow {
             doc_id_hex,
             source_surrogate,
             body,
             stamp,
+            vectors,
         });
         entry_off = field_off;
     }

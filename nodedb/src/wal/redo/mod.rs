@@ -54,4 +54,7 @@ pub use stream_ref::{RedoChunkRef, RedoEntryAt, RedoStreamRef, chunk_crc};
 pub use timeseries_ended_partition::{TIMESERIES_ENDED_PARTITION, TimeseriesEndedPartitionRedo};
 pub use timeseries_restore::{TIMESERIES_RESTORE, TimeseriesRestoreRedo};
 pub use timeseries_series_catalog::{TIMESERIES_SERIES_CATALOG, TimeseriesSeriesCatalogRedo};
-pub use vector_restore::{VECTOR_RESTORE, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo};
+pub use vector_restore::{
+    VECTOR_RESTORE, VectorRestoreIndex, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo,
+    VectorSidecarVersion,
+};

@@ -32,7 +32,7 @@ pub use snapshot_calvin::{
     CoveredCutBarrier, CutBarrierLog, CutFloor, CutFrozenReply, GroupCalvinCut, VShardCalvinState,
 };
 pub use snapshot_index::{FieldIndexImage, VectorIndexHistory};
-pub use source_stamp::{DocVersionStamp, KvVersionStamp};
+pub use source_stamp::{CopiedVectorNodes, DocVersionStamp, KvVersionStamp};
 
 pub use installed_document::{
     CapturedInstalledDocument, InstalledDocument, SharedInstalledDocument,

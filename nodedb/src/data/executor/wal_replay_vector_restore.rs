@@ -10,15 +10,29 @@
 //! install reads nothing to choose, so every replica and every replay writes
 //! the same nodes. The spans fold into the shared clock, so a later write
 //! stamps above every restored node.
+//!
+//! A vector-primary row's sidecar versions install first, in one sparse
+//! write, at the system times the record carries. Restart replay writes the
+//! same version keys with the same bytes, so a replayed record leaves the
+//! sidecar as the live apply left it.
+//!
+//! A row of a vector-primary collection's primary index registers the
+//! index settings a live write registers, and keeps its live node's payload
+//! bitmap entries in step with its current sidecar
+//! (`wal_replay_vector_restore_payload`).
+//!
+//! A clone copy installs only where the clone holds no version of the row.
 
 use nodedb_physical::physical_plan::VectorOp;
-use nodedb_types::Surrogate;
+use nodedb_types::{StorageKey, Surrogate};
 use nodedb_vector::collection::EndedNodeExport;
 
 use super::core_loop::CoreLoop;
 use super::wal_replay_vector_redo::RedoVectorWrite;
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan};
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::vector_direct_row::VectorDirectIndexSpec;
+use crate::engine::sparse::btree_versioned::VersionedPut;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::VectorRestoreRedo;
 
@@ -92,6 +106,25 @@ impl CoreLoop {
         ) {
             return Some(false);
         }
+        // A write into the clone wins over a copy of its source row.
+        if let Some(at) = redo.clone_copy_at {
+            match self.restored_row_holds_a_version(database_id, tenant_id, &index_key, &redo, at) {
+                Ok(false) => {}
+                Ok(true) => return Some(false),
+                Err(error) => {
+                    self.replay_record_unapplied(
+                        "vector",
+                        "clone_copy_probe",
+                        record_lsn,
+                        &format!(
+                            "clone copy of row {} in '{}' could not read its row: {error}",
+                            redo.surrogate, redo.collection
+                        ),
+                    );
+                    return Some(false);
+                }
+            }
+        }
         match self.install_restored_vector_row(database_id, tenant_id, record_lsn, &redo) {
             Ok(()) => Some(true),
             Err(error) => {
@@ -131,15 +164,46 @@ impl CoreLoop {
         if let Some(at) = redo.end_live_at {
             self.observe_bitemporal_ordinal(at);
         }
+        for version in &redo.sidecar {
+            self.observe_bitemporal_ordinal(version.sys_from);
+        }
+        let prior_payload = self.restored_payload_row(database_id, tenant_id, redo, &index_key)?;
+        self.install_restored_sidecar(database_id, tenant_id, redo)
+            .map_err(ErrorCode::from)?;
         let created = !self.vector_collections.contains_key(&index_key);
         let defer_seal = self.recording_redo_undo();
-        let coll = self.get_or_create_vector_index(
-            database_id,
-            tenant_id,
-            collection,
-            dim,
-            &redo.field_name,
-        )?;
+        // A vector-primary collection's primary index takes the settings a
+        // live write registers on a new index, its payload bitmaps included.
+        match &redo.primary_index {
+            Some(settings) => {
+                self.vector_direct_index_in(
+                    database_id,
+                    tenant_id,
+                    &VectorDirectIndexSpec {
+                        collection,
+                        field: &redo.field_name,
+                        dim,
+                        quantization: settings.quantization,
+                        storage_dtype: settings.storage_dtype,
+                        payload_indexes: &settings.payload_indexes,
+                    },
+                )?;
+            }
+            None => {
+                self.get_or_create_vector_index(
+                    database_id,
+                    tenant_id,
+                    collection,
+                    dim,
+                    &redo.field_name,
+                )?;
+            }
+        }
+        let Some(coll) = self.vector_collections.get_mut(&index_key) else {
+            return Err(ErrorCode::Internal {
+                detail: format!("vector index for '{collection}' vanished during a restore"),
+            });
+        };
         if let Some(at) = redo.end_live_at {
             if redo.multi {
                 coll.end_multi_vector_at(surrogate, at);
@@ -168,6 +232,7 @@ impl CoreLoop {
                 }
             }
         }
+        self.refresh_restored_payload(database_id, tenant_id, redo, &index_key, prior_payload)?;
         if created && defer_seal {
             self.record_redo_undo([UndoEntry::VectorCollectionCreated {
                 index_key: index_key.clone(),
@@ -205,5 +270,161 @@ impl CoreLoop {
                 .map_err(ErrorCode::from)?;
         }
         Ok(())
+    }
+
+    /// Write every sidecar version `redo` carries, in one sparse write
+    /// transaction, each at its own system time and valid interval. The
+    /// bytes are stored as the backup holds them: the tagged encoding every
+    /// live vector-primary write stores. Each version's undo removes it.
+    fn install_restored_sidecar(
+        &mut self,
+        database_id: u64,
+        tenant_id: u64,
+        redo: &VectorRestoreRedo,
+    ) -> crate::Result<()> {
+        if redo.sidecar.is_empty() {
+            return Ok(());
+        }
+        let collection = redo.collection.as_str();
+        let key = StorageKey::for_surrogate(Surrogate::new(redo.surrogate));
+        let txn = self.sparse.begin_write()?;
+        for version in &redo.sidecar {
+            match &version.body {
+                Some(body) => self.sparse.versioned_put_in_txn(
+                    &txn,
+                    VersionedPut {
+                        database_id,
+                        tenant: tenant_id,
+                        coll: collection,
+                        doc_id: &key,
+                        sys_from: version.sys_from,
+                        valid_from_ms: version.valid_from_ms,
+                        valid_until_ms: version.valid_until_ms,
+                        body,
+                    },
+                )?,
+                None => self.sparse.versioned_tombstone_in_txn(
+                    &txn,
+                    database_id,
+                    tenant_id,
+                    collection,
+                    &key,
+                    version.sys_from,
+                )?,
+            }
+        }
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "sparse".into(),
+            detail: format!("commit the restored sidecar of {key} in '{collection}': {e}"),
+        })?;
+        self.doc_cache
+            .invalidate(database_id, tenant_id, collection, &key);
+        self.record_redo_undo(redo.sidecar.iter().map(|version| UndoEntry::PutDocument {
+            collection: collection.to_string(),
+            document_id: key,
+            version_sys_from: version.sys_from,
+            index_tuples: Vec::new(),
+            chain_hash_prior: None,
+        }));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use nodedb_types::Value;
+    use nodedb_wal::TombstoneSet;
+
+    use super::*;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::wal::{VectorRestoreLive, VectorSidecarVersion};
+
+    const DB: u64 = 0;
+    const TID: u64 = 1;
+    const COLLECTION: &str = "vp_restore";
+
+    fn tagged(tag: &str) -> Vec<u8> {
+        let mut fields = HashMap::new();
+        fields.insert("tag".to_string(), Value::String(tag.into()));
+        zerompk::to_msgpack_vec(&fields).expect("encode sidecar")
+    }
+
+    /// Restart replay of a restored vector-primary row stores every sidecar
+    /// version in the tagged encoding, at its system time and valid
+    /// interval. A second replay of the record leaves the same bytes.
+    #[test]
+    fn a_replayed_restored_row_stores_its_tagged_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let redo = VectorRestoreRedo {
+            collection: COLLECTION.into(),
+            field_name: "emb".into(),
+            surrogate: 7,
+            dim: 3,
+            multi: false,
+            ended: Vec::new(),
+            live: Some(VectorRestoreLive {
+                vectors: vec![vec![1.0, 0.0, 0.0]],
+                sys_from: 100,
+            }),
+            end_live_at: None,
+            vector_primary: true,
+            sidecar: vec![
+                VectorSidecarVersion {
+                    sys_from: 100,
+                    valid_from_ms: 5,
+                    valid_until_ms: 50,
+                    body: Some(tagged("first")),
+                },
+                VectorSidecarVersion {
+                    sys_from: 200,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                    body: Some(tagged("second")),
+                },
+            ],
+            primary_index: None,
+            clone_copy_at: None,
+        };
+        let payload = redo.encode().expect("encode redo");
+        let tombstones = TombstoneSet::new();
+        for lsn in [10, 11] {
+            let applied = core.try_replay_vector_restore(
+                &payload,
+                TID,
+                DB,
+                lsn,
+                &tombstones.for_database(DB),
+            );
+            assert_eq!(applied, Some(true), "replay {lsn} installs the row");
+        }
+
+        let key = StorageKey::for_surrogate(Surrogate::new(7));
+        let read = |sys: i64, valid: Option<i64>| {
+            core.sparse
+                .versioned_get_as_of(DB, TID, COLLECTION, &key, Some(sys), valid)
+                .expect("read sidecar")
+        };
+        assert_eq!(read(150, None), Some(tagged("first")));
+        assert_eq!(read(150, Some(10)), Some(tagged("first")));
+        assert_eq!(read(150, Some(60)), None, "outside its valid interval");
+        assert_eq!(read(250, None), Some(tagged("second")));
+        let current = core
+            .sparse
+            .get(DB, TID, COLLECTION, &key)
+            .expect("read current")
+            .expect("a current sidecar");
+        let fields: HashMap<String, Value> =
+            zerompk::from_msgpack(&current).expect("the sidecar decodes tagged");
+        assert_eq!(fields.get("tag"), Some(&Value::String("second".into())));
+        assert_eq!(
+            core.sparse
+                .versioned_latest_sys_from(DB, TID, COLLECTION, &key)
+                .expect("newest version"),
+            Some(200),
+            "a second replay writes no version of its own"
+        );
     }
 }

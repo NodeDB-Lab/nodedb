@@ -9,11 +9,20 @@
 //! one row, so every replica and every replay installs each at exactly its
 //! span, and a search at any cut answers as the source answered.
 //!
+//! A row of a vector-primary index also carries every backed-up version of
+//! its sidecar, in the stored encoding, each at its own system time and
+//! valid interval. The install writes them in the same apply as the nodes.
+//!
 //! A RESTORE is a write in the Calvin sequence. The resolve reads the
 //! destination's newest ordinal for the row and rewrites the record to the
 //! exact nodes the install writes (`restore_key_plan`). The install first
 //! ends the row's live nodes at `end_live_at`, so no two versions of the row
 //! overlap. It reads nothing to choose, so every replica writes alike.
+//!
+//! A clone copy reuses the record for one source row: its nodes visible at
+//! the clone's cut as live nodes, and for a vector-primary row its sidecar
+//! version at that cut. It skips the resolve and installs only where the
+//! clone holds no version of the row (`clone_copy_at`).
 //!
 //! The payload is the pair `("vector_restore", VectorRestoreRedo)`. The
 //! `VectorPut` insert shapes are tuples that open with the collection name,
@@ -60,6 +69,47 @@ pub struct VectorRestoreLive {
     pub sys_from: i64,
 }
 
+/// One backed-up version of a vector-primary row's sidecar.
+///
+/// `body` holds the sidecar bytes exactly as the source stored them: the
+/// `zerompk` tagged `HashMap<String, Value>` every live write encodes. `None`
+/// is a tombstone version.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct VectorSidecarVersion {
+    pub sys_from: i64,
+    pub valid_from_ms: i64,
+    pub valid_until_ms: i64,
+    pub body: Option<Vec<u8>>,
+}
+
+/// The settings of a vector-primary collection's primary index, which a
+/// first install registers on a new index as a live write does.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct VectorRestoreIndex {
+    pub quantization: nodedb_types::VectorQuantization,
+    pub storage_dtype: nodedb_types::VectorStorageDtype,
+    /// The sidecar fields with a payload bitmap index, with their kinds.
+    pub payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+}
+
 /// Every node of one restored vector row.
 #[derive(
     Debug,
@@ -94,6 +144,20 @@ pub struct VectorRestoreRedo {
     /// entries by their surrogate's identity. A vector index on a document
     /// collection publishes none: the document row does.
     pub vector_primary: bool,
+    /// The sidecar versions to install, ascending by `sys_from`. Only a row
+    /// of a vector-primary index carries them. The install writes them with
+    /// the row's nodes, so a read never finds a sidecar without its node.
+    pub sidecar: Vec<VectorSidecarVersion>,
+    /// The primary index settings, for a row of a vector-primary
+    /// collection's primary index. The install registers them and keeps the
+    /// payload bitmaps of the row's live node in step with its sidecar.
+    /// `None` for every other index.
+    pub primary_index: Option<VectorRestoreIndex>,
+    /// Set for a clone copy: the system time of the source row version the
+    /// copy installs. The install writes nothing where the row already holds
+    /// a node in the index, or a stored version at any other system time. A
+    /// write into the clone therefore wins over a copy. `None` for a RESTORE.
+    pub clone_copy_at: Option<i64>,
 }
 
 impl VectorRestoreRedo {
@@ -134,6 +198,26 @@ mod tests {
             }),
             end_live_at: Some(10),
             vector_primary: true,
+            sidecar: vec![
+                VectorSidecarVersion {
+                    sys_from: 10,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                    body: Some(vec![0x80]),
+                },
+                VectorSidecarVersion {
+                    sys_from: 20,
+                    valid_from_ms: 0,
+                    valid_until_ms: 0,
+                    body: None,
+                },
+            ],
+            primary_index: Some(VectorRestoreIndex {
+                quantization: nodedb_types::VectorQuantization::default(),
+                storage_dtype: nodedb_types::VectorStorageDtype::F32,
+                payload_indexes: vec![("tag".into(), nodedb_types::PayloadIndexKind::Equality)],
+            }),
+            clone_copy_at: Some(20),
         }
     }
 

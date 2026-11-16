@@ -23,8 +23,8 @@ use crate::control::clone::copy::{CopyTarget, DocCopy, commit_doc_copies};
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
-use crate::types::DocVersionStamp;
 use crate::types::hash_chain::CHAIN_SEQ_FIELD;
+use crate::types::{CopiedVectorNodes, DocVersionStamp};
 
 use super::document::{SourcePage, SourceRow, scan_page};
 
@@ -35,6 +35,7 @@ struct ScannedRow {
     pk_bytes: Vec<u8>,
     body: Vec<u8>,
     stamp: DocVersionStamp,
+    vectors: Vec<CopiedVectorNodes>,
 }
 
 fn clone_error(detail: String) -> crate::Error {
@@ -81,6 +82,7 @@ pub(super) async fn materialize_chained_collection(
                 source_surrogate,
                 body,
                 stamp,
+                vectors,
             } = row;
             // The catalog is read per row, so a tombstone recorded while the
             // copy runs counts.
@@ -145,6 +147,7 @@ pub(super) async fn materialize_chained_collection(
                 pk_bytes,
                 body,
                 stamp,
+                vectors,
             });
         }
         if next_cursor.is_empty() {
@@ -181,6 +184,8 @@ pub(super) async fn materialize_chained_collection(
                     target_surrogate,
                     body: row.body,
                     stamp: row.stamp,
+                    vectors: row.vectors,
+                    vector_primary: None,
                 },
             )
         })

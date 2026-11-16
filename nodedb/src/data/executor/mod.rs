@@ -83,6 +83,7 @@ mod wal_replay_vector_params;
 mod wal_replay_vector_redo;
 mod wal_replay_vector_resolved;
 mod wal_replay_vector_restore;
+mod wal_replay_vector_restore_payload;
 mod wal_replay_vector_sparse;
 mod wal_replay_vector_task;
 #[cfg(test)]

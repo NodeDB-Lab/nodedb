@@ -296,6 +296,9 @@ pub(in crate::data::executor) enum UndoEntry {
     /// nodes it inserted and put every binding, tombstone, sidecar and
     /// bitmap entry back.
     VectorWrite(Box<super::vector_write::VectorWriteUndo>),
+    /// Undo the payload bitmap change of a restored vector-primary row:
+    /// remove the row it added and put back the row it took.
+    VectorPayloadRows(Box<super::vector_payload::VectorPayloadRowsUndo>),
     /// Undo a sparse-vector write: put the document back to its prior entries
     /// and the index's id counter back. `next_id == None` means the index did
     /// not exist before the write.

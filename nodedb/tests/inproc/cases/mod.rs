@@ -76,6 +76,7 @@ mod cdc_registry_index;
 mod checkpoint_durability;
 mod checkpoint_replication_apply;
 mod clone_materializer_background_progress;
+mod clone_vector_primary;
 mod collection_cascade_enumeration;
 mod collection_hard_delete;
 mod collection_pending_reclaim;

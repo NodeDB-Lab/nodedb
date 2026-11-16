@@ -318,6 +318,17 @@ pub async fn run_post_apply_async_side_effects(
         } => {
             let registered = collection::clone_shadows_async(target_descriptor.id, &shared).await;
             register_outcome(registered, &target_descriptor.name);
+            // AWAITED: the clone writes the source's vector index parameter
+            // rows straight into the catalog, so no `PutVectorIndexParams`
+            // entry installs them. They reach every core before a copy into
+            // the clone materializes an index with default parameters.
+            let params = shared
+                .credentials
+                .catalog()
+                .list_vector_index_params_in_database(target_descriptor.id.as_u64())?;
+            for entry in params {
+                super::vector::put_async(entry, Arc::clone(&shared)).await;
+            }
         }
         // AWAITED: every core opens the array before the applied-index
         // watcher advances, purging the tombstone of a prior incarnation, so
