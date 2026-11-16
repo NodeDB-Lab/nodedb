@@ -15,8 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::harness::TestServer;
 
 /// Cells the writer appends, one per `x`. Tiles of extent 4 on `x` spread
-/// them over 64 tiles and every core.
-const CELLS: i64 = 256;
+/// them over 16 tiles and every core. Each read aggregates every cell
+/// written so far, so the reads cost grows with the square of this count.
+const CELLS: i64 = 64;
 
 fn now_ms() -> i64 {
     SystemTime::now()
