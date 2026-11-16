@@ -10,6 +10,9 @@ use crate::data::executor::core_loop::tests::make_core_with_dir;
 use nodedb_physical::physical_plan::DocumentOp;
 use nodedb_types::{MAX_ROW_IMAGE_BYTES, StorageKey, Surrogate};
 
+/// A deadline no run of this test reaches.
+const UNEXPIRED: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A plain MessagePack body `{"value": ...}` of `len` bytes.
 fn body_of_len(len: usize) -> Vec<u8> {
     // A one-entry map header, the `fixstr` key `value` and a `str 32` header.
@@ -41,6 +44,9 @@ fn a_put_whose_event_image_is_over_the_limit_fails_alone() {
     let (mut core, _requests, mut responses) = make_core_with_dir(directory.path());
     for id in [1, 2, 3] {
         let mut task = ordinary_task(id);
+        // The 8 MiB put takes seconds in a debug build. The siblings must
+        // outlast both polls, so no deadline expires them.
+        task.request.deadline = std::time::Instant::now() + UNEXPIRED;
         if id == 2 {
             // Within the limit as sent and as stored. The event image gains
             // the row's identity and passes the limit.

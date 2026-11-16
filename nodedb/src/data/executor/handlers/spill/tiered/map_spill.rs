@@ -237,8 +237,12 @@ mod tests {
         let mut resident: TieredMap<PairKey, u64> = TieredMap::default();
         let mut history: std::collections::HashMap<PairKey, Vec<(u64, u64)>> =
             std::collections::HashMap::new();
+        // Threshold zero writes one run per insert. 1,000 runs reach three
+        // merge levels at fanout 8, and the 480 keys get about two versions
+        // each.
+        const INSERTS: u64 = 1_000;
         let mut state = 7u64;
-        for seq in 0..3_000u64 {
+        for seq in 0..INSERTS {
             let key = pair_key(&mut state);
             let value = seq * 3;
             history.entry(key.clone()).or_default().push((seq, value));
@@ -263,7 +267,7 @@ mod tests {
                 let want = resident.get(&key, resident_reader).unwrap().map(|v| *v);
                 assert_eq!(spilled.get(&key, reader).unwrap().map(|v| *v), want);
                 assert_eq!(spilled.contains(&key, reader).unwrap(), want.is_some());
-                for bound in [0u64, 1, 500, 1_500, 2_999, u64::MAX] {
+                for bound in [0u64, 1, INSERTS / 4, INSERTS / 2, INSERTS - 1, u64::MAX] {
                     let before = history.get(&key).and_then(|versions| {
                         versions
                             .iter()

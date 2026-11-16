@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Baseline INSERTs the writer records before the ALTER starts.
+const BASELINE_SAMPLES: usize = 60;
+/// How long the writer has to record its baseline samples.
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Tracing layer: counts how many times the schema_version_barrier_acquired
 // event is emitted on the "nodedb::schema_barrier" target.
@@ -113,8 +118,8 @@ async fn alter_add_column_does_not_stall_writes() {
     // -----------------------------------------------------------------------
     // Concurrent writer task — runs on a second pgwire connection.
     //
-    // Inserts individual rows at ~10 000/s (one per 100 µs). Records wall-clock
-    // duration of every INSERT for p99 analysis.
+    // Inserts one row every 5 ms and records the wall-clock duration of each
+    // INSERT with its phase relative to the ALTER.
     // -----------------------------------------------------------------------
     let latencies: Arc<Mutex<Vec<(Duration, u8)>>> =
         Arc::new(Mutex::new(Vec::with_capacity(64_000)));
@@ -170,8 +175,26 @@ async fn alter_add_column_does_not_stall_writes() {
         }
     });
 
-    // Warmup: 300 ms of baseline writes to establish a steady state.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Warmup: the ALTER starts only once the writer recorded its baseline
+    // samples. A fixed sleep races the writer's connect and first insert.
+    let warmup_deadline = Instant::now() + WARMUP_TIMEOUT;
+    loop {
+        let baseline_samples = latencies
+            .lock()
+            .expect("latency lock")
+            .iter()
+            .filter(|(_, phase)| *phase == 0)
+            .count();
+        if baseline_samples >= BASELINE_SAMPLES {
+            break;
+        }
+        assert!(
+            Instant::now() < warmup_deadline,
+            "writer recorded {baseline_samples} of {BASELINE_SAMPLES} baseline samples \
+             within {WARMUP_TIMEOUT:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // Snapshot the barrier count before the ALTER so that CREATE COLLECTION
     // and other setup DDL that also acquire the schema barrier are excluded

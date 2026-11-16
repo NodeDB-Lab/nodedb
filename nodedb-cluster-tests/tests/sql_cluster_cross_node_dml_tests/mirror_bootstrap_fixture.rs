@@ -21,7 +21,7 @@ use nodedb_types::{DatabaseId, MirrorStatus};
 use tempfile::TempDir;
 
 use crate::common::cluster_harness::{
-    TestCluster, TestClusterNode, read_once_a_leader_exists, wait_for, wait_for_async,
+    TestCluster, TestClusterNode, read_once_a_leader_exists, wait_for,
 };
 
 pub(super) const SOURCE_NAME: &str = "source";
@@ -209,23 +209,37 @@ pub(super) async fn rows(node: &TestClusterNode, sql: &str) -> Vec<String> {
     joined_rows(&messages)
 }
 
-/// Wait until every mirror node answers `sql` with `expected`.
+/// Wait until every mirror node answers `sql` with `expected`. A timeout
+/// names the last answer that did not match.
 pub(super) async fn await_mirror_reads(mirror: &TestCluster, sql: &str, expected: &[String]) {
-    wait_for_async(
-        &format!("every mirror node answers {sql} with {expected:?}"),
-        Duration::from_secs(90),
-        Duration::from_millis(200),
-        || async move {
-            for node in &mirror.nodes {
-                let Ok(messages) = node.client.simple_query(sql).await else {
-                    return false;
-                };
-                if joined_rows(&messages) != expected {
-                    return false;
+    let deadline = Duration::from_secs(90);
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < deadline {
+        let mut mismatch = None;
+        for (idx, node) in mirror.nodes.iter().enumerate() {
+            match node.client.simple_query(sql).await {
+                Ok(messages) => {
+                    let answer = joined_rows(&messages);
+                    if answer != expected {
+                        mismatch = Some(format!("node {idx} answered {answer:?}"));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    mismatch = Some(format!("node {idx} failed: {error}"));
+                    break;
                 }
             }
-            true
-        },
-    )
-    .await;
+        }
+        match mismatch {
+            None => return,
+            Some(reason) => last = reason,
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!(
+        "timed out after {deadline:?} waiting for every mirror node to answer {sql} \
+         with {expected:?}; last check: {last}"
+    );
 }
