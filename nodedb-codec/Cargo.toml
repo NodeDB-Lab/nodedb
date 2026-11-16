@@ -16,7 +16,6 @@ categories = ["compression", "encoding"]
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 zerompk = { workspace = true }
 

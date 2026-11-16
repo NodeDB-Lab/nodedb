@@ -21,7 +21,6 @@ zerompk = { workspace = true }
 rkyv = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-arc-swap = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -27,7 +27,6 @@ unicode-normalization = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 crc32c = { workspace = true }
-arc-swap = { workspace = true }
 
 # Dictionary-based CJK segmentation (always compiled in; selected at runtime)
 # lang-zh falls back to CJK bigrams — the previous dictionary chain pulled
@@ -35,6 +34,5 @@ arc-swap = { workspace = true }
 # The bigram code path is the permanent state for v0.1.0.
 lindera = { workspace = true }
 icu_segmenter = { workspace = true }
-whatlang = { workspace = true }
 
 [dev-dependencies]
