@@ -195,7 +195,14 @@ pub fn spawn_version_cleanup(shared: &Arc<SharedState>, config: &ServerConfig) {
                 if shutdown.is_cancelled() {
                     break;
                 }
-                match crate::control::version_cleanup::run_cleanup_pass(&state, batch).await {
+                // A pass only purges history below the horizon, and the next
+                // pass redoes what one leaves undone. Shutdown drops it rather
+                // than holding the control-plane drain for its reply.
+                let pass = tokio::select! {
+                    _ = shutdown.wait_cancelled() => break,
+                    pass = crate::control::version_cleanup::run_cleanup_pass(&state, batch) => pass,
+                };
+                match pass {
                     Ok(Some(outcome)) => tracing::debug!(
                         horizon = outcome.horizon,
                         rounds = outcome.rounds,
