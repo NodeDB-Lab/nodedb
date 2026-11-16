@@ -16,7 +16,6 @@ use nodedb_physical::physical_plan::{
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::spill::error::SpillError;
 use crate::data::executor::handlers::transaction::overlay_gauge::txn_spill_dir;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TxnId;
@@ -114,17 +113,11 @@ impl CoreLoop {
         if let Some(earlier) = self.resolve_cursors.close(txn_id) {
             remove_resolve_path(&earlier)?;
         }
-        let dir = txn_spill_dir(&self.data_dir, self.core_id, txn_id);
-        std::fs::create_dir_all(&dir).map_err(|source| {
-            crate::Error::from(SpillError::Io {
-                action: "create",
-                path: dir.clone(),
-                source,
-            })
-        })?;
-        let path = dir.join(RESOLVE_FILE);
+        // The sink creates the directory and the file only for a resolve of
+        // more than one part.
+        let path = txn_spill_dir(&self.data_dir, self.core_id, txn_id).join(RESOLVE_FILE);
         let max_part_bytes = usize::try_from(request.max_part_bytes).unwrap_or(usize::MAX);
-        let mut sink = RedoSink::spill(&path, max_part_bytes)?;
+        let mut sink = RedoSink::spill(&path, max_part_bytes);
         let finished = self
             .resolve_txn_into(task, tid, txn_id, plans, &mut sink)
             .and_then(|()| sink.finish());
@@ -146,8 +139,8 @@ impl CoreLoop {
                 return Err(error.into());
             }
         };
-        let (path, len, parts) = match output {
-            SinkOutput::Spill { path, len, parts } => (path, len, parts),
+        let (source, len, parts) = match output {
+            SinkOutput::Spill { source, len, parts } => (source, len, parts),
             #[cfg(test)]
             SinkOutput::Memory(_) => {
                 return Err(crate::Error::Internal {
@@ -157,7 +150,7 @@ impl CoreLoop {
             }
         };
         let now = self.hlc.peek();
-        self.resolve_cursors.open(txn_id, path, parts, now)?;
+        self.resolve_cursors.open(txn_id, source, parts, now)?;
         let (bytes, done) = self.resolve_cursors.read(txn_id, 0, now)?;
         Ok(ResolvedTxnPart {
             index: 0,

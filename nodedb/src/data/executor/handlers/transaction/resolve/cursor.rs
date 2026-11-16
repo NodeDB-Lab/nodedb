@@ -2,11 +2,12 @@
 
 //! The resolve cursors of committing transactions on one core.
 //!
-//! A cursor reads the parts of one resolved redo from the transaction's
-//! resolve spill file, one row per part, in order. It holds one part at a
-//! time. It closes with its last part, which removes the file, when its
-//! transaction's overlay drops, and when the lease reaper finds it unread
-//! past the lease.
+//! A cursor reads the parts of one resolved redo in order. A resolve of one
+//! part holds it in memory. A longer one is read from the transaction's
+//! resolve spill file, one row per part. Either way the cursor holds one
+//! part at a time. It closes with its last part, which removes any file,
+//! when its transaction's overlay drops, and when the lease reaper finds it
+//! unread past the lease.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,11 +20,41 @@ use crate::types::TxnId;
 /// directory.
 pub(in crate::data::executor) const RESOLVE_FILE: &str = "resolve";
 
+/// Where a resolve's parts are.
+pub(in crate::data::executor) enum PartSource {
+    /// The resolve's only part, `None` for a resolve of no part. No file
+    /// exists.
+    Memory(Option<Vec<u8>>),
+    /// The resolve spill file at this path, one row per part.
+    File(PathBuf),
+}
+
+/// Where an open cursor reads its parts.
+enum CursorSource {
+    Memory(Option<Vec<u8>>),
+    File {
+        reader: FrameStreamReader,
+        path: PathBuf,
+    },
+}
+
+impl CursorSource {
+    /// The path of the cursor's file, if it reads one.
+    fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Memory(_) => None,
+            Self::File { reader, path } => {
+                drop(reader);
+                Some(path)
+            }
+        }
+    }
+}
+
 /// The unread parts of one resolved redo.
 struct ResolveCursor {
-    reader: FrameStreamReader,
-    path: PathBuf,
-    /// Parts the file holds that no read returned yet.
+    source: CursorSource,
+    /// Parts the source holds that no read returned yet.
     remaining: u64,
     /// The part the next request reads.
     next: u32,
@@ -38,21 +69,26 @@ pub(in crate::data::executor) struct ResolveCursors {
 }
 
 impl ResolveCursors {
-    /// Open the cursor of `txn_id` over the `parts` parts of the resolve
-    /// spill file at `path`. The caller closed any open one.
+    /// Open the cursor of `txn_id` over the `parts` parts in `source`. The
+    /// caller closed any open one.
     pub(in crate::data::executor) fn open(
         &mut self,
         txn_id: TxnId,
-        path: PathBuf,
+        source: PartSource,
         parts: u64,
         now: i64,
     ) -> crate::Result<()> {
-        let reader = FrameStreamReader::open(&path)?;
+        let source = match source {
+            PartSource::Memory(part) => CursorSource::Memory(part),
+            PartSource::File(path) => CursorSource::File {
+                reader: FrameStreamReader::open(&path)?,
+                path,
+            },
+        };
         self.open.insert(
             txn_id,
             ResolveCursor {
-                reader,
-                path,
+                source,
                 remaining: parts,
                 next: 0,
                 touched: now,
@@ -90,12 +126,19 @@ impl ResolveCursors {
         let bytes = if cursor.remaining == 0 {
             Vec::new()
         } else {
-            let Some(bytes) = cursor.reader.next_row()? else {
+            let next = match &mut cursor.source {
+                CursorSource::Memory(slot) => slot.take(),
+                CursorSource::File { reader, .. } => reader.next_row()?,
+            };
+            let Some(bytes) = next else {
+                let held = match &cursor.source {
+                    CursorSource::Memory(_) => "in-memory resolve part".to_string(),
+                    CursorSource::File { path, .. } => {
+                        format!("resolve spill file {}", path.display())
+                    }
+                };
                 return Err(crate::Error::Internal {
-                    detail: format!(
-                        "the resolve spill file {} of {txn_id} ends before its part {part}",
-                        cursor.path.display()
-                    ),
+                    detail: format!("the {held} of {txn_id} ends before its part {part}"),
                 });
             };
             cursor.remaining -= 1;
@@ -111,9 +154,11 @@ impl ResolveCursors {
     }
 
     /// Close the cursor of `txn_id`, if one is open. Returns the path of its
-    /// file, which stays in place.
+    /// file, which stays in place, when it reads one.
     pub(in crate::data::executor) fn close(&mut self, txn_id: TxnId) -> Option<PathBuf> {
-        self.open.remove(&txn_id).map(|cursor| cursor.path)
+        self.open
+            .remove(&txn_id)
+            .and_then(|cursor| cursor.source.into_path())
     }
 
     /// At most `limit` transactions whose cursor was last read before
@@ -139,11 +184,12 @@ impl ResolveCursors {
     }
 }
 
-/// Remove the file of a cursor that read its last part.
+/// Remove the file, if any, of a cursor that read its last part.
 fn remove_resolve_file(cursor: ResolveCursor) -> crate::Result<()> {
-    let ResolveCursor { reader, path, .. } = cursor;
-    drop(reader);
-    remove_resolve_path(&path)
+    match cursor.source.into_path() {
+        Some(path) => remove_resolve_path(&path),
+        None => Ok(()),
+    }
 }
 
 /// Remove a resolve spill file. A file that cannot be removed files a
@@ -174,7 +220,9 @@ mod tests {
         let path = file(dir.path(), 3);
         let mut cursors = ResolveCursors::default();
         let txn = TxnId::new(9);
-        cursors.open(txn, path.clone(), 3, 0).expect("open");
+        cursors
+            .open(txn, PartSource::File(path.clone()), 3, 0)
+            .expect("open");
         assert_eq!(
             cursors.read(txn, 0, 1).expect("part 0"),
             (vec![0; 4], false)
@@ -195,13 +243,26 @@ mod tests {
 
     #[test]
     fn an_empty_resolve_answers_one_empty_last_part() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = file(dir.path(), 0);
         let mut cursors = ResolveCursors::default();
         let txn = TxnId::new(3);
-        cursors.open(txn, path, 0, 0).expect("open");
+        cursors
+            .open(txn, PartSource::Memory(None), 0, 0)
+            .expect("open");
         assert_eq!(cursors.read(txn, 0, 0).expect("part 0"), (Vec::new(), true));
         assert!(!cursors.is_open(txn));
+    }
+
+    /// A one-part resolve held in memory answers its part as the last one.
+    #[test]
+    fn a_part_in_memory_answers_as_the_last_part() {
+        let mut cursors = ResolveCursors::default();
+        let txn = TxnId::new(4);
+        cursors
+            .open(txn, PartSource::Memory(Some(vec![7; 4])), 1, 0)
+            .expect("open");
+        assert_eq!(cursors.read(txn, 0, 0).expect("part 0"), (vec![7; 4], true));
+        assert!(!cursors.is_open(txn));
+        assert_eq!(cursors.close(txn), None);
     }
 
     #[test]
@@ -212,7 +273,9 @@ mod tests {
         for (txn, touched) in [(live, 0), (stale, 0), (fresh, 50)] {
             let sub = dir.path().join(txn.as_u64().to_string());
             std::fs::create_dir_all(&sub).expect("dir");
-            cursors.open(txn, file(&sub, 2), 2, touched).expect("open");
+            cursors
+                .open(txn, PartSource::File(file(&sub, 2)), 2, touched)
+                .expect("open");
         }
         assert_eq!(cursors.expired(10, 8, |txn| *txn == live), vec![stale]);
         assert!(

@@ -111,10 +111,9 @@ impl CoreLoop {
         self.resolve_txn_into(task, tid, txn_id, plans, &mut sink)?;
         match sink.finish()?.output {
             super::sink::SinkOutput::Memory(lists) => Ok(lists),
-            super::sink::SinkOutput::Spill { path, .. } => Err(crate::Error::Internal {
+            super::sink::SinkOutput::Spill { parts, .. } => Err(crate::Error::Internal {
                 detail: format!(
-                    "a memory resolve sink finished into the spill file {}",
-                    path.display()
+                    "a memory resolve sink finished as a spill sink of {parts} parts"
                 ),
             }),
         }
