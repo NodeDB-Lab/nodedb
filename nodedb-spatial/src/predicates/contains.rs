@@ -250,16 +250,12 @@ fn edges_properly_cross(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2]) 
     let o4 = orientation(b1, b2, a2);
 
     // Proper crossing requires different orientations on both sides.
-    if o1 != o2
+    o1 != o2
         && o3 != o4
         && o1 != Orientation::Collinear
         && o2 != Orientation::Collinear
         && o3 != Orientation::Collinear
         && o4 != Orientation::Collinear
-    {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]

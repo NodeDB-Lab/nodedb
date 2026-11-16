@@ -110,7 +110,7 @@ async fn graph_traverse_returns_complete_distinct_set_from_any_node() {
     // so a non-owning coordinator correctly scatters the start frontier to its
     // owner. (The gateway path tolerates stale routing via NotLeader retry; the
     // graph path relies on a converged routing view here.)
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reaches all {NEIGHBORS} root neighbors"),
             Duration::from_secs(20),
@@ -119,7 +119,7 @@ async fn graph_traverse_returns_complete_distinct_set_from_any_node() {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let v = query_graph_json(
-                            &cluster.nodes[idx].client,
+                            &node.client,
                             "GRAPH TRAVERSE IN 'graph_xnode' FROM 'root' DEPTH 1 LABEL 'l' DIRECTION out",
                         )
                         .await;
@@ -142,9 +142,9 @@ async fn graph_traverse_returns_complete_distinct_set_from_any_node() {
         .collect();
 
     // From BOTH node 0 and node 1: complete + distinct (no dup, no drop).
-    for idx in 0..2 {
+    for (idx, node) in cluster.nodes.iter().take(2).enumerate() {
         let v1 = query_graph_json(
-            &cluster.nodes[idx].client,
+            &node.client,
             "GRAPH TRAVERSE IN 'graph_xnode' FROM 'root' DEPTH 1 LABEL 'l' DIRECTION out",
         )
         .await;
@@ -161,7 +161,7 @@ async fn graph_traverse_returns_complete_distinct_set_from_any_node() {
         );
 
         let v2 = query_graph_json(
-            &cluster.nodes[idx].client,
+            &node.client,
             "GRAPH TRAVERSE IN 'graph_xnode' FROM 'root' DEPTH 2 LABEL 'l' DIRECTION out",
         )
         .await;

@@ -64,7 +64,7 @@ fn source_pairs(sources: impl IntoIterator<Item = usize>) -> Pairs {
 
 /// Wait until `sql` from every node returns exactly `expected`.
 async fn wait_every_node_reads(cluster: &TestCluster, sql: &str, expected: &Pairs) {
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reads {} rows of {sql}", expected.len()),
             Duration::from_secs(30),
@@ -72,7 +72,7 @@ async fn wait_every_node_reads(cluster: &TestCluster, sql: &str, expected: &Pair
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pairs(&cluster.nodes[idx].client, sql).await;
+                        let rows = pairs(&node.client, sql).await;
                         &rows.into_iter().collect::<Pairs>() == expected
                     })
                 })
@@ -84,8 +84,8 @@ async fn wait_every_node_reads(cluster: &TestCluster, sql: &str, expected: &Pair
 
 /// Assert `sql` from every node returns exactly `expected`, each row once.
 async fn assert_every_node_reads(cluster: &TestCluster, sql: &str, expected: &Pairs) {
-    for idx in 0..cluster.nodes.len() {
-        let rows = pairs(&cluster.nodes[idx].client, sql).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pairs(&node.client, sql).await;
         let set: Pairs = rows.iter().cloned().collect();
         assert_eq!(
             rows.len(),

@@ -97,14 +97,13 @@ async fn native_implicit_edge_delete_cleans_reverse_cross_node() {
 
     // PRE-DELETE: 1-hop reverse traversal from `hub` must reach all sources on
     // every node (proves cross-shard implicit edges dual-homed onto `hub`).
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub (pre-delete)"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                cluster.nodes[idx]
-                    .traversed_node_ids("GRAPH TRAVERSE IN 'nat_impl_edge_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in")
+                node.traversed_node_ids("GRAPH TRAVERSE IN 'nat_impl_edge_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in")
                     .len()
                     > SOURCES
             },
@@ -168,13 +167,13 @@ async fn native_implicit_edge_delete_cleans_reverse_cross_node() {
     // dispatch would leave cross-shard reverse-edge copies dangling, making at
     // least some `src_i` still reachable. Only if `edge_recon_gate` fired and
     // the OLLP edge-delete bundle ran will all sources be absent.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse traversal from hub finds no sources after native DELETE"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                let ids = cluster.nodes[idx]
+                let ids = node
                     .traversed_node_ids("GRAPH TRAVERSE IN 'nat_impl_edge_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in");
                 // At most the start node `hub` remains. With every edge gone
                 // `hub` is absent from the graph and the result is empty.

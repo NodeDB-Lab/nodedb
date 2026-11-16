@@ -107,7 +107,7 @@ async fn graph_reverse_traverse_omits_deleted_sources_from_any_node() {
     // Confirm all 12 in-edges are reverse-reachable from `hub` on every node
     // before deleting — establishes the dual-homed baseline so the deletion
     // assertion below isolates the DELETE path.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub"),
             Duration::from_secs(20),
@@ -116,7 +116,7 @@ async fn graph_reverse_traverse_omits_deleted_sources_from_any_node() {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let v = query_graph_json(
-                            &cluster.nodes[idx].client,
+                            &node.client,
                             "GRAPH TRAVERSE IN 'graph_del_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
                         )
                         .await;
@@ -151,7 +151,7 @@ async fn graph_reverse_traverse_omits_deleted_sources_from_any_node() {
     // Wait until every node's reverse traversal from `hub` converges to exactly
     // the surviving set — tombstones applied + dual-homed + replicated AND each
     // node's routing view converged.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!(
                 "node {idx} reverse set converges to {} survivors",
@@ -163,7 +163,7 @@ async fn graph_reverse_traverse_omits_deleted_sources_from_any_node() {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let v = query_graph_json(
-                            &cluster.nodes[idx].client,
+                            &node.client,
                             "GRAPH TRAVERSE IN 'graph_del_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
                         )
                         .await;
@@ -177,9 +177,9 @@ async fn graph_reverse_traverse_omits_deleted_sources_from_any_node() {
     }
 
     // From every node: exactly the survivors, no deleted source, no dup, no drop.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         let v = query_graph_json(
-            &cluster.nodes[idx].client,
+            &node.client,
             "GRAPH TRAVERSE IN 'graph_del_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
         )
         .await;

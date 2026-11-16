@@ -198,59 +198,72 @@ impl DatabaseMetricsRegistry {
 
     store_setter!(
         /// Set the WAL commit P99 gauge in microseconds.
-        set_wal_commit_p99_us, wal_commit_latency_p99_us
+        set_wal_commit_p99_us,
+        wal_commit_latency_p99_us
     );
     store_setter!(
         /// Set the collection-count gauge.
-        set_collections, collections
+        set_collections,
+        collections
     );
     store_setter!(
         /// Set the tenant-count gauge.
-        set_tenants, tenants
+        set_tenants,
+        tenants
     );
     store_setter!(
         /// Set the memory-bytes gauge.
-        set_memory_bytes, memory_bytes
+        set_memory_bytes,
+        memory_bytes
     );
     store_setter!(
         /// Set the storage-bytes gauge.
-        set_storage_bytes, storage_bytes
+        set_storage_bytes,
+        storage_bytes
     );
     store_setter!(
         /// Set the storage limit in bytes. Zero means unlimited.
-        set_storage_limit, storage_limit_bytes
+        set_storage_limit,
+        storage_limit_bytes
     );
     store_setter!(
         /// Set the active-connections gauge.
-        set_connections, connections
+        set_connections,
+        connections
     );
     store_setter!(
         /// Set the bridge queue-depth snapshot.
-        set_bridge_queue_depth, bridge_queue_depth
+        set_bridge_queue_depth,
+        bridge_queue_depth
     );
     store_setter!(
         /// Set the mirror replication lag in milliseconds.
         ///
         /// Computed as `now_ms - applied_cut_ms` on the wall clock, the same
         /// basis as the bounded-staleness read rejection.
-        set_mirror_lag_ms, mirror_lag_ms
+        set_mirror_lag_ms,
+        mirror_lag_ms
     );
 
     load_reader!(
         /// Storage limit in bytes. Zero means unlimited or unknown.
-        storage_limit, storage_limit_bytes
+        storage_limit,
+        storage_limit_bytes
     );
     load_reader!(
         /// Storage usage in bytes. Zero means unknown.
-        storage_bytes, storage_bytes
+        storage_bytes,
+        storage_bytes
     );
     load_reader!(
         /// Memory usage in bytes. Zero means unknown.
-        memory_bytes, memory_bytes
+        memory_bytes,
+        memory_bytes
     );
     load_reader!(
         /// Cumulative requests admitted. Zero means unknown.
-        qps_total, qps_total
+        qps_total,
+        qps_total
     );
 }
 

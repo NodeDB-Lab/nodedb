@@ -89,17 +89,16 @@ async fn cross_node_select_returns_all_chunks() {
     // Wait until every node sees all rows applied. Each node has the vShard's
     // data Raft-replicated to its local store and scans it for this read, so the
     // count converges on every node once replication completes.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {ROWS} rows"),
             Duration::from_secs(30),
             Duration::from_millis(100),
             || {
                 tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(count_rows(
-                        &cluster.nodes[idx].client,
-                        "SELECT id FROM wide",
-                    )) >= ROWS
+                    tokio::runtime::Handle::current()
+                        .block_on(count_rows(&node.client, "SELECT id FROM wide"))
+                        >= ROWS
                 })
             },
         )
@@ -110,8 +109,8 @@ async fn cross_node_select_returns_all_chunks() {
     // fix the result was silently truncated to the first 1000-row chunk because
     // the streamed chunk arrays were raw-concatenated (only the first array was
     // decoded) instead of merged into one array.
-    for idx in 0..cluster.nodes.len() {
-        let got = count_rows(&cluster.nodes[idx].client, "SELECT id FROM wide").await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let got = count_rows(&node.client, "SELECT id FROM wide").await;
         assert_eq!(
             got, ROWS,
             "node {idx} SELECT must return all {ROWS} rows across stream chunks; got {got}"

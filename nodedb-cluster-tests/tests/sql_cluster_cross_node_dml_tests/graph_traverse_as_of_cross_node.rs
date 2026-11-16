@@ -49,7 +49,7 @@ async fn traverse_ids(client: &tokio_postgres::Client, sql: &str) -> Vec<String>
 
 /// Wait until a traverse from every node reaches exactly `expected`.
 async fn wait_every_node_reaches(cluster: &TestCluster, sql: &str, expected: &HashSet<String>) {
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reaches {} nodes", expected.len()),
             Duration::from_secs(30),
@@ -57,7 +57,7 @@ async fn wait_every_node_reaches(cluster: &TestCluster, sql: &str, expected: &Ha
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let ids = traverse_ids(&cluster.nodes[idx].client, sql).await;
+                        let ids = traverse_ids(&node.client, sql).await;
                         &ids.into_iter().collect::<HashSet<_>>() == expected
                     })
                 })
@@ -69,8 +69,8 @@ async fn wait_every_node_reaches(cluster: &TestCluster, sql: &str, expected: &Ha
 
 /// Assert a traverse from every node returns exactly `expected`, each id once.
 async fn assert_every_node_reaches(cluster: &TestCluster, sql: &str, expected: &HashSet<String>) {
-    for idx in 0..cluster.nodes.len() {
-        let ids = traverse_ids(&cluster.nodes[idx].client, sql).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let ids = traverse_ids(&node.client, sql).await;
         let set: HashSet<String> = ids.iter().cloned().collect();
         assert_eq!(
             ids.len(),

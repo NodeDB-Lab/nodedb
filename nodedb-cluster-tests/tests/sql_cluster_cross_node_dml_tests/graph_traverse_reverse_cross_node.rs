@@ -105,7 +105,7 @@ async fn graph_reverse_traverse_reaches_all_sources_from_any_node() {
     // EVERY node — edges applied + dual-homed + replicated AND each node's routing
     // view converged so a non-owning coordinator scatters the start frontier to
     // hub's owner correctly.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub"),
             Duration::from_secs(20),
@@ -114,7 +114,7 @@ async fn graph_reverse_traverse_reaches_all_sources_from_any_node() {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let v = query_graph_json(
-                            &cluster.nodes[idx].client,
+                            &node.client,
                             "GRAPH TRAVERSE IN 'graph_rev_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
                         )
                         .await;
@@ -133,9 +133,9 @@ async fn graph_reverse_traverse_reaches_all_sources_from_any_node() {
         .collect();
 
     // From every node: complete + distinct (no dup, no drop).
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         let v = query_graph_json(
-            &cluster.nodes[idx].client,
+            &node.client,
             "GRAPH TRAVERSE IN 'graph_rev_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
         )
         .await;

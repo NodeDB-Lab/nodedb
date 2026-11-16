@@ -132,8 +132,8 @@ mod tests {
         let b = ts_bollinger(&vals, 5, 2.0);
 
         // First 4 should be None.
-        for i in 0..4 {
-            assert!(b.upper[i].is_none());
+        for upper in b.upper.iter().take(4) {
+            assert!(upper.is_none());
         }
 
         // At position 4: mean = 3.8, stddev ≈ 0.98

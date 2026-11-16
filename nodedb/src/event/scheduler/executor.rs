@@ -408,12 +408,8 @@ fn is_raft_group_healthy(sched: &ScheduleDef, state: &SharedState) -> bool {
         return false;
     }
 
-    // Also check that we're actually the leader for this group.
-    if status.leader_id != state.node_id {
-        return false;
-    }
-
-    true
+    // This node fires the schedule only as the group's leader.
+    status.leader_id == state.node_id
 }
 
 #[cfg(test)]

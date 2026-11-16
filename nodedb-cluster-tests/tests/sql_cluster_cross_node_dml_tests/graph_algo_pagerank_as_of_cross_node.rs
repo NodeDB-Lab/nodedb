@@ -34,7 +34,7 @@ async fn pagerank_rows(client: &tokio_postgres::Client, sql: &str) -> Vec<(Strin
 
 /// Wait until `sql` run from every node names exactly `expected`.
 async fn wait_every_node_sees(cluster: &TestCluster, sql: &str, expected: &HashSet<String>) {
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees {} pagerank nodes", expected.len()),
             Duration::from_secs(30),
@@ -42,7 +42,7 @@ async fn wait_every_node_sees(cluster: &TestCluster, sql: &str, expected: &HashS
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, sql).await;
+                        let rows = pagerank_rows(&node.client, sql).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         &names == expected
                     })
@@ -111,8 +111,8 @@ async fn historical_pagerank_runs_bsp_at_one_cut_cross_node() {
     wait_every_node_sees(&cluster, "GRAPH ALGO PAGERANK ON 'gpr_asof'", &changed).await;
 
     let historical = format!("GRAPH ALGO PAGERANK ON 'gpr_asof' AS OF SYSTEM TIME {cut}");
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, &historical).await;
+    for (idx, target_node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&target_node.client, &historical).await;
         let names: HashSet<String> = rows.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(
             names, ring,

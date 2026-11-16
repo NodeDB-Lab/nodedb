@@ -100,7 +100,7 @@ async fn pagerank_sums_to_one_cross_node() {
     // applied + replicated AND each node's routing view converged so a
     // non-owning coordinator runs the count phase and superstep loop across all
     // owning shards.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {N} pagerank nodes"),
             Duration::from_secs(30),
@@ -108,7 +108,7 @@ async fn pagerank_sums_to_one_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+                        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         names == expected_nodes
                     })
@@ -119,8 +119,8 @@ async fn pagerank_sums_to_one_cross_node() {
     }
 
     // From every node: ranks sum to ≈ 1.0 and exactly one row per distinct node.
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
 
         // (ii) Row count == distinct node count (no dup, no drop).
         let names: HashSet<String> = rows.iter().map(|(n, _)| n.clone()).collect();

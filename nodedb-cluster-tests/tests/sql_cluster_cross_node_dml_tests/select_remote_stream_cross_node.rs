@@ -82,17 +82,16 @@ async fn cross_node_remote_stream_returns_all_chunks() {
     }
 
     // Wait until every node sees all rows applied (Raft replication).
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {ROWS} rows"),
             Duration::from_secs(30),
             Duration::from_millis(100),
             || {
                 tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(count_rows(
-                        &cluster.nodes[idx].client,
-                        "SELECT id FROM streamwide",
-                    )) >= ROWS
+                    tokio::runtime::Handle::current()
+                        .block_on(count_rows(&node.client, "SELECT id FROM streamwide"))
+                        >= ROWS
                 })
             },
         )
@@ -101,8 +100,8 @@ async fn cross_node_remote_stream_returns_all_chunks() {
 
     // From EVERY node: the full result spanning all stream chunks. The two
     // non-owning nodes pull the chunks across the QUIC streaming transport.
-    for idx in 0..cluster.nodes.len() {
-        let got = count_rows(&cluster.nodes[idx].client, "SELECT id FROM streamwide").await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let got = count_rows(&node.client, "SELECT id FROM streamwide").await;
         assert_eq!(
             got, ROWS,
             "node {idx} streamed SELECT must return all {ROWS} rows across chunks; got {got}"

@@ -288,13 +288,13 @@ async fn staged_varlen_edge_is_read_your_own_writes_remote_led() {
 
     // Strengthening: every OTHER node that does not lead the staged edge's home
     // group must also observe RYOW through a remote-led staging forward.
-    for idx in 0..cluster.nodes.len() {
-        if cluster.nodes[idx].node_id == src_leader {
+    for node in &cluster.nodes {
+        if node.node_id == src_leader {
             continue;
         }
         assert_staged_ryow(
-            &format!("remote coordinator (node {})", cluster.nodes[idx].node_id),
-            &cluster.nodes[idx].client,
+            &format!("remote coordinator (node {})", node.node_id),
+            &node.client,
             &match_sql,
             &stage_edge_sql,
             &durable_only,

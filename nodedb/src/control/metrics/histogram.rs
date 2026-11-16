@@ -320,12 +320,11 @@ mod tests {
         h.observe(99_000_000); // 99 seconds — beyond all buckets
         assert_eq!(h.count(), 1);
         // None of the fixed buckets should contain it.
-        let mut found_in_bucket = false;
-        for i in 0..DEFAULT_BUCKETS_US.len() {
-            if h.buckets[i].load(Ordering::Relaxed) > 0 {
-                found_in_bucket = true;
-            }
-        }
+        let found_in_bucket = h
+            .buckets
+            .iter()
+            .take(DEFAULT_BUCKETS_US.len())
+            .any(|bucket| bucket.load(Ordering::Relaxed) > 0);
         assert!(!found_in_bucket);
     }
 

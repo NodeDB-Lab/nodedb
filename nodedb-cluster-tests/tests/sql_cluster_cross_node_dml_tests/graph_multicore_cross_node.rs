@@ -144,7 +144,7 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
     const PAGERANK_SQL: &str = "GRAPH ALGO PAGERANK ON 'gmc_xnode' ITERATIONS 100";
 
     // Wait until EVERY node sees all N ring nodes in the PageRank result.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {N} pagerank nodes (multicore)"),
             Duration::from_secs(30),
@@ -152,7 +152,7 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+                        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
                         rows.len() == N
                     })
                 })
@@ -162,8 +162,8 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
     }
 
     // From every node: assert PageRank completeness + mass conservation.
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
 
         // (a) COMPLETENESS — exactly the N ring nodes; no dup, no drop.
         let names: HashSet<String> = rows.iter().map(|(n, _)| n.clone()).collect();
@@ -200,7 +200,7 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
     const MATCH_2HOP: &str = "MATCH (a)-[:K]->(b)-[:K]->(c) RETURN a, b, c";
 
     // Wait until every node sees all N ring 2-hop paths.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {N} 2-hop paths (multicore)"),
             Duration::from_secs(25),
@@ -208,7 +208,7 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = match_2hop_rows(&cluster.nodes[idx].client, MATCH_2HOP).await;
+                        let rows = match_2hop_rows(&node.client, MATCH_2HOP).await;
                         let set: HashSet<_> = rows.into_iter().collect();
                         set == expected_paths
                     })
@@ -219,8 +219,8 @@ async fn graph_pagerank_and_match_multicore_cross_node() {
     }
 
     // From every node: MATCH completeness — exactly the N ring chains, no dups.
-    for idx in 0..cluster.nodes.len() {
-        let rows = match_2hop_rows(&cluster.nodes[idx].client, MATCH_2HOP).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = match_2hop_rows(&node.client, MATCH_2HOP).await;
         let set: HashSet<_> = rows.iter().cloned().collect();
 
         assert_eq!(
