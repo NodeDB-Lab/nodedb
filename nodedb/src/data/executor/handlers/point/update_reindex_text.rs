@@ -8,8 +8,9 @@
 //! body held and misses the words its new body holds.
 //!
 //! The text is extracted exactly as the insert path extracts it
-//! (`fts_text::extract_fts_fields`), so an updated row indexes the same way a
-//! freshly inserted row with the same body does. `index_document_in_txn`
+//! (`fts_text::extract_fts_fields`, over the collection's declared text
+//! fields), so an updated row indexes the same way a freshly inserted row
+//! with the same body does. `index_document_in_txn`
 //! retracts the terms the new text no longer contains, retracts the row from
 //! every field index the new body no longer fills, and removes the row from
 //! an index whose new text has no indexable word.
@@ -45,7 +46,13 @@ impl CoreLoop {
         txn: &WriteTransaction,
         p: UpdateTextReindex<'_>,
     ) -> crate::Result<()> {
-        let text = extract_fts_fields(p.new_doc);
+        let text_fields = self.declared_text_fields(p.database_id, p.tid, p.collection);
+        // A collection with no declared text field holds no inverted-index
+        // state, so the update touches none.
+        if text_fields.is_empty() {
+            return Ok(());
+        }
+        let text = extract_fts_fields(p.new_doc, text_fields);
         self.inverted
             .index_document_in_txn(
                 txn,

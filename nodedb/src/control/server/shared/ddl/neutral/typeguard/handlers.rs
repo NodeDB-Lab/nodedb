@@ -215,7 +215,9 @@ pub async fn alter_typeguard_drop(
 
     let drop_pos = find_ascii_case_insensitive(sql, " DROP ")
         .ok_or_else(|| err("42601", "ALTER TYPEGUARD requires DROP <field>"))?;
-    let field_name = sql[drop_pos + 6..].trim().to_lowercase();
+    let field_name = crate::control::server::shared::ddl::sql_parse::resolve_name_token(
+        sql[drop_pos + 6..].trim(),
+    );
 
     if field_name.is_empty() {
         return Err(err("42601", "ALTER TYPEGUARD DROP requires a field name"));

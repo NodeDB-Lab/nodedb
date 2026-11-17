@@ -60,6 +60,7 @@ pub(super) fn text_column_fault_to_wire(fault: TextColumnFault) -> DataPlaneText
         TextColumnFault::NotText { data_type } => DataPlaneTextColumnFault::NotText { data_type },
         TextColumnFault::NotAColumn => DataPlaneTextColumnFault::NotAColumn,
         TextColumnFault::NotIndexed => DataPlaneTextColumnFault::NotIndexed,
+        TextColumnFault::IndexBuilding => DataPlaneTextColumnFault::IndexBuilding,
     }
 }
 
@@ -70,5 +71,6 @@ pub(super) fn text_column_fault_from_wire(fault: DataPlaneTextColumnFault) -> Te
         DataPlaneTextColumnFault::NotText { data_type } => TextColumnFault::NotText { data_type },
         DataPlaneTextColumnFault::NotAColumn => TextColumnFault::NotAColumn,
         DataPlaneTextColumnFault::NotIndexed => TextColumnFault::NotIndexed,
+        DataPlaneTextColumnFault::IndexBuilding => TextColumnFault::IndexBuilding,
     }
 }

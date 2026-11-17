@@ -109,6 +109,7 @@ mod tests {
             }],
             columnar_keys: Vec::new(),
             vector_rows: Vec::new(),
+            synced_text: Vec::new(),
             timeseries: Vec::new(),
             collections,
             identities: Vec::new(),

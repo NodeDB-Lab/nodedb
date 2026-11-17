@@ -845,6 +845,9 @@ The inverted index is maintained automatically on document writes (insert, updat
 ### Full-Text Search
 
 ```sql
+-- A search reads only fields a search index declares.
+CREATE SEARCH INDEX ON articles FIELDS body;
+
 -- BM25 search
 SELECT title, bm25_score(body, 'distributed database') AS score
 FROM articles

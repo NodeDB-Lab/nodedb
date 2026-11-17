@@ -39,6 +39,7 @@ fn collection(name: &str, engine: EngineType, columns: Vec<ColumnInfo>) -> Colle
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema: CollectionInfo::open_schema_for(engine),
+        text_indexes: None,
     }
 }
 

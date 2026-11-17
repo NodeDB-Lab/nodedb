@@ -85,6 +85,23 @@ impl InvertedIndex {
             .set_collection_analyzer(database_id, tid.as_u64(), collection, analyzer_name)
     }
 
+    /// The analyzer and fuzzy default this core holds for `collection`. An
+    /// unset analyzer reads as `None`, an unset fuzzy default as `false`.
+    pub fn collection_analysis(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        collection: &str,
+    ) -> crate::Result<(Option<String>, bool)> {
+        let analyzer = self
+            .inner
+            .get_collection_analyzer(database_id, tid.as_u64(), collection)?;
+        let fuzzy = self
+            .inner
+            .get_collection_fuzzy(database_id, tid.as_u64(), collection)?;
+        Ok((analyzer, fuzzy))
+    }
+
     /// Bind whether searches over `collection` fall back to fuzzy matching by
     /// default, persisted to backend metadata. `FtsIndex::search` ORs it into
     /// every query's own fuzzy flag.

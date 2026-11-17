@@ -81,6 +81,7 @@ pub mod spatial_refine;
 pub mod spatial_sync;
 pub mod spill;
 pub mod text_index;
+pub mod text_rebuild;
 pub mod text_rows;
 pub mod text_score_columns;
 pub mod text_score_sink;

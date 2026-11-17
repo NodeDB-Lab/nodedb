@@ -46,6 +46,10 @@ async fn a_text_rebuild_preserves_field_scopes() {
         .exec("CREATE COLLECTION rx_fields WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    server
+        .exec("CREATE SEARCH INDEX ON rx_fields (title, body)")
+        .await
+        .unwrap();
     for (id, title, body) in [
         ("d1", "rust handbook", "an introduction"),
         ("d2", "cooking", "the rust belt"),

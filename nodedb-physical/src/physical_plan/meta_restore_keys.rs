@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The keys a RESTORE batch's columnar keys and vector rows lock.
+//! The keys a RESTORE batch's columnar keys, vector rows and synced text
+//! lock.
 
 /// One restored columnar primary key: the row its writers lock.
 #[derive(
@@ -34,6 +35,25 @@ pub struct RestoredColumnarKey {
 )]
 #[msgpack(map)]
 pub struct RestoredVectorRow {
+    /// The collection, as the Data Plane stores it.
+    pub collection: String,
+    /// The row's identity in the destination database.
+    pub surrogate: u32,
+}
+
+/// One restored row's stored sync-frame text: the row its writers lock.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct RestoredSyncedText {
     /// The collection, as the Data Plane stores it.
     pub collection: String,
     /// The row's identity in the destination database.

@@ -179,9 +179,8 @@ impl CoreLoop {
     /// Run the BM25 leg of a three-source fusion: `(surrogate, score)` per
     /// hit, in rank order. The leg searches the index of `bm25.field`. It
     /// fetches three times `final_top_k`, at least 20, so fusion has
-    /// candidates past the final cut. A collection with no text at all gives
-    /// no hits. A field that holds no text while other text exists is a
-    /// `TextColumn` error.
+    /// candidates past the final cut. A field no declared full-text index
+    /// covers is a `TextColumn` error.
     pub(in crate::data::executor) fn bm25_leg_hits(
         &self,
         task: &ExecutionTask,
@@ -192,8 +191,7 @@ impl CoreLoop {
         scope: &nodedb_physical::physical_plan::GraphReadScope,
     ) -> Result<Vec<(Surrogate, f32)>, Response> {
         let index = match self.text_index(task, tenant_id.as_u64(), collection, Some(bm25.field)) {
-            Ok(Some(index)) => index,
-            Ok(None) => return Ok(Vec::new()),
+            Ok(index) => index,
             Err(e) => return Err(self.response_error(task, e)),
         };
         // The leg ranks the text versions visible at the fusion's cut, the

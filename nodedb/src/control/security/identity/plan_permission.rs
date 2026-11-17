@@ -116,7 +116,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             Permission::Write
         }
 
-        PhysicalPlan::Text(TextOp::SetTextConfig { .. }) => Permission::Alter,
+        PhysicalPlan::Text(TextOp::SetTextConfig { .. } | TextOp::RebuildIndex { .. }) => {
+            Permission::Alter
+        }
 
         PhysicalPlan::Spatial(SpatialOp::Scan { .. }) => Permission::Read,
         PhysicalPlan::Spatial(SpatialOp::Insert { .. } | SpatialOp::Delete { .. }) => {

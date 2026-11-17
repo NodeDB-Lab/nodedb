@@ -100,6 +100,34 @@ impl ReadOnlySystemCatalog {
         )
     }
 
+    /// See [`SystemCatalog::list_committed_index_records`].
+    pub fn list_committed_index_records(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<super::index_record::StoredIndexRecord>> {
+        super::index_registry::list_committed_index_records_in(
+            &self.read_txn("read txn")?,
+            database_id,
+            tenant_id,
+        )
+    }
+
+    /// See [`SystemCatalog::list_committed_index_records_for_collection`].
+    pub fn list_committed_index_records_for_collection(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Vec<super::index_record::StoredIndexRecord>> {
+        super::index_registry_by_collection::list_committed_index_records_for_collection_in(
+            &self.read_txn("read txn")?,
+            database_id,
+            tenant_id,
+            collection,
+        )
+    }
+
     /// See [`SystemCatalog::load_all_collections`].
     pub fn load_all_collections(
         &self,

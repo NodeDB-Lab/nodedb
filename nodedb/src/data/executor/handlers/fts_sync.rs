@@ -21,8 +21,10 @@ use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 impl CoreLoop {
     /// Index a document's `(field, text)` pairs into the inverted BM25
     /// indexes (whole-document and per field), optionally gating on the
-    /// `SyncProvenance` for idempotent replay. Empty `fields` remove the
-    /// document from every index.
+    /// `SyncProvenance` for idempotent replay. Only the collection's declared
+    /// text fields are kept. No declared field left in `fields` removes the
+    /// document from every index. A collection that declares no text field
+    /// indexes nothing.
     ///
     /// Without provenance behaves identically to the pre-gate implementation.
     /// With provenance: runs the idempotency gate (`sync_admit`) before
@@ -37,6 +39,31 @@ impl CoreLoop {
         fields: &[(String, String)],
         provenance: Option<&SyncProvenance>,
     ) -> Response {
+        let frame = SyncedFrame {
+            collection,
+            surrogate,
+            fields,
+            sys_from: None,
+        };
+        self.execute_fts_index_doc_at(task, tid, frame, provenance)
+    }
+
+    /// [`Self::execute_fts_index_doc`] for `frame`. A frame with a
+    /// `sys_from` installs at that ordinal through
+    /// [`Self::install_synced_text`].
+    pub(in crate::data::executor) fn execute_fts_index_doc_at(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        frame: SyncedFrame<'_>,
+        provenance: Option<&SyncProvenance>,
+    ) -> Response {
+        let SyncedFrame {
+            collection,
+            surrogate,
+            fields,
+            sys_from,
+        } = frame;
         // ── Idempotency gate ────────────────────────────────────────────────
         if let Some(prov) = provenance {
             match self.sync_admit(prov) {
@@ -72,19 +99,18 @@ impl CoreLoop {
         }
 
         // ── Engine write ────────────────────────────────────────────────────
-        let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
-        let text = nodedb_fts::DocumentText::from_fields(fields.iter().cloned());
-        // The prior text version ends at the write's system time.
-        let ordinal = self.bitemporal_ordinal();
-        match self.inverted.index_document_at(
-            database_id,
-            tenant_id,
-            collection,
-            surrogate,
-            &text,
-            ordinal,
-        ) {
+        let written = match sys_from {
+            // The prior text version ends at the write's system time.
+            None => {
+                let base = self.bitemporal_ordinal();
+                self.write_synced_text(database_id, tid, collection, surrogate, fields, base)
+            }
+            Some(ordinal) => {
+                self.install_synced_text(database_id, tid, collection, surrogate, fields, ordinal)
+            }
+        };
+        match written {
             Ok(()) => {
                 // Note this committed FTS write.
                 if let Err(e) = self.note_collection_write(task, collection) {
@@ -121,6 +147,21 @@ impl CoreLoop {
         surrogate: Option<Surrogate>,
         provenance: Option<&SyncProvenance>,
     ) -> Response {
+        self.execute_fts_delete_doc_at(task, tid, collection, surrogate, provenance, None)
+    }
+
+    /// [`Self::execute_fts_delete_doc`] at `sys_from`. A delete with a
+    /// `sys_from` installs its tombstone version at that ordinal through
+    /// [`Self::install_synced_text`].
+    pub(in crate::data::executor) fn execute_fts_delete_doc_at(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        surrogate: Option<Surrogate>,
+        provenance: Option<&SyncProvenance>,
+        sys_from: Option<i64>,
+    ) -> Response {
         // ── Idempotency gate ────────────────────────────────────────────────
         if let Some(prov) = provenance {
             match self.sync_admit(prov) {
@@ -145,17 +186,18 @@ impl CoreLoop {
         };
 
         // ── Engine write ────────────────────────────────────────────────────
-        let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
-        // The text version ends at the delete's system time.
-        let ordinal = self.bitemporal_ordinal();
-        match self.inverted.remove_document_at(
-            database_id,
-            tenant_id,
-            collection,
-            surrogate,
-            ordinal,
-        ) {
+        let written = match sys_from {
+            // The text version ends at the delete's system time.
+            None => {
+                let base = self.bitemporal_ordinal();
+                self.write_synced_text(database_id, tid, collection, surrogate, &[], base)
+            }
+            Some(ordinal) => {
+                self.install_synced_text(database_id, tid, collection, surrogate, &[], ordinal)
+            }
+        };
+        match written {
             Ok(()) => {
                 // Note this committed FTS delete.
                 if let Err(e) = self.note_collection_write(task, collection) {
@@ -179,6 +221,126 @@ impl CoreLoop {
             }
         }
     }
+}
+
+impl CoreLoop {
+    /// Store a live frame's `fields` as the document's newest synced-text
+    /// version and index the collection's declared fields of it, in one
+    /// write transaction. Empty `fields` store a tombstone version and end
+    /// the document's text.
+    ///
+    /// The version stamps `base`, raised one above the row's newest stored
+    /// frame when that frame sits at or above `base`. A document version
+    /// stamps by the same rule (`KeyStamps`). So two frames of one row
+    /// under one Calvin ordinal store two versions, the second newest. A
+    /// frame below a restored head stores above it. The live frame is
+    /// always the row's newest version, so it holds the current text. The
+    /// stamp folds into the shared clock.
+    ///
+    /// The frame indexes exactly what a local write would: the declared
+    /// text fields. A collection that declares none indexes nothing, and
+    /// still stores the frame. A full-text index created later rebuilds the
+    /// document's text history from the stored versions when the document
+    /// store holds no body.
+    pub(in crate::data::executor) fn write_synced_text(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        fields: &[(String, String)],
+        base: i64,
+    ) -> crate::Result<()> {
+        let mut doc = crate::engine::sparse::inverted::IndexDocScope {
+            database_id,
+            tid: nodedb_types::TenantId::new(tid),
+            collection,
+            surrogate,
+            ordinal: base,
+        };
+        let txn = self.sparse.begin_write()?;
+        doc.ordinal = match self.inverted.synced_text_head_in_txn(&txn, doc)? {
+            Some(head) if head.ordinal >= base => head.ordinal.checked_add(1).ok_or_else(|| {
+                crate::Error::NumericValueOutOfRange {
+                    detail: format!(
+                        "synced text version ordinal for '{collection}' cannot advance beyond {}",
+                        head.ordinal
+                    ),
+                }
+            })?,
+            _ => base,
+        };
+        self.inverted.put_synced_text_in_txn(&txn, doc, fields)?;
+        self.replay_frame_text(&txn, doc, fields)?;
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "inverted".into(),
+            detail: format!("synced text commit ({collection}): {e}"),
+        })?;
+        self.observe_bitemporal_ordinal(doc.ordinal);
+        Ok(())
+    }
+
+    /// Store a frame's `fields` as the document's synced-text version at
+    /// its source `ordinal`, as a RESTORE re-issues it. The frame indexes
+    /// its declared fields only when the document store holds no version
+    /// of the row. A row with a stored body takes its text from the body,
+    /// as a text-index rebuild and a snapshot restore read it. A frame
+    /// indexed at an older ordinal than the body would end the body's
+    /// text version before it starts. A frame below the row's newest
+    /// stored frame is only stored: the newer frame holds the current text.
+    pub(in crate::data::executor) fn install_synced_text(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        fields: &[(String, String)],
+        ordinal: i64,
+    ) -> crate::Result<()> {
+        let doc = crate::engine::sparse::inverted::IndexDocScope {
+            database_id,
+            tid: nodedb_types::TenantId::new(tid),
+            collection,
+            surrogate,
+            ordinal,
+        };
+        let bodied = self
+            .sparse
+            .versioned_latest_sys_from(
+                database_id,
+                tid,
+                collection,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )?
+            .is_some();
+        let txn = self.sparse.begin_write()?;
+        // A version below the row's newest stored frame is history only.
+        // The newer frame set the current text, as for a document version.
+        let below = self
+            .inverted
+            .synced_text_head_in_txn(&txn, doc)?
+            .is_some_and(|head| ordinal < head.ordinal);
+        self.inverted.put_synced_text_in_txn(&txn, doc, fields)?;
+        if !bodied && !below {
+            self.replay_frame_text(&txn, doc, fields)?;
+        }
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "inverted".into(),
+            detail: format!("synced text install commit ({collection}): {e}"),
+        })
+    }
+}
+
+/// One sync frame an `FtsIndex` write carries.
+pub(in crate::data::executor) struct SyncedFrame<'a> {
+    /// The collection as the Data Plane stores it.
+    pub collection: &'a str,
+    pub surrogate: Surrogate,
+    /// Every `(field, text)` pair the frame carried.
+    pub fields: &'a [(String, String)],
+    /// The source ordinal of a re-issued frame version. `None` for a live
+    /// frame, which stamps above the row's newest stored frame.
+    pub sys_from: Option<i64>,
 }
 
 #[cfg(test)]

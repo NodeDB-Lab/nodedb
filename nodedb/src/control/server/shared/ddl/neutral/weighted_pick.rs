@@ -45,8 +45,9 @@ pub async fn weighted_pick(
     }
 
     // A string literal is data: the collection name resolves exactly as
-    // written, with no case folding.
-    let collection = unquote(&args[0]);
+    // written, with no case folding. A bare or double-quoted name follows
+    // the SQL identifier rule.
+    let collection = super::kv_atomic::name_arg(&args[0])?;
 
     // Parse named parameters from remaining args.
     let mut weight_col = String::new();

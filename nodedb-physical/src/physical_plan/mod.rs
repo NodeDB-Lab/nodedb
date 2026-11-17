@@ -59,8 +59,8 @@ pub use document::{
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
     MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
     RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TimeseriesSchema,
-    UpdateValue, resolved_sum_surrogate,
+    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TextFieldSet,
+    TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;
@@ -78,7 +78,7 @@ pub use meta_restore::{
     RestoredArrayCells, RestoredEdgeVersion, RestoredIdentity, RestoredKvKey, RestoredNodeLabels,
     RestoredRedo, RestoredRow,
 };
-pub use meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
+pub use meta_restore_keys::{RestoredColumnarKey, RestoredSyncedText, RestoredVectorRow};
 pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
 pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHistory};
 pub use plan::PhysicalPlan;
@@ -90,7 +90,7 @@ pub use routing::plan_contains_cluster_partitioned_leaf;
 pub use set_op::SetOpKind;
 pub use sort_key::SortKeySpec;
 pub use spatial::{SpatialOp, SpatialPredicate};
-pub use text::{ScoreScanBound, ScoreScanOrder, TextOp, TextScoreSpec};
+pub use text::{ScoreScanBound, ScoreScanOrder, TextOp, TextRebuildProgress, TextScoreSpec};
 pub use tiering::{TierRead, TierSegment, TierSource, TieringError, TieringPlan};
 pub use timeseries::{
     AggregateIncarnation, PartitionsAction, RefreshCut, TimeseriesOp, TimeseriesResolve,

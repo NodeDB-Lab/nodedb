@@ -12,6 +12,9 @@ pub(in crate::diag) struct MetadataApplyWedged<'a> {
     pub last_applied_watermark: u64,
     pub entry_kind: &'a str,
     pub error_class: &'a str,
+    /// The catalog objects the entry writes, as `<kind> <name>` labels, such
+    /// as the collection whose Register a core did not acknowledge.
+    pub catalog_objects: &'a [String],
     /// The applier judged this failure deterministic in the entry and the
     /// local state, so re-delivery cannot clear it and the node withdrew from
     /// readiness. `false` means halt-and-retry is still expected to heal.
@@ -35,6 +38,7 @@ impl DomainContext for MetadataApplyWedged<'_> {
             "last_applied_watermark": self.last_applied_watermark,
             "entry_kind": self.entry_kind,
             "error_class": self.error_class,
+            "catalog_objects": self.catalog_objects,
             "permanent": self.permanent,
             "why_fatal": "the apply loop never advances the watermark past an entry it \
                           could not durably apply; a deterministic failure re-fails on \

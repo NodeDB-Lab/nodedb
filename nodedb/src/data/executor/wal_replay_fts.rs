@@ -189,6 +189,7 @@ impl CoreLoop {
                         tenant_id,
                         &payload.collection,
                         surrogate,
+                        payload.sys_from,
                         Some(&prov),
                     );
                     if !self.record_redo_capture(captured) {
@@ -229,12 +230,17 @@ impl CoreLoop {
                 .then(|| self.capture_sync_hwm_undo(Some(&prov)))
                 .flatten();
 
-                let response = self.execute_fts_index_doc(
+                // A frame version a RESTORE re-issues installs at its source
+                // ordinal. A live frame stamps the apply's own ordinal.
+                let response = self.execute_fts_index_doc_at(
                     &task,
                     tenant_id,
-                    &payload.collection,
-                    surrogate,
-                    &payload.fields,
+                    crate::data::executor::handlers::fts_sync::SyncedFrame {
+                        collection: &payload.collection,
+                        surrogate,
+                        fields: &payload.fields,
+                        sys_from: payload.sys_from,
+                    },
                     Some(&prov),
                 );
 
@@ -328,6 +334,7 @@ impl CoreLoop {
                             tenant_id,
                             &payload.collection,
                             surrogate,
+                            payload.sys_from,
                             Some(&prov),
                         ),
                         None => Ok(self
@@ -372,12 +379,13 @@ impl CoreLoop {
                 .then(|| self.capture_sync_hwm_undo(Some(&prov)))
                 .flatten();
 
-                let response = self.execute_fts_delete_doc(
+                let response = self.execute_fts_delete_doc_at(
                     &task,
                     tenant_id,
                     &payload.collection,
                     surrogate,
                     Some(&prov),
+                    payload.sys_from,
                 );
 
                 if response.status != crate::bridge::envelope::Status::Ok {

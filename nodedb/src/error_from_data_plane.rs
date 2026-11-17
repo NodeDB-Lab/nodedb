@@ -261,7 +261,8 @@ pub(crate) fn rejected_constraint_to_public(
 
 /// The public error of a full-text column fault. A field that does not exist
 /// as text is an undefined column (`42703`). An argument that is not a text
-/// column is a type mismatch (class `42`). Shared by the Data-Plane code and
+/// column is a type mismatch (class `42`). An index still building is an
+/// object not ready (class `55`). Shared by the Data-Plane code and
 /// the Control-Plane variant, so both render one message.
 pub(crate) fn text_column_to_public(
     collection: &str,
@@ -272,11 +273,9 @@ pub(crate) fn text_column_to_public(
     let code = match fault {
         TextColumnFault::Undeclared | TextColumnFault::NotIndexed => PublicCode::UNDEFINED_COLUMN,
         TextColumnFault::NotText { .. } | TextColumnFault::NotAColumn => PublicCode::TYPE_MISMATCH,
+        TextColumnFault::IndexBuilding => PublicCode::OBJECT_NOT_READY,
     };
-    NodeDbError::from_wire(
-        code,
-        format!("column \"{column}\" of collection \"{collection}\" {fault}"),
-    )
+    NodeDbError::from_wire(code, fault.describe(collection, column))
 }
 
 /// The message of a refused node-label write. Shared by the public error and

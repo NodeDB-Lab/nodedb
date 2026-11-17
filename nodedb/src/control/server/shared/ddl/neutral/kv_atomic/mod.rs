@@ -19,7 +19,7 @@ pub mod dispatch;
 pub mod handlers;
 
 pub(crate) use dispatch::{
-    KvAtomicDispatch, dispatch_and_respond, error_to_ddl, parse_function_args, single_text_col,
-    split_args, unquote,
+    KvAtomicDispatch, dispatch_and_respond, error_to_ddl, name_arg, parse_function_args,
+    single_text_col, split_args, unquote,
 };
 pub use handlers::{kv_cas, kv_getset, kv_incr, kv_incr_float};

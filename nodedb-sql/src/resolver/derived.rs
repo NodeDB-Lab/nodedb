@@ -59,6 +59,7 @@ pub fn infer_subquery_relation(
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema,
+        text_indexes: None,
     })
 }
 
@@ -80,6 +81,7 @@ pub fn open_subquery_relation(alias: &str) -> CollectionInfo {
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema: true,
+        text_indexes: None,
     }
 }
 
@@ -339,6 +341,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+            text_indexes: None,
         }
     }
 

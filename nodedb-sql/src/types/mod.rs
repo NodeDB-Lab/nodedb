@@ -10,7 +10,7 @@ pub mod filter;
 pub mod plan;
 pub mod query;
 
-pub use collection::{CollectionInfo, ColumnInfo, IndexSpec, IndexState};
+pub use collection::{CollectionInfo, ColumnInfo, IndexSpec, IndexState, TextIndexFields};
 pub use filter::{CompareOp, Filter, FilterExpr};
 pub use plan::ResolvedReturning;
 pub use plan::{

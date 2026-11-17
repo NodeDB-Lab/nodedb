@@ -174,6 +174,7 @@ fn relation_from_schema(name: &str, schema: &OutputSchema) -> CollectionInfo {
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema: true,
+        text_indexes: None,
     }
 }
 

@@ -5,10 +5,13 @@
 //!
 //! The backup holds a schemaless collection with a secondary index and a
 //! unique index, a strict collection, a strict `bitemporal=true` collection
-//! with two versions of one row, and two edges. A fresh server restores it,
-//! then restarts. Before and after the restart every row reads back, the
-//! index lookups answer, the unique index refuses a duplicate, the bitemporal
-//! row keeps both versions, and the edges traverse.
+//! with two versions of one row, two edges, a collection with a search
+//! index, and one whose search index names the 'hindi' analyzer. A fresh
+//! server restores it, then restarts. Before and after the restart every row
+//! reads back, the index lookups answer, the unique index refuses a
+//! duplicate, the bitemporal row keeps both versions, the edges traverse,
+//! `text_match` finds the restored text, and the restored index tokenizes
+//! with its analyzer.
 
 use super::backup_support::{drain_backup, push_restore};
 use crate::harness::TestServer;
@@ -33,6 +36,17 @@ const SETUP: &[&str] = &[
      WITH (engine='document_strict', bitemporal=true)",
     "INSERT INTO rd_ledger (id, value) VALUES ('e1', 'draft')",
     "UPDATE rd_ledger SET value = 'final' WHERE id = 'e1'",
+    "CREATE COLLECTION rd_notes (id STRING PRIMARY KEY, body STRING) \
+     WITH (engine='document_schemaless')",
+    "CREATE SEARCH INDEX rd_notes_body ON rd_notes FIELDS body",
+    "INSERT INTO rd_notes (id, body) VALUES ('n1', 'raft consensus protocol')",
+    "INSERT INTO rd_notes (id, body) VALUES ('n2', 'vector search engine')",
+    // The 'hindi' analyzer keeps the English stop word "the", which the
+    // standard analyzer drops. A match on "the" proves the analyzer.
+    "CREATE COLLECTION rd_hindi (id STRING PRIMARY KEY, body STRING) \
+     WITH (engine='document_schemaless')",
+    "CREATE SEARCH INDEX rd_hindi_body ON rd_hindi FIELDS body ANALYZER 'hindi'",
+    "INSERT INTO rd_hindi (id, body) VALUES ('h1', 'the zebra')",
 ];
 
 async fn column(server: &TestServer, sql: &str) -> Vec<String> {
@@ -105,6 +119,40 @@ async fn assert_restored(server: &TestServer, stage: &str) {
     assert!(
         from_bob.contains("carol"),
         "{stage}: the edge bob -> carol, got {from_bob}"
+    );
+    assert_eq!(
+        column(
+            server,
+            "SELECT id FROM rd_notes WHERE text_match(body, 'consensus')"
+        )
+        .await,
+        vec!["n1"],
+        "{stage}: the restored search index finds the restored row"
+    );
+    assert_eq!(
+        column(
+            server,
+            "SELECT id FROM rd_hindi WHERE text_match(body, 'the')"
+        )
+        .await,
+        vec!["h1"],
+        "{stage}: the restored index tokenizes with its 'hindi' analyzer"
+    );
+    let other_analyzer = server
+        .exec("CREATE SEARCH INDEX rd_hindi_other ON rd_hindi FIELDS body ANALYZER 'english'")
+        .await;
+    assert!(
+        other_analyzer.is_err(),
+        "{stage}: the restored record names 'hindi', so another analyzer is refused"
+    );
+    let indexes = server
+        .query_text("SHOW INDEXES")
+        .await
+        .unwrap_or_else(|e| panic!("SHOW INDEXES: {e}"))
+        .join(" ");
+    assert!(
+        indexes.contains("rd_notes_body"),
+        "{stage}: SHOW INDEXES lists the restored search index, got {indexes}"
     );
 }
 

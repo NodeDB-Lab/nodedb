@@ -9,7 +9,7 @@
 //! |-----------|----------------------------------------------------|
 //! | secondary | `StoredCollection.indexes` entry + sparse-engine index entries, or the KV engine's field index on a key-value collection |
 //! | vector    | `_system.vector_index_params` row + Data Plane index + checkpoint |
-//! | fulltext  | the collection's analyzer / fuzzy binding (per collection) |
+//! | fulltext  | postings the drop's text rebuild replaces; its analyzer and fuzzy default travel on its record |
 //! | spatial   | none beyond the registry + ownership rows           |
 //! | sparse    | none beyond the registry + ownership rows           |
 //! | sorted    | an order-statistic tree on the core holding the collection's rows |
@@ -44,7 +44,11 @@ pub(super) async fn teardown(
     match record.kind {
         IndexKind::Secondary => secondary(state, record, database_id, tenant_id).await,
         IndexKind::Vector => vector(state, record, database_id, tenant_id).await,
-        IndexKind::FullText => fulltext(state, record, database_id, tenant_id).await,
+        // A full-text index's analysis travels on its record. Once the record
+        // is `Dropping` or gone, the collection's next Register derives its
+        // analysis from the records that remain, on every node. The dropped
+        // fields' postings leave in the drop's text rebuild.
+        IndexKind::FullText => Ok(()),
         // A spatial or sparse index declares no durable engine state of its
         // own: `CREATE SPATIAL INDEX` / `CREATE SPARSE INDEX` register the
         // index and bind nothing in the Data Plane, and the R-tree / sparse
@@ -163,45 +167,6 @@ async fn vector(
         record.primary_field(),
     )
     .await
-}
-
-/// Reset the collection's FTS binding once its last full-text index is gone.
-///
-/// `CREATE FULLTEXT INDEX ... ANALYZER '<name>'` binds an analyzer and a
-/// fuzzy default on the collection. Those settings belong to the index that
-/// asked for them, so when no full-text index remains they must go back to
-/// the engine defaults; otherwise a dropped index keeps changing how the
-/// collection's text is tokenized.
-async fn fulltext(
-    state: &SharedState,
-    record: &StoredIndexRecord,
-    database_id: DatabaseId,
-    tenant_id: TenantId,
-) -> Result<(), DdlError> {
-    let remaining = state
-        .credentials
-        .catalog()
-        .list_index_records_for_collection(
-            database_id.as_u64(),
-            tenant_id.as_u64(),
-            &record.collection,
-        )
-        .map_err(|e| DdlError::from_error(&e))?
-        .into_iter()
-        .filter(|r| r.kind == IndexKind::FullText && r.name != record.name)
-        .count();
-    if remaining > 0 {
-        return Ok(());
-    }
-
-    let plan = crate::bridge::envelope::PhysicalPlan::Text(
-        nodedb_physical::physical_plan::TextOp::SetTextConfig {
-            collection: nodedb_types::QualifiedCollection::new(database_id, &record.collection),
-            analyzer_name: Some("standard".to_string()),
-            fuzzy_default: Some(false),
-        },
-    );
-    teardown_now_or_at_commit(state, tenant_id, database_id, &record.collection, plan).await
 }
 
 /// Run one teardown plan now, or at COMMIT inside an explicit transaction:

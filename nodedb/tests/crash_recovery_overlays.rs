@@ -99,6 +99,7 @@ async fn fts_index_survives_kill_9() {
 
     h.exec("CREATE COLLECTION crash_fts WITH (engine='document_schemaless')")
         .await;
+    h.exec("CREATE SEARCH INDEX ON crash_fts (body)").await;
     h.exec("INSERT INTO crash_fts { id: 'd1', body: 'The quick brown fox' }")
         .await;
 

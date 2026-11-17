@@ -14,8 +14,10 @@
 pub enum Tok {
     /// A bare identifier, keyword, or numeric literal.
     Word(String),
-    /// A single- or double-quoted string literal, quotes stripped.
+    /// A single-quoted string literal, quotes stripped.
     Quoted(String),
+    /// A double-quoted identifier, quotes stripped. Its case is kept.
+    QuotedIdent(String),
     LParen,
     RParen,
     Comma,
@@ -41,6 +43,7 @@ impl Tok {
         match self {
             Tok::Word(w) => w.clone(),
             Tok::Quoted(s) => format!("'{s}'"),
+            Tok::QuotedIdent(s) => format!("\"{s}\""),
             Tok::LParen => "(".to_string(),
             Tok::RParen => ")".to_string(),
             Tok::Comma => ",".to_string(),
@@ -84,7 +87,12 @@ pub fn tokenize(sql: &str) -> Option<Vec<Tok>> {
                         break;
                     }
                 }
-                out.push(Tok::Quoted(sql[start..end?].to_string()));
+                let text = sql[start..end?].to_string();
+                out.push(if quote == '"' {
+                    Tok::QuotedIdent(text)
+                } else {
+                    Tok::Quoted(text)
+                });
             }
             _ => {
                 let start = idx;
@@ -159,7 +167,15 @@ mod tests {
 
     #[test]
     fn double_quoted_identifier_unwraps() {
-        assert_eq!(words("(\"Odd Name\")"), ["(", "'Odd Name'", ")"]);
+        assert_eq!(words("(\"Odd Name\")"), ["(", "\"Odd Name\"", ")"]);
+        assert_eq!(
+            tokenize("\"Body\"").unwrap(),
+            [Tok::QuotedIdent("Body".to_string())]
+        );
+        assert_eq!(
+            tokenize("'Body'").unwrap(),
+            [Tok::Quoted("Body".to_string())]
+        );
     }
 
     #[test]

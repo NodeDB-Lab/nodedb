@@ -491,6 +491,7 @@ pub(crate) mod test_support {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+            text_indexes: None,
         };
         TableScope::single(ResolvedTable {
             name: info.name.clone(),
@@ -533,6 +534,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+            text_indexes: None,
         }
     }
 

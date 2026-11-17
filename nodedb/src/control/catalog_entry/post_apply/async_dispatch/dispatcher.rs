@@ -61,6 +61,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::control::catalog_entry::entry::CatalogEntry;
+use crate::control::security::catalog::IndexKind;
 use crate::control::state::SharedState;
 
 use super::apply_outcome::{reclaim_outcome, register_outcome};
@@ -75,11 +76,9 @@ use super::collection;
 /// never a Raft log index. Every write of the reclaimed collection on this
 /// node sits below the next LSN this WAL assigns.
 ///
-/// `Err` means a reclaim failed with no durable retry queued. The caller must
-/// not advance past the entry, so its re-delivery retries the reclaim.
-///
-/// A Register that a Data Plane core did not acknowledge is logged, and the
-/// batch advances.
+/// `Err` means a reclaim failed with no durable retry queued, or a Data Plane
+/// core did not acknowledge a Register. The caller must not advance past the
+/// entry, so its re-delivery runs the effect again.
 ///
 /// The future resolves once every awaited effect completed. A variant with
 /// no awaited effect resolves on its first poll.
@@ -113,53 +112,11 @@ pub async fn run_post_apply_async_side_effects(
                 .await?;
             }
             let registered = collection::put_async(&stored, &shared).await;
-            register_outcome(registered, &stored.name);
+            register_outcome(registered, &stored.name)?;
         }
         CatalogEntry::PutCollectionIfAbsent(stored) => {
-            // Register from the CANONICAL collection read back from the
-            // catalog after apply — never from the carried entry. On the
-            // no-op path (the collection already existed) the carried
-            // `stored` can hold a divergent incoming config; the catalog
-            // holds the authoritative pre-existing one. Post-apply the
-            // collection always exists (created or pre-existing), so the
-            // read-back is always Some; a None here means the redb
-            // write silently failed, so warn and skip rather than register
-            // a divergent config.
-            let canonical = shared
-                .credentials
-                .catalog()
-                .get_collection(stored.database_id, stored.tenant_id, &stored.name)
-                .ok()
-                .flatten();
-            match canonical {
-                Some(canonical) => {
-                    // AWAITED: Register completes before the applied-index
-                    // watcher bumps, so any later scan on this node finds the
-                    // collection in doc_configs.
-                    //
-                    // The canonical row carries the entry's clock only when
-                    // this entry created it: a new incarnation, cleared first.
-                    if canonical.modification_hlc == stored.modification_hlc {
-                        collection::clear_before_recreate(
-                            &shared,
-                            canonical.database_id.as_u64(),
-                            canonical.tenant_id,
-                            &canonical.name,
-                        )
-                        .await?;
-                    }
-                    let registered = collection::put_async(&canonical, &shared).await;
-                    register_outcome(registered, &canonical.name);
-                }
-                None => {
-                    tracing::warn!(
-                        collection = %stored.name,
-                        tenant = stored.tenant_id,
-                        "PutCollectionIfAbsent post-apply: canonical collection not found in \
-                         catalog after apply; skipping Data Plane register"
-                    );
-                }
-            }
+            // AWAITED: registers from the catalog row, never the carried one.
+            collection::put_if_absent_async(&stored, &shared).await?;
         }
         CatalogEntry::PurgeCollection {
             database_id,
@@ -284,6 +241,20 @@ pub async fn run_post_apply_async_side_effects(
         } => {
             super::synonym_group::delete_async(database_id, tenant_id, name, &shared).await;
         }
+        // AWAITED: a full-text record changes the fields a write indexes, so
+        // every core holds the new list before the applied-index watcher bumps.
+        CatalogEntry::PutIndexRecord(record) if record.kind == IndexKind::FullText => {
+            let r = &*record;
+            super::text_index::reregister(&shared, r.database_id, r.tenant_id, &r.collection)
+                .await?;
+        }
+        CatalogEntry::DeleteIndexRecord {
+            database_id,
+            tenant_id,
+            collection,
+            kind: IndexKind::FullText,
+            ..
+        } => super::text_index::reregister(&shared, database_id, tenant_id, &collection).await?,
         // AWAITED: every core must hold the new set before the applied-index
         // watcher bumps. A statement that runs first refuses the CRS it just
         // defined, or still resolves the one it just dropped. A core that
@@ -317,7 +288,7 @@ pub async fn run_post_apply_async_side_effects(
             target_descriptor, ..
         } => {
             let registered = collection::clone_shadows_async(target_descriptor.id, &shared).await;
-            register_outcome(registered, &target_descriptor.name);
+            register_outcome(registered, &target_descriptor.name)?;
             // AWAITED: the clone writes the source's vector index parameter
             // rows straight into the catalog, so no `PutVectorIndexParams`
             // entry installs them. They reach every core before a copy into
@@ -403,6 +374,7 @@ pub async fn run_post_apply_async_side_effects(
         // Scope grants: the store install happens in `sync.rs`.
         | CatalogEntry::PutScopeGrant(_)
         | CatalogEntry::DeleteScopeGrant { .. }
+        // Full-text records have their own branches above.
         | CatalogEntry::PutIndexRecord(_)
         | CatalogEntry::DeleteIndexRecord { .. }
         | CatalogEntry::PutOwner(_)

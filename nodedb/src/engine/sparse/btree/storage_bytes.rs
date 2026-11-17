@@ -64,8 +64,8 @@ mod tests {
     use crate::engine::sparse::btree_versioned::index::INDEXES_VERSIONED;
     use crate::engine::sparse::btree_versioned::{VersionedIndexEntry, VersionedPut};
     use crate::engine::sparse::fts_redb::tables::{
-        DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, POSTINGS, SEGMENTS, TEXT_ENDED, TEXT_LIVE_BY_FROM,
-        TEXT_LIVE_FROM,
+        DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, POSTINGS, SEGMENTS, SYNCED_TEXT, TEXT_ENDED,
+        TEXT_LIVE_BY_FROM, TEXT_LIVE_FROM,
     };
     use crate::engine::sparse::inverted::InvertedIndex;
     use crate::engine::sparse::inverted::test_support::body;
@@ -110,6 +110,15 @@ mod tests {
             let (k, v) = entry.unwrap();
             let (d, t, c, _) = k.value();
             add(&mut totals, (d, t, c), 16 + c.len() + 4 + v.value().len());
+        }
+        for entry in txn.open_table(SYNCED_TEXT).unwrap().iter().unwrap() {
+            let (k, v) = entry.unwrap();
+            let (d, t, c, _, _) = k.value();
+            add(
+                &mut totals,
+                (d, t, c),
+                16 + c.len() + 4 + 8 + v.value().len(),
+            );
         }
         for entry in txn.open_table(SEGMENTS).unwrap().iter().unwrap() {
             let (k, v) = entry.unwrap();
@@ -262,6 +271,30 @@ mod tests {
         inverted.undo_text_version(0, t, "docs", s, 20).unwrap();
         assert_exact(&engine);
         inverted.remove_document_at(0, t, "docs", s, 30).unwrap();
+        assert_exact(&engine);
+        // Stored sync-frame versions, a tombstone among them, and a
+        // re-applied frame that replaces its own row.
+        let frame = |ordinal: i64, text: &str| {
+            let fields: Vec<(String, String)> = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![("body".to_string(), text.to_string())]
+            };
+            let doc = crate::engine::sparse::inverted::IndexDocScope {
+                database_id: 0,
+                tid: t,
+                collection: "docs",
+                surrogate: Surrogate::new(9),
+                ordinal,
+            };
+            let txn = engine.begin_write().unwrap();
+            inverted.put_synced_text_in_txn(&txn, doc, &fields).unwrap();
+            txn.commit().unwrap();
+        };
+        frame(12, "frame one");
+        frame(22, "frame two words");
+        frame(22, "frame two");
+        frame(26, "");
         assert_exact(&engine);
         inverted.purge_text_versions_below(25).unwrap();
         assert_exact(&engine);

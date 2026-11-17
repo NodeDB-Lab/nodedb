@@ -5,7 +5,9 @@
 use super::*;
 use crate::bridge::envelope::{Admission, Status};
 use crate::control::server::wal_dispatch::encode_text_op_record;
-use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+use crate::data::executor::core_loop::tests::{
+    declare_text_fields, make_core_with_dir, make_default_task,
+};
 use crate::types::{TenantId, VShardId};
 use crate::wal::manager::{NO_APPLY_KEY, WalManager};
 use nodedb_types::QualifiedCollection;
@@ -48,6 +50,20 @@ fn append(wal: &WalManager, op: &TextOp) -> crate::types::Lsn {
         .unwrap()
 }
 
+/// Open a core at `path` with `articles.body` declared, as the boot seed
+/// declares the catalog's text fields before replay.
+fn open_core(
+    path: &std::path::Path,
+) -> (
+    CoreLoop,
+    nodedb_bridge::buffer::Producer<crate::bridge::dispatch::BridgeRequest>,
+    nodedb_bridge::buffer::Consumer<crate::bridge::dispatch::BridgeResponse>,
+) {
+    let (mut core, requests, responses) = make_core_with_dir(path);
+    declare_text_fields(&mut core, 1, COLLECTION, &["body"]);
+    (core, requests, responses)
+}
+
 fn count(core: &CoreLoop) -> u32 {
     core.inverted
         .corpus_stats(0, TenantId::new(1), COLLECTION)
@@ -69,7 +85,7 @@ fn an_uncancelled_sync_refusal_and_next_index_survive_two_reopens() {
         let wal = WalManager::open_for_testing(&wal_path).unwrap();
         let records = wal.replay().unwrap();
         assert_eq!(records.len(), 1, "crash precedes abort and HWM markers");
-        let (mut core, _requests, _responses) = make_core_with_dir(&core_path);
+        let (mut core, _requests, _responses) = open_core(&core_path);
         core.replay_all_wal(&records, 1, &TombstoneSet::new())
             .unwrap();
         assert_eq!(core.sync_hwm_value(PRODUCER, STREAM), 1);
@@ -92,7 +108,7 @@ fn an_uncancelled_sync_refusal_and_next_index_survive_two_reopens() {
         let wal = WalManager::open_for_testing(&wal_path).unwrap();
         let records = wal.replay().unwrap();
         assert_eq!(records.len(), 2);
-        let (mut core, _requests, _responses) = make_core_with_dir(&core_path);
+        let (mut core, _requests, _responses) = open_core(&core_path);
         core.replay_all_wal(&records, 1, &TombstoneSet::new())
             .unwrap();
         assert_eq!(core.sync_hwm_value(PRODUCER, STREAM), 2);
@@ -112,7 +128,7 @@ fn an_unbound_local_index_remains_corrupt_on_reopen() {
         }
         let wal = WalManager::open_for_testing(&wal_path).unwrap();
         let records = wal.replay().unwrap();
-        let (mut core, _requests, _responses) = make_core_with_dir(&directory.path().join("core"));
+        let (mut core, _requests, _responses) = open_core(&directory.path().join("core"));
         assert!(
             core.replay_all_wal(&records, 1, &TombstoneSet::new())
                 .is_err()

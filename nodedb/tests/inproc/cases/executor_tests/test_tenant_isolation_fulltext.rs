@@ -13,6 +13,16 @@ use super::helpers::*;
 #[test]
 fn fulltext_search_isolated() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
+    for tenant in [TENANT_A, TENANT_B] {
+        register_text_fields(
+            &mut core,
+            &mut tx,
+            &mut rx,
+            tenant,
+            "articles",
+            &["body", "title"],
+        );
+    }
 
     // Tenant A inserts documents with searchable text.
     let docs = [
@@ -70,6 +80,15 @@ fn fulltext_search_isolated() {
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
+    let json_a = payload_json(&resp_a.payload);
+    let hits_a = serde_json::from_str::<serde_json::Value>(&json_a)
+        .ok()
+        .and_then(|v| v.as_array().map(Vec::len))
+        .unwrap_or(0);
+    assert_eq!(
+        hits_a, 2,
+        "Tenant A finds its two quantum documents: {json_a}"
+    );
 
     // Tenant B searches the same collection — must get zero results.
     let resp_b = send_raw_as_tenant(

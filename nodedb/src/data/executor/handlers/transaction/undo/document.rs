@@ -58,31 +58,34 @@ impl CoreLoop {
                 // started leaves, and the version it ended is live again.
                 // FATAL on failure — a rollback that leaves stale FTS postings
                 // behind is the same silent-partial-success corruption the
-                // primary-store restore guards against.
-                self.inverted
-                    .undo_text_version(
-                        database_id,
-                        crate::types::TenantId::new(tid),
-                        &collection,
-                        surrogate,
-                        version_sys_from,
-                    )
-                    .map_err(|e| {
-                        let err = UndoError::failed(
-                            entry_index,
-                            format!("fts posting removal on {collection}/{document_id}"),
-                            e,
-                        );
-                        error!(
-                            core = self.core_id,
-                            entry_index,
-                            collection = %collection,
-                            document_id = %document_id,
-                            error = %err,
-                            "transaction undo: FTS posting removal failed; shard state unknown"
-                        );
-                        err
-                    })?;
+                // primary-store restore guards against. A collection with no
+                // declared text field and no open rebuild holds no text.
+                if self.removal_touches_text(database_id, tid, &collection) {
+                    self.inverted
+                        .undo_text_version(
+                            database_id,
+                            crate::types::TenantId::new(tid),
+                            &collection,
+                            surrogate,
+                            version_sys_from,
+                        )
+                        .map_err(|e| {
+                            let err = UndoError::failed(
+                                entry_index,
+                                format!("fts posting removal on {collection}/{document_id}"),
+                                e,
+                            );
+                            error!(
+                                core = self.core_id,
+                                entry_index,
+                                collection = %collection,
+                                document_id = %document_id,
+                                error = %err,
+                                "transaction undo: FTS posting removal failed; shard state unknown"
+                            );
+                            err
+                        })?;
+                }
                 // Evict any cached copy of the reversed document. Always safe:
                 // a stale hit would otherwise resurrect a rolled-back put; the
                 // worst case here is a cache miss.

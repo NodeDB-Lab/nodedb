@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use crate::data::executor::handlers::control::reindex::{PendingReindex, ReindexWaiter};
+use crate::data::executor::handlers::text_rebuild::ensure::TextRebuildRecord;
 use crate::data::executor::handlers::timeseries::cagg_cut::CaggRefreshWaiter;
 use crate::data::executor::handlers::timeseries::read_aggregate::CaggReadWaiter;
 
@@ -42,6 +43,10 @@ pub(in crate::data::executor) struct MaintenanceState {
     /// tick answers each one when they have, or at its deadline.
     pub(in crate::data::executor) reindex_waiters: Vec<ReindexWaiter>,
 
+    /// The latest `TextOp::RebuildIndex` rebuild of each collection: one
+    /// record per collection a full-text index DDL rebuilt on this core.
+    pub(in crate::data::executor) text_rebuilds: Vec<TextRebuildRecord>,
+
     /// `REFRESH CONTINUOUS AGGREGATE` requests waiting for their cut to
     /// fold. The tick answers each one when it has, or at its deadline.
     pub(in crate::data::executor) cagg_refresh_waiters: Vec<CaggRefreshWaiter>,
@@ -70,6 +75,7 @@ impl MaintenanceState {
             maintenance_budget: None,
             pending_reindex: Vec::new(),
             reindex_waiters: Vec::new(),
+            text_rebuilds: Vec::new(),
             cagg_refresh_waiters: Vec::new(),
             cagg_read_waiters: Vec::new(),
             version_purge: super::version_purge::VersionPurgeState::new(),

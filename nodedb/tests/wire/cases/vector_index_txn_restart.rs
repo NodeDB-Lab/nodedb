@@ -290,6 +290,9 @@ async fn txn_fts_insert_survives_restart() {
     srv.exec("CREATE COLLECTION fts_docs WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_docs (body)")
+        .await
+        .unwrap();
 
     srv.exec("BEGIN").await.unwrap();
     srv.exec("INSERT INTO fts_docs (id, body) VALUES ('e1', 'an elephant never forgets')")

@@ -30,6 +30,11 @@ impl CoreLoop {
         old_value: &[u8],
         delete_ordinal: i64,
     ) -> Result<(), UndoError> {
+        // A collection with no declared text field and no open rebuild
+        // holds no text to restore.
+        if !self.removal_touches_text(ctx.database_id, ctx.tid, ctx.collection) {
+            return Ok(());
+        }
         let restored = self
             .inverted
             .undo_text_version(
@@ -81,12 +86,7 @@ impl CoreLoop {
             collection,
             document_id,
         } = ctx;
-        let config_key = (
-            crate::types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tid),
-            collection.to_string(),
-        );
-        let Some(config) = self.doc_configs.get(&config_key) else {
+        let Some(config) = self.doc_config(database_id, tid, collection) else {
             // No config → cannot decode a strict tuple and no index paths to
             // reconstruct; the forward cascade could not have indexed text it
             // could not decode either, so there is nothing to restore.
@@ -104,7 +104,9 @@ impl CoreLoop {
                     e,
                 )
             })?;
-        let text = extract_fts_fields(&doc);
+        // The restored row indexes exactly the declared fields, as the
+        // forward PUT did. No declared field means no text to restore.
+        let text = extract_fts_fields(&doc, config.text_fields.indexed());
         if text.is_empty() {
             return Ok(());
         }
@@ -169,9 +171,13 @@ mod tests {
             ColumnDef::nullable("body", ColumnType::String),
         ])
         .unwrap();
+        let mut config =
+            CollectionConfig::new(COLL).with_storage_mode(StorageMode::Strict { schema });
+        config.text_fields =
+            nodedb_physical::physical_plan::TextFieldSet::all_readable(vec!["body".to_string()]);
         core.doc_configs.insert(
             (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
-            CollectionConfig::new(COLL).with_storage_mode(StorageMode::Strict { schema }),
+            config,
         );
     }
 

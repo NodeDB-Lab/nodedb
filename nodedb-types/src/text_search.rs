@@ -104,10 +104,15 @@ impl Default for TextSearchParams {
     }
 }
 
+/// The column name a full-text fault carries for a whole-document read:
+/// `text_match(*, q)` and every read that names no field.
+pub const WHOLE_DOCUMENT: &str = "*";
+
 /// Why a column cannot serve a full-text search.
 ///
 /// Carried by the planner error, the Data-Plane error code, and the server
-/// error, so each surface renders the same SQLSTATE through [`Self::sqlstate`].
+/// error, so each surface renders the same SQLSTATE through [`Self::sqlstate`]
+/// and the same message through [`Self::describe`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum TextColumnFault {
     /// The strict schema declares no column of that name.
@@ -119,27 +124,90 @@ pub enum TextColumnFault {
     /// The argument is an expression or literal, not a column reference.
     #[error("is not a column reference; name a text column or use *")]
     NotAColumn,
-    /// No document of the collection holds text under that field, while
-    /// other fields hold text.
-    #[error("holds no indexed text in any document")]
+    /// No ready full-text index covers the field. For a whole-document
+    /// read, the collection declares no ready full-text index at all.
+    #[error("has no full-text index")]
     NotIndexed,
+    /// The full-text index that covers the field is still building, and no
+    /// ready index serves the read.
+    #[error("has a full-text index that is still building")]
+    IndexBuilding,
 }
 
 impl TextColumnFault {
     /// SQLSTATE of the fault: `42703` (undefined_column) for a column that
-    /// does not exist as text, `42804` (datatype_mismatch) for an argument
-    /// that is not a text column.
+    /// does not exist as indexed text, `42804` (datatype_mismatch) for an
+    /// argument that is not a text column, `55000`
+    /// (object_not_in_prerequisite_state) for an index still building.
     pub fn sqlstate(&self) -> &'static str {
         match self {
             Self::Undeclared | Self::NotIndexed => crate::error::sqlstate::UNDEFINED_COLUMN,
             Self::NotText { .. } | Self::NotAColumn => crate::error::sqlstate::DATATYPE_MISMATCH,
+            Self::IndexBuilding => crate::error::sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
         }
+    }
+
+    /// The message of the fault on `column` of `collection`. A `column` of
+    /// [`WHOLE_DOCUMENT`] names the collection alone. A missing index names
+    /// the statement that declares one.
+    pub fn describe(&self, collection: &str, column: &str) -> String {
+        let subject = if column == WHOLE_DOCUMENT {
+            format!("collection \"{collection}\"")
+        } else {
+            format!("column \"{column}\" of collection \"{collection}\"")
+        };
+        match self {
+            Self::NotIndexed => {
+                let fields = if column == WHOLE_DOCUMENT {
+                    "<field>".to_owned()
+                } else {
+                    sql_identifier(column)
+                };
+                format!(
+                    "{subject} {self}; run CREATE SEARCH INDEX ON {} ({fields})",
+                    sql_identifier(collection)
+                )
+            }
+            Self::IndexBuilding => {
+                format!("{subject} {self}; retry the read after the build completes")
+            }
+            Self::Undeclared | Self::NotText { .. } | Self::NotAColumn => {
+                format!("{subject} {self}")
+            }
+        }
+    }
+}
+
+/// `name` spelled so SQL resolves it back to `name`.
+///
+/// An unquoted identifier lowercases, so a name with any other character
+/// form is written in double quotes. The hint statement then declares the
+/// field the read named.
+fn sql_identifier(name: &str) -> String {
+    let mut chars = name.chars();
+    let bare = chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_lowercase())
+        && chars.all(|c| c == '_' || c == '$' || c.is_ascii_lowercase() || c.is_ascii_digit());
+    if bare {
+        name.to_owned()
+    } else {
+        format!("\"{name}\"")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_index_hint_quotes_a_case_sensitive_name() {
+        assert_eq!(
+            TextColumnFault::NotIndexed.describe("Notes", "Body"),
+            "column \"Body\" of collection \"Notes\" has no full-text index; \
+             run CREATE SEARCH INDEX ON \"Notes\" (\"Body\")"
+        );
+    }
 
     #[test]
     fn query_mode_sql_spelling_round_trips() {
@@ -169,5 +237,29 @@ mod tests {
         };
         assert_eq!(not_text.sqlstate(), "42804");
         assert_eq!(not_text.to_string(), "has type INT, not text");
+        assert_eq!(TextColumnFault::IndexBuilding.sqlstate(), "55000");
+    }
+
+    #[test]
+    fn a_missing_index_names_the_create_statement() {
+        assert_eq!(
+            TextColumnFault::NotIndexed.describe("articles", "title"),
+            "column \"title\" of collection \"articles\" has no full-text index; \
+             run CREATE SEARCH INDEX ON articles (title)"
+        );
+        assert_eq!(
+            TextColumnFault::NotIndexed.describe("articles", WHOLE_DOCUMENT),
+            "collection \"articles\" has no full-text index; \
+             run CREATE SEARCH INDEX ON articles (<field>)"
+        );
+    }
+
+    #[test]
+    fn a_building_index_says_it_is_still_building() {
+        assert_eq!(
+            TextColumnFault::IndexBuilding.describe("articles", "title"),
+            "column \"title\" of collection \"articles\" has a full-text index that is \
+             still building; retry the read after the build completes"
+        );
     }
 }

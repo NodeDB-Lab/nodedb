@@ -16,8 +16,9 @@ use super::helpers::*;
 #[test]
 fn document_indexes_consistent_after_simulated_crash() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
+    register_text_fields(&mut core, &mut tx, &mut rx, 1, "articles", &["title"]);
 
-    // Insert documents — auto-indexes text fields in inverted index.
+    // Insert documents — each indexes its declared `title` text.
     send_ok(
         &mut core,
         &mut tx,

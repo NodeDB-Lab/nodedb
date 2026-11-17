@@ -14,6 +14,8 @@
 //! │producer_id u64│ epoch u64│stream_id u64│  seq u64 │ name_len u32 │ collection   │ id_len u32 + id... │
 //! └──────────────┴──────────┴───────────┴──────────┴──────────────┴──────────────┴────────────────────┘
 //! ```
+//! FtsIndex and FtsDelete put a system-time field right after the
+//! provenance: a presence tag `u8`, then `sys_from i64` when the tag is `1`.
 //! FtsIndex additionally carries `field_count u32` followed by
 //! `field_len u32 + field bytes + text_len u32 + text bytes` per field.
 //! SpatialPut additionally carries `field_len u32 + field bytes + geometry_len u32 + geometry bytes`.
@@ -122,6 +124,32 @@ fn read_opt_utf8_field(buf: &[u8], offset: usize) -> Result<(Option<String>, usi
     }
 }
 
+fn push_opt_i64(buf: &mut Vec<u8>, v: Option<i64>) {
+    match v {
+        None => buf.push(FIELD_ABSENT),
+        Some(v) => {
+            buf.push(FIELD_PRESENT);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
+fn read_opt_i64(buf: &[u8], offset: usize) -> Result<(Option<i64>, usize)> {
+    match buf.get(offset).copied() {
+        Some(FIELD_ABSENT) => Ok((None, offset + 1)),
+        Some(FIELD_PRESENT) => {
+            let raw = read_u64_le(buf, offset + 1)?;
+            Ok((Some(i64::from_le_bytes(raw.to_le_bytes())), offset + 9))
+        }
+        Some(tag) => Err(WalError::InvalidPayload {
+            detail: format!("optional i64 at offset {offset} has unknown presence tag {tag}"),
+        }),
+        None => Err(WalError::InvalidPayload {
+            detail: format!("truncated at offset {offset}, need a presence tag"),
+        }),
+    }
+}
+
 fn push_bytes_field(buf: &mut Vec<u8>, data: &[u8]) -> Result<()> {
     if data.len() > u32::MAX as usize {
         return Err(WalError::InvalidPayload {
@@ -176,6 +204,10 @@ pub struct FtsIndexPayload {
     pub doc_id: String,
     /// `(field, text)` per top-level string field.
     pub fields: Vec<(String, String)>,
+    /// The system-time ordinal the frame version installs at. `None` for a
+    /// live frame: its apply stamps the write's own ordinal. `Some` for a
+    /// stored frame version a RESTORE re-issues at its source ordinal.
+    pub sys_from: Option<i64>,
 }
 
 /// Smallest encoding of one `(field, text)` pair: two empty length-prefixed
@@ -183,6 +215,7 @@ pub struct FtsIndexPayload {
 const MIN_FIELD_PAIR_BYTES: usize = 8;
 
 impl FtsIndexPayload {
+    /// A live frame: its apply stamps the write's own ordinal.
     pub fn new(
         provenance: SyncProvenance,
         collection: impl Into<String>,
@@ -194,12 +227,20 @@ impl FtsIndexPayload {
             collection: collection.into(),
             doc_id: doc_id.into(),
             fields,
+            sys_from: None,
         }
+    }
+
+    /// The frame version installed at system-time ordinal `sys_from`.
+    pub fn at_sys_from(mut self, sys_from: i64) -> Self {
+        self.sys_from = Some(sys_from);
+        self
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         push_provenance(&mut buf, &self.provenance);
+        push_opt_i64(&mut buf, self.sys_from);
         push_str_field(&mut buf, &self.collection)?;
         push_str_field(&mut buf, &self.doc_id)?;
         let count = u32::try_from(self.fields.len()).map_err(|_| WalError::InvalidPayload {
@@ -214,7 +255,8 @@ impl FtsIndexPayload {
     }
 
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
-        let (provenance, mut off) = read_provenance(buf)?;
+        let (provenance, off) = read_provenance(buf)?;
+        let (sys_from, mut off) = read_opt_i64(buf, off)?;
         let (collection, next) = read_utf8_field(buf, off)?;
         off = next;
         let (doc_id, next) = read_utf8_field(buf, off)?;
@@ -248,6 +290,7 @@ impl FtsIndexPayload {
             collection,
             doc_id,
             fields,
+            sys_from,
         })
     }
 }
@@ -262,9 +305,15 @@ pub struct FtsDeletePayload {
     /// The deleted document's identifier. `None` when the key's home binds
     /// no row: the delete removes nothing and still commits its provenance.
     pub doc_id: Option<String>,
+    /// The system-time ordinal the tombstone version installs at. `None`
+    /// for a live delete: its apply stamps the write's own ordinal. `Some`
+    /// for a stored tombstone version a RESTORE re-issues at its source
+    /// ordinal.
+    pub sys_from: Option<i64>,
 }
 
 impl FtsDeletePayload {
+    /// A live delete: its apply stamps the write's own ordinal.
     pub fn new(
         provenance: SyncProvenance,
         collection: impl Into<String>,
@@ -274,19 +323,28 @@ impl FtsDeletePayload {
             provenance,
             collection: collection.into(),
             doc_id,
+            sys_from: None,
         }
+    }
+
+    /// The tombstone version installed at system-time ordinal `sys_from`.
+    pub fn at_sys_from(mut self, sys_from: i64) -> Self {
+        self.sys_from = Some(sys_from);
+        self
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         push_provenance(&mut buf, &self.provenance);
+        push_opt_i64(&mut buf, self.sys_from);
         push_str_field(&mut buf, &self.collection)?;
         push_opt_str_field(&mut buf, self.doc_id.as_deref())?;
         Ok(buf)
     }
 
     pub fn from_bytes(buf: &[u8]) -> Result<Self> {
-        let (provenance, mut off) = read_provenance(buf)?;
+        let (provenance, off) = read_provenance(buf)?;
+        let (sys_from, mut off) = read_opt_i64(buf, off)?;
         let (collection, next) = read_utf8_field(buf, off)?;
         off = next;
         let (doc_id, _) = read_opt_utf8_field(buf, off)?;
@@ -294,6 +352,7 @@ impl FtsDeletePayload {
             provenance,
             collection,
             doc_id,
+            sys_from,
         })
     }
 }
@@ -451,6 +510,26 @@ mod tests {
         assert_eq!(
             FtsIndexPayload::from_bytes(&p.to_bytes().unwrap()).unwrap(),
             p
+        );
+    }
+
+    /// A stored frame version and a stored tombstone keep their ordinal.
+    #[test]
+    fn fts_versions_at_a_sys_from_roundtrip() {
+        let index = FtsIndexPayload::new(prov(1, 2, 3, 4), "c", "d", pairs(&[("body", "x")]))
+            .at_sys_from(-17);
+        let decoded = FtsIndexPayload::from_bytes(&index.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.sys_from, Some(-17));
+        assert_eq!(decoded, index);
+
+        let delete =
+            FtsDeletePayload::new(prov(1, 2, 3, 4), "c", Some("d".to_string())).at_sys_from(42);
+        let decoded = FtsDeletePayload::from_bytes(&delete.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.sys_from, Some(42));
+        assert_eq!(decoded, delete);
+        assert_eq!(
+            FtsDeletePayload::new(prov(0, 0, 0, 0), "c", None).sys_from,
+            None
         );
     }
 

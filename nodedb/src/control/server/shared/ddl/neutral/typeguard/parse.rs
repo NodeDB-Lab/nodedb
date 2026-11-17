@@ -11,6 +11,7 @@ use nodedb_sql::parser::type_expr::parse_type_expr;
 use nodedb_types::TypeGuardFieldDef;
 
 use super::super::super::result::DdlError;
+use super::super::super::sql_parse::resolve_name_token;
 use super::injected_expr::validate_injected_expr;
 
 /// Extract collection name from `... TYPEGUARD [IF EXISTS] ON <collection> ...`.
@@ -22,7 +23,7 @@ pub(super) fn extract_collection_name(sql: &str) -> Result<String, DdlError> {
     let end = after_on
         .find(|c: char| c.is_whitespace() || c == '(')
         .unwrap_or(after_on.len());
-    let name = after_on[..end].trim().to_lowercase();
+    let name = resolve_name_token(after_on[..end].trim());
     if name.is_empty() {
         return Err(err("42601", "missing collection name after ON"));
     }
@@ -100,10 +101,11 @@ pub(super) fn parse_single_field(s: &str) -> Result<TypeGuardFieldDef, DdlError>
 
     // Field name: first token (may contain dots for nested paths).
     let mut tokens = s.splitn(2, |c: char| c.is_whitespace());
-    let field = tokens
-        .next()
-        .ok_or_else(|| err("42601", "missing field name"))?
-        .to_lowercase();
+    let field = resolve_name_token(
+        tokens
+            .next()
+            .ok_or_else(|| err("42601", "missing field name"))?,
+    );
     let rest = tokens.next().unwrap_or("").trim();
 
     if rest.is_empty() {

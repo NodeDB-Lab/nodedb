@@ -209,7 +209,8 @@ fn text_read_key(op: &TextOp) -> ReadKey {
         | TextOp::FtsIndexDoc { .. }
         | TextOp::FtsDeleteDoc { .. }
         | TextOp::HybridSearchTriple { .. }
-        | TextOp::SetTextConfig { .. } => ReadKey::Predicate,
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => ReadKey::Predicate,
     }
 }
 

@@ -386,6 +386,7 @@ mod tests {
             },
             TextColumnFault::NotAColumn,
             TextColumnFault::NotIndexed,
+            TextColumnFault::IndexBuilding,
         ] {
             let original = ErrorCode::TextColumn {
                 collection: "docs".into(),

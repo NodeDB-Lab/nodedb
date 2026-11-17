@@ -55,6 +55,11 @@ pub(crate) fn ended_key_len(collection: &str, field: &str) -> usize {
     SCOPE_BYTES + collection.len() + field.len() + 2 * ORDINAL_BYTES + SURROGATE_BYTES
 }
 
+/// Key bytes of a `text.synced` key.
+pub(crate) fn synced_key_len(collection: &str) -> usize {
+    SCOPE_BYTES + collection.len() + SURROGATE_BYTES + ORDINAL_BYTES
+}
+
 /// Insert `value` under `key` into a `text.doc_lengths`-shaped table, and
 /// record the bytes it adds in `delta`.
 pub(crate) fn put_doc_row(
@@ -157,5 +162,6 @@ mod tests {
         assert_eq!(live_from_row_len("docs", ""), 16 + 4 + 4 + 8);
         assert_eq!(live_by_from_row_len("docs", ""), 16 + 4 + 8 + 4 + 1);
         assert_eq!(ended_key_len("docs", ""), 16 + 4 + 16 + 4);
+        assert_eq!(synced_key_len("docs"), 16 + 4 + 4 + 8);
     }
 }

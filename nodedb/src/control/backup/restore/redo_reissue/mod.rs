@@ -13,8 +13,10 @@ mod kv;
 mod labels;
 mod prepared;
 mod reissue;
+mod row_keys;
 mod sidecars;
 mod sub_record;
+mod synced_text;
 mod timeseries;
 mod units;
 mod vectors;
@@ -26,6 +28,7 @@ pub(in crate::control::backup::restore) use documents::{
 };
 pub(in crate::control::backup::restore) use kv::reissue_kv_tables;
 pub(in crate::control::backup::restore) use reissue::{RestoredRows, reissue_rows_and_edges};
+pub(in crate::control::backup::restore) use synced_text::reissue_synced_text;
 pub(in crate::control::backup::restore) use timeseries::{
     BackedUpTimeseries, reissue_timeseries_rows,
 };

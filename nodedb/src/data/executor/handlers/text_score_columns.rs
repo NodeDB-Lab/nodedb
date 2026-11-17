@@ -9,8 +9,7 @@
 //!
 //! A row scores the BM25 value of its match. A row the index holds that the
 //! query does not match scores `0.0`. A row the index does not hold (no text
-//! in the field, or no text at all for the whole-document index) scores
-//! `null`. The issuing transaction's staged rows are scored from their
+//! in the field) scores `null`. The issuing transaction's staged rows are scored from their
 //! staged text. The AND-mode fallback of a column is decided over the rows
 //! the reading query admits, the same rows its search ranks.
 
@@ -25,11 +24,10 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::sparse::inverted::TextDocScorer;
 use crate::types::TenantId;
 
-/// One score column: its output alias and its scorer. `None` scorer: the
-/// collection holds no text, so every row scores `null`.
+/// One score column: its output alias and its scorer.
 struct ScoreColumn<'a> {
     alias: &'a str,
-    scorer: Option<TextDocScorer<'a>>,
+    scorer: TextDocScorer<'a>,
 }
 
 /// The score columns of one read.
@@ -46,10 +44,7 @@ impl ScoreColumns<'_> {
         rows: &mut [DocumentRow],
     ) -> crate::Result<()> {
         for column in &self.columns {
-            let scores = match &column.scorer {
-                Some(scorer) => scorer.score(surrogates)?,
-                None => vec![DocScore::Absent; surrogates.len()],
-            };
+            let scores = column.scorer.score(surrogates)?;
             for (row, score) in rows.iter_mut().zip(scores) {
                 if let serde_json::Value::Object(map) = &mut row.data {
                     map.insert(column.alias.to_string(), score_value(score));
@@ -89,24 +84,20 @@ impl CoreLoop {
         let tenant = TenantId::new(tid);
         let mut columns = Vec::with_capacity(specs.len());
         for spec in specs {
-            let scorer = match self.text_index(task, tid, collection, spec.field.as_deref())? {
-                None => None,
-                Some(index) => {
-                    let staged = self.text_staged_view(task, tid, index, cut)?;
-                    Some(self.inverted.doc_scorer(
-                        database_id,
-                        tenant,
-                        index,
-                        TextQuery {
-                            query: &spec.query,
-                            fuzzy_enabled: spec.fuzzy,
-                            mode: QueryMode::from(spec.mode),
-                        },
-                        eligible,
-                        staged,
-                    )?)
-                }
-            };
+            let index = self.text_index(task, tid, collection, spec.field.as_deref())?;
+            let staged = self.text_staged_view(task, tid, index, cut)?;
+            let scorer = self.inverted.doc_scorer(
+                database_id,
+                tenant,
+                index,
+                TextQuery {
+                    query: &spec.query,
+                    fuzzy_enabled: spec.fuzzy,
+                    mode: QueryMode::from(spec.mode),
+                },
+                eligible,
+                staged,
+            )?;
             columns.push(ScoreColumn {
                 alias: &spec.alias,
                 scorer,

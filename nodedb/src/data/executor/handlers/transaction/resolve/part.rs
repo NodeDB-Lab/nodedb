@@ -3,11 +3,11 @@
 //! `MetaOp::ResolveTxnPart`: a session commit reads its resolved redo in
 //! parts.
 //!
-//! Part `0` checks the transaction's guards and resolves it into the
-//! transaction's resolve spill file, one row per part, as the serializers
-//! produce each record. It then opens the transaction's cursor over the
-//! file and reports the byte length of every part, the sub-record count and
-//! the rejected timeseries lines. Every check of the resolve runs there,
+//! Part `0` checks the transaction's guards and resolves it into parts as the
+//! serializers produce each record. One part stays in memory. More parts go
+//! to the transaction's resolve spill file, one row per part. It then opens
+//! the transaction's cursor over the parts and reports the byte length of
+//! every part, the sub-record count and the rejected timeseries lines. Every check of the resolve runs there,
 //! before the commit proposes any part. A later part reads the cursor.
 
 use nodedb_physical::physical_plan::{
@@ -59,8 +59,8 @@ impl CoreLoop {
         }
     }
 
-    /// Check the guards, then resolve into the transaction's resolve spill
-    /// file and read its part `0`. A refused guard asks for a retry.
+    /// Check the guards, then resolve the transaction into parts and read
+    /// part `0`. A refused guard asks for a retry.
     fn open_resolve_cursor(
         &mut self,
         task: &ExecutionTask,
@@ -97,11 +97,15 @@ impl CoreLoop {
             .map_err(ErrorCode::from)
     }
 
-    /// Resolve `plans`, staged under `request.txn_id`, into the
-    /// transaction's resolve spill file, open the cursor over it, and read
-    /// its part `0`. Any earlier cursor of the transaction is closed first.
-    /// The resolve holds one part at a time, and every check runs before
-    /// the answer, so a failure leaves no cursor and no file.
+    /// Resolve `plans`, staged under `request.txn_id`, into parts, open the
+    /// cursor over them, and read part `0`. Any earlier cursor of the
+    /// transaction is closed first.
+    ///
+    /// A resolve of one part keeps it in memory and creates no file. A
+    /// resolve of more parts writes all of them to the transaction's resolve
+    /// spill file. The resolve holds one part at a time, and every check runs
+    /// before the answer. An error leaves no cursor, and it removes the
+    /// spill file when the resolve created one.
     pub(in crate::data::executor) fn resolve_into_cursor(
         &mut self,
         task: &ExecutionTask,
@@ -128,8 +132,10 @@ impl CoreLoop {
         } = match finished {
             Ok(finished) => finished,
             Err(error) => {
-                // The removal files its own report when it fails, and the
-                // resolve answers its own error.
+                // A resolve that stopped before its second part created no
+                // file, and removing an absent file succeeds. The removal
+                // files its own report when it fails, and the resolve answers
+                // its own error.
                 if remove_resolve_path(&path).is_err() {
                     tracing::error!(
                         path = %path.display(),

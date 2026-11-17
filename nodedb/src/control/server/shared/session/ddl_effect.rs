@@ -5,7 +5,8 @@
 //! Index DDL inside an explicit transaction buffers its catalog entries (see
 //! [`super::ddl_buffer`]). Some index kinds also change Data Plane state: a
 //! secondary index is backfilled from existing rows, a dropped one is purged,
-//! a full-text index binds or resets its analyzer, a sorted index builds
+//! a full-text index binds or resets its analyzer and rebuilds the
+//! collection's text from its stored rows, a sorted index builds
 //! or drops its order-statistic tree, and a key-value collection's index is
 //! built or dropped in the KV engine. That engine
 //! work must follow the catalog: it runs at COMMIT, once the buffered entries
@@ -60,6 +61,23 @@ pub enum DeferredDdlEffect {
         database_id: DatabaseId,
         collection: String,
         field: String,
+    },
+    /// Rebuild the text index of a collection the transaction gave a new
+    /// full-text index, then mark the index record `Ready`.
+    TextIndexBuild {
+        tenant_id: TenantId,
+        database_id: DatabaseId,
+        collection: String,
+        index_name: String,
+    },
+    /// Finish the drop of a full-text index the transaction marked
+    /// `Dropping`: rebuild the collection's text without its fields, run
+    /// its teardown, then remove its record and owner row.
+    TextIndexDrop {
+        tenant_id: TenantId,
+        database_id: DatabaseId,
+        collection: String,
+        index_name: String,
     },
 }
 

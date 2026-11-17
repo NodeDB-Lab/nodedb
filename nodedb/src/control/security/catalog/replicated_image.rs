@@ -167,6 +167,7 @@ pub(super) const REPLICATED_TABLES: &[ReplicatedTable] = replicated_tables![
     "vector_model_metadata" => VECTOR_MODEL_METADATA,
     "vector_index_params" => VECTOR_INDEX_PARAMS,
     "index_registry" => INDEX_REGISTRY,
+    "index_registry_by_collection" => INDEX_REGISTRY_BY_COLLECTION,
     "checkpoints" => CHECKPOINTS,
     "crdt_compaction_points" => super::crdt_compaction_points::CRDT_COMPACTION_POINTS,
     // ── Metadata-group host state ──

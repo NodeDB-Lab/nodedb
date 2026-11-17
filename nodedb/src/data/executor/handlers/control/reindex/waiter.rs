@@ -198,6 +198,25 @@ impl CoreLoop {
     }
 }
 
+#[cfg(test)]
+impl ReindexWaiter {
+    /// A plain REINDEX of `target` that waits for FTS and CSR rebuilds
+    /// only.
+    pub(in crate::data::executor) fn for_test(task: ExecutionTask, target: RebuildTarget) -> Self {
+        Self {
+            task,
+            target,
+            vector_failed_before: HashMap::new(),
+            first_error: None,
+        }
+    }
+
+    /// The first rebuild refusal noted against this REINDEX.
+    pub(in crate::data::executor) fn first_error(&self) -> Option<&crate::Error> {
+        self.first_error.as_ref()
+    }
+}
+
 /// Whether `task`'s request deadline passed. The wait is bounded by the
 /// request deadline whatever the request's admission class.
 fn past_deadline(task: &ExecutionTask) -> bool {

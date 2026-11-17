@@ -13,7 +13,6 @@
 //! `String` form. The Data Plane dispatch paths (`dispatch_to_data_plane`,
 //! plan construction, ordering) run here.
 
-use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -25,6 +24,7 @@ use crate::types::TraceId;
 use nodedb_physical::physical_plan::VectorOp;
 
 use super::super::super::result::{DdlError, DdlResult};
+use super::collection_column::parse_collection_column;
 use super::support::ddl_err;
 
 /// Handle `SHOW VECTOR INDEX status ON collection.column`.
@@ -193,30 +193,4 @@ pub async fn handle_alter_vector_index_compact(
         command: "COMPACT".to_string(),
         rows_affected: None,
     }])
-}
-
-/// Parse `collection.column` or `collection` after a keyword like " ON ".
-///
-/// Returns `(collection, field_name)`. If no dot, field_name is empty (default field).
-pub(super) fn parse_collection_column(
-    sql: &str,
-    keyword: &str,
-) -> Result<(String, String), DdlError> {
-    let pos = find_ascii_case_insensitive(sql, keyword)
-        .ok_or_else(|| ddl_err("42601", format!("expected '{keyword}' in statement")))?;
-
-    let after = sql[pos + keyword.len()..].trim();
-    // Take the next token (ends at space or end of string).
-    let token = after
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| ddl_err("42601", "expected collection[.column] after ON"))?
-        .to_lowercase();
-
-    if let Some((coll, col)) = token.split_once('.') {
-        Ok((coll.to_string(), col.to_string()))
-    } else {
-        // No dot: default (unnamed) field.
-        Ok((token, String::new()))
-    }
 }

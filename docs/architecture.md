@@ -383,6 +383,9 @@ When you insert a row into any engine, the Control Plane assigns a unique `surro
 
 ```sql
 -- Vector + Graph + Text fusion in one query
+-- The text leg reads only fields a search index declares.
+CREATE SEARCH INDEX ON documents FIELDS body;
+
 SELECT docs.id, docs.title, rrf_score() AS score
 FROM documents AS docs
 WHERE docs.id IN (

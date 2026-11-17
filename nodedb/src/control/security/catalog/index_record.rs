@@ -122,6 +122,37 @@ pub struct StoredIndexRecord {
     /// Mirrors the owning collection's `is_active`. A soft-dropped collection
     /// hides its indexes; `UNDROP COLLECTION` brings them back.
     pub is_active: bool,
+    /// Where the index stands in its lifecycle. See [`IndexRecordState`].
+    pub state: IndexRecordState,
+    /// The analyzer a full-text index names (`ANALYZER '<name>'`). `None`
+    /// for every other kind, and for a full-text index that names none. The
+    /// collection tokenizes with the analyzer its full-text records name.
+    pub analyzer: Option<String>,
+    /// The fuzzy default a full-text index names (`FUZZY <bool>`). `None` for
+    /// every other kind, and for a full-text index that names none.
+    pub fuzzy_default: Option<bool>,
+}
+
+/// Lifecycle state of an index record.
+///
+/// Only a full-text record leaves `Ready`. Its rebuild runs on every node
+/// and is not transactional, so the record names the step that is owed.
+/// The boot reconcile finishes every owed step, and a retried `DROP INDEX`
+/// finishes a drop.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
+pub enum IndexRecordState {
+    /// The index does not yet hold every existing row. A full-text record
+    /// is `Building` from CREATE until its rebuild finishes on every node.
+    Building,
+    /// The index holds every existing row.
+    #[default]
+    Ready,
+    /// A `DROP INDEX` is under way. The record declares no text field, so
+    /// no write indexes its fields. The record leaves the catalog once every
+    /// node rebuilt the collection's text without them.
+    Dropping,
 }
 
 impl StoredIndexRecord {

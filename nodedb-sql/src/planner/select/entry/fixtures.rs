@@ -30,6 +30,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "users" => Some(CollectionInfo {
                 name: "users".into(),
@@ -43,6 +44,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "orders" => Some(CollectionInfo {
                 name: "orders".into(),
@@ -56,6 +58,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "docs" => Some(CollectionInfo {
                 name: "docs".into(),
@@ -69,6 +72,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "tags" => Some(CollectionInfo {
                 name: "tags".into(),
@@ -82,6 +86,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "user_prefs" => Some(CollectionInfo {
                 name: "user_prefs".into(),
@@ -95,6 +100,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::KeyValue),
+                text_indexes: None,
             }),
             "embeddings" => Some(CollectionInfo {
                 name: "embeddings".into(),
@@ -108,6 +114,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "tagged_embeddings" | "tagged_embeddings_bitemporal" => Some(CollectionInfo {
                 name: name.into(),
@@ -128,6 +135,7 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             "articles" => Some(CollectionInfo {
                 name: "articles".into(),
@@ -145,6 +153,29 @@ impl SqlCatalog for TestCatalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+                text_indexes: None,
+            }),
+            // `body` has a ready full-text index, `title` a building one.
+            "notes" | "unindexed_notes" => Some(CollectionInfo {
+                name: name.into(),
+                engine: EngineType::DocumentSchemaless,
+                columns: Vec::new(),
+                primary_key: Some("id".into()),
+                has_auto_tier: false,
+                indexes: Vec::new(),
+                bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
+                partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
+                open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: Some(if name == "notes" {
+                    TextIndexFields {
+                        ready: vec!["body".into()],
+                        building: vec!["title".into()],
+                    }
+                } else {
+                    TextIndexFields::default()
+                }),
             }),
             _ => None,
         };

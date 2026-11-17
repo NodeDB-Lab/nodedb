@@ -68,10 +68,11 @@ pub async fn create_graph_index(
         .position(|p| p.eq_ignore_ascii_case("ON"))
         .ok_or_else(|| ddl_err("42601", "CREATE GRAPH INDEX requires ON <collection>"))?;
 
-    let collection = parts
-        .get(on_idx + 1)
-        .ok_or_else(|| ddl_err("42601", "missing collection name after ON"))?
-        .to_lowercase();
+    let collection = parse_ident_token(
+        parts
+            .get(on_idx + 1)
+            .ok_or_else(|| ddl_err("42601", "missing collection name after ON"))?,
+    )?;
 
     let (parent_col, id_col) = parse_edge_columns(sql)?;
 

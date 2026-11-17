@@ -9,7 +9,7 @@ use nodedb_sql::parser::preprocess::lex::{
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::result::DdlError;
 use crate::control::server::shared::ddl::sql_parse::{
-    parse_sql_value, split_value_tuples, split_values,
+    parse_sql_value, resolve_name_token, split_value_tuples, split_values,
 };
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -41,7 +41,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     let kw_pos = find_ascii_case_insensitive(sql, keyword)?;
     let after_into = sql[kw_pos + keyword.len()..].trim_start();
     let coll_name_str = after_into.split_whitespace().next()?;
-    let coll_name = coll_name_str.to_lowercase();
+    let coll_name = resolve_name_token(coll_name_str);
 
     // Check if collection is schemaless. Let the SQL path handle typed INSERT
     // with VALUES syntax, but always handle here for pre-write concerns:

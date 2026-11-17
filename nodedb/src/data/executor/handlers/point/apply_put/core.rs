@@ -130,11 +130,11 @@ pub(super) struct MemoryIndexPut<'a> {
 
 #[cfg(test)]
 mod tests {
-    use redb::TableDefinition;
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
     use crate::bridge::envelope::{Priority, Request, Status};
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::core_loop::tests::{declare_text_fields, make_core_with_dir};
     use crate::data::executor::enforcement::unique::UniqueJudge;
     use crate::data::executor::handlers::point::apply_put::PointPutParams;
     use crate::data::executor::handlers::point::put::PointPutExec;
@@ -222,6 +222,7 @@ mod tests {
     fn healthy_index_commits_the_row_and_indexes_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &["title"]);
         let row_key = row_key();
 
         let task = point_put_task(&row_key);
@@ -255,6 +256,7 @@ mod tests {
     fn index_failure_rejects_the_write_and_leaves_no_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &["title"]);
         let row_key = row_key();
         poison_inverted_index(&core);
 
@@ -301,6 +303,7 @@ mod tests {
     fn apply_point_put_propagates_index_failure_instead_of_absorbing_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &["title"]);
         let row_key = row_key();
         poison_inverted_index(&core);
 
@@ -344,6 +347,7 @@ mod tests {
     fn index_text_disabled_is_unaffected_by_a_broken_index() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &["title"]);
         let row_key = row_key();
         poison_inverted_index(&core);
 
@@ -446,5 +450,131 @@ mod tests {
             "the overwrite tombstones the old index value"
         );
         assert_eq!(owners("rome", None), vec![key]);
+    }
+
+    /// Apply one indexed put of `body` to row `SURROGATE` and commit it.
+    fn put_indexed(core: &mut CoreLoop, body: &[u8]) {
+        let txn = core.sparse.begin_write().unwrap();
+        core.apply_point_put(
+            &txn,
+            PointPutParams {
+                database_id: DatabaseId::DEFAULT.as_u64(),
+                tid: TID,
+                collection: COLL,
+                storage_key: StorageKey::for_surrogate(SURROGATE),
+                surrogate: SURROGATE,
+                value: body,
+                index_text: true,
+                user_roles: &[],
+                enforce: true,
+                unique: UniqueJudge::Row,
+                wal_lsn: None,
+                resolved_targets: &[],
+                guards: crate::data::executor::enforcement::typeguard::GuardScope::Document,
+            },
+        )
+        .expect("indexed put");
+        txn.commit().unwrap();
+    }
+
+    /// Rows of one inverted-index table whose key names `COLL`. Every
+    /// table this counts holds the collection at key position 2.
+    macro_rules! coll_rows {
+        ($read:expr, $table:expr) => {{
+            use redb::ReadableTable as _;
+            match $read.open_table($table) {
+                Ok(table) => table
+                    .iter()
+                    .expect("scan table")
+                    .filter(|row| row.as_ref().expect("read row").0.value().2 == COLL)
+                    .count(),
+                Err(redb::TableError::TableDoesNotExist(_)) => 0,
+                Err(e) => panic!("open table: {e}"),
+            }
+        }};
+    }
+
+    /// Row counts of the postings, document lengths, field sets, live text
+    /// versions, and ended text versions `COLL` holds.
+    fn text_rows(core: &CoreLoop) -> [usize; 5] {
+        use crate::engine::sparse::fts_redb::tables::{
+            DOC_FIELDS, POSTINGS, TEXT_ENDED, TEXT_LIVE_FROM,
+        };
+        let read = core.sparse.db().begin_read().expect("read txn");
+        [
+            coll_rows!(read, POSTINGS),
+            coll_rows!(read, DOC_LENGTHS),
+            coll_rows!(read, DOC_FIELDS),
+            coll_rows!(read, TEXT_LIVE_FROM),
+            coll_rows!(read, TEXT_ENDED),
+        ]
+    }
+
+    /// The field set the inverted index records for row `SURROGATE`.
+    fn doc_fields(core: &CoreLoop) -> Vec<String> {
+        use crate::engine::sparse::fts_redb::tables::DOC_FIELDS;
+        let read = core.sparse.db().begin_read().expect("read txn");
+        let table = read.open_table(DOC_FIELDS).expect("open doc_fields");
+        let row = table
+            .get((DatabaseId::DEFAULT.as_u64(), TID, COLL, SURROGATE.as_u32()))
+            .expect("read doc_fields")
+            .expect("a field-set row");
+        zerompk::from_msgpack(row.value()).expect("decode doc_fields")
+    }
+
+    /// Documents of `index` that hold `word`, analyzed the way the
+    /// collection analyzes text.
+    fn word_df<'a>(
+        core: &CoreLoop,
+        index: impl Into<nodedb_fts::IndexScope<'a>>,
+        word: &str,
+    ) -> u32 {
+        let tid = TenantId::new(TID);
+        let db = DatabaseId::DEFAULT.as_u64();
+        let term = core
+            .inverted
+            .analyze_for_collection(db, tid, COLL, word)
+            .expect("analyze")
+            .remove(0);
+        core.inverted
+            .term_df(db, tid, index, &term)
+            .expect("term df")
+    }
+
+    /// A collection that declares no full-text field writes no inverted-index
+    /// state: no posting, no document length, no field set, no text version.
+    /// An overwrite ends no text version either.
+    #[test]
+    fn a_put_into_a_collection_with_no_declared_text_field_writes_no_text_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &[]);
+        put_indexed(&mut core, br#"{"title":"alpha bravo"}"#);
+        put_indexed(&mut core, br#"{"title":"charlie delta"}"#);
+
+        assert!(stored_row(&core, &row_key()).is_some(), "the row is stored");
+        assert_eq!(
+            text_rows(&core),
+            [0; 5],
+            "no inverted-index row of any kind"
+        );
+    }
+
+    /// A collection that declares `title` indexes `title` in the
+    /// whole-document index and its field index, and leaves `body` out.
+    #[test]
+    fn a_put_indexes_only_the_declared_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        declare_text_fields(&mut core, TID, COLL, &["title"]);
+        put_indexed(&mut core, br#"{"title":"alpha","body":"bravo"}"#);
+
+        let title = nodedb_fts::IndexScope::field(COLL, "title").expect("field scope");
+        let body = nodedb_fts::IndexScope::field(COLL, "body").expect("field scope");
+        assert_eq!(word_df(&core, COLL, "alpha"), 1);
+        assert_eq!(word_df(&core, COLL, "bravo"), 0, "body is undeclared");
+        assert_eq!(word_df(&core, title, "alpha"), 1);
+        assert_eq!(word_df(&core, body, "bravo"), 0);
+        assert_eq!(doc_fields(&core), vec!["title".to_string()]);
     }
 }

@@ -21,7 +21,9 @@ use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate, Te
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+use crate::data::executor::core_loop::tests::{
+    declare_text_fields, make_core_with_dir, make_default_task,
+};
 use crate::engine::array::wal::ArrayPutCell;
 
 const TID: u64 = 1;
@@ -328,6 +330,13 @@ fn an_array_write_lands_and_a_refused_install_restores_the_tiles() {
 
 // ── Text (full-text index) ───────────────────────────────────────────────
 
+/// Declare the full-text fields the text fixtures write: `docs.body` and
+/// `articles.title`.
+pub(super) fn declare_text(core: &mut CoreLoop) {
+    declare_text_fields(core, TID, "docs", &["body"]);
+    declare_text_fields(core, TID, "articles", &["title"]);
+}
+
 /// The redo sub-record resolve serializes from a text index plan of
 /// `docs` row 91.
 pub(super) fn fts_index_sub_record() -> crate::wal::RedoSubRecord {
@@ -355,6 +364,7 @@ fn fts_documents(refuse: bool) -> u32 {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+    declare_text(&mut core);
     let mut ops = vec![fts_index_sub_record()];
     if refuse {
         let lines = zerompk::to_msgpack_vec(&vec!["other_probe,host=a value=1 1".to_string()])
@@ -460,11 +470,11 @@ fn indexed_side_effects(core: &CoreLoop) -> (u32, usize) {
 #[test]
 fn a_refused_install_withdraws_the_index_side_effects_of_a_document_write() {
     assert_eq!(
-        indexed_side_effects(&run(&[indexed_document_put()], false, |_| {}).core),
+        indexed_side_effects(&run(&[indexed_document_put()], false, declare_text).core),
         (1, 1)
     );
     assert_eq!(
-        indexed_side_effects(&run(&[indexed_document_put()], true, |_| {}).core),
+        indexed_side_effects(&run(&[indexed_document_put()], true, declare_text).core),
         (0, 0)
     );
 }

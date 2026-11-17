@@ -21,6 +21,8 @@ pub mod purge;
 pub mod register;
 pub(crate) mod server_path;
 pub mod show_indexes;
+pub(crate) mod text_analysis;
+pub(crate) mod text_fields;
 pub mod undrop;
 pub mod vector_metadata;
 

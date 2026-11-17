@@ -281,6 +281,21 @@ pub(crate) fn split_args(s: &str) -> Vec<String> {
     args
 }
 
+/// The object name a function argument names, such as a collection or an
+/// index.
+///
+/// A single-quoted literal names the object verbatim, as every query
+/// function's literal argument does. A bare or double-quoted name follows
+/// the SQL identifier rule: a bare name lowercases, a double-quoted name
+/// keeps its case.
+pub(crate) fn name_arg(s: &str) -> Result<String, DdlError> {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        return Ok(t[1..t.len() - 1].to_string());
+    }
+    crate::control::server::shared::ddl::sql_parse::parse_ident_token(t)
+}
+
 /// Remove surrounding single quotes from a string argument.
 pub(crate) fn unquote(s: &str) -> String {
     let t = s.trim();
@@ -349,4 +364,19 @@ fn parse_ttl_seconds(s: &str) -> Result<u64, DdlError> {
 /// Build a [`DdlError`] from an ANSI SQLSTATE code and a message.
 pub(crate) fn ddl_err(sqlstate: &str, message: impl Into<String>) -> DdlError {
     DdlError::new(sqlstate, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A string literal names the object verbatim. A bare name lowercases
+    /// and a double-quoted name keeps its case.
+    #[test]
+    fn name_arg_reads_literals_verbatim_and_names_by_the_identifier_rule() {
+        assert_eq!(name_arg(" 'Counters' ").unwrap(), "Counters");
+        assert_eq!(name_arg("Counters").unwrap(), "counters");
+        assert_eq!(name_arg("\"Counters\"").unwrap(), "Counters");
+        assert!(name_arg("bad-name").is_err());
+    }
 }

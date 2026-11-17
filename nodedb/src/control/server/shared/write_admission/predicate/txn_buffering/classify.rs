@@ -297,7 +297,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | TextOp::PhraseSearch { .. }
             | TextOp::HybridSearch { .. }
             | TextOp::HybridSearchTriple { .. }
-            | TextOp::SetTextConfig { .. },
+            | TextOp::SetTextConfig { .. }
+            | TextOp::RebuildIndex { .. },
         ) => false,
 
         // ---- Spatial: encoded (buffered) ----
@@ -662,6 +663,7 @@ mod tests {
                 vector_fields: Vec::new(),
                 declared_columns: Vec::new(),
                 declared_key: None,
+                text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::ZERO,
             }),
             PhysicalPlan::Document(DocumentOp::IndexLookup {
@@ -1765,6 +1767,12 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 analyzer_name: Some("standard".into()),
                 fuzzy_default: None,
+            }),
+            PhysicalPlan::Text(TextOp::RebuildIndex {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                text_fields: vec!["body".into()],
+                analyzer: None,
+                fuzzy_default: false,
             }),
         ];
         for p in &plans {

@@ -23,6 +23,7 @@ mod restore_changes;
 mod restore_columnar;
 mod restore_key_plan;
 mod restore_reassert;
+mod restore_synced_text;
 mod restore_timeseries;
 mod restore_timeseries_held;
 mod restore_vector;

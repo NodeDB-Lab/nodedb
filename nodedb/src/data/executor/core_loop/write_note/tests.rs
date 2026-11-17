@@ -95,6 +95,29 @@ pub fn make_default_task() -> ExecutionTask {
     ExecutionTask::new(make_request(point_get()))
 }
 
+/// Declare `text_fields` as the full-text fields of `collection` in database
+/// DEFAULT under tenant `tid`.
+///
+/// A config the core already holds keeps every other value. Otherwise the
+/// collection gets a default schemaless config. Every field is indexed and
+/// readable, as a ready index declares it.
+pub(crate) fn declare_text_fields(
+    core: &mut CoreLoop,
+    tid: u64,
+    collection: &str,
+    text_fields: &[&str],
+) {
+    let fields: Vec<String> = text_fields.iter().map(|f| f.to_string()).collect();
+    core.doc_configs
+        .entry((
+            DatabaseId::DEFAULT,
+            TenantId::new(tid),
+            collection.to_string(),
+        ))
+        .or_insert_with(|| crate::engine::document::store::CollectionConfig::new(collection))
+        .text_fields = nodedb_physical::physical_plan::TextFieldSet::all_readable(fields);
+}
+
 /// A `{k: v}` document body: a standard MessagePack map.
 pub(crate) fn doc_value(k: &str, v: &str) -> Vec<u8> {
     let mut obj = std::collections::HashMap::new();

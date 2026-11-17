@@ -22,11 +22,13 @@ pub fn metadata_apply_wedged(
 ) {
     let kind = entry_kind(entry);
     let class = error_class(err);
+    let objects = catalog_objects(entry);
     let ctx = context::MetadataApplyWedged {
         raft_index,
         last_applied_watermark,
         entry_kind: &kind,
         error_class: &class,
+        catalog_objects: &objects,
         permanent,
     };
     let _ = Capture::new(
@@ -37,6 +39,37 @@ pub fn metadata_apply_wedged(
     .domain(&ctx)
     .with_backtrace()
     .emit();
+}
+
+/// The catalog objects `entry` writes, as `<kind> <name>` labels. An index
+/// record also names its collection. A batch lists the objects of every
+/// sub-entry. An undecodable payload names no object.
+fn catalog_objects(entry: &MetadataEntry) -> Vec<String> {
+    use crate::control::catalog_entry::{self, CatalogEntry};
+
+    match entry {
+        MetadataEntry::CatalogDdl { payload }
+        | MetadataEntry::CatalogDdlAudited { payload, .. } => {
+            let Ok(decoded) = catalog_entry::decode(payload) else {
+                return Vec::new();
+            };
+            let kind = decoded.kind();
+            let (name, _, _) = crate::control::cluster::metadata_applier::describe_entry(&decoded);
+            let label = match &decoded {
+                CatalogEntry::PutIndexRecord(record) => {
+                    format!("{kind} {name} on {}", record.collection)
+                }
+                CatalogEntry::DeleteIndexRecord { collection, .. } => {
+                    format!("{kind} {name} on {collection}")
+                }
+                _ => format!("{kind} {name}"),
+            };
+            vec![label]
+        }
+        MetadataEntry::Batch { entries } => entries.iter().flat_map(catalog_objects).collect(),
+        MetadataEntry::DdlPrepared { entry, .. } => catalog_objects(entry),
+        _ => Vec::new(),
+    }
 }
 
 /// Report a `catalog_entry::apply_to` call that left redb with an orphaned

@@ -10,6 +10,7 @@ use nodedb_sql::parser::preprocess::lex::{
 
 use crate::control::security::catalog::types::TransitionRule;
 use crate::control::server::shared::ddl::result::DdlError;
+use crate::control::server::shared::ddl::sql_parse::resolve_name_token;
 
 use super::support::err;
 
@@ -239,10 +240,10 @@ fn parse_value_ref(s: &str) -> Result<crate::bridge::expr_eval::SqlExpr, DdlErro
     use crate::bridge::expr_eval::SqlExpr;
 
     if let Some(col) = nodedb_types::strip_prefix_ascii_case_insensitive(s, "OLD.") {
-        return Ok(SqlExpr::OldColumn(col.to_lowercase()));
+        return Ok(SqlExpr::OldColumn(resolve_name_token(col)));
     }
     if let Some(col) = nodedb_types::strip_prefix_ascii_case_insensitive(s, "NEW.") {
-        return Ok(SqlExpr::Column(col.to_lowercase()));
+        return Ok(SqlExpr::Column(resolve_name_token(col)));
     }
 
     if s.eq_ignore_ascii_case("TRUE") {

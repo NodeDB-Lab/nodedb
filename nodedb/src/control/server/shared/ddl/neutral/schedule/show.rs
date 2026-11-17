@@ -104,7 +104,7 @@ pub fn show_schedule_history(
     name: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let tenant_id = identity.tenant_id.as_u64();
-    let name = name.to_lowercase();
+    let name = crate::control::server::shared::ddl::sql_parse::resolve_name_token(name);
 
     // Verify the schedule exists.
     if state

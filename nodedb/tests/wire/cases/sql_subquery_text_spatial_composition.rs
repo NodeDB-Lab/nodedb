@@ -20,6 +20,10 @@ async fn create_fts_collection(server: &TestServer) {
         .exec("CREATE COLLECTION fts_sub WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    server
+        .exec("CREATE SEARCH INDEX ON fts_sub (content)")
+        .await
+        .unwrap();
     // Every row matches 'database' so the inner ranked search returns all three;
     // `tag` splits them for DISTINCT and `id` gives a deterministic outer order.
     for (id, tag, content) in [

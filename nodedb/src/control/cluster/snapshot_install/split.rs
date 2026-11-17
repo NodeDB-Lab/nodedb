@@ -214,6 +214,7 @@ pub fn split_by_core(
         group_proposal_keys,
         group_proposal_keys_complete_from,
         documents_versioned,
+        synced_text,
         indexes_versioned,
         vector_multi_documents,
         vector_versions,
@@ -310,6 +311,12 @@ pub fn split_by_core(
     for entry in crdt_constraints {
         let core = cores.collection_core(group_id, entry.database_id, &entry.collection)?;
         s.per_core[core].crdt_constraints.push(entry);
+    }
+
+    // A frame's text goes to the core its collection's rows go to.
+    for entry in synced_text {
+        let core = cores.collection_core(group_id, entry.database_id, &entry.collection)?;
+        s.per_core[core].synced_text.push(entry);
     }
 
     for (key, value) in edges {
@@ -453,6 +460,14 @@ mod tests {
                 version: 1,
                 constraints: Vec::new(),
             });
+            snap.synced_text.push(crate::types::SyncedTextEntry {
+                database_id: 0,
+                tenant_id: 1,
+                collection: name.clone(),
+                surrogate: 4,
+                ordinal: 1,
+                fields: vec![("title".into(), "alpha".into())],
+            });
         }
 
         let shares = split_by_core(GROUP, snap, &cores()).unwrap();
@@ -480,8 +495,13 @@ mod tests {
             for entry in &share.crdt_constraints {
                 assert_eq!(home(0, &entry.collection), core);
             }
+            for entry in &share.synced_text {
+                assert_eq!(home(0, &entry.collection), core);
+            }
         }
         assert_eq!(documents, names.len() * 3, "no document lost or duplicated");
+        let frames: usize = shares.per_core.iter().map(|s| s.synced_text.len()).sum();
+        assert_eq!(frames, names.len(), "no frame lost or duplicated");
     }
 
     #[test]

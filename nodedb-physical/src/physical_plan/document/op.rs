@@ -300,6 +300,12 @@ pub enum DocumentOp {
         /// identity under this column, else under `id`, and only when the
         /// row lacks that column.
         declared_key: Option<String>,
+        /// The top-level fields the full-text inverted index holds. A write
+        /// indexes the fields of every building or ready full-text index. A
+        /// read runs only against the fields of a ready one. Empty means a
+        /// write touches no inverted-index state.
+        #[serde(default)]
+        text_fields: super::text_field_set::TextFieldSet,
         /// The collection's incarnation in the catalog: the stamp of the
         /// create a drop and a same-name create replace. The collection's
         /// CRDT document mints its Loro operations under a peer id derived

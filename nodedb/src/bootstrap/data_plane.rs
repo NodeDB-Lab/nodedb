@@ -16,6 +16,7 @@ use crate::control::metrics::SystemMetrics;
 use crate::control::server::shared::ddl::neutral::collection::register::{
     build_doc_config_from_stored, derive_auto_indexes, extend_with_catalog_indexes,
 };
+use crate::control::server::shared::ddl::neutral::collection::text_fields::text_field_sets_by_collection;
 use crate::data::eventfd::EventFdNotifier;
 use crate::data::runtime::{CoreCompactionConfig, SpawnCoreParams, spawn_core};
 use crate::event::EventProducer;
@@ -98,7 +99,7 @@ pub fn load_doc_config_registry_at(
 /// any caller that already has the catalog open must pass it here instead of
 /// handing over a path and re-opening behind its own lock.
 ///
-/// `Err` when the catalog's collections do not read.
+/// `Err` when the catalog's collections or index records do not read.
 pub fn load_doc_config_registry_from<S>(
     catalog: &S,
 ) -> crate::Result<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>>
@@ -107,18 +108,32 @@ where
 {
     let all = crate::bootstrap::constraint_reconcile::load_collections(catalog)?;
 
-    Ok(all
-        .into_iter()
+    // Each tenant's index records are read and grouped once, so the seed
+    // reads every record once however many collections the tenant holds.
+    let mut text_fields_by_tenant: std::collections::HashMap<
+        (DatabaseId, u64),
+        std::collections::HashMap<String, nodedb_physical::physical_plan::TextFieldSet>,
+    > = std::collections::HashMap::new();
+    all.into_iter()
         .filter(|(_, coll)| coll.is_active)
         .map(|(database_id, coll)| {
             let tenant_id = TenantId::new(coll.tenant_id);
             let mut indexes = derive_auto_indexes(coll.fields.iter().map(|(n, _)| n.as_str()));
             extend_with_catalog_indexes(&mut indexes, &coll);
-            let config = build_doc_config_from_stored(catalog, tenant_id, &coll, &indexes);
+            let tenant_fields = match text_fields_by_tenant.entry((database_id, coll.tenant_id)) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let records = catalog.index_records_for_tenant(database_id, coll.tenant_id)?;
+                    entry.insert(text_field_sets_by_collection(&records)?)
+                }
+            };
+            let text_fields = tenant_fields.remove(&coll.name).unwrap_or_default();
+            let config =
+                build_doc_config_from_stored(catalog, tenant_id, &coll, &indexes, text_fields)?;
             let key = (database_id, tenant_id, config.name.clone());
-            (key, config)
+            Ok((key, config))
         })
-        .collect())
+        .collect()
 }
 
 /// Load every persisted `CREATE VECTOR INDEX`'s build parameters from the
@@ -553,6 +568,23 @@ mod tests {
             _database_id: DatabaseId,
             _tenant_id: u64,
         ) -> crate::Result<Vec<crate::control::security::catalog::StoredCollection>> {
+            Ok(Vec::new())
+        }
+
+        fn index_records_for_tenant(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn index_records_for_collection(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+            _collection: &str,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
             Ok(Vec::new())
         }
     }

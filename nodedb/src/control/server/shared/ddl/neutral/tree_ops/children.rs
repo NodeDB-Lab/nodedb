@@ -38,7 +38,7 @@ pub async fn tree_children(
             "TREE_CHILDREN requires (graph_index, root_id)",
         ));
     }
-    let graph_index = args[0].trim().to_lowercase();
+    let graph_index = super::super::kv_atomic::name_arg(args[0])?;
     let root_id = args[1]
         .trim()
         .trim_matches('\'')

@@ -34,9 +34,11 @@ mod adapter;
 mod cagg_relation;
 mod sequence_access;
 mod sql_catalog_impl;
+mod text_index_fields;
 mod type_convert;
 
 pub use adapter::OriginCatalog;
+pub(crate) use text_index_fields::check_text_read;
 pub(crate) use type_convert::{
     convert_collection_type, declared_column_info, document_declared_key,
 };

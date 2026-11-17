@@ -18,12 +18,14 @@ use super::super::target::DatabaseTarget;
 /// Decode and durably re-issue every restored vector-index (collection,
 /// field) HNSW/PQ/IVF configuration as a `VectorOp::SetParams`.
 ///
-/// MUST run before the vector rows re-issue: `get_or_create_vector_index`
-/// (`handlers/vector.rs`) lazily creates the Data Plane HNSW index from
-/// `self.vector_params` on the FIRST `VectorOp::Insert` it sees for a
-/// (collection, field) — falling back to `HnswParams::default()` when no
-/// `SetParams` has landed yet. Re-issuing params after inserts is a
-/// no-op for the already-created index.
+/// MUST run before any row re-issues: `get_or_create_vector_index`
+/// (`handlers/vector.rs`) lazily creates the Data Plane HNSW index on the
+/// first vector write for a (collection, field), a document's included. It
+/// falls back to `HnswParams::default()` when no `SetParams` has landed, and
+/// the Data Plane refuses a `SetParams` once the index exists.
+///
+/// A (collection, field) whose parameters the destination catalog holds is
+/// skipped: the restored catalog row installs them on every node.
 ///
 /// `params` are `("{db}:{tid}:{coll_key}", msgpack)` pairs decoding to
 /// `HnswParams` (the `TenantDataSnapshot::vector_params` wire shape);
@@ -88,6 +90,23 @@ pub(super) async fn reissue_vector_params(
         let (collection, field_name) =
             super::super::vector_reissue::split_vector_coll_key(&coll_key);
         let name = target.resolve(collection)?;
+        // An index the destination catalog holds parameters for gets them
+        // from that row: its post-apply installs them on every core of every
+        // node, and boot seeds them from it. A second install races the
+        // first vector write and is refused once the index materializes.
+        if state
+            .credentials
+            .catalog()
+            .get_committed_vector_index_params(
+                target.dest.as_u64(),
+                tenant_id,
+                &name.bare,
+                field_name,
+            )?
+            .is_some()
+        {
+            continue;
+        }
 
         let plan = super::super::vector_reissue::build_vector_set_params_plan(
             name.stored.clone(),

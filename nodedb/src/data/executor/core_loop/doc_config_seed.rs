@@ -57,6 +57,20 @@ impl CoreLoop {
                     );
                 }
             }
+            // WAL replay tokenizes the collection's text with the analysis
+            // its catalog records name, as a live write after a Register
+            // does. A write error keeps the held analysis and files an error.
+            // The Register the boot rehydrate sends installs it again.
+            if let Err(error) =
+                self.install_text_analysis(key.0, key.1, &key.2, &config.text_fields)
+            {
+                tracing::error!(
+                    core = self.core_id,
+                    collection = %key.2,
+                    %error,
+                    "boot seed: the collection's full-text analysis did not install"
+                );
+            }
             self.doc_configs.insert(key.clone(), config);
         }
     }

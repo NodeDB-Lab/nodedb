@@ -7,17 +7,17 @@
 //! syntax, the column count, and the `ANALYZER` clause. Both spellings of the column list are accepted here, and the
 //! statement is rejected if any token goes unread.
 
-use crate::bridge::envelope::PhysicalPlan;
-use crate::control::security::catalog::IndexKind;
+use crate::control::security::catalog::{IndexKind, IndexRecordState};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
-    IndexRegistration, propose_index_record,
+    IndexRegistration, index_name_holder, propose_text_index_record,
 };
+use crate::control::server::shared::ddl::neutral::collection::index::text_build::build_text_index;
+use crate::control::server::shared::ddl::neutral::collection::text_analysis::analysis_conflict;
 use crate::control::server::shared::session::ddl_buffer;
 use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
-use nodedb_physical::physical_plan::TextOp;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::options::{
@@ -84,13 +84,18 @@ pub async fn create_fulltext_index(
     create_text_index(state, identity, database_id, stmt, FULLTEXT_COMMAND).await
 }
 
-/// Record ownership for every named field and bind the collection analyzer.
+/// Register the index with its analyzer and fuzzy default, record its owner,
+/// and rebuild the collection's text from its stored rows.
 ///
-/// `ANALYZER '<name>'` binds the collection's per-collection FTS analyzer
-/// (`InvertedIndex::set_collection_analyzer`) — the same analyzer-registry
-/// lookup that forward indexing (`index_document_in_txn`), the staged-write
-/// overlay (`fts_merge` / `fts_score`), and the base search path all resolve
-/// through via `InvertedIndex::analyze_for_collection`.
+/// The record registers `Building` and flips to `Ready` once every node
+/// rebuilt. A rebuild error leaves it `Building`. The boot reconcile runs
+/// the rebuild again, and a `DROP INDEX` removes it.
+///
+/// `ANALYZER '<name>'` and `FUZZY <bool>` travel on the record. A Register
+/// carries the collection's analysis to every core, and the core installs it
+/// where every tokenization reads it: forward indexing, the staged-write
+/// overlay, search, and the rebuild (`InvertedIndex::analyze_for_collection`).
+/// A second index that names other values is refused.
 async fn create_text_index(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -98,7 +103,8 @@ async fn create_text_index(
     stmt: IndexStatement,
     command: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let collection = stmt.header.collection.to_lowercase();
+    // The header resolves the collection and fields by the SQL identifier rule.
+    let collection = stmt.header.collection.clone();
     let tenant_id = identity.tenant_id;
 
     // An analyzer name the registry does not know resolves to the standard
@@ -126,14 +132,9 @@ async fn create_text_index(
     // per-column name and discarding the declared one will leave
     // `DROP INDEX <the name I typed>` unable to match.
     let index_name = resolve_index_name(&stmt, &collection);
-    if let Some(taken) = state
-        .credentials
-        .catalog()
-        .get_index_record(database_id.as_u64(), tenant_id.as_u64(), &index_name)
-        .map_err(|e| {
-            DdlError::from_error_in_context(&format!("{command}: read index registry"), &e)
-        })?
-    {
+    // A `DROP INDEX` of the same name earlier in this transaction frees it.
+    // The drop's deferred effect leaves the new record in place.
+    if let Some(taken) = index_name_holder(state, database_id, tenant_id, &index_name, command)? {
         if stmt.header.if_not_exists && taken.kind == IndexKind::FullText {
             return Ok(vec![DdlResult::Status {
                 command: command.to_string(),
@@ -150,7 +151,30 @@ async fn create_text_index(
         ));
     }
 
-    propose_index_record(
+    // One inverted index serves every full-text index of the collection, so
+    // they tokenize one way. The listing applies this transaction's buffered
+    // DDL, so a record an earlier statement buffered counts. The proposal
+    // checks again under the DDL preparation lease.
+    let records = state
+        .credentials
+        .catalog()
+        .list_index_records_for_collection(database_id.as_u64(), tenant_id.as_u64(), &collection)
+        .map_err(|e| {
+            DdlError::from_error_in_context(&format!("{command}: read index registry"), &e)
+        })?;
+    if let Some(conflict) = analysis_conflict(
+        &records,
+        &collection,
+        analyzer_name.as_deref(),
+        fuzzy_default,
+    ) {
+        return Err(ddl_err("0A000", format!("{command}: {conflict}")));
+    }
+
+    // The record carries the analyzer and fuzzy default. Every node's
+    // Register delivers them to its cores, so every write, query and rebuild
+    // of the collection tokenizes with them.
+    propose_text_index_record(
         state,
         &IndexRegistration {
             database_id,
@@ -159,7 +183,11 @@ async fn create_text_index(
             kind: IndexKind::FullText,
             collection: &collection,
             fields: stmt.header.columns.clone(),
+            // `Ready` once every node rebuilt the collection's text below.
+            state: IndexRecordState::Building,
         },
+        analyzer_name.clone(),
+        fuzzy_default,
     )
     .await?;
     crate::control::server::shared::ddl::owner::propose_owner(
@@ -176,50 +204,27 @@ async fn create_text_index(
         Some(tenant_id),
         &identity.username,
         &format!(
-            "created text index '{index_name}' on '{collection}' ({})",
-            stmt.header.columns.join(", ")
+            "created text index '{index_name}' on '{collection}' ({}) (analyzer={}, fuzzy={})",
+            stmt.header.columns.join(", "),
+            analyzer_name.as_deref().unwrap_or("unnamed"),
+            fuzzy_default
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "unnamed".to_string()),
         ),
     );
 
-    if analyzer_name.is_some() || fuzzy_default.is_some() {
-        let set_config_plan = PhysicalPlan::Text(TextOp::SetTextConfig {
-            collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
-            analyzer_name: analyzer_name.clone(),
-            fuzzy_default,
-        });
-        // Inside an explicit transaction the binding waits for COMMIT, after
-        // the buffered index record lands.
-        let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::EngineApply {
-            tenant_id,
-            database_id,
-            collection: collection.clone(),
-            plan: set_config_plan.clone(),
-            context: command.to_string(),
-        });
-        if !deferred {
-            crate::control::server::shared::ddl::engine_apply::apply_in_engine(
-                state,
-                tenant_id,
-                database_id,
-                &collection,
-                set_config_plan,
-                command,
-            )
-            .await?;
-        }
-
-        state.audit_record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!(
-                "configured text index on '{collection}' (analyzer={}, fuzzy={})",
-                analyzer_name.as_deref().unwrap_or("unchanged"),
-                fuzzy_default
-                    .map(|f| f.to_string())
-                    .unwrap_or_else(|| "unchanged".to_string()),
-            ),
-        );
+    // Rows stored before the index existed become searchable, tokenized by
+    // the record's analyzer. Inside an explicit transaction the rebuild
+    // waits for COMMIT, after the buffered record and binding land, so a
+    // ROLLBACK leaves nothing.
+    let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::TextIndexBuild {
+        tenant_id,
+        database_id,
+        collection: collection.clone(),
+        index_name: index_name.clone(),
+    });
+    if !deferred {
+        build_text_index(state, tenant_id, database_id, &collection, &index_name).await?;
     }
 
     Ok(vec![DdlResult::Status {

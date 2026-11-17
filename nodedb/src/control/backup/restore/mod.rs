@@ -16,6 +16,8 @@ mod cut;
 mod databases;
 mod durable;
 pub(crate) mod guard;
+mod index_apply;
+mod index_records;
 mod orchestrate;
 mod quorum;
 mod redo_reissue;

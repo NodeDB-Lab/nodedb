@@ -15,7 +15,9 @@
 //! - the WAL tombstones of the tenant's purged collections in it
 //!   (`SECTION_ORIGIN_SOURCE_TOMBSTONES`);
 //! - the catalog row of each of the tenant's arrays in it
-//!   (`SECTION_ORIGIN_ARRAY_CATALOG`).
+//!   (`SECTION_ORIGIN_ARRAY_CATALOG`);
+//! - every index of those collections, with its owner and a vector index's
+//!   build parameters (`SECTION_ORIGIN_INDEX_RECORDS`).
 //!
 //! Every entry names its database by the source id. Restore maps each source
 //! id to a destination database by name.
@@ -24,13 +26,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_types::backup_envelope::{
     ArrayCatalogBlob, DatabaseBlob, EnvelopeWriter, SECTION_ORIGIN_ARRAY_CATALOG,
-    SECTION_ORIGIN_CATALOG_ROWS, SECTION_ORIGIN_DATABASES, SECTION_ORIGIN_SOURCE_TOMBSTONES,
-    SECTION_ORIGIN_SURROGATE_PK, SourceTombstoneEntry, StoredCollectionBlob, SurrogateBindBlob,
+    SECTION_ORIGIN_CATALOG_ROWS, SECTION_ORIGIN_DATABASES, SECTION_ORIGIN_INDEX_RECORDS,
+    SECTION_ORIGIN_SOURCE_TOMBSTONES, SECTION_ORIGIN_SURROGATE_PK, SourceTombstoneEntry,
+    StoredCollectionBlob, SurrogateBindBlob,
 };
 
 use crate::Error;
 use crate::control::array_catalog::ArrayCatalogEntry;
-use crate::control::security::catalog::{DatabaseDescriptor, StoredCollection, SystemCatalog};
+use crate::control::security::catalog::{
+    DatabaseDescriptor, IndexRecordState, StoredCollection, StoredIndexRecord, SystemCatalog,
+};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -43,6 +48,9 @@ pub struct TenantDatabase {
     pub collections: Vec<StoredCollection>,
     /// Every array of the tenant in this database.
     pub arrays: Vec<ArrayCatalogEntry>,
+    /// Every index record of `collections`, except the ones a `DROP INDEX`
+    /// is removing.
+    pub indexes: Vec<StoredIndexRecord>,
 }
 
 impl TenantDatabase {
@@ -99,13 +107,36 @@ fn tenant_databases_in(
                          database entry, then retry the backup"
                 ),
             })?;
+        let indexes = backed_up_indexes(catalog, raw_id, tenant_id, &collections)?;
         databases.push(TenantDatabase {
             descriptor,
             collections,
             arrays,
+            indexes,
         });
     }
     Ok(databases)
+}
+
+/// The committed index records of `collections` in database `database_id`.
+///
+/// A `Dropping` record names an index a `DROP INDEX` is removing, so the
+/// backup leaves it out. A record of a collection the backup does not carry
+/// is left out too: its collection was created after the collection read.
+fn backed_up_indexes(
+    catalog: &SystemCatalog,
+    database_id: u64,
+    tenant_id: u64,
+    collections: &[StoredCollection],
+) -> Result<Vec<StoredIndexRecord>, Error> {
+    let names: BTreeSet<&str> = collections.iter().map(|c| c.name.as_str()).collect();
+    Ok(catalog
+        .list_committed_index_records(database_id, tenant_id)?
+        .into_iter()
+        .filter(|record| {
+            record.state != IndexRecordState::Dropping && names.contains(record.collection.as_str())
+        })
+        .collect())
 }
 
 /// Refuse to back up a collection whose rows still live in its clone source.
@@ -184,6 +215,14 @@ pub fn push_metadata_sections(
         SECTION_ORIGIN_ARRAY_CATALOG,
         "array catalog rows",
         &arrays,
+    )?;
+
+    let indexes = super::index_capture::index_blobs(state, tenant, databases)?;
+    push_nonempty(
+        writer,
+        SECTION_ORIGIN_INDEX_RECORDS,
+        "index records",
+        &indexes,
     )?;
 
     // PK→surrogate identity map. This is DATA-derived per-node state that the

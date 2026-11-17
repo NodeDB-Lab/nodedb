@@ -432,6 +432,7 @@ mod tests {
                 vector_fields: &[],
                 declared_columns: &[],
                 declared_key: None,
+                text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::ZERO,
             },
         );

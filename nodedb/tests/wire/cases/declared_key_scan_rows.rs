@@ -14,6 +14,9 @@ async fn seed(srv: &TestServer) {
     srv.exec("CREATE COLLECTION items (sku STRING NOT NULL PRIMARY KEY, name STRING)")
         .await
         .expect("create items");
+    srv.exec("CREATE SEARCH INDEX ON items (name)")
+        .await
+        .expect("index items");
     srv.exec("CREATE COLLECTION orders (oid STRING NOT NULL PRIMARY KEY, sku STRING, qty INT)")
         .await
         .expect("create orders");

@@ -158,6 +158,22 @@ impl SqlCatalog for OriginCatalog {
                 predicate: i.predicate.clone(),
             })
             .collect();
+        // The overlay-aware listing makes a full-text index created earlier
+        // in the same transaction visible here.
+        let index_records = catalog
+            .list_index_records_for_collection(
+                self.database_id.as_u64(),
+                self.tenant_id,
+                &stored.name,
+            )
+            .map_err(|e| SqlCatalogError::Unreadable {
+                relation: name.to_string(),
+                detail: e.to_string(),
+            })?;
+        let text_indexes = Some(super::text_index_fields::text_index_fields(
+            &index_records,
+            &stored.name,
+        ));
 
         Ok(Some(CollectionInfo {
             name: stored.name,
@@ -171,6 +187,7 @@ impl SqlCatalog for OriginCatalog {
             vector_primary: stored.vector_primary,
             partition_strategy: stored.partition_strategy,
             open_schema: CollectionInfo::open_schema_for(engine),
+            text_indexes,
         }))
     }
 

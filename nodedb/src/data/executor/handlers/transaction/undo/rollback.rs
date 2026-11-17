@@ -336,17 +336,20 @@ mod tests {
     const PK: &str = "doc1";
     type Core = CoreLoop;
 
-    /// Register the collection config (secondary index on `status`) and the
-    /// schemaless vector params (field `emb`) so `apply_point_put` exercises every
-    /// side-effect path.
+    /// Register the collection config (secondary index and full-text index on
+    /// `status`) and the schemaless vector params (field `emb`) so
+    /// `apply_point_put` exercises every side-effect path.
     fn register(core: &mut Core) {
+        let mut config = CollectionConfig::new(COLL).with_index("status");
+        config.text_fields =
+            nodedb_physical::physical_plan::TextFieldSet::all_readable(vec!["status".to_string()]);
         core.doc_configs.insert(
             (
                 nodedb_types::DatabaseId::new(DB),
                 TenantId::new(TID),
                 COLL.to_string(),
             ),
-            CollectionConfig::new(COLL).with_index("status"),
+            config,
         );
         core.vector_params.insert(
             (

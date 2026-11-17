@@ -22,6 +22,7 @@ pub mod scan;
 pub mod snapshot;
 pub mod stamped;
 pub mod value;
+pub mod version_walk;
 pub mod visible;
 
 pub use doc::VersionedRow;

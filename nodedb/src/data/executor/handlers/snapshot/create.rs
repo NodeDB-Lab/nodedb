@@ -59,6 +59,21 @@ impl CoreLoop {
             }
         }
 
+        // Every stored sync-frame text version, tombstones included. A
+        // restore re-indexes the text of a document whose body no section
+        // carries from them.
+        match self.capture_synced_text(database_id, tenant_id) {
+            Ok(frames) => snapshot.synced_text = frames,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: synced text scan failed: {e}"),
+                    },
+                );
+            }
+        }
+
         // 2. Graph edges: scan edge_store by tenant prefix. A snapshot that
         // omits them restores every node with no edges. The versions a
         // TRUNCATE hides travel apart, with the cuts and applied ordinals.
@@ -181,6 +196,7 @@ impl CoreLoop {
             tenant_id,
             documents_versioned = snapshot.documents_versioned.len(),
             indexes_versioned = snapshot.indexes_versioned.len(),
+            synced_text = snapshot.synced_text.len(),
             edges = snapshot.edges.len(),
             labeled_nodes = snapshot.node_labels.len(),
             node_label_versions = snapshot.node_label_versions.len(),

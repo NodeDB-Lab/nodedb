@@ -38,3 +38,34 @@ pub fn index_rebuild_not_installed(
     .domain(&ctx)
     .emit();
 }
+
+/// Where an owed full-text index step belongs.
+pub struct TextIndexStepTarget<'a> {
+    /// `build` or `drop`.
+    pub step: &'static str,
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    pub index: &'a str,
+}
+
+/// Report a full-text index step the boot reconcile could not finish.
+/// Called only from the boot reconcile, which leaves the record for the
+/// next boot or a `DROP INDEX`.
+pub fn text_index_step_owed(sqlstate: &str, message: &str, target: &TextIndexStepTarget<'_>) {
+    let ctx = context::TextIndexStepOwed {
+        step: target.step,
+        database_id: target.database_id,
+        tenant_id: target.tenant_id,
+        collection: target.collection,
+        index: target.index,
+        sqlstate,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "full-text index step still owed after the boot reconcile",
+    )
+    .error_chain([message])
+    .domain(&ctx)
+    .emit();
+}

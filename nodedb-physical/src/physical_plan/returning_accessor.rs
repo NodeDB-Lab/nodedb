@@ -176,7 +176,8 @@ macro_rules! match_returning_slot {
                 | TextOp::FtsIndexDoc { .. }
                 | TextOp::FtsDeleteDoc { .. }
                 | TextOp::HybridSearchTriple { .. }
-                | TextOp::SetTextConfig { .. },
+                | TextOp::SetTextConfig { .. }
+                | TextOp::RebuildIndex { .. },
             )
             | PhysicalPlan::Columnar(
                 ColumnarOp::Scan { .. }

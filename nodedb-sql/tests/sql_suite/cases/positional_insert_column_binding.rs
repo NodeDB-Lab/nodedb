@@ -64,6 +64,7 @@ impl SqlCatalog for Catalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+                text_indexes: None,
             }),
             // Schemaless collection: no declared column order exists to
             // bind positionally to. The pre-existing `col{i}` fallback is
@@ -80,6 +81,7 @@ impl SqlCatalog for Catalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+                text_indexes: None,
             }),
             // KV collection: key/value are separated by the KV insert path
             // matching column names against the "key"/"ttl" sentinels, not
@@ -97,6 +99,7 @@ impl SqlCatalog for Catalog {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::KeyValue),
+                text_indexes: None,
             }),
             _ => None,
         };

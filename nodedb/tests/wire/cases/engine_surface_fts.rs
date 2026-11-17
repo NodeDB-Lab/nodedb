@@ -12,6 +12,9 @@ async fn basic_text_match_search() {
     srv.exec("CREATE COLLECTION fts_basic WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_basic (body)")
+        .await
+        .unwrap();
 
     srv.exec("INSERT INTO fts_basic { id: 'd1', body: 'The quick brown fox' }")
         .await
@@ -37,6 +40,9 @@ async fn basic_text_match_search() {
 async fn bm25_score_projection() {
     let srv = TestServer::start().await;
     srv.exec("CREATE COLLECTION fts_bm25 WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_bm25 (content)")
         .await
         .unwrap();
 
@@ -111,6 +117,9 @@ async fn phrase_search() {
     srv.exec("CREATE COLLECTION fts_phrase WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_phrase (text)")
+        .await
+        .unwrap();
 
     srv.exec("INSERT INTO fts_phrase { id: 'p1', text: 'quick brown fox jumps' }")
         .await
@@ -140,6 +149,9 @@ async fn fuzzy_search() {
     srv.exec("CREATE COLLECTION fts_fuzzy WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_fuzzy (body)")
+        .await
+        .unwrap();
 
     srv.exec("INSERT INTO fts_fuzzy { id: 'f1', body: 'distributed database systems' }")
         .await
@@ -157,6 +169,9 @@ async fn fuzzy_search() {
 async fn and_or_query_combinations() {
     let srv = TestServer::start().await;
     srv.exec("CREATE COLLECTION fts_logic WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_logic (body)")
         .await
         .unwrap();
 
@@ -187,6 +202,9 @@ async fn crossed_docs(srv: &TestServer, coll: &str) {
     ))
     .await
     .unwrap();
+    srv.exec(&format!("CREATE SEARCH INDEX ON {coll} (title, body)"))
+        .await
+        .unwrap();
     srv.exec(&format!(
         "INSERT INTO {coll} {{ id: 'd1', title: 'rust guide', body: 'an introduction' }}"
     ))
@@ -241,6 +259,9 @@ async fn score_docs(srv: &TestServer, coll: &str) {
     ))
     .await
     .unwrap();
+    srv.exec(&format!("CREATE SEARCH INDEX ON {coll} (title, body)"))
+        .await
+        .unwrap();
     for (id, title, body) in [
         ("a", "xenon lamp", "yellow light"),
         ("b", "plain", "yellow paint"),
@@ -302,6 +323,9 @@ async fn a_residual_filter_restricts_matches_before_the_limit() {
     srv.exec("CREATE COLLECTION fts_filtered WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_filtered (body)")
+        .await
+        .unwrap();
     for i in 0..10 {
         let tag = if i % 3 == 0 { "a" } else { "b" };
         srv.exec(&format!(
@@ -331,6 +355,9 @@ async fn a_match_with_no_limit_returns_every_match() {
     srv.exec("CREATE COLLECTION fts_unbounded WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_unbounded (body)")
+        .await
+        .unwrap();
     for chunk in 0..3 {
         let values: Vec<String> = (0..500)
             .map(|i| {
@@ -357,6 +384,9 @@ async fn a_match_with_no_limit_returns_every_match() {
 async fn a_score_scan_keeps_its_filter_order_and_limit() {
     let srv = TestServer::start().await;
     srv.exec("CREATE COLLECTION fts_scan_tail WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_scan_tail (body)")
         .await
         .unwrap();
     for (id, tag, body) in [

@@ -152,35 +152,79 @@ impl MetadataCommitApplier {
                 catalog_entry::descriptor_validate::validate_image_row(&stamped, catalog)
             }
         };
+        // A re-delivered entry whose catalog write landed and whose post-apply
+        // did not finish finds its row written. It runs the post-apply again
+        // rather than counting as applied. The marker is a catalog row, so
+        // the full-log replay after a restart finds it too.
+        let owed = self.owes_post_apply(raft_index, payload)?;
         if matches!(
             validated?,
             catalog_entry::descriptor_validate::ValidationOutcome::AlreadyApplied
         ) {
+            if !owed {
+                debug!(
+                    kind = stamped.kind(),
+                    "catalog_entry: descriptor entry already superseded or applied"
+                );
+                // The DDL that installed the drain is over even though this
+                // entry changed nothing — release it, or every read of the
+                // descriptor stays rejected indefinitely (no wall-clock
+                // expiry backstops this path; see `lease::drain`).
+                self.clear_implicit_drain(&shared, &stamped)?;
+                return Ok(());
+            }
             debug!(
                 kind = stamped.kind(),
-                "catalog_entry: descriptor entry already superseded or applied"
+                "catalog_entry: re-running the post-apply a failed attempt owes"
             );
-            // The DDL that installed the drain is over even though this entry
-            // changed nothing — release it, or every read of the descriptor
-            // stays rejected indefinitely (no wall-clock expiry backstops
-            // this path; see `lease::drain`).
-            self.clear_implicit_drain(&shared, &stamped)?;
-            return Ok(());
+        } else {
+            debug!(kind = stamped.kind(), "catalog_entry: applying to redb");
+            // The marker lands before the catalog write. A crash or an error
+            // anywhere between that write and the end of the post-apply
+            // leaves it, and the re-delivery runs the post-apply again.
+            if !owed {
+                self.owe_post_apply(raft_index, payload)?;
+            }
+            let outcome = catalog_entry::apply::apply_to(&stamped, catalog)?;
+            let concluded = match outcome {
+                catalog_entry::apply::ApplyOutcome::Applied => false,
+                // An earlier delivery wrote the row, so this one writes
+                // nothing and still owes that write's post-apply.
+                catalog_entry::apply::ApplyOutcome::Unchanged => !owed,
+                // A refusal depends on rows this entry does not write, so an
+                // earlier delivery was refused alike and wrote nothing.
+                catalog_entry::apply::ApplyOutcome::Refused(_) => true,
+            };
+            if concluded {
+                // A `Put*` that wrote nothing (e.g. an if-absent create for a
+                // descriptor that already exists) still concludes its DDL. So
+                // does a refused entry: every node refuses it at this
+                // position, and the proposer reports the refusal to its
+                // client.
+                self.clear_implicit_drain(&shared, &stamped)?;
+                return self.settle_post_apply(raft_index, payload);
+            }
         }
+        // The catalog holds the entry's row. Until every effect below
+        // finished, the marker stays and a re-delivery runs them again.
+        self.finish_applied(&shared, &stamped, raft_index, audit.as_ref())
+            .await?;
+        self.settle_post_apply(raft_index, payload)
+    }
 
-        debug!(kind = stamped.kind(), "catalog_entry: applying to redb");
-        let outcome = catalog_entry::apply::apply_to(&stamped, catalog)?;
-        if !outcome.wrote() {
-            // A `Put*` that wrote nothing (e.g. an if-absent create for a
-            // descriptor that already exists) still concludes its DDL. So
-            // does a refused entry: every node refuses it at this position,
-            // and the proposer reports the refusal to its client.
-            self.clear_implicit_drain(&shared, &stamped)?;
-            return Ok(());
-        }
+    /// Every effect of a catalog entry whose row the catalog holds: the
+    /// purge-log row, the drain release, the post-apply, the purge broadcast
+    /// and the audit record.
+    async fn finish_applied(
+        &self,
+        shared: &std::sync::Arc<SharedState>,
+        stamped: &catalog_entry::CatalogEntry,
+        raft_index: u64,
+        audit: Option<&(String, String, String)>,
+    ) -> Result<(), crate::Error> {
         // The purge-log row lands before the reclaim, so an entry that
         // re-delivers after a crash writes it again.
-        let purges = super::purge_log::record_purges(&shared, &stamped, raft_index)?;
+        let purges = super::purge_log::record_purges(shared, stamped, raft_index)?;
         // Implicit drain clear: if the entry is a `Put*` for one
         // of the six stamped descriptor types, the DDL that was
         // waiting on drain has now committed — remove the drain
@@ -188,7 +232,7 @@ impl MetadataCommitApplier {
         // post_apply so a subsequent `acquire_lease` fired from
         // post_apply doesn't see a stale drain.
         {
-            self.clear_implicit_drain(&shared, &stamped)?;
+            self.clear_implicit_drain(shared, stamped)?;
             // Run synchronous post-apply side effects INLINE so every
             // in-memory cache update (install_replicated_user,
             // install_replicated_owner, etc.) is visible before the
@@ -200,22 +244,23 @@ impl MetadataCommitApplier {
             // `PutCollection`'s Register dispatch completes on every core
             // before the entry counts as applied, so a later scan always
             // finds the schema.
-            catalog_entry::post_apply::apply_post_apply_side_effects_sync(&stamped, &shared);
+            catalog_entry::post_apply::apply_post_apply_side_effects_sync(stamped, shared);
 
-            // A reclaim that failed with no durable retry returns `Err`. The
-            // batch stops here and the re-delivered entry retries the reclaim.
+            // A reclaim that failed with no durable retry, or a Register a
+            // core did not acknowledge, returns `Err`. The batch stops here
+            // and the re-delivered entry runs the post-apply again.
             catalog_entry::post_apply::run_post_apply_async_side_effects(
                 stamped.clone(),
-                std::sync::Arc::clone(&shared),
+                std::sync::Arc::clone(shared),
             )
             .await?;
 
             // The reclaim ran: online sessions drop their copy now.
-            super::purge_log::broadcast_purges(&shared, &purges);
+            super::purge_log::broadcast_purges(shared, &purges);
 
             // Emit a DdlChange audit record on every replica, once the entry
             // fully applied, so a re-delivered entry is audited once.
-            emit_ddl_audit(&shared, raft_index, &stamped, audit.as_ref());
+            emit_ddl_audit(shared, raft_index, stamped, audit);
         }
         Ok(())
     }
@@ -224,3 +269,69 @@ impl MetadataCommitApplier {
 /// The fail point that holds back a node's apply of backup schedule marks.
 /// A test arms it for one node.
 pub const BACKUP_MARK_FAIL_POINT: &str = "backup_schedule::mark_apply";
+
+#[cfg(test)]
+mod tests {
+    use nodedb_cluster::{MetadataApplier, MetadataEntry, encode_entry};
+
+    use super::super::test_fixture::applier_with_shared_at;
+    use crate::control::catalog_entry::{self, CatalogEntry};
+    use crate::control::security::catalog::StoredRole;
+
+    fn put_role() -> Vec<u8> {
+        catalog_entry::encode(&CatalogEntry::PutRole(Box::new(StoredRole {
+            name: "auditor".into(),
+            tenant_id: 1,
+            parent: String::new(),
+            created_at: 0,
+        })))
+        .unwrap()
+    }
+
+    fn ddl(payload: Vec<u8>) -> Vec<u8> {
+        encode_entry(&MetadataEntry::CatalogDdl { payload }).unwrap()
+    }
+
+    /// An entry that finished its post-apply leaves no marker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_applied_entry_leaves_no_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (applier, state) = applier_with_shared_at(dir.path(), "test.wal");
+        assert_eq!(applier.apply(&[(3, ddl(put_role()))]).await, 3);
+        assert_eq!(
+            state.credentials.catalog().load_owed_post_apply().unwrap(),
+            None
+        );
+    }
+
+    /// A marker a crash left behind survives the restart. The entry's
+    /// re-delivery runs its post-apply and clears the marker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_marker_left_by_a_crash_is_cleared_by_the_redelivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = put_role();
+        {
+            let (_applier, state) = applier_with_shared_at(dir.path(), "first.wal");
+            state
+                .credentials
+                .catalog()
+                .put_owed_post_apply(5, &payload)
+                .unwrap();
+        }
+        let (applier, state) = applier_with_shared_at(dir.path(), "second.wal");
+        let catalog = state.credentials.catalog();
+        assert_eq!(
+            catalog.load_owed_post_apply().unwrap(),
+            Some((5, payload.clone()))
+        );
+        assert_eq!(applier.apply(&[(5, ddl(payload))]).await, 5);
+        assert_eq!(catalog.load_owed_post_apply().unwrap(), None);
+        assert!(
+            catalog
+                .load_all_roles()
+                .unwrap()
+                .iter()
+                .any(|role| role.name == "auditor")
+        );
+    }
+}

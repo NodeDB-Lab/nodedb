@@ -241,6 +241,47 @@ pub fn send_ok_as_tenant(
     resp.inner.payload.to_vec()
 }
 
+/// Register `collection` of database DEFAULT under `tenant_id` as a
+/// schemaless collection whose full-text index covers `text_fields`.
+///
+/// A write indexes only declared fields, and a text read on an undeclared
+/// field errors. A fixture that searches text registers its fields first.
+pub fn register_text_fields(
+    core: &mut CoreLoop,
+    req_tx: &mut Producer<BridgeRequest>,
+    resp_rx: &mut Consumer<BridgeResponse>,
+    tenant_id: u64,
+    collection: &str,
+    text_fields: &[&str],
+) {
+    let fields: Vec<String> = text_fields.iter().map(|f| f.to_string()).collect();
+    send_ok_as_tenant(
+        core,
+        req_tx,
+        resp_rx,
+        tenant_id,
+        PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::Register {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb::types::DatabaseId::DEFAULT,
+                collection,
+            ),
+            indexes: Vec::new(),
+            crdt_enabled: false,
+            storage_mode: Default::default(),
+            enforcement: Box::default(),
+            bitemporal: false,
+            conflict_policy: None,
+            timeseries: None,
+            vector_primary: None,
+            vector_fields: Vec::new(),
+            declared_columns: Vec::new(),
+            declared_key: None,
+            text_fields: nodedb_physical::physical_plan::TextFieldSet::all_readable(fields),
+            incarnation: nodedb_types::Hlc::ZERO,
+        }),
+    );
+}
+
 /// Push a request as a specific tenant, tick, pop response — returns raw response.
 pub fn send_raw_as_tenant(
     core: &mut CoreLoop,

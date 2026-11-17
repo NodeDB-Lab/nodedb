@@ -171,6 +171,7 @@ fn restored_kv(value_len: usize) -> PhysicalPlan {
         arrays: Vec::new(),
         columnar_keys: Vec::new(),
         vector_rows: Vec::new(),
+        synced_text: Vec::new(),
         timeseries: Vec::new(),
         collections: vec![CACHE.to_string()],
         identities: Vec::new(),

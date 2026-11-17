@@ -157,8 +157,12 @@ impl CoreLoop {
         // Derived state follows the current read schema, including later ADD defaults.
         // Accepted bytes and their captured canonical image remain unchanged.
         // Shared with the DELETE-rollback re-index path.
-        let text_content = crate::data::executor::fts_text::extract_fts_fields(&doc);
-        // Empty text is NOT skipped — stripping every indexable word
+        let text_fields = self.declared_text_fields_of(&config_key);
+        // A collection with no declared text field holds no inverted-index
+        // state, so the write skips the index entirely.
+        let index_text = index_text && !text_fields.is_empty();
+        let text_content = crate::data::executor::fts_text::extract_fts_fields(&doc, text_fields);
+        // Empty text is NOT skipped — stripping every declared word
         // must still remove the document from the index.
         if index_text {
             // Lands in the caller's transaction, so propagating an error

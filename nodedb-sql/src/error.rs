@@ -74,7 +74,7 @@ pub enum SqlError {
 
     /// The column argument of `text_match` / `bm25_score` cannot serve a
     /// full-text search. `fault` names why and carries the SQLSTATE.
-    #[error("{function}(): column '{column}' of collection '{collection}' {fault}")]
+    #[error("{function}(): {}", fault.describe(collection, column))]
     TextColumn {
         function: String,
         collection: String,

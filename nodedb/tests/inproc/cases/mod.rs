@@ -175,6 +175,8 @@ mod quota_live_enforcement_apply;
 mod quota_three_level_denial;
 mod redaction_policy_ddl;
 mod reindex_concurrent_writes;
+#[cfg(feature = "failpoints")]
+mod reindex_concurrent_writes_held;
 mod reindex_field_scopes;
 mod reindex_vector_concurrent;
 mod request_tracker_backpressure;
@@ -229,6 +231,7 @@ mod sync_shape_read_authorization;
 mod sync_state_transition_by_role;
 mod system_task_call_sites;
 mod tenant_drop_owned_objects;
+mod text_index_build_held;
 mod timeseries_event_catch_up;
 mod timeseries_nowal_change_event;
 mod tls_policy_enforcement;

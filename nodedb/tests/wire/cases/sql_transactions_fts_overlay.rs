@@ -33,6 +33,10 @@ async fn setup(server: &TestServer, coll: &str, storage_mode: &str) {
                 .unwrap();
         }
     }
+    server
+        .exec(&format!("CREATE SEARCH INDEX ON {coll} (body)"))
+        .await
+        .unwrap();
     for (id, body) in [
         ("a1", "the quick brown fox"),
         ("a2", "a lazy dog sleeps"),
@@ -283,6 +287,10 @@ async fn ids_of(server: &TestServer, sql: &str) -> Vec<String> {
 async fn staged_insert_is_visible_to_a_field_scoped_search() {
     let server = TestServer::start().await;
     setup(&server, "fts_ov_scoped", "document_schemaless").await;
+    server
+        .exec("CREATE SEARCH INDEX fts_ov_scoped_title ON fts_ov_scoped (title)")
+        .await
+        .unwrap();
 
     server.exec("BEGIN").await.unwrap();
     server
@@ -345,6 +353,11 @@ async fn staged_row_failing_the_filter_is_excluded() {
 async fn first_use_of_a_field_inside_a_transaction_is_not_an_error() {
     let server = TestServer::start().await;
     setup(&server, "fts_ov_new_field", "document_schemaless").await;
+    // No row holds `note` yet: the first row that does is staged below.
+    server
+        .exec("CREATE SEARCH INDEX fts_ov_new_field_note ON fts_ov_new_field (note)")
+        .await
+        .unwrap();
 
     server.exec("BEGIN").await.unwrap();
     server

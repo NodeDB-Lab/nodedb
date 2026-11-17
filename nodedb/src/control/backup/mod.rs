@@ -7,6 +7,7 @@ pub mod cut_capture;
 pub mod cut_order;
 pub mod database;
 pub mod detect;
+mod index_capture;
 pub mod metadata;
 pub mod node_snapshot;
 pub mod orchestrator;

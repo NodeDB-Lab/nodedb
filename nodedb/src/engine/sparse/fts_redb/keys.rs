@@ -22,6 +22,9 @@ pub(crate) type FieldDocKey<'a> = (u64, u64, &'a str, &'a str, u32);
 pub(crate) type StatsKey<'a> = (u64, u64, &'a str, &'a str);
 /// `(db, tid, collection, surrogate)`: DOC_FIELDS.
 pub(crate) type DocFieldsKey<'a> = (u64, u64, &'a str, u32);
+/// `(db, tid, collection, surrogate, ordinal)`: SYNCED_TEXT. One row per
+/// frame version of a document.
+pub(crate) type SyncedKey<'a> = (u64, u64, &'a str, u32, i64);
 
 /// POSTINGS key of the posting of `surrogate` under `term` in one index.
 pub(crate) fn posting_key<'a>(
@@ -245,6 +248,17 @@ impl<'a> KeyOwner<'a> {
     /// Lowest DOC_FIELDS key this owner covers.
     pub(crate) fn doc_fields_start(&self) -> DocFieldsKey<'a> {
         (self.database_id, self.tid, self.collection_bound(), 0)
+    }
+
+    /// Lowest SYNCED_TEXT key this owner covers.
+    pub(crate) fn synced_start(&self) -> SyncedKey<'a> {
+        (
+            self.database_id,
+            self.tid,
+            self.collection_bound(),
+            0,
+            i64::MIN,
+        )
     }
 }
 

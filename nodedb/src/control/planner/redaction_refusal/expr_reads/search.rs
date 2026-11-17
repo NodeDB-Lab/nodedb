@@ -28,8 +28,10 @@ pub(super) fn text_reads(op: &TextOp, out: &mut NodeReads) -> crate::Result<()> 
             out.filter_bytes(filters)?;
             out.field(vector_field, Clause::Sort);
         }
-        TextOp::FtsIndexDoc { .. } | TextOp::FtsDeleteDoc { .. } | TextOp::SetTextConfig { .. } => {
-        }
+        TextOp::FtsIndexDoc { .. }
+        | TextOp::FtsDeleteDoc { .. }
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => {}
     }
     Ok(())
 }

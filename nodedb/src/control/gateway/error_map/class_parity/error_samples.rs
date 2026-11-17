@@ -203,6 +203,11 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::TextColumn {
             collection: collection(),
+            column: "x".into(),
+            fault: nodedb_types::text_search::TextColumnFault::IndexBuilding,
+        },
+        E::TextColumn {
+            collection: collection(),
             column: "n".into(),
             fault: nodedb_types::text_search::TextColumnFault::NotText {
                 data_type: "INT".into(),

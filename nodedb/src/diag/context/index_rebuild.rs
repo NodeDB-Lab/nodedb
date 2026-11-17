@@ -54,3 +54,46 @@ impl DomainContext for IndexRebuildNotInstalled<'_> {
         })
     }
 }
+
+/// A full-text index build or drop the boot reconcile could not finish.
+pub(in crate::diag) struct TextIndexStepOwed<'a> {
+    /// `build` or `drop`.
+    pub step: &'static str,
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    pub index: &'a str,
+    /// The SQLSTATE the step failed with.
+    pub sqlstate: &'a str,
+}
+
+impl DomainContext for TextIndexStepOwed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.text_index_step_owed"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The step and the SQLSTATE name the cause. The index is the
+        // occurrence, so every boot that hits one cause files one report.
+        format!("step={};sqlstate={}", self.step, self.sqlstate)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "step": self.step,
+            "database_id": self.database_id,
+            "tenant_id": self.tenant_id,
+            "collection": self.collection,
+            "index": self.index,
+            "sqlstate": self.sqlstate,
+            "why_reported": "a crash or an error interrupted this full-text index step, and \
+                             the boot reconcile could not finish it. A `build` leaves the \
+                             index missing rows stored before it. A `drop` leaves the record \
+                             listed in the `Dropping` state, and no write indexes its fields",
+            "operator_action": "read the node log for the same index. A peer that was down \
+                                at boot is the usual cause: the next boot finishes the step. \
+                                Run DROP INDEX on the index to finish a drop, or to remove a \
+                                build that keeps failing",
+        })
+    }
+}

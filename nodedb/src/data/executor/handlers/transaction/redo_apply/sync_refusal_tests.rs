@@ -5,7 +5,9 @@
 use crate::bridge::envelope::{ErrorCode, Status};
 use crate::control::server::wal_dispatch::{encode_text_op_record, encode_vector_put_payload};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+use crate::data::executor::core_loop::tests::{
+    declare_text_fields, make_core_with_dir, make_default_task,
+};
 use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoSubRecord};
 use nodedb_physical::physical_plan::TextOp;
@@ -72,6 +74,7 @@ pub(super) fn refused_vector() -> RedoSubRecord {
 fn assert_group_rolls_back(refused: RedoSubRecord) {
     let directory = tempfile::tempdir().unwrap();
     let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
+    declare_text_fields(&mut core, 1, "articles", &["body"]);
     let redo = RedoRecord {
         version: 1,
         ops: vec![
@@ -222,6 +225,7 @@ fn assert_reopened_group_refuses_to_serve(refused: RedoSubRecord, write_group: b
         } as u32
     );
     let (mut core, _requests, _responses) = make_core_with_dir(&directory.path().join("core"));
+    declare_text_fields(&mut core, 1, "articles", &["body"]);
     assert!(
         core.replay_all_wal(&records, 1, &nodedb_wal::TombstoneSet::new())
             .is_err(),

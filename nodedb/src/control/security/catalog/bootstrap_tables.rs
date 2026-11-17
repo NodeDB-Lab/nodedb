@@ -85,6 +85,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "metadata_leases" => super::metadata_host::leases::METADATA_LEASES,
     "metadata_drains" => super::metadata_host::drains::METADATA_DRAINS,
     "metadata_host_scalars" => super::metadata_host::scalars::METADATA_HOST_SCALARS,
+    "metadata_owed_post_apply" => super::metadata_host::owed_post_apply::METADATA_OWED_POST_APPLY,
     "pending_ddl" => super::metadata_host::ddl::PENDING_DDL,
     "pending_history_compaction" => super::pending_history_compaction::PENDING_HISTORY_COMPACTION,
     "crdt_compaction_points" => super::crdt_compaction_points::CRDT_COMPACTION_POINTS,
@@ -95,6 +96,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "vector_model_metadata" => VECTOR_MODEL_METADATA,
     "vector_index_params" => VECTOR_INDEX_PARAMS,
     "index_registry" => INDEX_REGISTRY,
+    "index_registry_by_collection" => INDEX_REGISTRY_BY_COLLECTION,
     "checkpoints" => CHECKPOINTS,
     // ── Surrogate identity map ──
     "surrogate_scopes" => SURROGATE_SCOPES,

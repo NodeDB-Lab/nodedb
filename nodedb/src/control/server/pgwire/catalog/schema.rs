@@ -251,5 +251,6 @@ pub fn catalog_collection_info(name: &str) -> Option<CollectionInfo> {
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         // NodeDB models a subset of the columns clients ask for.
         open_schema: true,
+        text_indexes: None,
     })
 }

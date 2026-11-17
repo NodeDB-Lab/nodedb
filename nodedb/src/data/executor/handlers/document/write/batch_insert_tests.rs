@@ -5,7 +5,7 @@ use redb::TableDefinition;
 use super::DocumentBatchInsertParams;
 use crate::bridge::envelope::{Priority, Request, Status};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::tests::make_core_with_dir;
+use crate::data::executor::core_loop::tests::{declare_text_fields, make_core_with_dir};
 use crate::data::executor::doc_format;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::CollectionConfig;
@@ -99,6 +99,7 @@ fn corpus_size(core: &CoreLoop) -> u32 {
 fn a_healthy_batch_commits_every_row_and_indexes_it() {
     let dir = tempfile::tempdir().unwrap();
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    declare_text_fields(&mut core, TID, COLL, &["title"]);
     let documents = bodies();
     let surrogates = vec![Surrogate(11), Surrogate(12)];
 
@@ -264,6 +265,7 @@ fn skip_mode_lands_only_new_keys() {
 fn a_row_that_cannot_be_indexed_fails_the_whole_batch() {
     let dir = tempfile::tempdir().unwrap();
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    declare_text_fields(&mut core, TID, COLL, &["title"]);
     poison_inverted_index(&core);
     let documents = bodies();
     let surrogates = vec![Surrogate(21), Surrogate(22)];

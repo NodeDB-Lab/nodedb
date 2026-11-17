@@ -14,6 +14,8 @@ use super::super::result::DdlError;
 use super::collection::index::build::build_secondary_index;
 use super::collection::index::kv_index::drop_kv_index;
 use super::collection::index::teardown;
+use super::collection::index::text_build::build_text_index;
+use super::collection::index::text_drop::finish_text_index_drop;
 use super::kv_sorted_index::SortedIndexTarget;
 use super::kv_sorted_index::dispatch::register_in_engine;
 use super::kv_sorted_index::drop_in_engine;
@@ -41,7 +43,9 @@ fn effect_collection(effect: &DeferredDdlEffect) -> &str {
         | DeferredDdlEffect::IndexTeardown { collection, .. }
         | DeferredDdlEffect::SortedIndexRegister { collection, .. }
         | DeferredDdlEffect::SortedIndexDrop { collection, .. }
-        | DeferredDdlEffect::KvIndexDrop { collection, .. } => collection,
+        | DeferredDdlEffect::KvIndexDrop { collection, .. }
+        | DeferredDdlEffect::TextIndexBuild { collection, .. }
+        | DeferredDdlEffect::TextIndexDrop { collection, .. } => collection,
     }
 }
 
@@ -105,6 +109,18 @@ async fn run_one(state: &SharedState, effect: DeferredDdlEffect) -> Result<(), D
             collection,
             field,
         } => drop_kv_index(state, tenant_id, database_id, &collection, &field).await,
+        DeferredDdlEffect::TextIndexBuild {
+            tenant_id,
+            database_id,
+            collection,
+            index_name,
+        } => build_text_index(state, tenant_id, database_id, &collection, &index_name).await,
+        DeferredDdlEffect::TextIndexDrop {
+            tenant_id,
+            database_id,
+            collection,
+            index_name,
+        } => finish_text_index_drop(state, tenant_id, database_id, &collection, &index_name).await,
     }
 }
 

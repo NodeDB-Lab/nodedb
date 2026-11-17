@@ -189,9 +189,10 @@ async fn translate_text_op(
             )
             .await
         }
-        TextOp::FtsIndexDoc { .. } | TextOp::FtsDeleteDoc { .. } | TextOp::SetTextConfig { .. } => {
-            Ok(payload.to_vec())
-        }
+        TextOp::FtsIndexDoc { .. }
+        | TextOp::FtsDeleteDoc { .. }
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => Ok(payload.to_vec()),
     }
 }
 

@@ -185,6 +185,11 @@ pub(super) fn samples() -> Vec<ErrorCode> {
         ErrorCode::TextColumn {
             collection: collection(),
             column: "x".into(),
+            fault: nodedb_types::text_search::TextColumnFault::IndexBuilding,
+        },
+        ErrorCode::TextColumn {
+            collection: collection(),
+            column: "x".into(),
             fault: nodedb_types::text_search::TextColumnFault::NotAColumn,
         },
         ErrorCode::Internal { detail: text() },

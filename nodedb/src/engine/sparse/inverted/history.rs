@@ -21,8 +21,10 @@ use super::doc_image::tokens_from_postings;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
-use crate::engine::sparse::fts_redb::backend::{RedbHistoryRead, RedbHistoryTxn};
-use crate::engine::sparse::fts_redb::tables::TEXT_ENDED;
+use crate::engine::sparse::fts_redb::backend::{RedbHistoryRead, RedbHistoryTxn, synced_rows};
+use crate::engine::sparse::fts_redb::bytes::synced_key_len;
+use crate::engine::sparse::fts_redb::keys::KeyOwner;
+use crate::engine::sparse::fts_redb::tables::{SYNCED_TEXT, TEXT_ENDED};
 use crate::engine::storage_bytes::StorageDelta;
 
 /// The history address of `doc` in `index`.
@@ -154,8 +156,9 @@ impl InvertedIndex {
         self.purge_text_versions_below_by(&|_, _, _| Some(horizon))
     }
 
-    /// Bytes the ended text versions of `collection` hold: each version's
-    /// key and its analyzed tokens.
+    /// Bytes the text history of `collection` holds: each ended version's
+    /// key and its analyzed tokens, plus each stored sync-frame version's
+    /// key and its `(field, text)` pairs.
     pub fn text_history_bytes(
         &self,
         database_id: u64,
@@ -179,23 +182,47 @@ impl InvertedIndex {
                 bytes = bytes.saturating_add((key_bytes + value.value().len()) as u64);
             }
         }
+        let synced = read
+            .open_table(SYNCED_TEXT)
+            .map_err(|e| inverted_err("open synced text", e))?;
+        let owner = KeyOwner::collection(database_id, tid.as_u64(), collection);
+        for entry in synced
+            .range(owner.synced_start()..)
+            .map_err(|e| inverted_err("synced text range", e))?
+        {
+            let (key, value) = entry.map_err(|e| inverted_err("read synced text", e))?;
+            let (d, t, c, ..) = key.value();
+            if !owner.owns(d, t, c, None) {
+                break;
+            }
+            let row_bytes = synced_key_len(c) + value.value().len();
+            bytes = bytes.saturating_add(row_bytes as u64);
+        }
         Ok(bytes)
     }
 
     /// [`Self::purge_text_versions_below`] with a horizon per collection:
     /// `horizon_of(database, tenant, collection)`, `None` to keep the
     /// collection's whole history.
+    ///
+    /// The same transaction drops the stored sync-frame versions below each
+    /// horizon. A rebuild replays those frames, so a kept frame version
+    /// would bring back text history the index purged. The count includes
+    /// the frame versions dropped.
     pub fn purge_text_versions_below_by(
         &self,
         horizon_of: &dyn Fn(u64, u64, &str) -> Option<i64>,
     ) -> crate::Result<usize> {
+        // A rebuild's snapshot still holds the purged versions: its cutover
+        // purges at the same horizon.
+        self.note_history_purge(horizon_of);
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
         let mut delta = StorageDelta::default();
         let dropped = {
             let mut store = RedbHistoryTxn::new(&txn, &mut delta);
             history::purge_below(&mut store, horizon_of)?
-        };
+        } + synced_rows::purge_below(&txn, horizon_of, &mut delta)?;
         delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit text purge", e))?;
@@ -413,6 +440,42 @@ mod tests {
         assert_eq!(
             audit_hits, 1,
             "the retained collection still reads alpha at 15"
+        );
+    }
+
+    /// The text history bytes of a collection count its stored sync-frame
+    /// versions, tombstones included, and no other collection's frames.
+    #[test]
+    fn the_text_history_bytes_count_stored_frame_versions() {
+        use crate::engine::sparse::fts_redb::bytes::synced_key_len;
+        use crate::engine::sparse::inverted::IndexDocScope;
+
+        let (idx, _dir) = open_temp();
+        assert_eq!(idx.text_history_bytes(DB, T, "docs").unwrap(), 0);
+        let pairs = vec![("body".to_string(), "alpha".to_string())];
+        let txn = idx.inner.backend().db().begin_write().unwrap();
+        for (collection, ordinal, fields) in [
+            ("docs", 10, pairs.clone()),
+            ("docs", 20, Vec::new()),
+            ("other", 10, pairs.clone()),
+        ] {
+            let doc = IndexDocScope {
+                database_id: DB,
+                tid: T,
+                collection,
+                surrogate: Surrogate::new(1),
+                ordinal,
+            };
+            idx.put_synced_text_in_txn(&txn, doc, &fields).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let value_bytes = zerompk::to_msgpack_vec(&pairs).unwrap().len();
+        let expected = 2 * synced_key_len("docs") + value_bytes;
+        assert_eq!(
+            idx.text_history_bytes(DB, T, "docs").unwrap(),
+            expected as u64,
+            "one frame version and one tombstone"
         );
     }
 }

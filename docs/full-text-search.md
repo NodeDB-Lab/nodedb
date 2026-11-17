@@ -30,6 +30,16 @@ NodeDB's full-text search engine provides Block-Max WAND (BMW) optimized BM25 ra
 - **LSM storage** — In-memory memtable with configurable spill thresholds, immutable compressed segments, level-based compaction (8×8 tiering), and parallel index build.
 - **Hybrid vector fusion** — Reciprocal Rank Fusion (RRF) merges BM25 text results with vector similarity in one query.
 
+## Declared Fields
+
+A search reads only the fields a search index declares. A collection with no search index stores no postings.
+
+- A search on a field that no search index declares returns SQLSTATE `42703`. The message names the `CREATE SEARCH INDEX` statement to run.
+- `text_match(*, ...)` needs at least one search index on the collection. It covers only the declared fields.
+- `CREATE SEARCH INDEX` indexes the rows already stored. A bitemporal collection also indexes its row history.
+- A search during an index build returns SQLSTATE `55000`. Run the search again after the build finishes.
+- `DROP INDEX <name>` removes the postings of that index. A new `CREATE SEARCH INDEX` rebuilds them from the stored rows.
+
 ## Examples
 
 ```sql

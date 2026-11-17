@@ -45,6 +45,7 @@ pub(super) fn validate_envelope(
 
     let listed: BTreeSet<u64> = databases.iter().map(|b| b.database_id).collect();
     validate_metadata_sections(env, &listed)?;
+    super::index_records::validate_index_records(catalog, tenant_id, env, &databases)?;
 
     let merged = merge_sections(&env.sections)?;
     if let Some(source) = merged.keys().find(|source| !listed.contains(source)) {

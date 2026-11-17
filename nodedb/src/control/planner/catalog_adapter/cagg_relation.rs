@@ -77,6 +77,8 @@ pub(super) fn continuous_aggregate_relation(
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema: CollectionInfo::open_schema_for(EngineType::ContinuousAggregate),
+        // A continuous aggregate carries no full-text index.
+        text_indexes: Some(nodedb_sql::types::TextIndexFields::default()),
     }))
 }
 

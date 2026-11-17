@@ -18,9 +18,10 @@
 //! every kind including `Secondary`.
 
 use crate::control::security::audit::AuditEvent;
-use crate::control::security::catalog::{IndexKind, StoredIndexRecord};
+use crate::control::security::catalog::{IndexKind, IndexRecordState, StoredIndexRecord};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
@@ -119,12 +120,6 @@ pub async fn drop_index(
         ));
     }
 
-    // Autocommit: engine and kind-specific catalog state first. If any of it
-    // survives, the identity record survives with it so the drop can be
-    // retried. Inside an explicit transaction every entry is buffered and
-    // the engine teardown waits for COMMIT, so the records are buffered
-    // first and the teardown's deferred effects ride on this statement's
-    // own entries: a ROLLBACK TO SAVEPOINT then discards them together.
     let in_transaction = ddl_buffer::is_active();
     if !in_transaction {
         // The engine teardown precedes the catalog entries, so the catalog
@@ -135,29 +130,12 @@ pub async fn drop_index(
             Some(tenant_id),
             &format!("DROP INDEX {index_name} ON {}", record.collection),
         )?;
-        super::teardown::teardown(state, &record, database_id, tenant_id).await?;
     }
 
-    super::super::super::super::index_registry::propose_delete_index_record(
-        state,
-        database_id,
-        tenant_id,
-        index_name,
-        &record.collection,
-    )
-    .await?;
-
-    crate::control::server::shared::ddl::owner::propose_delete_owner(
-        state,
-        record.kind.owner_object_type(),
-        database_id.as_u64(),
-        tenant_id,
-        index_name,
-    )
-    .await?;
-
-    if in_transaction {
-        super::teardown::teardown(state, &record, database_id, tenant_id).await?;
+    if record.kind == IndexKind::FullText {
+        drop_text_index(state, &record, database_id, tenant_id).await?;
+    } else {
+        drop_other_index(state, &record, database_id, tenant_id, in_transaction).await?;
     }
 
     state.audit_record(
@@ -175,4 +153,83 @@ pub async fn drop_index(
         command: tag,
         rows_affected: None,
     }])
+}
+
+/// Drop a full-text index: mark its record `Dropping`, then rebuild the
+/// collection's text without its fields before the record leaves.
+///
+/// An error leaves the record `Dropping`, and the statement returns it. A
+/// retried `DROP INDEX` runs the remaining steps again. Inside an explicit
+/// transaction the mark is buffered and the rest waits for COMMIT. See
+/// [`super::text_drop`].
+async fn drop_text_index(
+    state: &SharedState,
+    record: &StoredIndexRecord,
+    database_id: DatabaseId,
+    tenant_id: crate::types::TenantId,
+) -> Result<(), DdlError> {
+    if record.state != IndexRecordState::Dropping {
+        super::super::super::super::index_registry::propose_index_dropping(state, record).await?;
+    }
+    let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::TextIndexDrop {
+        tenant_id,
+        database_id,
+        collection: record.collection.clone(),
+        index_name: record.name.clone(),
+    });
+    if deferred {
+        return Ok(());
+    }
+    super::text_drop::finish_text_index_drop(
+        state,
+        tenant_id,
+        database_id,
+        &record.collection,
+        &record.name,
+    )
+    .await
+}
+
+/// Drop an index of any kind but full-text.
+///
+/// Autocommit: engine and kind-specific catalog state first. If any of it
+/// survives, the identity record survives with it so the drop can be
+/// retried. Inside an explicit transaction every entry is buffered and the
+/// engine teardown waits for COMMIT, so the records are buffered first and
+/// the teardown's deferred effects ride on this statement's own entries: a
+/// ROLLBACK TO SAVEPOINT then discards them together.
+async fn drop_other_index(
+    state: &SharedState,
+    record: &StoredIndexRecord,
+    database_id: DatabaseId,
+    tenant_id: crate::types::TenantId,
+    in_transaction: bool,
+) -> Result<(), DdlError> {
+    if !in_transaction {
+        super::teardown::teardown(state, record, database_id, tenant_id).await?;
+    }
+
+    super::super::super::super::index_registry::propose_delete_index_record(
+        state,
+        database_id,
+        tenant_id,
+        &record.name,
+        &record.collection,
+        record.kind,
+    )
+    .await?;
+
+    crate::control::server::shared::ddl::owner::propose_delete_owner(
+        state,
+        record.kind.owner_object_type(),
+        database_id.as_u64(),
+        tenant_id,
+        &record.name,
+    )
+    .await?;
+
+    if in_transaction {
+        super::teardown::teardown(state, record, database_id, tenant_id).await?;
+    }
+    Ok(())
 }

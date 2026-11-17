@@ -185,7 +185,7 @@ pub fn assert_visible(
     let [collection, _row_id, user_id] = args.as_slice() else {
         return Err(syntax());
     };
-    let collection = super::kv_atomic::unquote(collection);
+    let collection = super::kv_atomic::name_arg(collection)?;
     let user_id = super::kv_atomic::unquote(user_id);
 
     // Build AuthContext for the target user.

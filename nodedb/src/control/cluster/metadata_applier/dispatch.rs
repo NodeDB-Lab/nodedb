@@ -866,6 +866,96 @@ mod tests {
         assert_eq!(loaded.owner, "tester");
     }
 
+    /// Answer every request on `side` with `Ok`, and count the Registers.
+    async fn count_registers(
+        state: Arc<SharedState>,
+        mut side: crate::bridge::dispatch::CoreChannelDataSide,
+        registers: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::bridge::dispatch::BridgeResponse;
+        use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
+        loop {
+            while let Ok(request) = side.request_rx.try_pop() {
+                if matches!(
+                    request.inner.plan,
+                    PhysicalPlan::Document(
+                        nodedb_physical::physical_plan::DocumentOp::Register { .. }
+                    )
+                ) {
+                    registers.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                side.response_tx
+                    .try_push(BridgeResponse {
+                        inner: Response {
+                            request_id: request.inner.request_id,
+                            status: Status::Ok,
+                            attempt: 1,
+                            partial: false,
+                            payload: Payload::empty(),
+                            watermark_lsn: crate::types::Lsn::ZERO,
+                            error_code: None,
+                            stage_vote: None,
+                            read_vshards: crate::types::ReadShards::new(),
+                            write_set: Vec::new(),
+                        },
+                    })
+                    .expect("fake data-plane response queue has capacity");
+            }
+            state.poll_and_route_responses();
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// A post-apply no core acknowledges stops the batch at its entry, with
+    /// the catalog row written. The re-delivered entry finds the row and runs
+    /// the post-apply again, so the collection registers before the entry
+    /// counts as applied. A later re-delivery registers nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unacknowledged_register_halts_and_redelivery_registers_again() {
+        let (applier, state, mut data_sides, _tmp) = applier_over_shared_state();
+        let mut side = data_sides.pop().expect("one data side");
+        let batch = [(11, encode_entry(&put_collection_entry("owed")).unwrap())];
+
+        assert_eq!(
+            applier.apply(&batch).await,
+            0,
+            "no core answers, so the entry does not count as applied"
+        );
+        assert!(
+            state
+                .credentials
+                .catalog()
+                .get_collection(DatabaseId::DEFAULT, 7, "owed")
+                .unwrap()
+                .is_some(),
+            "the catalog write landed before the post-apply"
+        );
+
+        // The first attempt's requests timed out. Their waiters are gone.
+        while side.request_rx.try_pop().is_ok() {}
+        let registers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let core = tokio::spawn(count_registers(
+            Arc::clone(&state),
+            side,
+            Arc::clone(&registers),
+        ));
+
+        assert_eq!(applier.apply(&batch).await, 11, "the re-delivery applies");
+        let after_redelivery = registers.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            after_redelivery >= 1,
+            "the re-delivered entry registers the collection"
+        );
+
+        assert_eq!(applier.apply(&batch).await, 11);
+        assert_eq!(
+            registers.load(std::sync::atomic::Ordering::SeqCst),
+            after_redelivery,
+            "an entry whose post-apply finished registers nothing again"
+        );
+        core.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn apply_deactivate_preserves_record() {
         let (applier, state, _core, _tmp) = make_applier_with_acknowledging_core();

@@ -158,9 +158,9 @@ fn extract_target_collection(body_sql: &str) -> Option<String> {
 
     for (i, token) in upper_tokens.iter().enumerate() {
         if TARGET_KEYWORDS.contains(&token.as_str()) && i + 1 < tokens.len() {
-            let candidate = tokens[i + 1]
-                .trim_end_matches([';', '(', ')'])
-                .to_lowercase();
+            let candidate = crate::control::server::shared::ddl::sql_parse::resolve_name_token(
+                tokens[i + 1].trim_end_matches([';', '(', ')']),
+            );
             if !candidate.is_empty()
                 && !SKIP_AFTER.contains(&candidate.to_uppercase().as_str())
                 && !candidate.starts_with('$')

@@ -77,24 +77,6 @@ impl InvertedIndex {
             .purge_collection(database_id, tid.as_u64(), collection)
             .map_err(into_result_err)
     }
-
-    /// Empty every index of a `(database, tenant, collection)` in one write
-    /// transaction, keeping the collection's analyzer, language, and fuzzy
-    /// configuration. TRUNCATE empties a collection this way.
-    pub fn clear_collection(
-        &self,
-        database_id: u64,
-        tid: TenantId,
-        collection: &str,
-    ) -> crate::Result<usize> {
-        self.note_purge(database_id, tid.as_u64(), Some(collection));
-        self.inner
-            .memtable()
-            .drain_collection(database_id, tid.as_u64(), collection);
-        self.inner
-            .backend()
-            .clear_collection_data(database_id, tid.as_u64(), collection)
-    }
 }
 
 #[cfg(test)]
@@ -115,53 +97,6 @@ mod tests {
         let idx =
             InvertedIndex::open(db, crate::data::executor::core_loop::test_governor()).unwrap();
         (idx, dir)
-    }
-
-    /// Clearing a collection empties its indexes and keeps its fuzzy
-    /// configuration.
-    #[test]
-    fn clear_collection_empties_indexes_and_keeps_config() {
-        let (idx, _dir) = open_temp();
-        let t = TenantId::new(1);
-        idx.set_collection_fuzzy(DB, t, "docs", true).unwrap();
-        idx.index_document(DB, t, "docs", Surrogate::new(1), &body("alpha bravo"))
-            .unwrap();
-        idx.index_document(DB, t, "other", Surrogate::new(1), &body("alpha"))
-            .unwrap();
-
-        idx.clear_collection(DB, t, "docs").unwrap();
-
-        let search = |collection: &str| {
-            idx.search(
-                DB,
-                t,
-                collection,
-                FtsSearchParams {
-                    query: "alpha",
-                    top_k: 10,
-                    fuzzy_enabled: false,
-                    mode: QueryMode::And,
-                    prefilter: None,
-                },
-            )
-            .unwrap()
-        };
-        assert!(
-            search("docs").is_empty(),
-            "the cleared collection holds no text"
-        );
-        assert_eq!(
-            search("other").len(),
-            1,
-            "another collection keeps its text"
-        );
-        assert_eq!(idx.corpus_stats(DB, t, "docs").unwrap().0, 0);
-        assert!(
-            idx.inner
-                .get_collection_fuzzy(DB, t.as_u64(), "docs")
-                .unwrap(),
-            "the fuzzy configuration survives"
-        );
     }
 
     #[test]

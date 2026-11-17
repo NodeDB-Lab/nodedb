@@ -266,6 +266,24 @@ pub fn parse_ident_token(token: &str) -> Result<String, DdlError> {
         .map_err(|error| DdlError::new("42602", error.to_string()))
 }
 
+/// Resolve a raw statement token to the name it spells, with no reserved
+/// word or grammar check.
+///
+/// A double-quoted token keeps its case, with `""` read as one quote. A bare
+/// token lowercases. This is the rule the DDL parser applies to a name its
+/// statement reads without the reserved-word check, such as a schedule or
+/// alert name. A name that must pass that check goes through
+/// [`parse_ident_token`].
+pub fn resolve_name_token(token: &str) -> String {
+    match token
+        .strip_prefix('"')
+        .and_then(|quoted| quoted.strip_suffix('"'))
+    {
+        Some(quoted) if !quoted.is_empty() => quoted.replace("\"\"", "\""),
+        _ => token.to_lowercase(),
+    }
+}
+
 /// Resolve a raw token that names an identifier or the `*` wildcard.
 ///
 /// A clause meaning "every column" or "every collection" carries `*` where an
@@ -317,7 +335,18 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_clause, parse_ident_token, parse_sql_value, parse_stream_ident_token};
+    use super::{
+        extract_clause, parse_ident_token, parse_sql_value, parse_stream_ident_token,
+        resolve_name_token,
+    };
+
+    #[test]
+    fn name_token_follows_the_identifier_rule() {
+        assert_eq!(resolve_name_token("Notes"), "notes");
+        assert_eq!(resolve_name_token("\"Notes\""), "Notes");
+        assert_eq!(resolve_name_token("\"a\"\"b\""), "a\"b");
+        assert_eq!(resolve_name_token("\"\""), "\"\"");
+    }
 
     #[test]
     fn bare_ident_token_lowercases() {

@@ -6,6 +6,7 @@
 
 pub mod analyze;
 pub mod auto_analyze;
+mod collection_column;
 pub mod compact;
 pub mod distributed;
 pub mod reindex;

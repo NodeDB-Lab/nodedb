@@ -346,6 +346,10 @@ pub enum CatalogEntry {
         /// Not needed to locate the record. It lets post-apply invalidate exactly
         /// the cached plans still holding an `IndexLookup` on the dropped index.
         collection: String,
+        /// Not needed to locate the record. Post-apply re-registers
+        /// `collection` when a full-text index drops, so its declared text
+        /// fields shrink on every node.
+        kind: crate::control::security::catalog::IndexKind,
     },
 
     // ── Object ownership ───────────────────────────────────────────

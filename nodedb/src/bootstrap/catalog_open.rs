@@ -135,4 +135,27 @@ impl CollectionSource for CatalogForRead {
             Self::Repaired(c) => c.collections_for_tenant(database_id, tenant_id),
         }
     }
+
+    fn index_records_for_tenant(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+        match self {
+            Self::ReadOnly(c) => c.index_records_for_tenant(database_id, tenant_id),
+            Self::Repaired(c) => c.index_records_for_tenant(database_id, tenant_id),
+        }
+    }
+
+    fn index_records_for_collection(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+        match self {
+            Self::ReadOnly(c) => c.index_records_for_collection(database_id, tenant_id, collection),
+            Self::Repaired(c) => c.index_records_for_collection(database_id, tenant_id, collection),
+        }
+    }
 }

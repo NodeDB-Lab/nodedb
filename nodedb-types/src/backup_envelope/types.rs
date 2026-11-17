@@ -56,6 +56,10 @@ pub const SECTION_ORIGIN_VERIFICATION: u64 = 0xFFFF_FFFF_FFFF_FFF4;
 /// is a msgpack-encoded `Vec<ArrayCatalogBlob>`. The cells travel in the data
 /// sections.
 pub const SECTION_ORIGIN_ARRAY_CATALOG: u64 = 0xFFFF_FFFF_FFFF_FFF5;
+/// Section carrying every index of the tenant's collections: its identity
+/// record, its owner, and a vector index's build parameters. The body is a
+/// msgpack-encoded `Vec<IndexRecordBlob>`.
+pub const SECTION_ORIGIN_INDEX_RECORDS: u64 = 0xFFFF_FFFF_FFFF_FFF6;
 
 /// One database of the backed-up tenant, carried in a
 /// `SECTION_ORIGIN_DATABASES` section.
@@ -108,6 +112,23 @@ pub struct ArrayCatalogBlob {
     pub name: String,
     /// zerompk-encoded `ArrayCatalogEntry` from the `nodedb` crate.
     pub bytes: Vec<u8>,
+}
+
+/// One index in a `SECTION_ORIGIN_INDEX_RECORDS` section.
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub struct IndexRecordBlob {
+    /// Source id of the database the index's collection lives in.
+    pub database_id: u64,
+    pub name: String,
+    /// zerompk-encoded `StoredIndexRecord` from the `nodedb` crate.
+    pub record: Vec<u8>,
+    /// The index's owner in the source's owner ledger. `None` when the
+    /// ledger holds no owner for it.
+    pub owner: Option<String>,
+    /// zerompk-encoded `StoredVectorIndexParams` of a vector index. `None`
+    /// for every other kind, and for a vector index the catalog holds no
+    /// parameters for.
+    pub vector_params: Option<Vec<u8>>,
 }
 
 /// Single source-side tombstone entry. `purge_lsn` is the Origin WAL

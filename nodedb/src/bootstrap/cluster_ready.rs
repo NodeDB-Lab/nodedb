@@ -229,6 +229,13 @@ pub async fn await_cluster_ready(
     data_groups_gate.fire();
     transport_gate.fire();
 
+    // A full-text index build or drop that a crash or an error interrupted
+    // is still owed. Its rebuild reads every stored row, so it runs once the
+    // data groups replayed. It runs in the background: the node serves
+    // meanwhile, a search on a building field fails with 55000, and a
+    // dropping record declares no field.
+    crate::bootstrap::text_index_reconcile::spawn_text_index_reconcile(Arc::clone(shared));
+
     // Warm the QUIC peer cache so the first replicated request
     // after boot doesn't pay a cold dial.
     if let (Some(transport), Some(topology)) = (

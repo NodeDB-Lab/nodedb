@@ -21,6 +21,22 @@ fn search_params(fields: &TextFields) -> TextSearchParams {
     }
 }
 
+/// Refuse a text read of `field` that no ready full-text index on
+/// `collection` serves, by the rule the SQL planner applies.
+fn check_text_read(
+    ctx: &DispatchCtx<'_>,
+    collection: &str,
+    field: Option<&str>,
+) -> crate::Result<()> {
+    crate::control::planner::catalog_adapter::check_text_read(
+        ctx.state.credentials.catalog(),
+        ctx.database_id().as_u64(),
+        ctx.identity.tenant_id.as_u64(),
+        collection,
+        field,
+    )
+}
+
 pub(crate) async fn build_search(
     ctx: &DispatchCtx<'_>,
     fields: &TextFields,
@@ -34,11 +50,13 @@ pub(crate) async fn build_search(
         })?;
     let top_k = fields.top_k.unwrap_or(10) as usize;
     let params = search_params(fields);
+    // An absent or empty field reads the whole-document index.
+    let field = fields.field.clone().filter(|f| !f.is_empty());
+    check_text_read(ctx, collection, field.as_deref())?;
 
     Ok(PhysicalPlan::Text(TextOp::Search {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
-        // An absent or empty field reads the whole-document index.
-        field: fields.field.clone().filter(|f| !f.is_empty()),
+        field,
         query: query_text.to_string(),
         top_k,
         mode: params.mode,
@@ -72,6 +90,7 @@ pub(crate) async fn build_hybrid_search(
     let vector_weight = fields.vector_weight.unwrap_or(0.5) as f32;
     let ef_search = fields.ef_search.unwrap_or(0) as usize;
     let params = search_params(fields);
+    check_text_read(ctx, collection, None)?;
 
     Ok(PhysicalPlan::Text(TextOp::HybridSearch {
         collection: QualifiedCollection::new(ctx.database_id(), collection),

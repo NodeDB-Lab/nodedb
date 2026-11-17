@@ -179,6 +179,7 @@ pub fn extract_db_scoped_collection(key: &str, tenant_id: u64) -> Option<&str> {
 ///   `source_vshards` — the node owning the collection keeps it, every other
 ///   node drops it (captured exactly once, never duplicated).
 /// - `arrays` by the vShard each blob's cells route to.
+/// - `synced_text` by its explicit `collection` field (the stored name).
 /// - `vector_versions` like `vectors`: the restore installs every vector
 ///   node at its span.
 /// - the index image sections (`sparse_vectors`, `spatial_indexes`) are
@@ -207,6 +208,9 @@ pub fn retain_tenant_data_for_vshards(
         .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.indexes_versioned
         .retain(|(k, _)| in_group_db_tenant_scoped(k));
+    // A sync frame's text homes on its collection, as the rows do.
+    snap.synced_text
+        .retain(|frame| owned_row(frame.collection.as_str()));
     snap.vectors.retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.vector_versions
         .retain(|(k, _)| in_group_db_tenant_scoped(k));

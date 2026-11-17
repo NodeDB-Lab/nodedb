@@ -369,7 +369,7 @@ fn every_install_refusal_record_validates_alike() {
         (refusal::crdt_upsert(), none),
         (refusal::spatial_insert(), none),
         (refusal::array_put(), refusal::open_array),
-        (refusal::indexed_document_put(), none),
+        (refusal::indexed_document_put(), refusal::declare_text),
     ];
     for (index, (plan, setup)) in cases.into_iter().enumerate() {
         for refuse in [false, true] {
@@ -385,6 +385,7 @@ fn every_install_refusal_record_validates_alike() {
     }
     for refuse in [false, true] {
         let mut held = hold(plain_core);
+        refusal::declare_text(&mut held.core);
         let mut ops = vec![refusal::fts_index_sub_record()];
         if refuse {
             ops.push(failing_install_sub_record());

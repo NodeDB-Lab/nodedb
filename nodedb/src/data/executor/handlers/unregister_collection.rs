@@ -224,6 +224,12 @@ impl CoreLoop {
         let inv_removed = retry_reclaim("inverted.purge_collection", tid_raw, collection, || {
             self.inverted.purge_collection(db_raw, tid, collection)
         })?;
+        // The purge drops the collection's analyzer and fuzzy default with
+        // its postings. A clear that keeps the registration installs them
+        // again from it, before any row it installs is tokenized.
+        if preserve_collection_metadata {
+            self.reinstall_text_analysis(db, tid, collection)?;
+        }
 
         // Every counted row of the collection in the sparse file is gone, so
         // its stored-bytes counter row goes too.

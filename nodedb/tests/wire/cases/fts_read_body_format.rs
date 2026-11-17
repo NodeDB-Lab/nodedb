@@ -79,6 +79,10 @@ async fn a_vector_primary_payload_column_survives_the_bm25_score_scan() {
         .await
         .expect("create vector-primary collection");
     server
+        .exec("CREATE SEARCH INDEX ON vp_fts_body (owner)")
+        .await
+        .expect("declare the owner search index");
+    server
         .exec(
             "INSERT INTO vp_fts_body (id, vec, owner) \
              VALUES ('r1', ARRAY[1.0, 0.0, 0.0], 'alice')",

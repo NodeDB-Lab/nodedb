@@ -23,12 +23,19 @@ pub(in crate::data::executor) enum SpillKind {
     Sort,
     /// A spilled GROUP BY.
     GroupBy,
+    /// A full-text rebuild's scratch database.
+    TextRebuild,
 }
 
 impl SpillKind {
     /// Every spill owner, in sweep order.
-    pub(in crate::data::executor) const ALL: [SpillKind; 4] =
-        [Self::Txn, Self::Join, Self::Sort, Self::GroupBy];
+    pub(in crate::data::executor) const ALL: [SpillKind; 5] = [
+        Self::Txn,
+        Self::Join,
+        Self::Sort,
+        Self::GroupBy,
+        Self::TextRebuild,
+    ];
 
     /// The owner's label in reports.
     pub(in crate::data::executor) fn as_str(self) -> &'static str {
@@ -37,6 +44,7 @@ impl SpillKind {
             Self::Join => "join",
             Self::Sort => "sort",
             Self::GroupBy => "groupby",
+            Self::TextRebuild => "text-rebuild",
         }
     }
 
@@ -48,6 +56,7 @@ impl SpillKind {
             Self::Join => "join-spill",
             Self::Sort => "sort-spill",
             Self::GroupBy => "groupby-spill",
+            Self::TextRebuild => "text-rebuild-spill",
         }
     }
 

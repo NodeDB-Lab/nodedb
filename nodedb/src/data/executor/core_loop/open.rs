@@ -149,7 +149,7 @@ impl CoreLoop {
             spatial_indexes: std::collections::HashMap::new(),
             spatial_doc_map: std::collections::HashMap::new(),
             vector_doc_map: std::collections::HashMap::new(),
-            doc_configs: HashMap::new(),
+            doc_configs: hashbrown::HashMap::new(),
             chain: super::hash_chain_state::HashChainState::new(chain_hashes),
             query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
             graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),

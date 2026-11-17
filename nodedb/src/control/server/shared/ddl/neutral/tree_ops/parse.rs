@@ -34,8 +34,8 @@ pub(super) fn parse_edge_columns(sql: &str) -> Result<(String, String), DdlError
         ));
     };
 
-    let parent = parent.trim().to_lowercase();
-    let child = child.trim().to_lowercase();
+    let parent = crate::control::server::shared::ddl::sql_parse::resolve_name_token(parent.trim());
+    let child = crate::control::server::shared::ddl::sql_parse::resolve_name_token(child.trim());
 
     if parent.is_empty() || child.is_empty() {
         return Err(ddl_err(

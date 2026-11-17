@@ -7,6 +7,7 @@ use nodedb_types::protocol::TextFields;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::native::dispatch::DispatchCtx;
+use crate::control::server::shared::ddl::sql_parse::resolve_name_token;
 use crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH;
 use nodedb_physical::physical_plan::GraphOp;
 
@@ -94,7 +95,7 @@ pub(crate) async fn build_hop(
         collection: fields
             .collection
             .as_deref()
-            .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
+            .map(|c| QualifiedCollection::new(ctx.database_id(), &resolve_name_token(c))),
         start_nodes: vec![start.clone()],
         depth: clamped_depth(fields.depth, 2, "depth")?,
         edge_labels: fields.edge_labels.clone().unwrap_or_default(),
@@ -122,7 +123,7 @@ pub(crate) async fn build_neighbors(
         collection: fields
             .collection
             .as_deref()
-            .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
+            .map(|c| QualifiedCollection::new(ctx.database_id(), &resolve_name_token(c))),
         node_id: start.clone(),
         edge_labels: fields.edge_labels.clone().unwrap_or_default(),
         direction: parse_direction(fields.direction.as_deref())?,
@@ -153,7 +154,7 @@ pub(crate) async fn build_path(
         collection: fields
             .collection
             .as_deref()
-            .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
+            .map(|c| QualifiedCollection::new(ctx.database_id(), &resolve_name_token(c))),
         src: from.clone(),
         dst: to.clone(),
         max_depth: clamped_depth(fields.depth, 10, "depth")?,
@@ -181,7 +182,7 @@ pub(crate) async fn build_subgraph(
         collection: fields
             .collection
             .as_deref()
-            .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
+            .map(|c| QualifiedCollection::new(ctx.database_id(), &resolve_name_token(c))),
         start_nodes: vec![start.clone()],
         depth: clamped_depth(fields.depth, 2, "depth")?,
         edge_labels: fields.edge_labels.clone().unwrap_or_default(),

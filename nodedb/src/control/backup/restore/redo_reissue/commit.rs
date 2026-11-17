@@ -98,6 +98,7 @@ fn row_batch(
     let mut kv_keys = Vec::new();
     let mut columnar_keys = Vec::new();
     let mut vector_rows = Vec::new();
+    let mut synced_text = Vec::new();
     let mut timeseries: Vec<String> = Vec::new();
     let mut identities = Vec::new();
     let mut seen = HashSet::new();
@@ -108,6 +109,7 @@ fn row_batch(
         kv_keys.extend(unit.kv_keys);
         columnar_keys.extend(unit.columnar_keys);
         vector_rows.extend(unit.vector_rows);
+        synced_text.extend(unit.synced_text);
         for collection in unit.timeseries {
             if !timeseries.contains(&collection) {
                 timeseries.push(collection);
@@ -138,6 +140,7 @@ fn row_batch(
         arrays: Vec::new(),
         columnar_keys,
         vector_rows,
+        synced_text,
         timeseries,
         collections: vec![stored.to_string()],
         identities,
@@ -163,6 +166,7 @@ fn edge_batch(stored: &str, batch: Vec<EdgeUnit>, restore_cut: i64) -> Vec<Resto
                         arrays: Vec::new(),
                         columnar_keys: Vec::new(),
                         vector_rows: Vec::new(),
+                        synced_text: Vec::new(),
                         timeseries: Vec::new(),
                         collections: vec![stored.to_string()],
                         identities: Vec::new(),
@@ -330,6 +334,7 @@ pub(super) async fn commit_labels(
                 arrays: Vec::new(),
                 columnar_keys: Vec::new(),
                 vector_rows: Vec::new(),
+                synced_text: Vec::new(),
                 timeseries: Vec::new(),
                 collections: Vec::new(),
                 identities: Vec::new(),
@@ -373,6 +378,7 @@ mod tests {
             kv_keys: Vec::new(),
             columnar_keys: Vec::new(),
             vector_rows: Vec::new(),
+            synced_text: Vec::new(),
             timeseries: Vec::new(),
         }
     }

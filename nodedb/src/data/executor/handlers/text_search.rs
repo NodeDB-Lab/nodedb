@@ -123,9 +123,7 @@ impl CoreLoop {
     ) -> crate::Result<Vec<DocumentRow>> {
         let tenant_id = TenantId::new(p.tid);
         let cut = super::search_cut::SearchCut::of(p.system_time)?;
-        let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
-            return Ok(Vec::new());
-        };
+        let index = self.text_index(task, p.tid, p.collection, p.field)?;
         let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,

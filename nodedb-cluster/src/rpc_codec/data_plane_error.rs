@@ -271,6 +271,7 @@ pub enum DataPlaneTextColumnFault {
     NotText { data_type: String },
     NotAColumn,
     NotIndexed,
+    IndexBuilding,
 }
 
 /// Wire mirror of `nodedb::bridge::envelope::SyncHold`.

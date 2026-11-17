@@ -33,7 +33,7 @@ use crate::storage::quarantine::{CollectionScope, QuarantineEngine};
 
 /// Index metadata sub-keys that configure a collection rather than hold its
 /// indexed data: they survive a data-only purge.
-const CONFIG_META_KEYS: [&str; 3] = ["analyzer", "language", "fuzzy"];
+pub(super) const CONFIG_META_KEYS: [&str; 3] = ["analyzer", "language", "fuzzy"];
 
 /// Which metadata rows a purge drops.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,8 +53,6 @@ pub(super) fn collection(
 ) -> crate::Result<usize> {
     let removed = purge(
         backend,
-        database_id,
-        tid,
         KeyOwner::collection(database_id, tid, coll),
         MetaRows::All,
     )?;
@@ -72,32 +70,25 @@ fn release_collection_segments(backend: &RedbFtsBackend, database_id: u64, tid: 
     }
 }
 
-/// Drop every indexed row of one collection, keeping its configuration.
-pub(super) fn collection_data(
-    backend: &RedbFtsBackend,
-    database_id: u64,
-    tid: u64,
-    coll: &str,
+/// Drop every indexed row `owner` covers inside the caller's `txn`, which
+/// commits it, keeping its configuration rows and its synced text. The
+/// stored-bytes change lands in `delta`. The caller releases the removed
+/// segments with [`release_segments`] after commit.
+pub(super) fn collection_data_in_txn(
+    txn: &WriteTransaction,
+    owner: KeyOwner<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<usize> {
-    let removed = purge(
-        backend,
-        database_id,
-        tid,
-        KeyOwner::collection(database_id, tid, coll),
-        MetaRows::KeepConfig,
-    )?;
+    purge_in_txn(txn, owner, MetaRows::KeepConfig, delta)
+}
+
+/// Forget the quarantine records of a collection's removed segments.
+pub(super) fn release_segments(backend: &RedbFtsBackend, database_id: u64, tid: u64, coll: &str) {
     release_collection_segments(backend, database_id, tid, coll);
-    Ok(removed)
 }
 
 pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> crate::Result<usize> {
-    purge(
-        backend,
-        database_id,
-        tid,
-        KeyOwner::tenant(database_id, tid),
-        MetaRows::All,
-    )
+    purge(backend, KeyOwner::tenant(database_id, tid), MetaRows::All)
 }
 
 /// Every collection of the tenant that holds index stats, each once.
@@ -125,29 +116,40 @@ pub(super) fn tenant_collections(
 /// Drop every row `owner` covers from every FTS table, with metadata rows
 /// dropped per `meta`. Returns the number of posting rows, document-length
 /// rows, and segments removed.
-fn purge(
-    backend: &RedbFtsBackend,
-    database_id: u64,
-    tid: u64,
-    owner: KeyOwner<'_>,
-    meta: MetaRows,
-) -> crate::Result<usize> {
+fn purge(backend: &RedbFtsBackend, owner: KeyOwner<'_>, meta: MetaRows) -> crate::Result<usize> {
     let write_txn = backend
         .db
         .begin_write()
         .map_err(|e| redb_err("purge write txn", e))?;
-    let mut removed = 0;
     let mut delta = StorageDelta::default();
+    let removed = purge_in_txn(&write_txn, owner, meta, &mut delta)?;
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
 
-    removed += drop_posting_rows(&write_txn, owner, &mut delta)?;
+    write_txn
+        .commit()
+        .map_err(|e| redb_err("commit purge", e))?;
+    Ok(removed)
+}
+
+/// [`purge`] inside `write_txn`. `delta` records the bytes the rows held.
+fn purge_in_txn(
+    write_txn: &WriteTransaction,
+    owner: KeyOwner<'_>,
+    meta: MetaRows,
+    delta: &mut StorageDelta,
+) -> crate::Result<usize> {
+    let (database_id, tid) = (owner.database_id(), owner.tid());
+    let mut removed = 0;
+
+    removed += drop_posting_rows(write_txn, owner, delta)?;
     // DOC_LENGTHS and DOC_TERMS are per-document rows of the same indexes and
     // must go together: a surviving term set would name posting lists that no
     // longer exist.
-    removed += drop_doc_rows(&write_txn, DOC_LENGTHS, owner, "doc_lengths", &mut delta)?;
-    drop_doc_rows(&write_txn, DOC_TERMS, owner, "doc_terms", &mut delta)?;
-    drop_meta_rows(&write_txn, database_id, tid, owner, meta)?;
-    removed += drop_segment_rows(&write_txn, owner, &mut delta)?;
-    super::history_rows::drop_owned(&write_txn, owner, &mut delta)?;
+    removed += drop_doc_rows(write_txn, DOC_LENGTHS, owner, "doc_lengths", delta)?;
+    drop_doc_rows(write_txn, DOC_TERMS, owner, "doc_terms", delta)?;
+    drop_meta_rows(write_txn, database_id, tid, owner, meta)?;
+    removed += drop_segment_rows(write_txn, owner, delta)?;
+    super::history_rows::drop_owned(write_txn, owner, delta)?;
 
     {
         let mut stats = write_txn
@@ -170,16 +172,16 @@ fn purge(
             remove_doc_fields_row(
                 &mut fields,
                 doc_fields_key(database_id, tid, c, Surrogate::new(*s)),
-                &mut delta,
+                delta,
             )
             .map_err(|e| redb_err("remove doc_fields", e))?;
         }
     }
-    delta.apply(&write_txn, SPARSE_COUNTER)?;
-
-    write_txn
-        .commit()
-        .map_err(|e| redb_err("commit purge", e))?;
+    // A data-only purge keeps the synced text: a rebuild re-derives the
+    // index of a document with no stored body from it.
+    if meta == MetaRows::All {
+        super::synced_rows::drop_owned(write_txn, owner, delta)?;
+    }
     Ok(removed)
 }
 

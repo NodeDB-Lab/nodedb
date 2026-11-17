@@ -53,6 +53,7 @@ pub mod user;
 mod async_dispatch;
 pub(crate) mod gateway_invalidation;
 mod sync;
+mod sync_security;
 
 pub(crate) use async_dispatch::array::{
     delete_on_every_core as drop_array_on_every_core,

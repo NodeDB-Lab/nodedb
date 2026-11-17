@@ -14,6 +14,7 @@ pub mod snapshot;
 pub mod snapshot_calvin;
 pub mod snapshot_index;
 pub mod snapshot_lane;
+pub mod snapshot_synced_text;
 pub mod source_stamp;
 
 pub use consistency::ReadConsistency;
@@ -32,6 +33,7 @@ pub use snapshot_calvin::{
     CoveredCutBarrier, CutBarrierLog, CutFloor, CutFrozenReply, GroupCalvinCut, VShardCalvinState,
 };
 pub use snapshot_index::{FieldIndexImage, VectorIndexHistory};
+pub use snapshot_synced_text::SyncedTextEntry;
 pub use source_stamp::{CopiedVectorNodes, DocVersionStamp, KvVersionStamp};
 
 pub use installed_document::{

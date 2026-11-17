@@ -308,9 +308,6 @@ mod tests {
             panic!("a one-part resolve finishes in memory");
         };
         assert_eq!(part.len() as u64, len);
-        assert!(
-            !path.parent().expect("dir").exists(),
-            "no spill directory"
-        );
+        assert!(!path.parent().expect("dir").exists(), "no spill directory");
     }
 }

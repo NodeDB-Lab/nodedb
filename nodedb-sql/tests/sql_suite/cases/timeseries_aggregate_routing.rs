@@ -53,6 +53,7 @@ impl SqlCatalog for Catalog {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::Timeseries),
+            text_indexes: None,
         }))
     }
 

@@ -441,6 +441,9 @@ mod tests {
                 collection: "chunks".into(),
                 fields: vec!["embedding".into()],
                 is_active: true,
+                state: crate::control::security::catalog::IndexRecordState::Ready,
+                analyzer: None,
+                fuzzy_default: None,
             })
             .expect("seed index record");
 

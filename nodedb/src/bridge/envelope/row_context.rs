@@ -88,7 +88,8 @@ fn text_row_context(op: &TextOp) -> RowContext {
         | TextOp::HybridSearchTriple { .. }
         | TextOp::FtsIndexDoc { .. }
         | TextOp::FtsDeleteDoc { .. }
-        | TextOp::SetTextConfig { .. } => RowContext::Flat,
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => RowContext::Flat,
     }
 }
 

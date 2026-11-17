@@ -125,6 +125,9 @@ async fn fts_query_expands_synonym_terms() {
     srv.exec("CREATE COLLECTION syn_docs WITH (engine='document_schemaless')")
         .await
         .expect("create collection");
+    srv.exec("CREATE SEARCH INDEX ON syn_docs (body)")
+        .await
+        .expect("declare the body search index");
 
     // Insert documents using one term from each synonym pair.
     srv.exec("INSERT INTO syn_docs { id: 'a1', body: 'automobile engine repair' }")
@@ -186,6 +189,9 @@ async fn fts_expansion_disabled_after_drop() {
     srv.exec("CREATE COLLECTION syn_drop_docs WITH (engine='document_schemaless')")
         .await
         .expect("create collection");
+    srv.exec("CREATE SEARCH INDEX ON syn_drop_docs (body)")
+        .await
+        .expect("declare the body search index");
 
     srv.exec("INSERT INTO syn_drop_docs { id: 'b1', body: 'physician visits hospital' }")
         .await
@@ -239,6 +245,9 @@ async fn synonym_group_survives_restart() {
     srv.exec("CREATE COLLECTION durable_fts WITH (engine='document_schemaless')")
         .await
         .expect("create collection");
+    srv.exec("CREATE SEARCH INDEX ON durable_fts (body)")
+        .await
+        .expect("declare the body search index");
 
     srv.exec("INSERT INTO durable_fts { id: 'c1', body: 'laptop computer hardware' }")
         .await
@@ -319,6 +328,10 @@ async fn a_group_expands_only_in_the_database_that_holds_it() {
             .simple_query("CREATE COLLECTION scoped_docs WITH (engine='document_schemaless')")
             .await
             .unwrap_or_else(|e| panic!("CREATE COLLECTION in {name}: {e}"));
+        client
+            .simple_query("CREATE SEARCH INDEX ON scoped_docs (body)")
+            .await
+            .unwrap_or_else(|e| panic!("CREATE SEARCH INDEX in {name}: {e}"));
         client
             .simple_query("INSERT INTO scoped_docs { id: 'd1', body: 'automobile engine repair' }")
             .await

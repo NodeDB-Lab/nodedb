@@ -348,7 +348,7 @@ pub enum Error {
     /// The column argument of a full-text search cannot serve it. Propagated
     /// from `SqlError::TextColumn` or the Data-Plane `ErrorCode::TextColumn`.
     /// The pgwire layer renders `fault.sqlstate()`.
-    #[error("column \"{column}\" of collection \"{collection}\" {fault}")]
+    #[error("{}", fault.describe(collection, column))]
     TextColumn {
         collection: String,
         column: String,

@@ -150,14 +150,17 @@ impl CoreLoop {
         // Every row is removed: each row's text version ends at the
         // tombstones' system time, so a read at an earlier cut still matches
         // it. The collection's analyzer, language, and fuzzy configuration
-        // stay.
-        if let Err(e) = self.inverted.remove_documents(
-            database_id,
-            crate::types::TenantId::new(tid),
-            collection,
-            &removed,
-            scope.sys_from,
-        ) {
+        // stay. A collection with no declared text field and no open
+        // rebuild holds no inverted-index state.
+        if self.removal_touches_text(database_id, tid, collection)
+            && let Err(e) = self.inverted.remove_documents(
+                database_id,
+                crate::types::TenantId::new(tid),
+                collection,
+                &removed,
+                scope.sys_from,
+            )
+        {
             // The rows are removed, but the index still holds their text. That
             // cannot be undone here, so the core fail-stops, as in
             // `truncate_refusal`. Restart replay rebuilds the index.
@@ -207,13 +210,16 @@ impl CoreLoop {
         write_set: Vec<WriteSetEntry>,
     ) -> Response {
         let (task, collection) = (scope.task, scope.collection);
-        if let Err(e) = self.inverted.remove_documents(
-            task.request.database_id.as_u64(),
-            crate::types::TenantId::new(scope.tid),
-            collection,
-            removed,
-            scope.sys_from,
-        ) {
+        let database_id = task.request.database_id.as_u64();
+        if self.removal_touches_text(database_id, scope.tid, collection)
+            && let Err(e) = self.inverted.remove_documents(
+                database_id,
+                crate::types::TenantId::new(scope.tid),
+                collection,
+                removed,
+                scope.sys_from,
+            )
+        {
             self.fail_stop_core(
                 FailStopCause::PostInstallFailed,
                 &format!(

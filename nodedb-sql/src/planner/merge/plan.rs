@@ -220,6 +220,7 @@ fn merge_source_relation(
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             // The alias exposes whatever the subquery projects.
             open_schema: true,
+            text_indexes: None,
         },
     })
 }

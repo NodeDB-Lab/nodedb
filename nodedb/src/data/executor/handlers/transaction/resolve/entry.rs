@@ -112,9 +112,7 @@ impl CoreLoop {
         match sink.finish()?.output {
             super::sink::SinkOutput::Memory(lists) => Ok(lists),
             super::sink::SinkOutput::Spill { parts, .. } => Err(crate::Error::Internal {
-                detail: format!(
-                    "a memory resolve sink finished as a spill sink of {parts} parts"
-                ),
+                detail: format!("a memory resolve sink finished as a spill sink of {parts} parts"),
             }),
         }
     }

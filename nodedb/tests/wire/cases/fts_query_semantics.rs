@@ -9,19 +9,28 @@ use crate::harness::TestServer;
 
 const PASSWORD: &str = "fts-semantics-secret-3";
 
-fn ids(rows: &[Vec<String>]) -> Vec<&str> {
+pub(super) fn ids(rows: &[Vec<String>]) -> Vec<&str> {
     rows.iter().map(|r| r[0].as_str()).collect()
 }
 
+/// Create `coll` with a search index on `body`.
 async fn create(srv: &TestServer, coll: &str) {
+    create_indexed(srv, coll, "body").await;
+}
+
+/// Create `coll` with a search index on the comma-separated `fields`.
+pub(super) async fn create_indexed(srv: &TestServer, coll: &str, fields: &str) {
     srv.exec(&format!(
         "CREATE COLLECTION {coll} WITH (engine='document_schemaless')"
     ))
     .await
     .unwrap();
+    srv.exec(&format!("CREATE SEARCH INDEX ON {coll} ({fields})"))
+        .await
+        .unwrap();
 }
 
-async fn insert(srv: &TestServer, coll: &str, id: &str, extra: &str) {
+pub(super) async fn insert(srv: &TestServer, coll: &str, id: &str, extra: &str) {
     srv.exec(&format!("INSERT INTO {coll} {{ id: '{id}', {extra} }}"))
         .await
         .unwrap();
@@ -282,7 +291,7 @@ async fn an_id_filter_matches_a_key_only_row() {
 async fn text_reads_of_a_redacted_column_are_refused() {
     let srv = TestServer::start().await;
     let user = "fts_redact_reader";
-    create(&srv, "fts_redact").await;
+    create_indexed(&srv, "fts_redact", "ssn, bio").await;
     insert(&srv, "fts_redact", "r1", "ssn: '123 456', bio: 'gardener'").await;
     create_reader(&srv, user).await;
     srv.exec(
@@ -320,6 +329,9 @@ async fn a_bitemporal_score_scan_reads_current_versions() {
     )
     .await
     .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_bitemp (body)")
+        .await
+        .unwrap();
     srv.exec("INSERT INTO fts_bitemp (id, body) VALUES ('v1', 'amber stone')")
         .await
         .unwrap();

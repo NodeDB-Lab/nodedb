@@ -319,33 +319,15 @@ impl SparseEngine {
         coll: &str,
         mut visit: impl FnMut(&StorageKey, i64, Option<&[u8]>) -> crate::Result<()>,
     ) -> crate::Result<()> {
-        let lo = super::key::coll_prefix(database_id, tenant, coll);
-        let hi = super::key::coll_prefix_end(database_id, tenant, coll);
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
-        let t = txn
-            .open_table(DOCUMENTS_VERSIONED)
-            .map_err(|e| redb_err("open table", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?;
-        for entry in range {
-            let (k, v) = entry.map_err(|e| redb_err("entry", e))?;
-            let key_str = k.value();
-            let invalid = || {
-                crate::engine::sparse::btree::invalid_storage_key_err(
-                    crate::engine::sparse::btree::KeyedTable::DocumentsVersioned,
-                    coll,
-                    key_str,
-                )
-            };
-            let (id_part, suffix) = key_str.rsplit_once('\x00').ok_or_else(invalid)?;
-            let seg = id_part.strip_prefix(lo.as_str()).ok_or_else(invalid)?;
-            let doc_id = StorageKey::parse(seg).ok_or_else(invalid)?;
-            let sys_from = suffix.parse::<i64>().map_err(|_| invalid())?;
-            let decoded = decode_value(v.value())?;
-            visit(&doc_id, sys_from, decoded.is_live().then_some(decoded.body))?;
-        }
-        Ok(())
+        let table = super::version_walk::open_documents(&txn)?;
+        super::version_walk::for_each_collection_version(
+            &table,
+            database_id,
+            tenant,
+            coll,
+            &mut visit,
+        )
     }
 
     /// [`Self::versioned_get_current`] read inside `txn`, so it sees the

@@ -28,7 +28,9 @@ use std::time::Duration;
 use nodedb_types::{DatabaseId, TenantId};
 use tracing::{debug, warn};
 
-use crate::control::security::catalog::{ReadOnlySystemCatalog, StoredCollection, SystemCatalog};
+use crate::control::security::catalog::{
+    ReadOnlySystemCatalog, StoredCollection, StoredIndexRecord, SystemCatalog,
+};
 use crate::control::state::SharedState;
 
 /// A collection the reconcile loop delivers to: the same name in two
@@ -160,8 +162,9 @@ pub async fn reconcile_once(
 /// Load every collection across every database the node owns, tagged with its
 /// owning [`DatabaseId`]. `StoredCollection` does not carry its database id, so
 /// it is paired here from the enumeration that produced it.
-/// The two catalog reads [`load_collections`] needs, so it can run against
-/// either a read-write [`SystemCatalog`] or a [`ReadOnlySystemCatalog`].
+/// The catalog reads [`load_collections`] and the doc-config builder need, so
+/// both run against either a read-write [`SystemCatalog`] or a
+/// [`ReadOnlySystemCatalog`].
 pub trait CollectionSource {
     fn list_database_ids(&self) -> crate::Result<Vec<DatabaseId>>;
     fn collections_in(&self, database_id: DatabaseId) -> crate::Result<Vec<StoredCollection>>;
@@ -170,6 +173,20 @@ pub trait CollectionSource {
         database_id: DatabaseId,
         tenant_id: u64,
     ) -> crate::Result<Vec<StoredCollection>>;
+    /// Every index record of one (database, tenant), of every kind.
+    fn index_records_for_tenant(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<StoredIndexRecord>>;
+    /// Every index record of one collection, of every kind. The read
+    /// covers the collection's records only.
+    fn index_records_for_collection(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Vec<StoredIndexRecord>>;
 }
 
 impl CollectionSource for SystemCatalog {
@@ -186,6 +203,21 @@ impl CollectionSource for SystemCatalog {
     ) -> crate::Result<Vec<StoredCollection>> {
         self.load_collections_for_tenant(database_id, tenant_id)
     }
+    fn index_records_for_tenant(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<StoredIndexRecord>> {
+        self.list_index_records(database_id.as_u64(), tenant_id)
+    }
+    fn index_records_for_collection(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Vec<StoredIndexRecord>> {
+        self.list_index_records_for_collection(database_id.as_u64(), tenant_id, collection)
+    }
 }
 
 impl CollectionSource for ReadOnlySystemCatalog {
@@ -201,6 +233,25 @@ impl CollectionSource for ReadOnlySystemCatalog {
         tenant_id: u64,
     ) -> crate::Result<Vec<StoredCollection>> {
         self.load_collections_for_tenant(database_id, tenant_id)
+    }
+    fn index_records_for_tenant(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<StoredIndexRecord>> {
+        self.list_committed_index_records(database_id.as_u64(), tenant_id)
+    }
+    fn index_records_for_collection(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        collection: &str,
+    ) -> crate::Result<Vec<StoredIndexRecord>> {
+        self.list_committed_index_records_for_collection(
+            database_id.as_u64(),
+            tenant_id,
+            collection,
+        )
     }
 }
 

@@ -134,6 +134,7 @@ mod engine_surface_spatial;
 mod engine_surface_vector;
 mod event_write_op_tagging;
 mod expr_predicate_like_array;
+mod fts_declared_fields;
 mod fts_query_semantics;
 mod fts_read_body_format;
 mod function_security_e2e;

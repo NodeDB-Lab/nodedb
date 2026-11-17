@@ -29,7 +29,7 @@ fn make_core() -> CoreHarness {
     let dir = tempfile::tempdir().expect("tempdir");
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
-    let core = CoreLoop::open(
+    let mut core = CoreLoop::open(
         crate::data::executor::core_loop::CoreOpenParams::unencrypted(
             0,
             req_rx,
@@ -40,6 +40,13 @@ fn make_core() -> CoreHarness {
         ),
     )
     .expect("open core");
+    // The boot seed installs the catalog's declared text fields before replay.
+    crate::data::executor::core_loop::tests::declare_text_fields(
+        &mut core,
+        TENANT,
+        COLLECTION,
+        &["body", "title"],
+    );
     CoreHarness {
         core,
         _req_tx: req_tx,

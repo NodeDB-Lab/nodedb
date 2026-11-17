@@ -50,6 +50,7 @@ fn collection_unit(name: &RestoredName, payload: Vec<u8>) -> RowUnit {
         kv_keys: Vec::new(),
         columnar_keys: Vec::new(),
         vector_rows: Vec::new(),
+        synced_text: Vec::new(),
         timeseries: vec![stored],
     }
 }

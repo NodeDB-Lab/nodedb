@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Index DDL inside an explicit transaction, one family at a time: document
-//! `CREATE`/`DROP INDEX`, KV `CREATE`/`DROP SORTED INDEX`, and
-//! `CREATE`/`ALTER`/`DROP VECTOR INDEX`.
+//! `CREATE`/`DROP INDEX`, KV `CREATE`/`DROP SORTED INDEX`,
+//! `CREATE`/`ALTER`/`DROP VECTOR INDEX`, and a full-text `DROP INDEX` whose
+//! name a `CREATE INDEX` of another kind re-uses.
 //!
 //! Each family is visible to later statements of its own transaction,
 //! applies at COMMIT, and leaves nothing behind on ROLLBACK: neither the
@@ -326,4 +327,57 @@ async fn vector_index_dropped_then_rolled_back_still_serves() {
         .await
         .unwrap();
     assert_eq!(nearest, vec!["v1".to_string()]);
+}
+
+/// A transaction drops a full-text index and creates an index of another
+/// kind under the same name. The CREATE takes the name, and COMMIT finishes
+/// the full-text drop. The name then resolves to the new kind alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fulltext_index_dropped_then_its_name_reused_by_another_kind_commits() {
+    let server = TestServer::start().await;
+    document_collection(&server, "txn_fam_ft_reuse").await;
+    server
+        .exec("CREATE SEARCH INDEX txn_fam_ft_reuse_idx ON txn_fam_ft_reuse FIELDS region")
+        .await
+        .unwrap();
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .exec("DROP INDEX txn_fam_ft_reuse_idx")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE INDEX txn_fam_ft_reuse_idx ON txn_fam_ft_reuse(region)")
+        .await
+        .unwrap();
+    server.exec("COMMIT").await.unwrap();
+
+    assert!(
+        indexes(&server)
+            .await
+            .iter()
+            .any(|n| n == "txn_fam_ft_reuse_idx"),
+        "the new index holds the name"
+    );
+    assert_eq!(
+        eu_rows(&server, "txn_fam_ft_reuse").await,
+        vec!["a".to_string()]
+    );
+    assert!(
+        server
+            .exec("DROP FULLTEXT INDEX txn_fam_ft_reuse_idx")
+            .await
+            .is_err(),
+        "the name no longer resolves to a full-text index"
+    );
+    server
+        .exec("DROP INDEX txn_fam_ft_reuse_idx")
+        .await
+        .unwrap();
+    assert!(
+        !indexes(&server)
+            .await
+            .iter()
+            .any(|n| n == "txn_fam_ft_reuse_idx")
+    );
 }

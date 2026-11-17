@@ -256,13 +256,15 @@ pub(super) fn text_write(op: &TextOp) -> Option<ReplicatedWrite> {
             encode_provenance(provenance),
         ),
 
-        // Not a write — searches and the config-only analyzer binding.
+        // Not a replicated write: searches, the config-only analyzer
+        // binding, and the node-local index rebuild.
         TextOp::Search { .. }
         | TextOp::BM25ScoreScan { .. }
         | TextOp::PhraseSearch { .. }
         | TextOp::HybridSearch { .. }
         | TextOp::HybridSearchTriple { .. }
-        | TextOp::SetTextConfig { .. } => return None,
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => return None,
     })
 }
 

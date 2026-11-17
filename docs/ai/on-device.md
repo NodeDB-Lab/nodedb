@@ -48,6 +48,9 @@ WHERE embedding <-> $query_embedding
 LIMIT 5;
 
 -- Hybrid offline search: vector + keyword
+-- The keyword leg reads only fields a search index declares.
+CREATE SEARCH INDEX ON knowledge FIELDS content;
+
 SELECT content, rrf_score(
     vector_distance(embedding, $query_embedding),
     bm25_score(content, $keywords),

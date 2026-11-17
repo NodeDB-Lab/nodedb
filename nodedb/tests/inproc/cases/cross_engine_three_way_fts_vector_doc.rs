@@ -176,6 +176,14 @@ const COLLECTION: &str = "articles_3way";
 #[test]
 fn three_way_fts_vector_doc_bitmap() {
     let (mut core, mut tx, mut rx, _dir) = open_core();
+    crate::cases::core_loop::helpers::register_text_fields(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        1,
+        COLLECTION,
+        &["body"],
+    );
 
     // ── Insert rows 1–10 ──────────────────────────────────────────────────
     //
