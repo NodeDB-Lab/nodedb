@@ -97,6 +97,12 @@ pub struct QueryTuning {
     /// Default: 512 MiB.
     #[serde(default = "default_max_scan_result_bytes")]
     pub max_scan_result_bytes: usize,
+    /// RAM bytes one transaction's staging overlay holds on one core before
+    /// it spills its staged rows to `data_dir/txn-spill/`. A staged write
+    /// past it spills: no transaction size is refused.
+    /// Default: 256 MiB.
+    #[serde(default = "default_max_txn_overlay_bytes")]
+    pub max_txn_overlay_bytes: usize,
 }
 
 impl Default for QueryTuning {
@@ -115,6 +121,7 @@ impl Default for QueryTuning {
             groupby_max_groups_in_mem: default_groupby_max_groups_in_mem(),
             aggregate_chunk_size: default_aggregate_chunk_size(),
             max_scan_result_bytes: default_max_scan_result_bytes(),
+            max_txn_overlay_bytes: default_max_txn_overlay_bytes(),
         }
     }
 }
@@ -157,4 +164,7 @@ fn default_aggregate_chunk_size() -> usize {
 }
 fn default_max_scan_result_bytes() -> usize {
     512 * 1024 * 1024
+}
+fn default_max_txn_overlay_bytes() -> usize {
+    256 * 1024 * 1024
 }

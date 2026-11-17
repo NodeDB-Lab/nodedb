@@ -51,8 +51,8 @@ pub(super) fn inject_text(ctx: &RlsCtx<'_>, op: &mut TextOp) -> crate::Result<()
             ),
 
         // No-op: the per-collection analyzer binding is configuration, not a
-        // user row.
-        TextOp::SetTextConfig { .. } => Ok(()),
+        // user row. A rebuild re-derives the index from rows already stored.
+        TextOp::SetTextConfig { .. } | TextOp::RebuildIndex { .. } => Ok(()),
     }
 }
 

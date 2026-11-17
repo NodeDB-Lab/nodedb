@@ -53,7 +53,17 @@ impl zerompk::ToMessagePack for Value {
             Value::Object(map) => {
                 writer.write_array_len(2)?;
                 writer.write_u8(7)?;
-                map.write(writer)
+                if map.len() <= 1 {
+                    return map.write(writer);
+                }
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                writer.write_map_len(entries.len())?;
+                for (key, value) in entries {
+                    key.write(writer)?;
+                    value.write(writer)?;
+                }
+                Ok(())
             }
             Value::Uuid(s) => {
                 writer.write_array_len(2)?;
@@ -248,3 +258,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "msgpack_canonical_tests.rs"]
+mod canonical_tests;

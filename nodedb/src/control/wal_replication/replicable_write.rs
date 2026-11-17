@@ -8,8 +8,9 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 
-/// A write plan whose RLS write-check slots are all decided (never `Predicate`
-/// or `PendingInjection`). Private field, only the two constructors below build
+/// A write plan whose RLS write-check slots are all decided (never
+/// `PendingInjection`, and `Predicate` only on a record that carries it to
+/// every applier). Private field, only the two constructors below build
 /// it, so the guarantee holds for every value that exists.
 pub struct ReplicableWrite<'a>(&'a PhysicalPlan);
 
@@ -30,7 +31,7 @@ impl<'a> ReplicableWrite<'a> {
                 ),
             });
         }
-        if checks.iter().any(|c| c.has_predicate()) {
+        if !record_carries_write_policy(plan) && checks.iter().any(|c| c.has_predicate()) {
             return Err(crate::Error::PlanError {
                 detail: format!(
                     "this write on '{}' carries an RLS write policy whose decision is deferred \
@@ -69,6 +70,63 @@ impl<'a> ReplicableWrite<'a> {
     }
 }
 
+/// Whether `plan`'s replicated record carries its compiled write policy.
+///
+/// A materialized document write (`PointPut`, `PointInsert`, `BatchInsert`)
+/// travels with the predicate compiled against the writing identity. Every
+/// applier decides it against the row it materializes, so no identity is
+/// needed there. The compiled bytes hold literal comparisons only:
+/// `substitute_to_scan_filters` binds every `$auth.*` reference and function
+/// on the proposer, and the policy language has no clock, random, sequence,
+/// or subquery input, so every replica reaches the same verdict. Every other op drops its check on the wire and must resolve
+/// before it is proposed. Exhaustive so a new op decides here.
+fn record_carries_write_policy(plan: &PhysicalPlan) -> bool {
+    use nodedb_physical::physical_plan::DocumentOp;
+    match plan {
+        PhysicalPlan::Document(op) => match op {
+            DocumentOp::PointPut { .. }
+            | DocumentOp::PointInsert { .. }
+            | DocumentOp::BatchInsert { .. } => true,
+            DocumentOp::PointGet { .. }
+            | DocumentOp::PointUpdate { .. }
+            | DocumentOp::PointDelete { .. }
+            | DocumentOp::Upsert { .. }
+            | DocumentOp::BatchUpsert { .. }
+            | DocumentOp::BulkUpdate { .. }
+            | DocumentOp::BulkDelete { .. }
+            | DocumentOp::Merge { .. }
+            | DocumentOp::UpdateFromJoin { .. }
+            | DocumentOp::ResolveWrite(_)
+            | DocumentOp::ResolvedWrite { .. }
+            | DocumentOp::InsertSelect { .. }
+            | DocumentOp::Scan { .. }
+            | DocumentOp::RangeScan { .. }
+            | DocumentOp::Register { .. }
+            | DocumentOp::IndexLookup { .. }
+            | DocumentOp::IndexedFetch { .. }
+            | DocumentOp::DropIndex { .. }
+            | DocumentOp::BackfillIndex { .. }
+            | DocumentOp::Truncate { .. }
+            | DocumentOp::EstimateCount { .. }
+            | DocumentOp::MaterializeScan { .. }
+            | DocumentOp::ApplyBalanceDelta { .. } => false,
+        },
+        PhysicalPlan::Vector(_)
+        | PhysicalPlan::Graph(_)
+        | PhysicalPlan::Kv(_)
+        | PhysicalPlan::Text(_)
+        | PhysicalPlan::Columnar(_)
+        | PhysicalPlan::Timeseries(_)
+        | PhysicalPlan::Spatial(_)
+        | PhysicalPlan::Crdt(_)
+        | PhysicalPlan::Query(_)
+        | PhysicalPlan::Meta(_)
+        | PhysicalPlan::Array(_)
+        | PhysicalPlan::ClusterArray(_)
+        | PhysicalPlan::ClusterEvent(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +150,29 @@ mod tests {
     fn a_live_predicate_cannot_be_decided_for_replication() {
         let plan = delete_with(RlsWriteCheck::from_injected(vec![1, 2, 3]));
         assert!(ReplicableWrite::decide_for_replication(&plan).is_err());
+    }
+
+    /// A materialized document write carries its compiled policy on the
+    /// record, so every applier decides it against the row it stores.
+    #[test]
+    fn a_materialized_document_write_carries_its_predicate() {
+        let plan =
+            PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::PointInsert {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "orders",
+                ),
+                document_id: "a".into(),
+                value: vec![0x80],
+                surrogate: nodedb_types::Surrogate::new(1),
+                if_absent: false,
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: RlsWriteCheck::from_injected(vec![1, 2, 3]),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+            });
+        assert!(ReplicableWrite::decide_for_replication(&plan).is_ok());
     }
 
     /// An un-injected slot is refused separately: that write was never

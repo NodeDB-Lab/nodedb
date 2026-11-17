@@ -248,6 +248,7 @@ mod tests {
                 resolved_sum_targets: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
         let original_key = entry.idempotency_key;
@@ -270,6 +271,7 @@ mod tests {
                 resolved_sum_targets,
                 returning,
                 rls_filters,
+                rls_write_check,
             } => {
                 assert_eq!(collection, "users");
                 assert_eq!(document_id, "u1");
@@ -278,6 +280,10 @@ mod tests {
                 assert!(resolved_sum_targets.is_empty());
                 assert_eq!(returning, None);
                 assert!(rls_filters.is_empty());
+                assert_eq!(
+                    rls_write_check,
+                    nodedb_types::RlsWriteCheck::NoPolicyApplies
+                );
             }
             other => panic!("expected PointPut, got {other:?}"),
         }
@@ -358,6 +364,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
         let entry = to_replicated_entry(tenant, database, vshard, &plan)

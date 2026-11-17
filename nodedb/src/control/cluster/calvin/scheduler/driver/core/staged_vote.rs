@@ -38,6 +38,7 @@ impl StagedVote {
             Self::ParticipantError { refusal } => Some(AbortCause {
                 reason: AbortReason::ParticipantError,
                 refusal: refusal.clone(),
+                other_refusals: Vec::new(),
             }),
             Self::CollectionSuperseded => Some(AbortReason::CollectionSuperseded.into()),
             Self::PredictionDrift => Some(AbortReason::PredictionDrift.into()),
@@ -181,7 +182,8 @@ mod tests {
         let refusal = cause.refusal.expect("the vote carries the refusal");
         assert_eq!(
             crate::control::cluster::calvin::refusal::decode_refusal(&refusal)
-                .expect("the refusal decodes"),
+                .expect("the refusal decodes")
+                .code,
             code
         );
     }

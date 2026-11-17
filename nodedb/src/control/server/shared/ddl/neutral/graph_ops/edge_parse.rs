@@ -41,15 +41,16 @@ pub(super) fn validate_edge_label(label: &str) -> Result<(), DdlError> {
     Ok(())
 }
 
-/// Convert a parsed `PROPERTIES` clause to the plain-MessagePack map stored
-/// in `GraphOp::EdgePut`. Every edge-property writer and reader uses this
-/// encoding. Object-literal forms go through the shared
+/// Convert a parsed `PROPERTIES` clause to the native tagged object stored
+/// in `GraphOp::EdgePut` (`nodedb_graph::encode_edge_properties`). Every
+/// edge-property writer uses this encoding, and every reader decodes it
+/// through `ObjectView`. Object-literal forms go through the shared
 /// `nodedb_sql::parser::object_literal::parse_object_literal_complete`
 /// so the type coercions (numbers, bools, nested objects) match
 /// every other object-literal ingress (INSERT { ... }, UPSERT).
 pub(super) fn properties_to_msgpack(properties: GraphProperties) -> Result<Vec<u8>, DdlError> {
-    match properties {
-        GraphProperties::None => Ok(Vec::new()),
+    let fields = match properties {
+        GraphProperties::None => return Ok(Vec::new()),
         GraphProperties::Quoted(text) => {
             let json: serde_json::Value = sonic_rs::from_str(&text).map_err(|e| {
                 ddl_err(
@@ -57,14 +58,15 @@ pub(super) fn properties_to_msgpack(properties: GraphProperties) -> Result<Vec<u
                     format!("PROPERTIES '{text}' is not valid JSON: {e}"),
                 )
             })?;
-            if !json.is_object() {
-                return Err(ddl_err(
-                    "42601",
-                    format!("PROPERTIES '{text}' must be a JSON object"),
-                ));
+            match nodedb_types::Value::from(json) {
+                nodedb_types::Value::Object(fields) => fields,
+                _ => {
+                    return Err(ddl_err(
+                        "42601",
+                        format!("PROPERTIES '{text}' must be a JSON object"),
+                    ));
+                }
             }
-            nodedb_types::json_msgpack::json_to_msgpack(&json)
-                .map_err(|e| DdlError::internal(format!("PROPERTIES encode error: {e}")))
         }
         GraphProperties::Object(obj_str) => {
             // The graph lexer hands over the balanced `{ … }` and nothing else,
@@ -72,23 +74,26 @@ pub(super) fn properties_to_msgpack(properties: GraphProperties) -> Result<Vec<u
             // the statement was misparsed upstream, and saying so beats
             // persisting an edge whose properties silently lost a clause.
             match nodedb_sql::parser::object_literal::parse_object_literal_complete(&obj_str) {
-                Some(Ok(fields)) => nodedb_types::json_msgpack::value_to_msgpack(
-                    &nodedb_types::Value::Object(fields),
-                )
-                .map_err(|e| DdlError::internal(format!("PROPERTIES encode error: {e}"))),
-                Some(Err(msg)) => Err(ddl_err(
-                    "42601",
-                    format!("PROPERTIES object literal error: {msg}"),
-                )),
+                Some(Ok(fields)) => fields,
+                Some(Err(msg)) => {
+                    return Err(ddl_err(
+                        "42601",
+                        format!("PROPERTIES object literal error: {msg}"),
+                    ));
+                }
                 // The graph lexer emits an object token only for text that
                 // opens with `{`. Text that does not is a lexer defect, and
                 // storing no properties for it would lose the clause.
-                None => Err(DdlError::internal(format!(
-                    "PROPERTIES object token '{obj_str}' does not open with '{{'"
-                ))),
+                None => {
+                    return Err(DdlError::internal(format!(
+                        "PROPERTIES object token '{obj_str}' does not open with '{{'"
+                    )));
+                }
             }
         }
-    }
+    };
+    nodedb_graph::encode_edge_properties(fields)
+        .map_err(|e| DdlError::internal(format!("PROPERTIES encode error: {e}")))
 }
 
 #[cfg(test)]
@@ -97,11 +102,18 @@ mod tests {
     use nodedb_types::Value;
 
     fn decode(bytes: &[u8]) -> Value {
-        nodedb_types::json_msgpack::value_from_msgpack(bytes).expect("plain msgpack")
+        assert_eq!(
+            nodedb_types::ObjectView::new(bytes)
+                .expect("object")
+                .format(),
+            nodedb_types::ObjectFormat::Native,
+            "properties store as a native object"
+        );
+        nodedb_types::decode_object(bytes).expect("native object")
     }
 
     #[test]
-    fn quoted_json_object_stores_plain_msgpack() {
+    fn quoted_json_object_stores_a_native_object() {
         let bytes = properties_to_msgpack(GraphProperties::Quoted(
             r#"{"weight": 2.5, "kind": "road"}"#.into(),
         ))
@@ -118,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn object_literal_stores_plain_msgpack() {
+    fn object_literal_stores_a_native_object() {
         let bytes =
             properties_to_msgpack(GraphProperties::Object("{weight: 4, owner: 'x'}".into()))
                 .expect("encode");

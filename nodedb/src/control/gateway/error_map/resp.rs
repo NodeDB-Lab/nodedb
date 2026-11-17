@@ -48,8 +48,7 @@ impl GatewayErrorMap {
             }
             // Every other variant takes the prefix of its public code, the
             // same prefix a remote rendering of it gets.
-            Error::TxnOverlayMemoryExceeded { .. }
-            | Error::OffsetRegression { .. }
+            Error::OffsetRegression { .. }
             | Error::ConflictRetry { .. }
             | Error::CalvinSerializationConflict
             | Error::CalvinParticipantError
@@ -103,6 +102,8 @@ impl GatewayErrorMap {
             | Error::InvalidTextRepresentation { .. }
             | Error::DatatypeMismatch { .. }
             | Error::InvalidDatetimeFormat { .. }
+            | Error::InvalidArgumentForLogarithm { .. }
+            | Error::InvalidArgumentForPowerFunction { .. }
             | Error::DatetimeFieldOverflow { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }
@@ -139,7 +140,6 @@ impl GatewayErrorMap {
             | Error::Shaping(_)
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)

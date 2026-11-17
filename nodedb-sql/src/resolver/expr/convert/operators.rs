@@ -7,6 +7,7 @@ use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
 use crate::error::{Result, SqlError};
 use crate::resolver::ColumnScope;
 use crate::resolver::expr::binary_ops::{convert_binary_op, convert_unary_op};
+use crate::resolver::expr::int_width::{int_width_of, interval_operand_as_bigint};
 use crate::types::*;
 
 use super::entry::convert_expr_depth;
@@ -51,11 +52,41 @@ pub(super) fn convert_binary(
             col_expr, query_expr,
         ));
     }
+    let left_expr = convert_expr_depth(left, depth, scope)?;
+    let op = convert_binary_op(op)?;
+    let right_expr = convert_expr_depth(right, depth, scope)?;
+    // An interval with an integer is `bigint` arithmetic. An interval
+    // beside an instant or any other non-integer keeps its literal.
+    let (left_expr, right_expr) = if is_arithmetic(op) {
+        let left_is_int = int_width_of(&left_expr, scope).is_some();
+        let right_is_int = int_width_of(&right_expr, scope).is_some();
+        (
+            if right_is_int {
+                interval_operand_as_bigint(left, left_expr)
+            } else {
+                left_expr
+            },
+            if left_is_int {
+                interval_operand_as_bigint(right, right_expr)
+            } else {
+                right_expr
+            },
+        )
+    } else {
+        (left_expr, right_expr)
+    };
     Ok(SqlExpr::BinaryOp {
-        left: Box::new(convert_expr_depth(left, depth, scope)?),
-        op: convert_binary_op(op)?,
-        right: Box::new(convert_expr_depth(right, depth, scope)?),
+        left: Box::new(left_expr),
+        op,
+        right: Box::new(right_expr),
     })
+}
+
+fn is_arithmetic(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+    )
 }
 
 /// A negative integer literal reaches sqlparser as unary minus applied
@@ -83,9 +114,15 @@ pub(super) fn convert_unary(
             }),
         };
     }
+    let op = convert_unary_op(op)?;
+    let converted = convert_expr_depth(inner, depth, scope)?;
+    let converted = match op {
+        UnaryOp::Neg => interval_operand_as_bigint(inner, converted),
+        UnaryOp::Not => converted,
+    };
     Ok(SqlExpr::UnaryOp {
-        op: convert_unary_op(op)?,
-        expr: Box::new(convert_expr_depth(inner, depth, scope)?),
+        op,
+        expr: Box::new(converted),
     })
 }
 

@@ -33,15 +33,11 @@ impl SimpleQueryHandler for NodeDbPgHandler {
         // path completes and the guard stamps the session's last activity.
         let _in_flight = InFlightGuard::new(&self.sessions, session_id, "simple_query");
 
-        // Pin this statement's deadline before any work is planned or
-        // dispatched. Every Control -> Data envelope the statement fans out
-        // into reads it, so the whole statement is bounded by one budget
-        // instead of each hop restarting the clock. The guard restores the
-        // previous value on every exit path.
-        let _statement_scope = crate::control::server::shared::session::deadline::enter(
-            self.sessions.statement_timeout(session_id),
-            self.state.tuning.network.default_deadline_secs,
-        );
+        // Pin a deadline for the message's own work before any statement
+        // runs. `execute_sql` pins a fresh one for each statement the message
+        // splits into, so one statement's time never counts against the
+        // next. The guard restores the previous value on every exit path.
+        let _statement_scope = self.enter_statement_deadline(session_id);
         let _read_scope =
             crate::control::server::shared::session::read_scope::enter(&self.sessions, session_id);
 

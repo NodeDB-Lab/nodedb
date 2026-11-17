@@ -105,6 +105,7 @@ impl NativeTestServer {
 
         let data_side = data_sides.into_iter().next().expect("data side");
         let core_dir = dir.path().to_path_buf();
+        let wal_source = wal.read_source();
         let event_producer = event_producers.into_iter().next().expect("event producer");
         let core_array_catalog = shared.array_catalog.clone();
         // Share the Control-Plane `SystemMetrics` so the Data-Plane core updates
@@ -113,12 +114,15 @@ impl NativeTestServer {
         let (core_stop_tx, core_stop_rx) = std::sync::mpsc::channel::<()>();
         let _core_handle = tokio::task::spawn_blocking(move || {
             let mut core = CoreLoop::open_with_array_catalog(
-                0,
-                data_side.request_rx,
-                data_side.response_tx,
-                &core_dir,
-                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-                nodedb::data::executor::core_loop::test_governor(),
+                nodedb::data::executor::core_loop::CoreOpenParams {
+                    core_id: 0,
+                    request_rx: data_side.request_rx,
+                    response_tx: data_side.response_tx,
+                    data_dir: &core_dir,
+                    wal_source,
+                    hlc: std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                    governor: nodedb::data::executor::core_loop::test_governor(),
+                },
                 core_array_catalog,
             )
             .expect("open core");

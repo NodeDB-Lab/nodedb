@@ -14,7 +14,7 @@ use nodedb_types::TypeGuardFieldDef;
 use crate::bridge::envelope::ErrorCode;
 
 /// The parsed clauses of one typeguard.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuardClauses {
     pub type_expr: TypeExpr,
     /// The CHECK text (for messages) and its parsed form.
@@ -26,7 +26,7 @@ pub struct GuardClauses {
 }
 
 /// One typeguard, ready to enforce on every write without re-parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledTypeGuard {
     /// The collection name the user wrote, which every violation names.
     pub collection: String,

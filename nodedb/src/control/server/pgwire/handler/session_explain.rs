@@ -93,6 +93,16 @@ impl NodeDbPgHandler {
                 &self.state.permission_cache,
             ),
         };
+        // EXPLAIN plans with the session's planning overrides, as Execute
+        // does, so it describes the plan the statement runs
+        // (`nodedb.force_shuffle_agg` and the other planning settings).
+        crate::control::server::shared::planning_overrides::apply_planning_session_overrides(
+            &self.query_ctx,
+            &self.sessions,
+            &self.state,
+            session_id,
+            tenant_id,
+        );
         let (tasks, _output_schema) = self
             .query_ctx
             .plan_sql_with_rls_metadata(crate::control::planner::context::PlanSqlWithRlsParams {

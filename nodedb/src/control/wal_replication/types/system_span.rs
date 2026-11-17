@@ -108,6 +108,8 @@ impl ReplicatedWrite {
             | Self::KvResolvedWrite { .. } => Some(1),
             Self::CalvinReadResult { .. }
             | Self::CalvinReadTimeout { .. }
+            | Self::CalvinFrozenReply { .. }
+            | Self::CalvinSequenceEffects { .. }
             | Self::CutBarrier { .. }
             | Self::MirrorSeal { .. }
             | Self::TopicPublish { .. }
@@ -198,6 +200,7 @@ mod tests {
             resolved_sum_targets: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         };
         assert_eq!(put.system_ordinal_span(), Some(1));
         let barrier = ReplicatedWrite::CutBarrier {

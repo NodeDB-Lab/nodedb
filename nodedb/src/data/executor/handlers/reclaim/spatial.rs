@@ -4,15 +4,14 @@
 //! and docmap files.
 //!
 //! Checkpoint layout:
-//! `{data_dir}/spatial-ckpt/core-{n}/gen-{m}/{db}_{tid}_{enc(coll)}_{enc(field)}.ckpt`
-//! plus its paired `.docmap`, with each core's `MANIFEST` naming its live
+//! `{data_dir}/spatial-ckpt/core-{n}/gen-{m}/{hash(key)}.ckpt` plus its paired
+//! `{hash(key)}.docmap`, with each core's `MANIFEST` naming its live
 //! generation. Reclaim walks EVERY core's directory, because `data_dir` is
 //! shared and the dropped collection may have been routed to any of them, and
 //! resolves each core's live generation through the same manifest reader the
 //! load path uses so the two can never disagree about which files are
-//! reachable. The filename prefix is built by the SAME encoder the write path
-//! uses ([`spatial_checkpoint_prefix`]), so the match can never drift from the
-//! on-disk names.
+//! reachable. Each `.ckpt` stores its key, and reclaim matches the stored key
+//! through the SAME decoder the load path uses ([`spatial_map_key`]).
 //!
 //! Unlinking a file out of a published generation does not break the manifest's
 //! promise. That promise is about the collections that are LIVE, and this runs
@@ -21,12 +20,15 @@
 
 use std::path::Path;
 
-use tracing::debug;
-
+use super::keyed::reclaim_keyed_matching;
 use super::{ReclaimError, ReclaimStats, Result};
+use crate::data::executor::checkpoint_key::CheckpointKey;
 use crate::data::executor::spatial_checkpoint::{
-    read_spatial_manifest_at, spatial_checkpoint_prefix, spatial_ckpt_gen_dir,
+    read_spatial_manifest_at, spatial_ckpt_gen_dir, spatial_map_key,
 };
+
+/// Extension of the doc_map companion that shares each R-tree's stem.
+const DOCMAP_EXTENSION: &str = "docmap";
 
 /// Unlink every spatial checkpoint + docmap file for
 /// `(database_id, tenant_id, collection)`, across every core's live
@@ -52,9 +54,13 @@ pub fn reclaim_spatial_checkpoints(
         }
     };
 
-    // Build the prefix via the shared encoder so it always matches the
-    // filenames produced by `checkpoint_spatial_indexes`.
-    let prefix = spatial_checkpoint_prefix(database_id, tenant_id, collection);
+    // Every field index of the collection matches; the decoded key is
+    // compared whole, so "places" never matches "places_archive".
+    let matches = |key: &CheckpointKey| {
+        spatial_map_key(key).is_some_and(|(db, tid, coll, _)| {
+            db.as_u64() == database_id && tid.as_u64() == tenant_id && coll == collection
+        })
+    };
 
     let mut stats = ReclaimStats::default();
     for core_entry in cores {
@@ -82,85 +88,72 @@ pub fn reclaim_spatial_checkpoints(
                 });
             }
         };
-        reclaim_generation(&gen_dir, &prefix, &mut stats)?;
+        // Both the R-tree checkpoint AND its paired docmap go, or the docmap
+        // is left orphaned with no checkpoint to resolve entries for.
+        reclaim_keyed_matching(
+            "spatial",
+            &gen_dir,
+            &[DOCMAP_EXTENSION],
+            matches,
+            &mut stats,
+        )?;
     }
     Ok(stats)
-}
-
-/// Unlink every matching file in one core's live generation. A missing
-/// generation directory is a no-op, not an error.
-fn reclaim_generation(gen_dir: &Path, prefix: &str, stats: &mut ReclaimStats) -> Result<()> {
-    let entries = match std::fs::read_dir(gen_dir) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(ReclaimError::Io {
-                operation: "read spatial checkpoint live generation",
-                path: gen_dir.to_path_buf(),
-                source,
-            });
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|source| ReclaimError::Io {
-            operation: "read spatial checkpoint entry",
-            path: gen_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !name.starts_with(prefix) {
-            continue;
-        }
-        // Both the R-tree checkpoint AND its paired docmap must go, or the
-        // docmap is left orphaned with no checkpoint to resolve entries for.
-        let is_ours = name.ends_with(".ckpt")
-            || name.ends_with(".ckpt.tmp")
-            || name.ends_with(".docmap")
-            || name.ends_with(".docmap.tmp");
-        if !is_ours {
-            continue;
-        }
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-                stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-                debug!(path = %path.display(), size, "spatial reclaim: unlinked");
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ReclaimError::Io {
-                    operation: "unlink spatial checkpoint",
-                    path,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::executor::spatial_checkpoint::{spatial_ckpt_dir, test_manifest_bytes};
+    use crate::data::executor::checkpoint_key::{
+        write_keyed_checkpoint, write_keyed_checkpoint_as,
+    };
+    use crate::data::executor::spatial_checkpoint::{
+        spatial_ckpt_dir, spatial_ckpt_key, test_manifest_bytes,
+    };
     use tempfile::TempDir;
 
-    /// Publish a live generation under `core_id` holding `files`, through the
-    /// same manifest the load path reads.
-    fn publish(data_dir: &Path, core_id: usize, generation: u64, files: &[(&str, &[u8])]) {
+    /// One index to publish: its key and whether its docmap is written too.
+    struct Pair {
+        coll: String,
+        field: String,
+        docmap: bool,
+    }
+
+    /// Publish a live generation under `core_id` holding `pairs` (tenant 1,
+    /// database 0), through the same manifest the load path reads. Returns every
+    /// file written.
+    fn publish(
+        data_dir: &Path,
+        core_id: usize,
+        generation: u64,
+        pairs: &[Pair],
+    ) -> Vec<std::path::PathBuf> {
         let ckpt_dir = spatial_ckpt_dir(data_dir, core_id);
         let gen_dir = spatial_ckpt_gen_dir(&ckpt_dir, generation);
         std::fs::create_dir_all(&gen_dir).expect("mkdir");
-        for (name, bytes) in files {
-            std::fs::write(gen_dir.join(name), bytes).expect("write");
+        let mut paths = Vec::new();
+        for pair in pairs {
+            let key = spatial_ckpt_key(0, 1, &pair.coll, &pair.field);
+            paths.push(write_keyed_checkpoint(&gen_dir, &key, b"rtree").expect("write"));
+            if pair.docmap {
+                paths.push(
+                    write_keyed_checkpoint_as(&gen_dir, &key, DOCMAP_EXTENSION, b"map")
+                        .expect("write docmap"),
+                );
+            }
         }
         let manifest = test_manifest_bytes(generation);
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, "MANIFEST", &manifest)
             .expect("manifest");
+        paths
+    }
+
+    fn pair(coll: &str, field: &str, docmap: bool) -> Pair {
+        Pair {
+            coll: coll.to_string(),
+            field: field.to_string(),
+            docmap,
+        }
     }
 
     fn gen_dir_of(data_dir: &Path, core_id: usize, generation: u64) -> std::path::PathBuf {
@@ -174,67 +167,62 @@ mod tests {
     fn unlinks_both_halves_across_cores() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        publish(
-            base,
-            0,
-            3,
-            &[
-                ("0_1_places_geom.ckpt", b"x"),
-                ("0_1_places_geom.docmap", b"yy"),
-            ],
-        );
-        publish(
+        let core0 = publish(base, 0, 3, &[pair("places", "geom", true)]);
+        let core1 = publish(
             base,
             1,
             0,
             &[
-                ("0_1_places_home.ckpt", b"zzz"),
+                pair("places", "home", false),
                 // Different collection: must survive.
-                ("0_1_stores_geom.ckpt", b"keep"),
+                pair("stores", "geom", false),
             ],
         );
 
         let stats = reclaim_spatial_checkpoints(base, 0, 1, "places").expect("reclaim");
         assert_eq!(stats.files_unlinked, 3);
-        assert!(!gen_dir_of(base, 0, 3).join("0_1_places_geom.ckpt").exists());
-        assert!(
-            !gen_dir_of(base, 0, 3)
-                .join("0_1_places_geom.docmap")
-                .exists()
-        );
-        assert!(!gen_dir_of(base, 1, 0).join("0_1_places_home.ckpt").exists());
-        assert!(gen_dir_of(base, 1, 0).join("0_1_stores_geom.ckpt").exists());
+        assert!(!core0[0].exists());
+        assert!(!core0[1].exists(), "the docmap goes with its R-tree");
+        assert!(!core1[0].exists());
+        assert!(core1[1].exists());
     }
 
-    /// A collection whose encoded name merely starts with the target's bytes
-    /// must survive — the encoder escapes literal underscores precisely so the
-    /// structural separator cannot collide.
+    /// A collection whose name merely starts with the target's bytes must
+    /// survive — the stored key is compared whole.
     #[test]
     fn does_not_unlink_a_longer_collection_name() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(
-            tmp.path(),
-            0,
-            0,
-            &[("0_1_places%5Farchive_geom.ckpt", b"x")],
-        );
+        let paths = publish(tmp.path(), 0, 0, &[pair("places_archive", "geom", true)]);
 
         let stats = reclaim_spatial_checkpoints(tmp.path(), 0, 1, "places").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
+        assert!(paths.iter().all(|p| p.exists()));
     }
 
     /// Files under a SUPERSEDED generation are already unreachable.
     #[test]
     fn ignores_superseded_generations() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(tmp.path(), 0, 1, &[("0_1_places_geom.ckpt", b"live")]);
+        publish(tmp.path(), 0, 1, &[pair("places", "geom", false)]);
         let stale = gen_dir_of(tmp.path(), 0, 0);
         std::fs::create_dir_all(&stale).expect("mkdir");
-        std::fs::write(stale.join("0_1_places_geom.ckpt"), b"old").expect("write");
+        let old = write_keyed_checkpoint(&stale, &spatial_ckpt_key(0, 1, "places", "geom"), b"old")
+            .expect("write");
 
         let stats = reclaim_spatial_checkpoints(tmp.path(), 0, 1, "places").expect("reclaim");
         assert_eq!(stats.files_unlinked, 1, "only the live generation's file");
-        assert!(stale.join("0_1_places_geom.ckpt").exists());
+        assert!(old.exists());
+    }
+
+    /// A 255-byte collection with a 200-byte field reclaims by stored key.
+    #[test]
+    fn long_names_are_reclaimed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let coll = "c".repeat(255);
+        let paths = publish(tmp.path(), 0, 0, &[pair(&coll, &"f".repeat(200), true)]);
+        let stats = reclaim_spatial_checkpoints(tmp.path(), 0, 1, &coll).expect("reclaim");
+        assert_eq!(stats.files_unlinked, 2);
+        assert!(paths.iter().all(|p| !p.exists()));
     }
 
     #[test]

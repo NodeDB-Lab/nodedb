@@ -4,11 +4,14 @@
 //! clients use them.
 //!
 //! The server answers either statement with one `result` column holding one
-//! JSON text cell:
+//! cell:
 //!
 //! - `GRAPH TRAVERSE`: `{"nodes": [{"id", "depth"}], "edges": [{"from",
-//!   "to", "label"[, "properties"]}]}`.
-//! - `GRAPH PATH`: `["src", …, "dst"]`, or `[]` when no path exists.
+//!   "to", "label"[, "properties"]}]}`. The native protocol carries it as a
+//!   typed object, so each edge property keeps its exact type. pgwire
+//!   carries it as JSON text, which holds only JSON's kinds.
+//! - `GRAPH PATH`: `["src", …, "dst"]` JSON text, or `[]` when no path
+//!   exists.
 //!
 //! Any other shape is an error naming what is wrong. A dropped row would
 //! return a partial subgraph as a complete one.
@@ -19,16 +22,24 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::{SubGraph, SubGraphEdge, SubGraphNode};
 use nodedb_types::value::Value;
-use serde_json::{Map, Value as Json};
+use serde_json::Value as Json;
 
 /// Decode a `GRAPH TRAVERSE` result.
 pub(crate) fn decode_traverse_result(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> NodeDbResult<SubGraph> {
-    let json = result_json(columns, rows, "GRAPH TRAVERSE")?;
-    let Json::Object(mut top) = json else {
-        return Err(malformed("GRAPH TRAVERSE result is not a JSON object"));
+    let result = match result_cell(columns, rows, "GRAPH TRAVERSE")? {
+        object @ Value::Object(_) => object.clone(),
+        Value::String(text) => Value::from(parse_json(text, "GRAPH TRAVERSE")?),
+        other => {
+            return Err(malformed(format!(
+                "GRAPH TRAVERSE result cell is neither an object nor JSON text: {other:?}"
+            )));
+        }
+    };
+    let Value::Object(mut top) = result else {
+        return Err(malformed("GRAPH TRAVERSE result is not an object"));
     };
     let nodes = take_array(&mut top, "nodes")?
         .into_iter()
@@ -48,8 +59,10 @@ pub(crate) fn decode_path_result(
     columns: &[String],
     rows: &[Vec<Value>],
 ) -> NodeDbResult<Option<Vec<NodeId>>> {
-    let json = result_json(columns, rows, "GRAPH PATH")?;
-    let Json::Array(items) = json else {
+    let Value::String(text) = result_cell(columns, rows, "GRAPH PATH")? else {
+        return Err(malformed("GRAPH PATH result cell is not JSON text"));
+    };
+    let Json::Array(items) = parse_json(text, "GRAPH PATH")? else {
         return Err(malformed("GRAPH PATH result is not a JSON array"));
     };
     if items.is_empty() {
@@ -68,8 +81,12 @@ pub(crate) fn decode_path_result(
         .map(Some)
 }
 
-/// The JSON text of the one `result` cell.
-fn result_json(columns: &[String], rows: &[Vec<Value>], statement: &str) -> NodeDbResult<Json> {
+/// The one cell of the one `result` row.
+fn result_cell<'r>(
+    columns: &[String],
+    rows: &'r [Vec<Value>],
+    statement: &str,
+) -> NodeDbResult<&'r Value> {
     if columns.len() != 1 || columns[0] != "result" {
         return Err(malformed(format!(
             "{statement} answered columns {columns:?}, expected [\"result\"]"
@@ -81,37 +98,41 @@ fn result_json(columns: &[String], rows: &[Vec<Value>], statement: &str) -> Node
             rows.len()
         )));
     };
-    let [Value::String(text)] = row.as_slice() else {
+    let [cell] = row.as_slice() else {
         return Err(malformed(format!(
-            "{statement} result row is not one text cell: {row:?}"
+            "{statement} result row is not one cell: {row:?}"
         )));
     };
+    Ok(cell)
+}
+
+fn parse_json(text: &str, statement: &str) -> NodeDbResult<Json> {
     sonic_rs::from_str(text).map_err(|e| malformed(format!("{statement} result is not JSON: {e}")))
 }
 
-fn take_array(top: &mut Map<String, Json>, key: &str) -> NodeDbResult<Vec<Json>> {
+fn take_array(top: &mut HashMap<String, Value>, key: &str) -> NodeDbResult<Vec<Value>> {
     match top.remove(key) {
-        Some(Json::Array(items)) => Ok(items),
+        Some(Value::Array(items)) => Ok(items),
         Some(other) => Err(malformed(format!(
-            "GRAPH TRAVERSE `{key}` is not an array: {other}"
+            "GRAPH TRAVERSE `{key}` is not an array: {other:?}"
         ))),
         None => Err(malformed(format!("GRAPH TRAVERSE result lacks `{key}`"))),
     }
 }
 
-fn decode_node(index: usize, node: Json) -> NodeDbResult<SubGraphNode> {
+fn decode_node(index: usize, node: Value) -> NodeDbResult<SubGraphNode> {
     let what = format!("GRAPH TRAVERSE node {index}");
-    let Json::Object(mut fields) = node else {
+    let Value::Object(mut fields) = node else {
         return Err(malformed(format!("{what} is not an object")));
     };
     let id = node_id(take_string(&mut fields, "id", &what)?, &what)?;
     let depth = match fields.remove("depth") {
-        Some(Json::Number(n)) => n
-            .as_u64()
-            .and_then(|d| u8::try_from(d).ok())
-            .ok_or_else(|| malformed(format!("{what} depth {n} is not an integer in 0..=255")))?,
+        Some(Value::Integer(n)) => u8::try_from(n)
+            .map_err(|_| malformed(format!("{what} depth {n} is not an integer in 0..=255")))?,
         Some(other) => {
-            return Err(malformed(format!("{what} depth is not a number: {other}")));
+            return Err(malformed(format!(
+                "{what} depth is not an integer: {other:?}"
+            )));
         }
         None => return Err(malformed(format!("{what} lacks `depth`"))),
     };
@@ -122,9 +143,9 @@ fn decode_node(index: usize, node: Json) -> NodeDbResult<SubGraphNode> {
     })
 }
 
-fn decode_edge(index: usize, edge: Json) -> NodeDbResult<SubGraphEdge> {
+fn decode_edge(index: usize, edge: Value) -> NodeDbResult<SubGraphEdge> {
     let what = format!("GRAPH TRAVERSE edge {index}");
-    let Json::Object(mut fields) = edge else {
+    let Value::Object(mut fields) = edge else {
         return Err(malformed(format!("{what} is not an object")));
     };
     let from = node_id(take_string(&mut fields, "from", &what)?, &what)?;
@@ -132,13 +153,10 @@ fn decode_edge(index: usize, edge: Json) -> NodeDbResult<SubGraphEdge> {
     let label = take_string(&mut fields, "label", &what)?;
     let properties = match fields.remove("properties") {
         None => HashMap::new(),
-        Some(Json::Object(properties)) => properties
-            .into_iter()
-            .map(|(name, value)| (name, Value::from(value)))
-            .collect(),
+        Some(Value::Object(properties)) => properties,
         Some(other) => {
             return Err(malformed(format!(
-                "{what} properties are not an object: {other}"
+                "{what} properties are not an object: {other:?}"
             )));
         }
     };
@@ -156,11 +174,11 @@ fn decode_edge(index: usize, edge: Json) -> NodeDbResult<SubGraphEdge> {
     })
 }
 
-fn take_string(fields: &mut Map<String, Json>, key: &str, what: &str) -> NodeDbResult<String> {
+fn take_string(fields: &mut HashMap<String, Value>, key: &str, what: &str) -> NodeDbResult<String> {
     match fields.remove(key) {
-        Some(Json::String(s)) => Ok(s),
+        Some(Value::String(s)) => Ok(s),
         Some(other) => Err(malformed(format!(
-            "{what} `{key}` is not a string: {other}"
+            "{what} `{key}` is not a string: {other:?}"
         ))),
         None => Err(malformed(format!("{what} lacks `{key}`"))),
     }
@@ -172,7 +190,7 @@ fn node_id(id: String, what: &str) -> NodeDbResult<NodeId> {
 }
 
 fn malformed(detail: impl std::fmt::Display) -> NodeDbError {
-    NodeDbError::serialization("json", detail)
+    NodeDbError::serialization("graph result", detail)
 }
 
 #[cfg(test)]
@@ -216,6 +234,42 @@ mod tests {
         );
         assert_eq!(sg.edges[0].properties.get("w"), Some(&Value::Float(0.5)));
         assert!(sg.edges[1].properties.is_empty());
+    }
+
+    /// The native protocol carries the result as a typed object, so each
+    /// edge property keeps its exact type.
+    #[test]
+    fn a_typed_result_object_keeps_property_types() {
+        let price = Value::Decimal("12.50".parse().expect("decimal"));
+        let id = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let object = |pairs: Vec<(&str, Value)>| {
+            Value::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        };
+        let result = object(vec![
+            (
+                "nodes",
+                Value::Array(vec![object(vec![
+                    ("id", Value::String("a".into())),
+                    ("depth", Value::Integer(0)),
+                ])]),
+            ),
+            (
+                "edges",
+                Value::Array(vec![object(vec![
+                    ("from", Value::String("a".into())),
+                    ("to", Value::String("b".into())),
+                    ("label", Value::String("L".into())),
+                    (
+                        "properties",
+                        object(vec![("price", price.clone()), ("id", id.clone())]),
+                    ),
+                ])]),
+            ),
+        ]);
+        let sg = decode_traverse_result(&["result".to_string()], &[vec![result]]).expect("decodes");
+        assert_eq!(sg.nodes[0].depth, 0);
+        assert_eq!(sg.edges[0].properties.get("price"), Some(&price));
+        assert_eq!(sg.edges[0].properties.get("id"), Some(&id));
     }
 
     #[test]

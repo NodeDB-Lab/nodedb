@@ -9,20 +9,20 @@
 //!
 //! * A staged value ([`Staged::Put`]) → `RecordType::Put`, the 8-tuple
 //!   `(collection, document_id, value, Option<SyncProvenance>, surrogate,
-//!   sys_from, valid_from_ms, valid_until_ms)`. The trailing stamp is the one
-//!   `pin_doc_stamps` set in the overlay sidecar, so replay restores the row
-//!   on the versioned store at the version key the commit-time install uses.
+//!   sys_from, valid_from_ms, valid_until_ms)`. `sys_from` is the
+//!   resolve-time stamp (`doc_ordinal`), so replay restores the row on the
+//!   versioned store at the version key the commit-time install uses.
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`, the
 //!   5-tuple `(collection, document_id, Option<SyncProvenance>, surrogate,
 //!   sys_from)`. The redo delete shape carries the surrogate (unlike the
 //!   autocommit delete shape) because replay keys redb by
-//!   `StorageKey::for_surrogate(surrogate)`. `sys_from` is the pinned
+//!   `StorageKey::for_surrogate(surrogate)`. `sys_from` is the resolve-time
 //!   tombstone ordinal, so every apply of the record writes the same version
 //!   key.
 //!
-//! Every staged row is stamped before it serializes. A row without a stamp
-//! is an `Error::Internal`: the record never carries an unstamped document
-//! write.
+//! Every staged row is stamped as it serializes. A stamp that does not
+//! resolve fails the resolve: the record never carries an unstamped
+//! document write.
 //!
 //! ## Stored form vs replay input
 //!
@@ -48,84 +48,66 @@
 //! ## Staged TRUNCATE
 //!
 //! A truncated collection additionally emits one `RecordType::Delete` per base
-//! row the truncate removes ([`serialize_truncated_base_rows`]): the redo
+//! row the truncate removes ([`super::document_truncate::serialize_truncated_base_rows`]): the redo
 //! record is all a replica installs, so every removed row travels in it. Base
 //! rows superseded by an overlay entry are covered by that entry instead.
 //!
 //! ## Determinism
 //!
-//! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
-//! into a `BTreeMap` keyed by the row's client identity before emitting. Two
-//! replicas resolving the same transaction produce byte-identical redo ops.
+//! Entries emit in the overlay's merged identity order: the key-byte order
+//! of each row's encoded client identity. The order is a function of the
+//! staged rows alone, so two replicas resolving the same transaction produce
+//! byte-identical redo ops, and the resolve holds no row it has emitted.
 
-use std::collections::BTreeMap;
-
+use nodedb_types::RowIdentity;
 use nodedb_types::columnar::StrictSchema;
 use nodedb_types::sync::wire::SyncProvenance;
-use nodedb_types::{RowIdentity, StorageKey};
 use nodedb_wal::record::RecordType;
 
-use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
-
-use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{BitemporalStamp, Staged, TxnOverlay};
-use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
+use crate::data::executor::handlers::transaction::overlay::{Staged, TxnOverlay};
 use crate::data::executor::strict_format;
-use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoSubRecord;
 
-/// Append the redo sub-records for every document post-image staged in
-/// `overlay` for `coll_key` to `ops`, in deterministic doc-id order.
-///
-/// `strict_schema` is `Some` for a strict (Binary Tuple) collection and `None`
-/// for a schemaless (already MessagePack) one; a strict `Put` body is decoded
-/// back to MessagePack before emission so replay's `bytes_to_binary_tuple` can
-/// re-encode it (see module docs).
-pub(super) fn serialize_document_collection(
-    overlay: &TxnOverlay,
-    coll_key: &(DatabaseId, TenantId, String),
-    collection: &str,
-    strict_schema: Option<&StrictSchema>,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
-    let mut entries: BTreeMap<&RowIdentity, (u32, &Staged)> = BTreeMap::new();
-    for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        let surrogate = overlay
-            .surrogate_for_doc_id(coll_key, doc_id)
-            .ok_or_else(|| crate::Error::Internal {
-                detail: format!(
-                    "document resolve: staged doc-id '{doc_id}' has no bound surrogate"
-                ),
-            })?;
-        entries.insert(doc_id, (surrogate, staged));
-    }
+use super::sink::OpSink;
 
-    for (doc_id, (surrogate, staged)) in entries {
-        match staged {
-            Staged::Put(body) => {
-                let value = match strict_schema {
-                    Some(schema) => strict_format::binary_tuple_to_msgpack(body, schema)
-                        .ok_or_else(|| crate::Error::Storage {
-                            engine: "binary_tuple".into(),
-                            detail: format!(
-                                "document resolve: failed to decode Binary Tuple for staged \
-                                 put of '{doc_id}'"
-                            ),
-                        })?,
-                    None => body.clone(),
-                };
+/// The staged rows of one document collection.
+#[derive(Clone, Copy)]
+pub(super) struct StagedDocuments<'a> {
+    pub overlay: &'a TxnOverlay,
+    pub coll_key: &'a (DatabaseId, TenantId, String),
+    /// `Some` for a strict (Binary Tuple) collection, `None` for a
+    /// schemaless (already MessagePack) one.
+    pub strict_schema: Option<&'a StrictSchema>,
+}
+
+/// Append the redo sub-records for every document post-image staged in
+/// `docs` to `ops`, in the overlay's identity order. Each row's version
+/// takes the stamp `sys_from_of(surrogate)` gives.
+///
+/// A strict `Put` body is decoded back to MessagePack before emission so
+/// replay's `bytes_to_binary_tuple` can re-encode it (see module docs).
+pub(super) fn serialize_document_collection(
+    docs: StagedDocuments<'_>,
+    sys_from_of: &mut dyn FnMut(u32) -> crate::Result<i64>,
+    ops: &mut dyn OpSink,
+) -> crate::Result<()> {
+    let collection = docs.coll_key.2.as_str();
+    for row in staged_document_rows(docs.overlay, docs.coll_key, docs.strict_schema) {
+        let row = row?;
+        let sys_from = sys_from_of(row.surrogate)?;
+        match row.value {
+            Some(value) => {
                 let prov: Option<SyncProvenance> = None;
-                let stamp = pinned_stamp(overlay, coll_key, doc_id, surrogate)?;
                 let payload = zerompk::to_msgpack_vec(&(
                     collection,
-                    doc_id.as_str(),
+                    row.doc_id.as_str(),
                     value,
                     prov,
-                    surrogate,
-                    stamp.sys_from,
-                    stamp.valid_from_ms,
-                    stamp.valid_until_ms,
+                    row.surrogate,
+                    sys_from,
+                    i64::MIN,
+                    i64::MAX,
                 ))
                 .map_err(|e| crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -136,40 +118,77 @@ pub(super) fn serialize_document_collection(
                     payload,
                 });
             }
-            Staged::Tombstone => ops.push(delete_sub_record(
+            None => ops.push(delete_sub_record(
                 collection,
-                doc_id,
-                surrogate,
-                pinned_stamp(overlay, coll_key, doc_id, surrogate)?.sys_from,
+                &row.doc_id,
+                row.surrogate,
+                sys_from,
             )?),
         }
     }
     Ok(())
 }
 
-/// The stamp `pin_doc_stamps` pinned for one staged row. A row without one
-/// is an `Error::Internal`: its redo would carry a version key no apply
-/// reproduces.
-fn pinned_stamp(
-    overlay: &TxnOverlay,
+/// One document row a transaction staged for `coll_key`, as its redo entry
+/// writes it.
+pub(super) struct StagedDocumentRow {
+    pub doc_id: RowIdentity,
+    pub surrogate: u32,
+    /// The redo `value` of a put. `None` for a delete.
+    pub value: Option<Vec<u8>>,
+}
+
+/// Every document row staged in `overlay` for `coll_key`, in the overlay's
+/// identity order, with the value its redo put carries. The resolve
+/// serializes these rows, and the Calvin stage judges them at its commit
+/// boundary. The walk holds one row at a time.
+pub(super) fn staged_document_rows<'a>(
+    overlay: &'a TxnOverlay,
     coll_key: &(DatabaseId, TenantId, String),
-    doc_id: &RowIdentity,
-    surrogate: u32,
-) -> crate::Result<BitemporalStamp> {
+    strict_schema: Option<&'a StrictSchema>,
+) -> impl Iterator<Item = crate::Result<StagedDocumentRow>> + 'a {
     overlay
-        .get_bitemporal(coll_key, surrogate)
-        .ok_or_else(|| crate::Error::Internal {
-            detail: format!(
-                "document resolve: staged row '{doc_id}' of '{}' has no pinned version stamp",
-                coll_key.2
-            ),
+        .iter_staged_bindings_for_collection(coll_key)
+        .map(move |item| {
+            let (doc_id, surrogate, staged) = item?;
+            let value = match &*staged {
+                Staged::Put(body) => Some(redo_put_value(body, strict_schema, &doc_id)?),
+                Staged::Tombstone => None,
+            };
+            Ok(StagedDocumentRow {
+                doc_id,
+                surrogate,
+                value,
+            })
         })
+}
+
+/// The redo `value` of the staged put `body` of row `doc_id`: the body a
+/// replay hands to `apply_point_put`. A strict Binary Tuple decodes back to
+/// MessagePack (see module docs). A schemaless body is its own value.
+pub(in crate::data::executor) fn redo_put_value(
+    body: &[u8],
+    strict_schema: Option<&StrictSchema>,
+    doc_id: &RowIdentity,
+) -> crate::Result<Vec<u8>> {
+    match strict_schema {
+        Some(schema) => strict_format::binary_tuple_to_msgpack(body, schema).ok_or_else(|| {
+            crate::Error::Storage {
+                engine: "binary_tuple".into(),
+                detail: format!(
+                    "document resolve: failed to decode Binary Tuple for staged put of \
+                         '{doc_id}'"
+                ),
+            }
+        }),
+        None => Ok(body.to_vec()),
+    }
 }
 
 /// The `RecordType::Delete` redo sub-record for one row:
 /// `(collection, document_id, Option<SyncProvenance>, surrogate, sys_from)`,
 /// where `sys_from` is the tombstone's system-time ordinal.
-fn delete_sub_record(
+pub(super) fn delete_sub_record(
     collection: &str,
     doc_id: &RowIdentity,
     surrogate: u32,
@@ -186,110 +205,6 @@ fn delete_sub_record(
         record_type: RecordType::Delete as u32,
         payload,
     })
-}
-
-impl CoreLoop {
-    /// The base rows a staged TRUNCATE of `collection` removes at COMMIT:
-    /// every base row with no overlay entry. The redo record is the only
-    /// thing a replica installs, so each removed row travels as its own
-    /// `Delete`. Read-only against base.
-    pub(super) fn truncated_base_rows(
-        &self,
-        task: &ExecutionTask,
-        tid: u64,
-        collection: &str,
-        overlay: &TxnOverlay,
-        coll_key: &(DatabaseId, TenantId, String),
-    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
-        // Each base row at its current version.
-        let database_id = task.request.database_id.as_u64();
-        self.current_rows_where(
-            database_id,
-            tid,
-            collection,
-            &|key: &StorageKey, _: &[u8]| overlay.get(coll_key, key.surrogate().as_u32()).is_none(),
-        )
-    }
-}
-
-/// The declared primary key of every document collection a `Truncate` plan
-/// names, keyed by collection.
-pub(super) fn truncate_declared_primary_keys(
-    plans: &[PhysicalPlan],
-) -> BTreeMap<String, Option<String>> {
-    plans
-        .iter()
-        .filter_map(|plan| match plan {
-            PhysicalPlan::Document(DocumentOp::Truncate {
-                collection,
-                declared_primary_key,
-                ..
-            }) => Some((collection.to_string(), declared_primary_key.clone())),
-            PhysicalPlan::Document(_)
-            | PhysicalPlan::Kv(_)
-            | PhysicalPlan::Graph(_)
-            | PhysicalPlan::Crdt(_)
-            | PhysicalPlan::Text(_)
-            | PhysicalPlan::Query(_)
-            | PhysicalPlan::Meta(_)
-            | PhysicalPlan::Vector(_)
-            | PhysicalPlan::Array(_)
-            | PhysicalPlan::Columnar(_)
-            | PhysicalPlan::Timeseries(_)
-            | PhysicalPlan::Spatial(_)
-            | PhysicalPlan::ClusterArray(_)
-            | PhysicalPlan::ClusterEvent(_) => None,
-        })
-        .collect()
-}
-
-/// The base rows a staged TRUNCATE removes at COMMIT, with what names each
-/// one in its redo entry.
-pub(super) struct TruncatedBaseRows<'a> {
-    pub collection: &'a str,
-    /// `(storage key, stored body)` of every base row with no overlay entry.
-    pub rows: &'a [(StorageKey, Vec<u8>)],
-    pub strict_schema: Option<&'a StrictSchema>,
-    /// The collection's declared `PRIMARY KEY` column, from the plan.
-    pub declared_primary_key: Option<&'a str>,
-    /// Each removed row's tombstone ordinal, keyed by surrogate.
-    pub tombstone_sys_from: &'a BTreeMap<u32, i64>,
-}
-
-/// Append one `RecordType::Delete` redo sub-record per base row a staged
-/// TRUNCATE removes, in deterministic doc-id order. Every replica removes the
-/// same rows from the record, and a WAL-only restart does not replay a
-/// removed row's original `Put` and resurrect it or its HNSW vector.
-pub(super) fn serialize_truncated_base_rows(
-    params: TruncatedBaseRows<'_>,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
-    let TruncatedBaseRows {
-        collection,
-        rows,
-        strict_schema,
-        declared_primary_key,
-        tombstone_sys_from,
-    } = params;
-    let mut entries: BTreeMap<RowIdentity, u32> = BTreeMap::new();
-    for (key, body) in rows {
-        let identity = stored_row_identity(body, strict_schema, declared_primary_key, *key);
-        entries.insert(identity, key.surrogate().as_u32());
-    }
-    for (doc_id, surrogate) in &entries {
-        let sys_from =
-            tombstone_sys_from
-                .get(surrogate)
-                .copied()
-                .ok_or_else(|| crate::Error::Internal {
-                    detail: format!(
-                        "document resolve: truncated row '{doc_id}' of '{collection}' has no \
-                     tombstone ordinal"
-                    ),
-                })?;
-        ops.push(delete_sub_record(collection, doc_id, *surrogate, sys_from)?);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -335,17 +250,33 @@ mod tests {
         RowIdentity::from_user_key(text)
     }
 
-    /// Pin `sys_from` on `surrogate`, as `pin_doc_stamps` does at resolve.
-    fn pin(overlay: &mut TxnOverlay, coll: &str, surrogate: u32, sys_from: i64) {
-        overlay.set_bitemporal(
-            &coll_key(coll),
-            surrogate,
-            BitemporalStamp {
-                sys_from,
-                valid_from_ms: i64::MIN,
-                valid_until_ms: i64::MAX,
+    /// Serialize `coll` of `overlay`, each row stamped inline from `stamps`
+    /// by surrogate. A row `stamps` does not name fails the resolve.
+    fn serialize(
+        overlay: &TxnOverlay,
+        coll: &str,
+        strict_schema: Option<&StrictSchema>,
+        stamps: &[(u32, i64)],
+        ops: &mut Vec<RedoSubRecord>,
+    ) -> crate::Result<()> {
+        let key = coll_key(coll);
+        serialize_document_collection(
+            StagedDocuments {
+                overlay,
+                coll_key: &key,
+                strict_schema,
             },
-        );
+            &mut |surrogate| {
+                stamps
+                    .iter()
+                    .find(|(row, _)| *row == surrogate)
+                    .map(|(_, sys_from)| *sys_from)
+                    .ok_or_else(|| crate::Error::Internal {
+                        detail: format!("row {surrogate} of '{coll}' has no stamp"),
+                    })
+            },
+            ops,
+        )
     }
 
     /// The document put tuple a resolve emits.
@@ -365,11 +296,12 @@ mod tests {
         let schema = strict_schema();
         let tuple = strict_tuple(7, "elephant");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("docs"), 7, &id("row1"), tuple.clone());
-        pin(&mut overlay, "docs", 7, 900);
+        overlay
+            .insert_put(coll_key("docs"), 7, &id("row1"), tuple.clone())
+            .unwrap();
 
-        let mut ops = Vec::new();
-        serialize_document_collection(&overlay, &coll_key("docs"), "docs", Some(&schema), &mut ops)
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(&overlay, "docs", Some(&schema), &[(7, 900)], &mut ops)
             .expect("serialize strict");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::Put as u32);
@@ -401,12 +333,12 @@ mod tests {
     fn schemaless_put_emits_body_verbatim() {
         let body = schemaless_body("alice");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 3, &id("userpk"), body.clone());
-        pin(&mut overlay, "notes", 3, 901);
+        overlay
+            .insert_put(coll_key("notes"), 3, &id("userpk"), body.clone())
+            .unwrap();
 
-        let mut ops = Vec::new();
-        serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)
-            .expect("serialize schemaless");
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(&overlay, "notes", None, &[(3, 901)], &mut ops).expect("serialize schemaless");
         assert_eq!(ops.len(), 1);
 
         let (_c, _d, value, _p, surrogate, _, _, _) =
@@ -418,12 +350,12 @@ mod tests {
     #[test]
     fn tombstone_emits_delete_carrying_surrogate() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(coll_key("notes"), 11, &id("gone"));
-        pin(&mut overlay, "notes", 11, 902);
+        overlay
+            .insert_tombstone(coll_key("notes"), 11, &id("gone"))
+            .unwrap();
 
-        let mut ops = Vec::new();
-        serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)
-            .expect("serialize delete");
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(&overlay, "notes", None, &[(11, 902)], &mut ops).expect("serialize delete");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::Delete as u32);
 
@@ -439,22 +371,23 @@ mod tests {
         assert_eq!(sys_from, 902, "delete tuple must carry its pinned stamp");
     }
 
-    /// A staged row with no pinned stamp fails the resolve, for a put and a
-    /// tombstone alike.
+    /// A staged row whose stamp does not resolve fails the resolve, for a
+    /// put and a tombstone alike.
     #[test]
     fn an_unstamped_row_fails_the_resolve() {
         let mut put = TxnOverlay::new();
-        put.insert_put(coll_key("notes"), 5, &id("p"), schemaless_body("p"));
-        let mut ops = Vec::new();
-        let err = serialize_document_collection(&put, &coll_key("notes"), "notes", None, &mut ops)
-            .expect_err("an unstamped put");
+        put.insert_put(coll_key("notes"), 5, &id("p"), schemaless_body("p"))
+            .unwrap();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        let err = serialize(&put, "notes", None, &[], &mut ops).expect_err("an unstamped put");
         assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
 
         let mut tombstone = TxnOverlay::new();
-        tombstone.insert_tombstone(coll_key("notes"), 6, &id("t"));
-        let err =
-            serialize_document_collection(&tombstone, &coll_key("notes"), "notes", None, &mut ops)
-                .expect_err("an unstamped tombstone");
+        tombstone
+            .insert_tombstone(coll_key("notes"), 6, &id("t"))
+            .unwrap();
+        let err = serialize(&tombstone, "notes", None, &[], &mut ops)
+            .expect_err("an unstamped tombstone");
         assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
         assert!(ops.is_empty(), "no unstamped sub-record is emitted");
     }
@@ -462,20 +395,11 @@ mod tests {
     #[test]
     fn a_bitemporal_tombstone_carries_its_resolve_time_system_time() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(coll_key("hist"), 11, &id("gone"));
-        overlay.set_bitemporal(
-            &coll_key("hist"),
-            11,
-            BitemporalStamp {
-                sys_from: 4_242,
-                valid_from_ms: i64::MIN,
-                valid_until_ms: i64::MAX,
-            },
-        );
-
-        let mut ops = Vec::new();
-        serialize_document_collection(&overlay, &coll_key("hist"), "hist", None, &mut ops)
-            .expect("serialize delete");
+        overlay
+            .insert_tombstone(coll_key("hist"), 11, &id("gone"))
+            .unwrap();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(&overlay, "hist", None, &[(11, 4_242)], &mut ops).expect("serialize delete");
         let (_c, doc_id, _prov, surrogate, sys) =
             zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32, i64)>(
                 &ops[0].payload,
@@ -489,16 +413,24 @@ mod tests {
     #[test]
     fn entries_emit_in_deterministic_doc_id_order() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 30, &id("c"), schemaless_body("c"));
-        overlay.insert_put(coll_key("notes"), 10, &id("a"), schemaless_body("a"));
-        overlay.insert_put(coll_key("notes"), 20, &id("b"), schemaless_body("b"));
-        for surrogate in [10, 20, 30] {
-            pin(&mut overlay, "notes", surrogate, 1_000);
-        }
-
-        let mut ops = Vec::new();
-        serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)
-            .expect("serialize");
+        overlay
+            .insert_put(coll_key("notes"), 30, &id("c"), schemaless_body("c"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key("notes"), 10, &id("a"), schemaless_body("a"))
+            .unwrap();
+        overlay
+            .insert_put(coll_key("notes"), 20, &id("b"), schemaless_body("b"))
+            .unwrap();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(
+            &overlay,
+            "notes",
+            None,
+            &[(10, 1_000), (20, 1_000), (30, 1_000)],
+            &mut ops,
+        )
+        .expect("serialize");
         let doc_ids: Vec<String> = ops
             .iter()
             .map(|op| {
@@ -507,6 +439,52 @@ mod tests {
                     .1
             })
             .collect();
-        assert_eq!(doc_ids, vec!["a", "b", "c"], "doc-id ascending order");
+        assert_eq!(doc_ids, vec!["a", "b", "c"], "identity key-byte order");
+    }
+
+    /// A spilled overlay serializes every row with the stamp the inline
+    /// closure gives for its surrogate, a put and a tombstone alike.
+    #[test]
+    fn a_spilled_overlay_stamps_every_row_inline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut overlay = TxnOverlay::with_spill(
+            crate::data::executor::handlers::spill::tiered::SpillSpace::new(
+                dir.path().join("t"),
+                "doc",
+                0,
+            ),
+        );
+        for n in 1..=20u32 {
+            let row = format!("r{n:02}");
+            if n % 4 == 0 {
+                overlay
+                    .insert_tombstone(coll_key("notes"), n, &id(&row))
+                    .unwrap();
+            } else {
+                overlay
+                    .insert_put(coll_key("notes"), n, &id(&row), schemaless_body(&row))
+                    .unwrap();
+            }
+        }
+        assert!(overlay.spilled_heap_bytes() > 0, "the overlay spilled");
+        let stamps: Vec<(u32, i64)> = (1..=20u32).map(|n| (n, 5_000 + i64::from(n))).collect();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize(&overlay, "notes", None, &stamps, &mut ops).expect("serialize");
+        assert_eq!(ops.len(), 20);
+        for op in &ops {
+            let (surrogate, sys_from) = if op.record_type == RecordType::Put as u32 {
+                let (_c, _d, _v, _p, surrogate, sys_from, _, _) =
+                    zerompk::from_msgpack::<PutTuple>(&op.payload).expect("put");
+                (surrogate, sys_from)
+            } else {
+                let (_c, _d, _p, surrogate, sys_from) =
+                    zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32, i64)>(
+                        &op.payload,
+                    )
+                    .expect("delete");
+                (surrogate, sys_from)
+            };
+            assert_eq!(sys_from, 5_000 + i64::from(surrogate), "row {surrogate}");
+        }
     }
 }

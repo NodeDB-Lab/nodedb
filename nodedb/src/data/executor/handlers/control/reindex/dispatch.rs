@@ -93,7 +93,8 @@ impl CoreLoop {
             self.start_hnsw_rebuild(target);
         }
         let fts = if selection.fts {
-            self.start_fts_rebuild(target)
+            let text_fields = self.current_text_fields(target);
+            self.start_fts_rebuild(target, text_fields).map(|_| ())
         } else {
             Ok(())
         };

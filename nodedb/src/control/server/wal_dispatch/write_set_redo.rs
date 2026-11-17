@@ -19,22 +19,23 @@
 //! WAL.
 
 use crate::bridge::envelope::{EdgeImage, PhysicalPlan, RowEffect, WriteSetEntry};
+use crate::types::installed_document::InstalledDocument;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
+use crate::wal::redo::installed_document::InstalledDocumentRedo;
 use crate::wal::{RedoSubRecord, WriteGroup, WriteGroupRecord};
+use nodedb_physical::physical_plan::StorageMode;
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, MetaOp};
 use nodedb_wal::record::RecordType;
 
 use super::core::{WalAppendRequest, wal_append};
-use super::document::{
-    encode_document_delete_record, encode_document_put_record, opening_forward_sub_record,
-};
+use super::document::{encode_document_delete_record, opening_forward_sub_record};
 use super::graph::{encode_edge_delete, encode_edge_put};
 
 /// The bytes of a part's sub-records, when one WAL record holds at most
 /// `max_payload` bytes. A larger write set spreads over more parts. One
 /// sub-record never splits.
-fn part_budget(max_payload: usize) -> usize {
+pub(super) const fn part_budget(max_payload: usize) -> usize {
     max_payload.saturating_sub(2 * crate::wal::redo::continuation::RECORD_OVERHEAD)
 }
 
@@ -141,6 +142,7 @@ pub fn append_group_origin(req: WalAppendRequest<'_>) -> crate::Result<GroupOrig
             vshard_id,
             database_id,
             &WriteGroupRecord {
+                schemas: Vec::new(),
                 group,
                 ops,
                 redo: None,
@@ -183,12 +185,15 @@ pub struct WriteSetTarget<'a> {
     pub origin: GroupOrigin,
 }
 
+/// One part's home, ordered effects, and referenced schema witnesses.
+pub type GroupRun = (VShardId, Vec<RedoSubRecord>, Vec<StorageMode>);
+
 /// The parts a write set journals as, in entry order.
 #[derive(Debug)]
 pub struct GroupParts {
     /// Each part's vShard and sub-records. Never empty: a write set with no
     /// row to journal gets one part with no rows, which closes the group.
-    pub runs: Vec<(VShardId, Vec<RedoSubRecord>)>,
+    pub runs: Vec<GroupRun>,
     /// Whether an entry cancels the origin.
     pub cancels_origin: bool,
 }
@@ -222,43 +227,80 @@ pub fn plan_group_parts(
     max_payload: usize,
 ) -> crate::Result<GroupParts> {
     let budget = part_budget(max_payload);
-    let mut runs: Vec<(VShardId, Vec<RedoSubRecord>)> = Vec::new();
+    let mut runs: Vec<GroupRun> = Vec::new();
     let mut run_bytes = 0usize;
     let mut cancels_origin = false;
     for entry in write_set {
-        let Some(sub) = sub_record(entry, target.collection)? else {
+        if matches!(entry.effect, RowEffect::CancelForward) {
             cancels_origin = true;
             continue;
-        };
+        }
         let vshard = entry_vshard(entry, target)?;
-        let cost = sub
+        let mut schemas = runs
+            .last_mut()
+            .filter(|(home, _, _)| *home == vshard)
+            .map(|(_, _, schemas)| std::mem::take(schemas))
+            .unwrap_or_default();
+        let previous_schema_count = schemas.len();
+        let mut sub = sub_record(entry, target.collection, &mut schemas)?.ok_or_else(|| {
+            crate::Error::Internal {
+                detail: "cancel entry escaped group partition".into(),
+            }
+        })?;
+        let schema_cost = |schemas: &[StorageMode]| -> crate::Result<usize> {
+            zerompk::to_msgpack_vec(&schemas)
+                .map(|bytes| bytes.len())
+                .map_err(|error| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("installed schemas encode: {error}"),
+                })
+        };
+        let mut cost = sub
             .payload
             .len()
             .saturating_add(crate::wal::redo::continuation::SUB_RECORD_OVERHEAD);
+        if schemas.len() > previous_schema_count {
+            cost = cost.saturating_add(schema_cost(&schemas[previous_schema_count..])?);
+        }
+        let fits = runs.last().is_some_and(|(home, _, _)| *home == vshard)
+            && run_bytes.saturating_add(cost) <= budget;
+        if fits {
+            if let Some((_, ops, existing)) = runs.last_mut() {
+                *existing = schemas;
+                ops.push(sub);
+                run_bytes += cost;
+            }
+            continue;
+        }
+        if let Some((home, _, existing)) = runs.last_mut()
+            && *home == vshard
+        {
+            schemas.truncate(previous_schema_count);
+            *existing = schemas;
+        }
+        let mut schemas = Vec::new();
+        sub = sub_record(entry, target.collection, &mut schemas)?.ok_or_else(|| {
+            crate::Error::Internal {
+                detail: "cancel entry escaped group partition".into(),
+            }
+        })?;
+        cost = sub
+            .payload
+            .len()
+            .saturating_add(crate::wal::redo::continuation::SUB_RECORD_OVERHEAD)
+            .saturating_add(schema_cost(&schemas)?);
         if cost > budget {
             return Err(crate::Error::Internal {
                 detail: format!(
-                    "a write-set row of {} bytes exceeds the WAL record limit of \
-                     {max_payload} bytes",
-                    sub.payload.len()
+                    "a write-set row and schema of {cost} bytes exceeds the WAL record limit of {max_payload} bytes"
                 ),
             });
         }
-        match runs.last_mut() {
-            Some((run_vshard, ops))
-                if *run_vshard == vshard && run_bytes.saturating_add(cost) <= budget =>
-            {
-                run_bytes += cost;
-                ops.push(sub);
-            }
-            _ => {
-                run_bytes = cost;
-                runs.push((vshard, vec![sub]));
-            }
-        }
+        run_bytes = cost;
+        runs.push((vshard, vec![sub], schemas));
     }
     if runs.is_empty() {
-        runs.push((target.vshard_id, Vec::new()));
+        runs.push((target.vshard_id, Vec::new(), Vec::new()));
     }
     Ok(GroupParts {
         runs,
@@ -277,11 +319,12 @@ pub fn append_planned_parts(
     let count = parts.count()?;
     let origin = target.origin.lsn.as_u64();
     let mut last = None;
-    for (part, (vshard, ops)) in (1..=count).zip(parts.runs) {
+    for (part, (vshard, ops, schemas)) in (1..=count).zip(parts.runs) {
         if present(part) {
             continue;
         }
         let record = WriteGroupRecord {
+            schemas,
             group: WriteGroup::part_of(origin, part, count),
             ops,
             redo: None,
@@ -318,18 +361,29 @@ pub fn append_group_parts(
 }
 
 /// The sub-record `entry` journals, `None` for a cancel of the origin.
-fn sub_record(entry: &WriteSetEntry, fallback: &str) -> crate::Result<Option<RedoSubRecord>> {
+fn sub_record(
+    entry: &WriteSetEntry,
+    fallback: &str,
+    schemas: &mut Vec<StorageMode>,
+) -> crate::Result<Option<RedoSubRecord>> {
     let collection = entry.collection.as_deref().unwrap_or(fallback);
     let (record_type, payload) = match &entry.effect {
-        RowEffect::Put { value, version } => (
+        RowEffect::InstalledPut { image, event } => (
             RecordType::Put,
-            encode_document_put_record(
-                collection,
-                entry.identity.as_str(),
-                value,
-                entry.surrogate,
-                *version,
-            )?,
+            InstalledDocumentRedo {
+                collection: collection.to_string(),
+                document_id: entry.identity.as_str().to_string(),
+                surrogate: entry.surrogate,
+                event: event.clone(),
+                image: InstalledDocument {
+                    canonical: image.canonical.clone(),
+                    stored: image.stored.clone(),
+                    version: image.version,
+                    schema: crate::wal::redo::capture::intern_schema(schemas, &image.schema)?,
+                    chain_head: image.chain_head.clone(),
+                },
+            }
+            .encode()?,
         ),
         RowEffect::Delete { system_from } => (
             RecordType::Delete,
@@ -374,6 +428,34 @@ mod tests {
     use nodedb_physical::physical_plan::ReturningSpec;
     use nodedb_types::sync::wire::SyncProvenance;
     use nodedb_types::{QualifiedCollection, RowIdentity, Surrogate};
+
+    fn test_body(payload: Vec<u8>) -> Vec<u8> {
+        nodedb_types::json_to_msgpack(&serde_json::json!({"payload": payload})).expect("body")
+    }
+
+    fn installed_entry(
+        surrogate: u32,
+        identity: RowIdentity,
+        payload: Vec<u8>,
+        version: RowVersion,
+    ) -> WriteSetEntry {
+        let value = test_body(payload);
+        WriteSetEntry::installed_put(
+            surrogate,
+            identity,
+            InstalledDocument {
+                canonical: value.clone(),
+                stored: value.clone(),
+                version,
+                schema: std::sync::Arc::new(StorageMode::Schemaless),
+                chain_head: None,
+            },
+            crate::types::document_event::DocumentPutEvent {
+                new_value: value,
+                old_value: None,
+            },
+        )
+    }
 
     fn open_wal(dir: &std::path::Path) -> WalManager {
         WalManager::open_for_testing(&dir.join("test.wal")).expect("open wal")
@@ -485,7 +567,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(
+            installed_entry(
                 9,
                 RowIdentity::from_user_key("order-1"),
                 vec![1, 2, 3],
@@ -501,21 +583,19 @@ mod tests {
         assert_eq!(parts.len(), 1);
         let (_, part) = &parts[0];
         assert_eq!(part.group, WriteGroup::part_of(origin.as_u64(), 1, 1));
-        type StampedPut = (
-            String,
-            String,
-            Vec<u8>,
-            Option<SyncProvenance>,
-            u32,
-            i64,
-            i64,
-            i64,
-        );
-        let (collection, document_id, value, _prov, surrogate, _, _, _) =
-            zerompk::from_msgpack::<StampedPut>(&part.ops[0].payload).expect("decode put");
+        let row = InstalledDocumentRedo::<u32>::decode(&part.ops[0].payload)
+            .expect("decode")
+            .expect("installed")
+            .resolve(&part.schemas)
+            .expect("witness");
         assert_eq!(
-            (collection.as_str(), document_id.as_str(), value, surrogate),
-            ("docs", "order-1", vec![1, 2, 3], 9),
+            (
+                row.collection.as_str(),
+                row.document_id.as_str(),
+                row.image.stored,
+                row.surrogate
+            ),
+            ("docs", "order-1", test_body(vec![1, 2, 3]), 9),
             "a declared key journals verbatim"
         );
         let (_, document_id, _prov, surrogate, sys_from) =
@@ -560,6 +640,7 @@ mod tests {
             returning: None::<ReturningSpec>,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let appended = append_group_origin(WalAppendRequest {
             wal: appender(&wal),
@@ -601,13 +682,13 @@ mod tests {
         let origin = put_forward(&wal);
         let target = docs_target(forward(origin));
         let entries = vec![
-            WriteSetEntry::put(
+            installed_entry(
                 1,
                 RowIdentity::from_user_key("a"),
                 vec![1; 8],
                 RowVersion::open(1),
             ),
-            WriteSetEntry::put(
+            installed_entry(
                 2,
                 RowIdentity::from_user_key("t"),
                 vec![2; 8],
@@ -721,13 +802,13 @@ mod tests {
         let origin = put_forward(&wal);
         let target_collection = "totals";
         let entries = vec![
-            WriteSetEntry::put(
+            installed_entry(
                 1,
                 RowIdentity::from_user_key("a"),
                 vec![1],
                 RowVersion::open(1),
             ),
-            WriteSetEntry::put(
+            installed_entry(
                 2,
                 RowIdentity::from_user_key("t"),
                 vec![2],
@@ -775,7 +856,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(
+            installed_entry(
                 9,
                 RowIdentity::from_user_key("r"),
                 vec![1],
@@ -786,21 +867,18 @@ mod tests {
         append_group_parts(appender(&wal), docs_target(forward(origin)), &entries).expect("append");
 
         let parts = groups(&wal);
-        type VersionedPut = (
-            String,
-            String,
-            Vec<u8>,
-            Option<SyncProvenance>,
-            u32,
-            i64,
-            i64,
-            i64,
-        );
-        let (_, _, _, _, surrogate, sys, valid_from, valid_until) =
-            zerompk::from_msgpack::<VersionedPut>(&parts[0].1.ops[0].payload)
-                .expect("decode versioned put");
+        let row = InstalledDocumentRedo::<u32>::decode(&parts[0].1.ops[0].payload)
+            .expect("decode")
+            .expect("installed")
+            .resolve(&parts[0].1.schemas)
+            .expect("witness");
         assert_eq!(
-            (surrogate, sys, valid_from, valid_until),
+            (
+                row.surrogate,
+                row.image.version.sys_from,
+                row.image.version.valid_from_ms,
+                row.image.version.valid_until_ms
+            ),
             (9, 1_000, i64::MIN, i64::MAX)
         );
         let (_, _, _, surrogate, sys) =
@@ -819,7 +897,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(
+            installed_entry(
                 9,
                 RowIdentity::from_user_key("r"),
                 vec![7],
@@ -863,5 +941,43 @@ mod tests {
         let records = groups(&wal);
         assert_eq!(records.len(), 1, "one closing part");
         assert!(records[0].1.ops.is_empty());
+    }
+    #[test]
+    fn installed_parts_carry_only_their_referenced_schema_witnesses() {
+        let target = docs_target(forward(Lsn::new(4)));
+        let schema = std::sync::Arc::new(StorageMode::Schemaless);
+        let entries: Vec<_> = (1..=6)
+            .map(|surrogate| {
+                WriteSetEntry::installed_put(
+                    surrogate,
+                    RowIdentity::from_user_key(format!("r{surrogate}")),
+                    InstalledDocument {
+                        canonical: vec![1; 200],
+                        stored: vec![2; 200],
+                        version: RowVersion::open(i64::from(surrogate)),
+                        schema: schema.clone(),
+                        chain_head: None,
+                    },
+                    crate::types::document_event::DocumentPutEvent {
+                        new_value: vec![0x80],
+                        old_value: None,
+                    },
+                )
+            })
+            .collect();
+        let parts = plan_group_parts(&target, &entries, 1800).expect("parts");
+        assert!(parts.runs.len() > 1);
+        let mut rows = Vec::new();
+        for (_, ops, schemas) in parts.runs {
+            assert_eq!(schemas, vec![StorageMode::Schemaless]);
+            for op in ops {
+                let row = InstalledDocumentRedo::<u32>::decode(&op.payload)
+                    .expect("decode")
+                    .expect("installed");
+                assert_eq!(row.image.schema, 0);
+                rows.push(row.resolve(&schemas).expect("witness").surrogate);
+            }
+        }
+        assert_eq!(rows, vec![1, 2, 3, 4, 5, 6]);
     }
 }

@@ -71,6 +71,8 @@ pub enum DocumentOp {
         /// principal would show. See `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against the materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// `(target collection, join-key value)` → target row surrogate,
         /// resolved by the Control Plane at plan time (Data Plane has no
         /// PK→surrogate map). Keyed on the pair: one source can drive two
@@ -102,6 +104,8 @@ pub enum DocumentOp {
         /// `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against the materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// See `PointPut::resolved_sum_targets`.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
@@ -228,6 +232,8 @@ pub enum DocumentOp {
         /// `PointDelete::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Write policy evaluated against every materialized stored row.
+        rls_write_check: RlsWriteCheck,
         /// See `PointPut::resolved_sum_targets`. One entry per distinct pair
         /// across `documents`.
         #[serde(default)]
@@ -294,6 +300,12 @@ pub enum DocumentOp {
         /// identity under this column, else under `id`, and only when the
         /// row lacks that column.
         declared_key: Option<String>,
+        /// The top-level fields the full-text inverted index holds. A write
+        /// indexes the fields of every building or ready full-text index. A
+        /// read runs only against the fields of a ready one. Empty means a
+        /// write touches no inverted-index state.
+        #[serde(default)]
+        text_fields: super::text_field_set::TextFieldSet,
         /// The collection's incarnation in the catalog: the stamp of the
         /// create a drop and a same-name create replace. The collection's
         /// CRDT document mints its Loro operations under a peer id derived
@@ -404,6 +416,12 @@ pub enum DocumentOp {
     InsertSelect {
         target_collection: QualifiedCollection,
         source: RowSource,
+        /// When `Some`, answer the STORED image of every copied row, in copy
+        /// order.
+        returning: Option<ReturningSpec>,
+        /// The target's read policy, which gates the rows `returning`
+        /// answers. See `PointDelete::rls_filters`.
+        rls_filters: Vec<u8>,
     },
 
     /// Upsert: insert or merge. When `on_conflict_updates` is non-empty,

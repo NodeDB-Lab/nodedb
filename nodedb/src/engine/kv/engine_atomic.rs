@@ -15,6 +15,7 @@ use super::engine_helpers::{expiry_key, table_key};
 use super::engine_write::{UnboundKvWrite, require_bound};
 use super::entry::NO_EXPIRY;
 use super::hash_table::KvHashTable;
+use super::write_refusal::KvRowTooLarge;
 
 /// Result of a compare-and-swap operation.
 pub struct CasResult {
@@ -86,11 +87,20 @@ pub enum AtomicError {
     Rejected(Box<crate::Error>),
     /// The write binds its row to `Surrogate::ZERO`, so nothing was written.
     Unbound(UnboundKvWrite),
+    /// The key and the computed value are over the row limit, so nothing was
+    /// written.
+    RowTooLarge(KvRowTooLarge),
 }
 
 impl From<UnboundKvWrite> for AtomicError {
     fn from(error: UnboundKvWrite) -> Self {
         Self::Unbound(error)
+    }
+}
+
+impl From<KvRowTooLarge> for AtomicError {
+    fn from(error: KvRowTooLarge) -> Self {
+        Self::RowTooLarge(error)
     }
 }
 
@@ -240,7 +250,7 @@ impl KvEngine {
             ttl_ms,
             current.is_none(),
             expire_override,
-        );
+        )?;
 
         Ok(Incremented { value, written })
     }
@@ -280,7 +290,7 @@ impl KvEngine {
             Some(fitted) => (fitted_counter_f64(value, &computed, &fitted), fitted),
         };
         // incr_float always preserves existing TTL (ttl_ms = 0).
-        self.atomic_put(ctx, tkey, &written, 0, current.is_none(), None);
+        self.atomic_put(ctx, tkey, &written, 0, current.is_none(), None)?;
 
         Ok(Incremented { value, written })
     }
@@ -314,7 +324,7 @@ impl KvEngine {
         }
         // Decided before the value is installed — see `incr_resolved`.
         let write_bytes = gated(admit, write_bytes)?;
-        self.atomic_put(ctx, tkey, &write_bytes, 0, current.is_none(), None);
+        self.atomic_put(ctx, tkey, &write_bytes, 0, current.is_none(), None)?;
         Ok(CasResult {
             written: Some(write_bytes),
             current_value: current,
@@ -342,7 +352,7 @@ impl KvEngine {
         let write_bytes = gated(admit, write_bytes)?;
 
         // GetSet preserves existing TTL (ttl_ms = 0).
-        self.atomic_put(ctx, tkey, &write_bytes, 0, old.is_none(), None);
+        self.atomic_put(ctx, tkey, &write_bytes, 0, old.is_none(), None)?;
         Ok(GetSetResult {
             old,
             written: write_bytes,
@@ -377,6 +387,9 @@ impl KvEngine {
     /// (WAL redo replay uses this so a TTL survives crash-restart with the
     /// exact instant the original write resolved), otherwise derives
     /// `now_ms + ttl_ms` the way a live write does.
+    ///
+    /// A key and value over the row limit are refused before anything
+    /// changes.
     fn atomic_put(
         &mut self,
         ctx: AtomicKeyCtx<'_>,
@@ -385,7 +398,7 @@ impl KvEngine {
         ttl_ms: u64,
         is_new_key: bool,
         expire_override: Option<u64>,
-    ) {
+    ) -> Result<(), KvRowTooLarge> {
         let AtomicKeyCtx {
             database_id,
             tenant_id,
@@ -394,6 +407,7 @@ impl KvEngine {
             now_ms,
             surrogate,
         } = ctx;
+        KvRowTooLarge::check(collection, key, value)?;
         // Cache metadata lookup to avoid double HashMap access.
         let old_meta = if is_new_key {
             None
@@ -483,6 +497,7 @@ impl KvEngine {
                 self.sorted_indexes.on_put(tkey, key, new_document.as_ref());
             }
         }
+        Ok(())
     }
 }
 

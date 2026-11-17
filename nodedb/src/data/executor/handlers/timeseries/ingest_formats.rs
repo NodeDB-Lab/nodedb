@@ -70,6 +70,7 @@ impl CoreLoop {
             collection,
             payload,
             wal_lsn,
+            provenance,
             now_ms,
             mode,
             rls_write_check,
@@ -125,18 +126,19 @@ impl CoreLoop {
             .declared_ts_time_key(task.request.database_id, tid, collection)
             .map(str::to_string);
 
-        let ilp_buf = match normalize::msgpack_rows_to_ilp(&rows, measurement, time_key.as_deref())
-        {
-            Ok(buf) => buf,
-            Err(error) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: format!("timeseries ingest: {error}"),
-                    },
-                );
-            }
-        };
+        let exact = self.declared_ts_exact_columns(task.request.database_id, tid, collection);
+        let ilp_buf =
+            match normalize::msgpack_rows_to_ilp(&rows, measurement, time_key.as_deref(), &exact) {
+                Ok(buf) => buf,
+                Err(error) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::RejectedPrevalidation {
+                            reason: format!("timeseries ingest: {error}"),
+                        },
+                    );
+                }
+            };
 
         if ilp_buf.is_empty() {
             return self.response_error(
@@ -153,6 +155,7 @@ impl CoreLoop {
             collection,
             payload: ilp_buf.as_bytes(),
             wal_lsn,
+            provenance,
             now_ms,
             mode,
             rls_write_check,
@@ -172,6 +175,7 @@ impl CoreLoop {
             collection,
             payload,
             wal_lsn,
+            provenance,
             now_ms,
             mode,
             rls_write_check,
@@ -227,17 +231,19 @@ impl CoreLoop {
             .declared_ts_time_key(task.request.database_id, tid, collection)
             .map(str::to_string);
 
-        let ilp_buf = match normalize::json_rows_to_ilp(&rows, measurement, time_key.as_deref()) {
-            Ok(buf) => buf,
-            Err(error) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: format!("timeseries ingest: {error}"),
-                    },
-                );
-            }
-        };
+        let exact = self.declared_ts_exact_columns(task.request.database_id, tid, collection);
+        let ilp_buf =
+            match normalize::json_rows_to_ilp(&rows, measurement, time_key.as_deref(), &exact) {
+                Ok(buf) => buf,
+                Err(error) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::RejectedPrevalidation {
+                            reason: format!("timeseries ingest: {error}"),
+                        },
+                    );
+                }
+            };
 
         if ilp_buf.is_empty() {
             return self.response_error(
@@ -254,6 +260,7 @@ impl CoreLoop {
             collection,
             payload: ilp_buf.as_bytes(),
             wal_lsn,
+            provenance,
             now_ms,
             mode,
             rls_write_check,

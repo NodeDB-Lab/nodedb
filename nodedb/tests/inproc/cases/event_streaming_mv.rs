@@ -102,8 +102,12 @@ fn incremental_avg() {
 
     let results = state.read_results_with_status().unwrap();
     let g = results.iter().find(|r| r.0 == "g").unwrap();
-    // AVG = SUM / COUNT = 60 / 3 = 20.
-    assert_eq!(g.1[0].1, Value::Float(20.0));
+    // AVG = SUM / COUNT = 60 / 3 = 20. PostgreSQL's avg over integers is
+    // numeric: 20.0000000000000000.
+    let Value::Decimal(avg) = &g.1[0].1 else {
+        panic!("AVG over integers is numeric, got {:?}", g.1[0].1);
+    };
+    assert_eq!(avg.to_string(), "20.0000000000000000");
 }
 
 #[test]

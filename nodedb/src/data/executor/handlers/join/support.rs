@@ -4,7 +4,7 @@
 //! row merging, map-header writing, field filtering, and projection.
 
 use nodedb_query::EvalError;
-use nodedb_query::msgpack_scan;
+use nodedb_types::object_msgpack::{ObjectFormat, ObjectView};
 
 use crate::data::executor::msgpack_utils::write_str;
 
@@ -19,23 +19,67 @@ pub fn merge_join_docs_binary(
     right_bytes: Option<&[u8]>,
     left_collection: &str,
     right_collection: &str,
-) -> Vec<u8> {
-    let left_count = count_map_entries(left_bytes);
-    let right_count = right_bytes.map_or(0, count_map_entries);
-    let total = left_count + right_count;
-
-    // Estimate capacity: original data + prefixed keys overhead.
-    let cap = left_bytes.len()
-        + right_bytes.map_or(0, |b| b.len())
-        + total * (left_collection.len().max(right_collection.len()) + 8);
-    let mut buf = Vec::with_capacity(cap);
-
-    write_map_header(&mut buf, total);
-    write_prefixed_entries(&mut buf, left_bytes, left_collection);
-    if let Some(rb) = right_bytes {
-        write_prefixed_entries(&mut buf, rb, right_collection);
+) -> Result<Vec<u8>, EvalError> {
+    let left = (!left_bytes.is_empty())
+        .then(|| ObjectView::new(left_bytes))
+        .transpose()
+        .map_err(object_error)?;
+    let right = right_bytes
+        .map(ObjectView::new)
+        .transpose()
+        .map_err(object_error)?;
+    let native = left
+        .as_ref()
+        .into_iter()
+        .chain(right.as_ref())
+        .any(|view| view.format() == ObjectFormat::Native);
+    let mut entries = Vec::new();
+    for (view, prefix) in [
+        (left.as_ref(), left_collection),
+        (right.as_ref(), right_collection),
+    ] {
+        let Some(view) = view else {
+            continue;
+        };
+        for field in view.fields() {
+            let (key, value) = field.map_err(object_error)?;
+            let key = if prefix.is_empty() || key.contains('.') {
+                key.to_owned()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            let value = if native && view.format() == ObjectFormat::Plain {
+                zerompk::to_msgpack_vec(&view.decode_value(value).map_err(object_error)?)
+                    .map_err(object_error)?
+            } else {
+                view.decode_value(value).map_err(object_error)?;
+                value.to_vec()
+            };
+            entries.push((key, value));
+        }
     }
-    buf
+    Ok(encode_entries(&entries, native))
+}
+
+fn object_error(error: impl std::fmt::Display) -> EvalError {
+    EvalError::ArgumentValue {
+        function: "join",
+        position: 1,
+        reason: format!("invalid object row: {error}"),
+    }
+}
+
+fn encode_entries(entries: &[(String, Vec<u8>)], native: bool) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if native {
+        bytes.extend_from_slice(&[0x92, 7]);
+    }
+    write_map_header(&mut bytes, entries.len());
+    for (key, value) in entries {
+        write_str(&mut bytes, key);
+        bytes.extend_from_slice(value);
+    }
+    bytes
 }
 
 /// The qualifier a side scanned by name gives its columns in the merged row:
@@ -53,11 +97,6 @@ pub(super) fn row_qualifier(collection: &str, database_id: crate::types::Databas
         .unwrap_or(collection)
 }
 
-/// Count entries in a msgpack map.
-fn count_map_entries(bytes: &[u8]) -> usize {
-    msgpack_scan::map_header(bytes, 0).map_or(0, |(count, _)| count)
-}
-
 /// Write a msgpack map header.
 pub(super) fn write_map_header(buf: &mut Vec<u8>, len: usize) {
     if len < 16 {
@@ -71,78 +110,19 @@ pub(super) fn write_map_header(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
-/// Iterate msgpack map entries and write each key prefixed with `prefix.`
-/// and its value bytes verbatim.
-fn write_prefixed_entries(buf: &mut Vec<u8>, bytes: &[u8], prefix: &str) {
-    let Some((count, mut pos)) = msgpack_scan::map_header(bytes, 0) else {
-        return;
-    };
-    for _ in 0..count {
-        // Read key string.
-        let key = msgpack_scan::read_str(bytes, pos);
-        pos = match msgpack_scan::skip_value(bytes, pos) {
-            Some(p) => p,
-            None => return,
-        };
-        // Copy value bytes verbatim.
-        let value_start = pos;
-        let value_end = match msgpack_scan::skip_value(bytes, pos) {
-            Some(p) => p,
-            None => return,
-        };
-
-        // Write prefixed key.
-        if let Some(k) = key {
-            // A merged join row's keys are alias-qualified exactly once. When
-            // the source is itself a join result (multi-way join), its keys are
-            // already qualified (`c.relname`, `a.attname`); re-prefixing would
-            // produce `c.c.relname`, which no projection or filter can resolve.
-            // SQL column identifiers never contain '.', so a '.' in the key
-            // reliably means "already qualified" — pass it through verbatim.
-            if prefix.is_empty() || k.contains('.') {
-                write_str(buf, k);
-            } else {
-                // Avoid allocation: write prefix.key directly.
-                let prefixed_len = prefix.len() + 1 + k.len();
-                if prefixed_len < 32 {
-                    buf.push(0xA0 | prefixed_len as u8);
-                } else if prefixed_len <= u8::MAX as usize {
-                    buf.push(0xD9);
-                    buf.push(prefixed_len as u8);
-                } else if prefixed_len <= u16::MAX as usize {
-                    buf.push(0xDA);
-                    buf.extend_from_slice(&(prefixed_len as u16).to_be_bytes());
-                } else {
-                    buf.push(0xDB);
-                    buf.extend_from_slice(&(prefixed_len as u32).to_be_bytes());
-                }
-                buf.extend_from_slice(prefix.as_bytes());
-                buf.push(b'.');
-                buf.extend_from_slice(k.as_bytes());
-            }
-        }
-        // Write value bytes verbatim — zero decode.
-        buf.extend_from_slice(&bytes[value_start..value_end]);
-        pos = value_end;
-    }
-}
-
-/// Compare two documents using pre-extracted key byte ranges.
-/// `a_ranges`/`b_ranges` are `(start, end)` byte slices into the respective docs.
-pub(super) fn compare_preextracted(
-    a_doc: &[u8],
-    a_ranges: &[(usize, usize)],
-    b_doc: &[u8],
-    b_ranges: &[(usize, usize)],
+/// Order two rows' typed join key values, key by key, with the stored-column
+/// sort order. Plain and native rows compare alike, since both read through
+/// their object format into the same values.
+pub(super) fn compare_join_keys(
+    a: &[nodedb_types::Value],
+    b: &[nodedb_types::Value],
 ) -> std::cmp::Ordering {
-    use nodedb_query::msgpack_scan::compare_field_bytes;
-    for (a_range, b_range) in a_ranges.iter().zip(b_ranges.iter()) {
-        let ord = compare_field_bytes(a_doc, *a_range, b_doc, *b_range);
-        if ord != std::cmp::Ordering::Equal {
-            return ord;
-        }
-    }
-    std::cmp::Ordering::Equal
+    use crate::data::executor::handlers::document::sort::compare::compare_column_values;
+    a.iter()
+        .zip(b)
+        .map(|(a, b)| compare_column_values(a, b))
+        .find(|order| order.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Filter a binary msgpack row against ScanFilter predicates.
@@ -175,7 +155,10 @@ pub(super) fn binary_row_matches_filters(
             continue;
         }
         let doc: &[u8] = if filter_reads_bare_name(f) {
-            bare_view.get_or_insert_with(|| with_bare_names(row))
+            if bare_view.is_none() {
+                bare_view = Some(with_bare_names(row)?);
+            }
+            bare_view.as_deref().unwrap_or(row)
         } else {
             row
         };
@@ -267,49 +250,32 @@ fn is_bare(name: &str) -> bool {
 /// already a key, an entry `column` with the same value is added. When two
 /// sides carry the same column, the first in row order wins, as a suffix
 /// lookup does.
-fn with_bare_names(row: &[u8]) -> Vec<u8> {
-    let Some((count, mut pos)) = msgpack_scan::map_header(row, 0) else {
-        return row.to_vec();
-    };
-    let body_start = pos;
-    let mut keys: Vec<&str> = Vec::with_capacity(count);
-    let mut values: Vec<(usize, usize)> = Vec::with_capacity(count);
-    for _ in 0..count {
-        let key = msgpack_scan::read_str(row, pos);
-        let Some(val_start) = msgpack_scan::skip_value(row, pos) else {
-            return row.to_vec();
-        };
-        let Some(val_end) = msgpack_scan::skip_value(row, val_start) else {
-            return row.to_vec();
-        };
-        keys.push(key.unwrap_or(""));
-        values.push((val_start, val_end));
-        pos = val_end;
-    }
-    let body_end = pos;
-
-    let mut added: Vec<(&str, (usize, usize))> = Vec::new();
-    for (key, value) in keys.iter().zip(&values) {
-        let Some((_, column)) = key.rsplit_once('.') else {
-            continue;
-        };
-        if column.is_empty()
-            || keys.contains(&column)
-            || added.iter().any(|(name, _)| *name == column)
+fn with_bare_names(row: &[u8]) -> Result<Vec<u8>, EvalError> {
+    let view = ObjectView::new(row).map_err(object_error)?;
+    let mut entries = view
+        .fields()
+        .map(|field| {
+            let (key, value) = field.map_err(object_error)?;
+            view.decode_value(value).map_err(object_error)?;
+            Ok((key.to_owned(), value.to_vec()))
+        })
+        .collect::<Result<Vec<_>, EvalError>>()?;
+    let mut names: std::collections::HashSet<String> =
+        entries.iter().map(|(key, _)| key.clone()).collect();
+    let mut added = Vec::new();
+    for (key, value) in &entries {
+        if let Some((_, column)) = key.rsplit_once('.')
+            && !column.is_empty()
+            && names.insert(column.to_owned())
         {
-            continue;
+            added.push((column.to_owned(), value.clone()));
         }
-        added.push((column, *value));
     }
-
-    let mut buf = Vec::with_capacity(row.len() * 2);
-    write_map_header(&mut buf, count + added.len());
-    buf.extend_from_slice(&row[body_start..body_end]);
-    for (name, (start, end)) in &added {
-        write_str(&mut buf, name);
-        buf.extend_from_slice(&row[*start..*end]);
-    }
-    buf
+    entries.extend(added);
+    Ok(encode_entries(
+        &entries,
+        view.format() == ObjectFormat::Native,
+    ))
 }
 
 /// Apply projection to a binary msgpack row, keeping only requested columns.
@@ -320,53 +286,24 @@ fn with_bare_names(row: &[u8]) -> Vec<u8> {
 pub(super) fn binary_row_project(
     row: &[u8],
     projection: &[nodedb_physical::physical_plan::JoinProjection],
-) -> Vec<u8> {
-    let Some((count, pos)) = msgpack_scan::map_header(row, 0) else {
-        return row.to_vec();
-    };
-
-    // First pass: find matching entries.
-    struct Entry {
-        output_key: String,
-        val_start: usize,
-        val_end: usize,
-    }
+) -> Result<Vec<u8>, EvalError> {
+    let view = ObjectView::new(row).map_err(object_error)?;
     let mut entries = Vec::with_capacity(projection.len());
-    let mut scan_pos = pos;
-    for _ in 0..count {
-        let key = msgpack_scan::read_str(row, scan_pos);
-        scan_pos = match msgpack_scan::skip_value(row, scan_pos) {
-            Some(p) => p,
-            None => break,
-        };
-        let val_start = scan_pos;
-        scan_pos = match msgpack_scan::skip_value(row, scan_pos) {
-            Some(p) => p,
-            None => break,
-        };
-        if let Some(k) = &key {
-            let short = k.rsplit('.').next().unwrap_or(k);
-            if let Some(projected) = projection
-                .iter()
-                .find(|p| p.source == short || p.source == *k)
-            {
-                entries.push(Entry {
-                    output_key: projected.output.clone(),
-                    val_start,
-                    val_end: scan_pos,
-                });
-            }
+    for field in view.fields() {
+        let (key, value) = field.map_err(object_error)?;
+        view.decode_value(value).map_err(object_error)?;
+        let short = key.rsplit('.').next().unwrap_or(key);
+        if let Some(projected) = projection
+            .iter()
+            .find(|p| p.source == short || p.source == key)
+        {
+            entries.push((projected.output.clone(), value.to_vec()));
         }
     }
-
-    // Build output map.
-    let mut buf = Vec::with_capacity(row.len());
-    write_map_header(&mut buf, entries.len());
-    for e in &entries {
-        write_str(&mut buf, &e.output_key);
-        buf.extend_from_slice(&row[e.val_start..e.val_end]);
-    }
-    buf
+    Ok(encode_entries(
+        &entries,
+        view.format() == ObjectFormat::Native,
+    ))
 }
 
 #[cfg(test)]
@@ -395,7 +332,7 @@ mod tests {
             ("dept", serde_json::json!("eng")),
         ]);
 
-        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b");
+        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b").unwrap();
         let filters = vec![ScanFilter {
             field: "a.id".into(),
             op: FilterOp::LtColumn,
@@ -414,7 +351,7 @@ mod tests {
     fn qualified_projection_keeps_distinct_join_columns() {
         let left = msgpack_row(&[("name", serde_json::json!("Alice"))]);
         let right = msgpack_row(&[("name", serde_json::json!("Bob"))]);
-        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b");
+        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b").unwrap();
 
         let projected = binary_row_project(
             &merged,
@@ -428,7 +365,8 @@ mod tests {
                     output: "b.name".into(),
                 },
             ],
-        );
+        )
+        .unwrap();
         let json = nodedb_types::json_from_msgpack(&projected).unwrap();
         let obj = json.as_object().unwrap();
 
@@ -443,7 +381,7 @@ mod tests {
             ("dept", serde_json::json!("eng")),
         ]);
         let right = msgpack_row(&[("name", serde_json::json!("Bob"))]);
-        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b");
+        let merged = merge_join_docs_binary(&left, Some(&right), "a", "b").unwrap();
 
         let projected = binary_row_project(
             &merged,
@@ -461,7 +399,8 @@ mod tests {
                     output: "a.dept".into(),
                 },
             ],
-        );
+        )
+        .unwrap();
 
         let json = nodedb_types::json_from_msgpack(&projected).unwrap();
         let obj = json.as_object().unwrap();
@@ -470,3 +409,7 @@ mod tests {
         assert_eq!(obj.get("a.dept").and_then(|v| v.as_str()), Some("eng"));
     }
 }
+
+#[cfg(test)]
+#[path = "support_native_tests.rs"]
+mod native_tests;

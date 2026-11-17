@@ -5,6 +5,7 @@
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
 
+use super::append::check_kv_row;
 use super::encode::{
     encode_kv_delete, encode_kv_expire, encode_kv_persist, encode_kv_put, encode_kv_reap,
     encode_kv_rewrite,
@@ -30,6 +31,7 @@ pub(super) fn append_kv_resolved_mutation(
             surrogate,
             precondition: _,
         } => {
+            check_kv_row(collection.as_str(), key, value)?;
             let entry = encode_kv_put(
                 collection.as_str(),
                 key,
@@ -50,6 +52,7 @@ pub(super) fn append_kv_resolved_mutation(
             expire_at_ms,
             precondition: _,
         } => {
+            check_kv_row(collection.as_str(), key, value)?;
             let entry = encode_kv_rewrite(collection.as_str(), key, value, *ttl_ms, *expire_at_ms)?;
             wal.append_put(tenant_id, vshard_id, database_id, &entry)
         }

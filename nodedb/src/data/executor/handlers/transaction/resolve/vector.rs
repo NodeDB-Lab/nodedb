@@ -21,9 +21,10 @@
 //! * `DeleteBySurrogate` → `RecordType::VectorDelete`,
 //!   `(collection, surrogate, field_name, provenance)`.
 //! * `DirectInsert` / `DirectInsertIfAbsent` / `DirectUpsert` /
-//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` register their
-//!   collection only: a vector-primary row is staged whole, so those resolve
-//!   from the overlay (`vector_primary`).
+//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` and a
+//!   `DirectBatchWrite` page register their collection only: a
+//!   vector-primary row is staged whole, so those resolve from the overlay
+//!   (`vector_primary`).
 //! * `MultiVectorInsert` → `RecordType::MultiVectorPut`, the 6-element
 //!   flattened multi-vector shape (`replay_multi_vector_put`).
 //! * `MultiVectorDelete` → `RecordType::MultiVectorDelete`,
@@ -60,6 +61,7 @@
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use super::vector_primary::{VectorPrimaryCollections, VectorPrimarySpec, note_direct_write};
 use crate::control::server::wal_dispatch::{
     VectorResolvedDirectWritePayload, encode_multi_vector_delete_payload,
@@ -79,7 +81,7 @@ use crate::wal::RedoSubRecord;
 /// vector-index DDL (`SetParams`) raises a typed error (see module docs).
 pub(super) fn serialize_vector_op(
     op: &VectorOp,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
     direct_writes: &mut VectorPrimaryCollections,
 ) -> crate::Result<()> {
     match op {
@@ -162,20 +164,8 @@ pub(super) fn serialize_vector_op(
         // compact / rebuild are reconstructed without a redo sub-record.
         VectorOp::Seal { .. } | VectorOp::CompactIndex { .. } | VectorOp::Rebuild { .. } => Ok(()),
 
-        // Vector-index configuration DDL: rejected like the KV / document
-        // index-DDL ops. No row-level post-image; a CREATE VECTOR INDEX rides
-        // its own autocommit `VectorParams` record, not a transaction redo.
-        VectorOp::SetParams { .. } => Err(crate::Error::PlanError {
-            detail: "vector SetParams (index DDL) is not supported in transaction resolve"
-                .to_string(),
-        }),
-
-        // Same contract on the teardown side: a DROP INDEX rides its own
-        // autocommit `VectorIndexDrop` record, never a transaction redo.
-        VectorOp::DropIndex { .. } => Err(crate::Error::PlanError {
-            detail: "vector DropIndex (index DDL) is not supported in transaction resolve"
-                .to_string(),
-        }),
+        // Vector-index DDL: refused (see `refuse_vector_op`).
+        VectorOp::SetParams { .. } | VectorOp::DropIndex { .. } => refuse_vector_op(op),
 
         // Vector-primary direct writes: the overlay holds each staged row, so
         // the op only registers its collection (`vector_primary`).
@@ -218,15 +208,37 @@ pub(super) fn serialize_vector_op(
             );
             Ok(())
         }
-        // A transaction stages a page as its point writes, so the overlay
-        // never holds a page. A page here was never staged.
-        VectorOp::DirectBatchWrite { collection, .. } => Err(crate::Error::PlanError {
-            detail: format!(
-                "a vector-primary page for '{}' reached transaction resolve unstaged; a \
-                 transaction stages each row of a page as its own point write",
-                collection.as_str()
-            ),
-        }),
+        // A page stages each row as its point write: a session block
+        // splits it on the Control Plane, and a Calvin stage expands it. The
+        // overlay holds every row, so the page registers its collection and
+        // each row's key, as each point write does.
+        VectorOp::DirectBatchWrite {
+            collection,
+            field,
+            rows,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            ..
+        } => {
+            note_direct_write(
+                direct_writes,
+                collection.as_str(),
+                field,
+                Some(spec(*quantization, *storage_dtype, payload_indexes)),
+                None,
+            );
+            for row in rows {
+                note_direct_write(
+                    direct_writes,
+                    collection.as_str(),
+                    field,
+                    None,
+                    Some((row.surrogate, row.pk_bytes.as_slice())),
+                );
+            }
+            Ok(())
+        }
         VectorOp::DirectUpdate {
             collection,
             field,
@@ -356,6 +368,48 @@ pub(super) fn serialize_vector_op(
             });
             Ok(())
         }
+    }
+}
+
+/// Refuse a vector op that no transaction resolves: vector-index DDL. It is
+/// rejected like the KV and document index DDL. A CREATE VECTOR INDEX rides
+/// its own autocommit `VectorParams` record, and a DROP INDEX its own
+/// `VectorIndexDrop` record, never a transaction redo. Every other op passes.
+pub(super) fn refuse_vector_op(op: &VectorOp) -> crate::Result<()> {
+    match op {
+        VectorOp::SetParams { .. } => Err(crate::Error::PlanError {
+            detail: "vector SetParams (index DDL) is not supported in transaction resolve"
+                .to_string(),
+        }),
+        VectorOp::DropIndex { .. } => Err(crate::Error::PlanError {
+            detail: "vector DropIndex (index DDL) is not supported in transaction resolve"
+                .to_string(),
+        }),
+        VectorOp::Insert { .. }
+        | VectorOp::BatchInsert { .. }
+        | VectorOp::Delete { .. }
+        | VectorOp::DeleteBySurrogate { .. }
+        | VectorOp::Search { .. }
+        | VectorOp::MultiSearch { .. }
+        | VectorOp::MultiVectorScoreSearch { .. }
+        | VectorOp::SparseSearch { .. }
+        | VectorOp::QueryStats { .. }
+        | VectorOp::Seal { .. }
+        | VectorOp::CompactIndex { .. }
+        | VectorOp::Rebuild { .. }
+        | VectorOp::DirectUpsert { .. }
+        | VectorOp::DirectInsert { .. }
+        | VectorOp::DirectInsertIfAbsent { .. }
+        | VectorOp::DirectBatchWrite { .. }
+        | VectorOp::DirectUpdate { .. }
+        | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectTruncate { .. }
+        | VectorOp::ResolvedDirectWrite { .. }
+        | VectorOp::ResolveDirectWrite(_)
+        | VectorOp::MultiVectorInsert { .. }
+        | VectorOp::MultiVectorDelete { .. }
+        | VectorOp::SparseInsert { .. }
+        | VectorOp::SparseDelete { .. } => Ok(()),
     }
 }
 

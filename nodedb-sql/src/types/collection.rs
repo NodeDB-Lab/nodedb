@@ -2,6 +2,8 @@
 
 //! Collection and column metadata types for query planning.
 
+use nodedb_types::text_search::TextColumnFault;
+
 use super::query::EngineType;
 use crate::types_expr::SqlDataType;
 
@@ -41,6 +43,45 @@ pub struct CollectionInfo {
     /// source. `pg_catalog` relations are open because NodeDB models a subset
     /// of the columns clients ask for.
     pub open_schema: bool,
+    /// The full-text index declarations a text read checks.
+    ///
+    /// `Some` when the catalog reports them: a text read then needs a ready
+    /// full-text index covering its field. The Origin catalog adapter always
+    /// reports them for a stored collection. `None` for a relation with no
+    /// such report: a synthesized relation, or a catalog that tracks no text
+    /// index state. The planner then leaves the check to execution.
+    pub text_indexes: Option<TextIndexFields>,
+}
+
+/// The fields a collection's full-text indexes cover, by build state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextIndexFields {
+    /// Fields a ready full-text index covers. Only these serve reads.
+    pub ready: Vec<String>,
+    /// Fields a building full-text index covers and no ready index covers.
+    pub building: Vec<String>,
+}
+
+impl TextIndexFields {
+    /// Why a full-text read of `field` cannot run, or `None` when a ready
+    /// index serves it. A `None` field reads the whole document, which any
+    /// ready index serves.
+    pub fn read_fault(&self, field: Option<&str>) -> Option<TextColumnFault> {
+        let (ready, building) = match field {
+            None => (!self.ready.is_empty(), !self.building.is_empty()),
+            Some(name) => (
+                self.ready.iter().any(|f| f == name),
+                self.building.iter().any(|f| f == name),
+            ),
+        };
+        if ready {
+            None
+        } else if building {
+            Some(TextColumnFault::IndexBuilding)
+        } else {
+            Some(TextColumnFault::NotIndexed)
+        }
+    }
 }
 
 impl CollectionInfo {

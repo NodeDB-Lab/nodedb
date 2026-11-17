@@ -33,11 +33,10 @@ use std::collections::{HashMap, HashSet};
 
 use nodedb_types::RowIdentity;
 
-use super::staged::{JournalEntry, TxnOverlay};
+use super::staged::{CollKey, TxnOverlay};
+use super::staged_journal::JournalEntry;
 use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId};
-
-type CollKey = (DatabaseId, TenantId, String);
 
 /// Body-only rows of one transaction.
 #[derive(Debug, Default)]
@@ -55,7 +54,7 @@ pub struct RowTags {
 }
 
 /// One tag change, journaled so a savepoint rollback reverses it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(super) enum TagUndo {
     /// A row tag set or cleared outside the value journal: a graph edge or a
     /// node-label delta. `prev_tagged` is the tag the row held before.
@@ -207,13 +206,20 @@ impl TxnOverlay {
     /// Note a mutation of `row` in `coll_key` that stages outside the value
     /// journal: a graph edge or a node-label delta. `was_staged` says whether
     /// this transaction had staged the row before.
-    pub fn note_row(&mut self, coll_key: CollKey, row: RowIdentity, was_staged: bool) {
+    pub fn note_row(
+        &mut self,
+        coll_key: CollKey,
+        row: RowIdentity,
+        was_staged: bool,
+    ) -> crate::Result<()> {
+        self.guard()?;
         let prev_tagged = self.row_tags.note(&coll_key, &row, was_staged);
         self.journal.push(JournalEntry::Tags(TagUndo::Row {
             coll_key,
             row,
             prev_tagged,
         }));
+        self.spill_past_threshold()
     }
 
     /// What only trigger bodies staged, when a client also wrote in this
@@ -267,11 +273,17 @@ mod tests {
     fn a_body_row_is_tagged_and_a_client_row_is_not() {
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::ImplicitClient, [key("orders")]);
-        overlay.insert_put(key("orders"), 1, &id("client"), vec![1]);
+        overlay
+            .insert_put(key("orders"), 1, &id("client"), vec![1])
+            .unwrap();
         overlay.begin_staging(EventSource::Trigger, [key("orders"), key("edges")]);
-        overlay.insert_put(key("orders"), 2, &id("body"), vec![2]);
+        overlay
+            .insert_put(key("orders"), 2, &id("body"), vec![2])
+            .unwrap();
         // A body write to the client's row keeps it the client's.
-        overlay.insert_put(key("orders"), 1, &id("client"), vec![3]);
+        overlay
+            .insert_put(key("orders"), 1, &id("client"), vec![3])
+            .unwrap();
 
         assert_eq!(
             writes(&overlay),
@@ -287,13 +299,17 @@ mod tests {
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::User, []);
         overlay.begin_staging(EventSource::Trigger, []);
-        overlay.insert_put(key("audit"), 1, &id("a"), vec![1]);
+        overlay
+            .insert_put(key("audit"), 1, &id("a"), vec![1])
+            .unwrap();
         let marker = overlay.journal_len();
         overlay.begin_staging(EventSource::User, []);
-        overlay.insert_put(key("audit"), 1, &id("a"), vec![2]);
+        overlay
+            .insert_put(key("audit"), 1, &id("a"), vec![2])
+            .unwrap();
         assert!(writes(&overlay).rows.is_empty());
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
         assert_eq!(
             writes(&overlay).rows,
             vec![("audit".to_string(), "a".to_string())]
@@ -304,7 +320,9 @@ mod tests {
     fn a_transaction_no_client_wrote_reports_no_body_rows() {
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::Trigger, [key("audit")]);
-        overlay.insert_put(key("audit"), 1, &id("a"), vec![1]);
+        overlay
+            .insert_put(key("audit"), 1, &id("a"), vec![1])
+            .unwrap();
         assert_eq!(writes(&overlay), BodyWrites::default());
     }
 
@@ -314,13 +332,15 @@ mod tests {
     fn a_savepoint_rollback_rewinds_the_collection_sets() {
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::User, [key("orders")]);
-        overlay.insert_put(key("orders"), 1, &id("o1"), vec![1]);
+        overlay
+            .insert_put(key("orders"), 1, &id("o1"), vec![1])
+            .unwrap();
         let marker = overlay.journal_len();
         overlay.begin_staging(EventSource::Trigger, [key("purged")]);
-        overlay.mark_truncated(key("purged"));
+        overlay.mark_truncated(key("purged")).unwrap();
         assert_eq!(writes(&overlay).collections, vec!["purged".to_string()]);
 
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
         assert_eq!(writes(&overlay), BodyWrites::default());
     }
 
@@ -331,9 +351,11 @@ mod tests {
         let mut overlay = TxnOverlay::new();
         let marker = overlay.journal_len();
         overlay.begin_staging(EventSource::User, [key("orders")]);
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
         overlay.begin_staging(EventSource::Trigger, [key("audit")]);
-        overlay.insert_put(key("audit"), 1, &id("a"), vec![1]);
+        overlay
+            .insert_put(key("audit"), 1, &id("a"), vec![1])
+            .unwrap();
         assert_eq!(writes(&overlay), BodyWrites::default());
     }
 
@@ -346,9 +368,9 @@ mod tests {
         let other = crate::event::graph_cdc::edge_row_id("a", "KNOWS", "c");
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::User, [key("social")]);
-        overlay.note_row(key("social"), id(&other), false);
+        overlay.note_row(key("social"), id(&other), false).unwrap();
         overlay.begin_staging(EventSource::Trigger, [key("social")]);
-        overlay.note_row(key("social"), id(&edge), false);
+        overlay.note_row(key("social"), id(&edge), false).unwrap();
         assert_eq!(
             writes(&overlay).rows,
             vec![("social".to_string(), edge.clone())]
@@ -356,9 +378,9 @@ mod tests {
 
         let marker = overlay.journal_len();
         overlay.begin_staging(EventSource::User, [key("social")]);
-        overlay.note_row(key("social"), id(&edge), true);
+        overlay.note_row(key("social"), id(&edge), true).unwrap();
         assert!(writes(&overlay).rows.is_empty());
-        overlay.rollback_to(marker);
+        overlay.rollback_to(marker).unwrap();
         assert_eq!(writes(&overlay).rows, vec![("social".to_string(), edge)]);
     }
 
@@ -369,9 +391,11 @@ mod tests {
         let stream = crate::event::graph_cdc::GRAPH_LABEL_STREAM;
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::User, [key("people")]);
-        overlay.insert_put(key("people"), 1, &id("n1"), vec![1]);
+        overlay
+            .insert_put(key("people"), 1, &id("n1"), vec![1])
+            .unwrap();
         overlay.begin_staging(EventSource::Trigger, [key(stream)]);
-        overlay.note_row(key(stream), id("n1"), false);
+        overlay.note_row(key(stream), id("n1"), false).unwrap();
         assert_eq!(
             writes(&overlay).rows,
             vec![(stream.to_string(), "n1".to_string())]
@@ -385,10 +409,16 @@ mod tests {
     fn a_body_crdt_row_is_tagged_per_row() {
         let mut overlay = TxnOverlay::new();
         overlay.begin_staging(EventSource::ImplicitClient, [key("notes")]);
-        overlay.insert_put(key("notes"), 1, &id("client-note"), vec![1]);
+        overlay
+            .insert_put(key("notes"), 1, &id("client-note"), vec![1])
+            .unwrap();
         overlay.begin_staging(EventSource::Trigger, [key("notes")]);
-        overlay.insert_put(key("notes"), 2, &id("body-note"), vec![2]);
-        overlay.insert_tombstone(key("notes"), 3, &id("body-gone"));
+        overlay
+            .insert_put(key("notes"), 2, &id("body-note"), vec![2])
+            .unwrap();
+        overlay
+            .insert_tombstone(key("notes"), 3, &id("body-gone"))
+            .unwrap();
         assert_eq!(
             writes(&overlay),
             BodyWrites {

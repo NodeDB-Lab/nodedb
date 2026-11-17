@@ -140,7 +140,16 @@ pub(super) mod test_support {
                 rls_write_check, ..
             })
             | PhysicalPlan::Document(
-                DocumentOp::PointUpdate {
+                DocumentOp::PointPut {
+                    rls_write_check, ..
+                }
+                | DocumentOp::PointInsert {
+                    rls_write_check, ..
+                }
+                | DocumentOp::BatchInsert {
+                    rls_write_check, ..
+                }
+                | DocumentOp::PointUpdate {
                     rls_write_check, ..
                 }
                 | DocumentOp::PointDelete {

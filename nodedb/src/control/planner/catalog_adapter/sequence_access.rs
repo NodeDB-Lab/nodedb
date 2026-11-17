@@ -3,8 +3,9 @@
 //! Sequence accessor bodies behind `OriginCatalog`'s `SqlCatalog` methods.
 //!
 //! `nextval` advances the node counter AND records the value in the calling
-//! session's map. `currval` reads only that session map, so one session never
-//! reports another session's allocation.
+//! session's map, and `setval` records the value it set. `currval` reads only
+//! that session map, so one session never reports another session's
+//! allocation.
 
 use nodedb_sql::SqlError;
 
@@ -56,15 +57,22 @@ impl OriginCatalog {
             })
     }
 
-    /// Position `name` so the next `nextval` returns `value + increment`.
+    /// Position `name` so the next `nextval` returns `value + increment`,
+    /// and record `value` as this session's `currval`: a two-argument
+    /// `setval` marks the value called, as in PostgreSQL.
     pub(super) fn position_sequence(&self, name: &str, value: i64) -> Result<i64, SqlError> {
         let registry = self.require_sequence_registry()?;
         if self.describing {
             return self.describe_placeholder(registry, name).map(|_| value);
         }
-        registry
-            .setval(self.database_id.as_u64(), self.tenant_id, name, value)
-            .map_err(|e| map_sequence_error(name, e))
+        let database_id = self.database_id.as_u64();
+        let value = registry
+            .setval(database_id, self.tenant_id, name, value)
+            .map_err(|e| map_sequence_error(name, e))?;
+        if let Some(session) = &self.session_sequences {
+            session.record(database_id, self.tenant_id, name, value);
+        }
+        Ok(value)
     }
 
     /// What a sequence function resolves to while describing: the same type

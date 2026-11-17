@@ -149,7 +149,7 @@ async fn source_group_barrier(state: &SharedState, sources: &[TreeKey]) -> crate
     crate::control::security::auth_lease::authorization_barrier(
         state,
         targets,
-        crate::control::server::shared::session::StatementDeadline::of_statement(state).instant(),
+        crate::control::server::shared::session::StatementDeadline::barrier_of_statement(state),
     )
     .await
 }

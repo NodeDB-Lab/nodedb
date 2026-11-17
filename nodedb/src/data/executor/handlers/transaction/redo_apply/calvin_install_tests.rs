@@ -4,8 +4,8 @@
 //! `ApplyTransactionRedo` plan with a `CalvinInstall`.
 
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinReplySpec, CalvinResolved, DocumentOp, MetaOp, PhysicalPlan, RedoOrigin,
-    RedoSumTargets, ReturningColumns, ReturningSpec,
+    CalvinInstall, CalvinReplySpec, DocumentOp, MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets,
+    ReturningColumns, ReturningSpec,
 };
 use nodedb_types::{QualifiedCollection, StorageKey, Surrogate};
 
@@ -18,7 +18,6 @@ use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
 use crate::data::executor::handlers::control::calvin::test_support::{
     bulk_delete_plan, point_insert_plan, seed_row,
 };
-use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::handlers::control::calvin_synthetic_txn_id;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, Lsn, TenantId};
@@ -47,15 +46,20 @@ fn returning_insert(document_id: &str, surrogate: u32) -> PhysicalPlan {
         surrogate: Surrogate::new(surrogate),
         returning: Some(ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         }),
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
 /// Stage `plans` as the leader does at `(1, 0)` and resolve them.
-fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResolved {
+fn stage_and_resolve(
+    core: &mut CoreLoop,
+    plans: &[PhysicalPlan],
+) -> crate::data::executor::handlers::control::calvin_resolve::WholeResolved {
     let task = make_default_task();
     let ctx = CalvinExecCtx {
         epoch: 1,
@@ -71,9 +75,8 @@ fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResol
         &[],
     );
     assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
-    let resolved = core.execute_calvin_resolve(&task, 1, 0);
-    assert_eq!(resolved.status, Status::Ok, "{:?}", resolved.error_code);
-    zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer")
+    core.calvin_resolve_whole(&task, 1, 0)
+        .expect("resolve the staged slice")
 }
 
 /// The stamped install of `redo` as the slice at `(epoch, 0)`.
@@ -323,33 +326,28 @@ fn a_refused_calvin_install_keeps_the_staged_entry() {
     assert!(!core.txn_overlays.contains_key(&synthetic));
 }
 
-/// A reply that fails to render after a successful install leaves the
-/// install `Ok` and carries the render error for the statement.
+/// The install answers the reply bytes the leader's stage decided, and
+/// reads nothing back from base to answer. A replica whose base row differs
+/// from the staged row still answers the staged bytes.
 #[test]
-fn a_reply_render_error_leaves_the_calvin_install_ok() {
+fn a_calvin_install_answers_the_staged_reply_bytes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
     let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
-    let unrenderable = CalvinReplySpec::from(&CalvinReply::unrenderable_for_test(ORDERS));
+    let staged_rows = vec![0x91, 0xa6, b's', b't', b'a', b'g', b'e', b'd'];
 
     let plan = install_plan(
         resolved.redo,
         vec![ORDERS.to_string()],
         Vec::new(),
         1,
-        unrenderable,
+        CalvinReplySpec::Rows(staged_rows.clone()),
     );
     let installed = run_at(&mut core, &plan, 47);
 
-    assert_eq!(installed.status, Status::Ok);
-    assert!(
-        matches!(
-            installed.error_code.as_deref(),
-            Some(ErrorCode::Internal { .. })
-        ),
-        "{:?}",
-        installed.error_code
-    );
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    assert!(installed.error_code.is_none(), "{:?}", installed.error_code);
+    assert_eq!(installed.payload.as_bytes(), staged_rows.as_slice());
     assert!(base_row(&core, 7).is_some());
     assert!(!core.calvin.commit_pending.contains_key(&(1, 0, VSHARD)));
 }

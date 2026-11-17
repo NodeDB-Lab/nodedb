@@ -100,7 +100,17 @@ impl CoreLoop {
         tid: u64,
         spec: &VectorDirectIndexSpec<'_>,
     ) -> Result<VectorIndexKey, ErrorCode> {
-        let database_id = task.request.database_id.as_u64();
+        self.vector_direct_index_in(task.request.database_id.as_u64(), tid, spec)
+    }
+
+    /// [`Self::vector_direct_index`] in database `database_id`, for an
+    /// install that runs without a task.
+    pub(in crate::data::executor) fn vector_direct_index_in(
+        &mut self,
+        database_id: u64,
+        tid: u64,
+        spec: &VectorDirectIndexSpec<'_>,
+    ) -> Result<VectorIndexKey, ErrorCode> {
         if let Some(index_key) = self.check_vector_direct_index(database_id, tid, spec)? {
             return Ok(index_key);
         }

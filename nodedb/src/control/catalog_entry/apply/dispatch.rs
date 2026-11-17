@@ -108,7 +108,6 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             // Preserve an inactive row until post-apply storage reclaim
             // succeeds — the restart-durable same-name lifecycle barrier.
             // A node that never held the row has nothing to fence.
-            // Interactive purge paths use `prepare_purge_checked` instead.
             let found = collection::prepare_purge(*database_id, *tenant_id, name, catalog)?;
             debug!(
                 collection = %name,
@@ -275,6 +274,9 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             collection,
             purge_lsn,
         } => wal_tombstone::record(*database_id, *tenant_id, collection, *purge_lsn, catalog),
+        CatalogEntry::PruneCollectionPurgeLog { cutoff_ms } => catalog
+            .prune_collection_purge_log(*cutoff_ms)
+            .map(|_pruned| ()),
         CatalogEntry::PutDatabaseQuota { db_id, record } => {
             quota::put_database(*db_id, record, catalog)
         }

@@ -47,6 +47,15 @@ impl PhysicalPlan {
             | PhysicalPlan::Graph(GraphOp::EdgeDelete {
                 rls_write_check, ..
             })
+            | PhysicalPlan::Document(DocumentOp::PointPut {
+                rls_write_check, ..
+            })
+            | PhysicalPlan::Document(DocumentOp::PointInsert {
+                rls_write_check, ..
+            })
+            | PhysicalPlan::Document(DocumentOp::BatchInsert {
+                rls_write_check, ..
+            })
             | PhysicalPlan::Document(DocumentOp::PointDelete {
                 rls_write_check, ..
             })

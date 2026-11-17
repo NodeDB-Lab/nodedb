@@ -264,6 +264,7 @@ async fn the_leader_stamps_a_document_write_from_its_clock() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     };
     let mut stamps = Vec::new();

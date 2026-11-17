@@ -34,6 +34,9 @@ pub struct HandshakeMsg {
     /// JWT bearer token for authentication.
     pub jwt_token: String,
     /// Client's vector clock: `{ collection: { doc_id: lamport_ts } }`.
+    ///
+    /// Each key names a collection the client holds Origin state of. Origin
+    /// replays a missed `CollectionPurged` only for a collection a key names.
     pub vector_clock: HashMap<String, HashMap<String, u64>>,
     /// Shape IDs the client is subscribed to.
     pub subscribed_shapes: Vec<String>,
@@ -50,6 +53,14 @@ pub struct HandshakeMsg {
     /// refused.
     #[serde(default)]
     pub wire_version: u16,
+    /// [`HandshakeAckMsg::server_watermark`] of the last handshake this
+    /// client applied together with every purge frame sent ahead of it. `0`
+    /// when the client holds none.
+    ///
+    /// Origin sends a `CollectionPurged` for every purge past it, and a
+    /// `DatabaseResync` when purges past it are no longer on record.
+    #[serde(default)]
+    pub last_server_watermark: u64,
 }
 
 impl HandshakeMsg {
@@ -96,6 +107,13 @@ pub struct HandshakeAckMsg {
     /// means signing is unavailable for this session.
     #[serde(default)]
     pub delta_signing_key: [u8; 32],
+    /// The server's sync watermark: the metadata Raft group's applied index
+    /// when the handshake read its purge record. Every purge at or below it
+    /// either reached the client ahead of this ack or does not concern it.
+    /// The client stores it and sends it back as
+    /// [`HandshakeMsg::last_server_watermark`]. `0` on a refused handshake.
+    #[serde(default)]
+    pub server_watermark: u64,
 }
 
 impl HandshakeAckMsg {
@@ -178,6 +196,7 @@ mod tests {
             lite_id: String::new(),
             epoch: 0,
             wire_version: SYNC_WIRE_VERSION,
+            last_server_watermark: 0,
         };
         let frame = SyncFrame::new_msgpack(SyncMessageType::Handshake, &msg).unwrap();
         let bytes = frame.to_bytes();
@@ -198,6 +217,7 @@ mod tests {
             lite_id: String::new(),
             epoch: 0,
             wire_version,
+            last_server_watermark: 0,
         };
         assert_eq!(handshake(SYNC_WIRE_VERSION).check_wire_version(), Ok(()));
         assert_eq!(
@@ -218,6 +238,7 @@ mod tests {
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: [0; 32],
+            server_watermark: 0,
         };
         assert_eq!(
             ack(false, SYNC_WIRE_VERSION + 1).wire_version_mismatch(),

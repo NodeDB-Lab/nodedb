@@ -6,4 +6,4 @@ pub mod commit;
 pub mod rows;
 
 pub use commit::{CopyTarget, commit_doc_copies, commit_kv_copies};
-pub use rows::{DocCopy, KvCopy};
+pub use rows::{DocCopy, KvCopy, VectorPrimaryCopy};

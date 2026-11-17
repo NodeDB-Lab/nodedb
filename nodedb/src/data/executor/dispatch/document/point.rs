@@ -59,6 +59,7 @@ impl CoreLoop {
                 pk_bytes: _,
                 returning,
                 rls_filters,
+                rls_write_check,
                 resolved_sum_targets,
             } => self.execute_point_put(
                 task,
@@ -70,6 +71,7 @@ impl CoreLoop {
                     value,
                     returning: returning.as_ref(),
                     rls_filters,
+                    rls_write_check,
                     resolved_sum_targets,
                 },
             ),
@@ -82,6 +84,7 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
+                rls_write_check,
                 resolved_sum_targets,
                 deferred_sum_targets,
             } => self.execute_point_insert(point::insert::PointInsertParams {
@@ -94,6 +97,7 @@ impl CoreLoop {
                 if_absent: *if_absent,
                 returning: returning.as_ref(),
                 rls_filters,
+                rls_write_check,
                 resolved_sum_targets,
                 deferred_sum_targets,
             }),

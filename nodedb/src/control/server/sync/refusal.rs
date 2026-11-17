@@ -61,7 +61,6 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::Unsupported { .. }
             | ErrorCode::RollbackFailed { .. }
             | ErrorCode::OllpRetryRequired
-            | ErrorCode::TxnOverlayMemoryExceeded { .. }
             | ErrorCode::DivisionByZero
             | ErrorCode::UndefinedFunction { .. }
             | ErrorCode::DataException { .. }
@@ -69,6 +68,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::InvalidTextRepresentation { .. }
             | ErrorCode::DatatypeMismatch { .. }
             | ErrorCode::InvalidDatetimeFormat { .. }
+            | ErrorCode::InvalidArgumentForLogarithm { .. }
+            | ErrorCode::InvalidArgumentForPowerFunction { .. }
             | ErrorCode::DatetimeFieldOverflow { .. }
             | ErrorCode::UndefinedObject { .. }
             | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -79,10 +80,10 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::ActiveSqlTransaction { .. }
             | ErrorCode::DependentObjectsExist { .. }
             | ErrorCode::NodeLabelLimit { .. }
-            | ErrorCode::ProgramLimitExceeded { .. } => None,
+            | ErrorCode::ProgramLimitExceeded { .. }
+            | ErrorCode::ExecutionLimitExceeded { .. } => None,
         },
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::DeadlineExceeded { .. }
@@ -143,6 +144,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableSchemaChanged { .. }
@@ -182,7 +185,6 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::RemoteTyped { .. }
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
@@ -264,7 +266,6 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::MetadataGroupGone { .. } => false,
         // Refused on its merits, or a fault the same bytes reproduce.
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::RejectedPrevalidation { .. }
@@ -314,6 +315,8 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::ExecutionLimitExceeded { .. }
@@ -338,7 +341,6 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::RemoteTyped { .. }
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
@@ -408,7 +410,6 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
@@ -416,6 +417,8 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedObject { .. }
         | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -423,7 +426,8 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
-        | ErrorCode::ProgramLimitExceeded { .. } => false,
+        | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. } => false,
     }
 }
 
@@ -431,6 +435,17 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
 /// clears. Every sync path that reports a failed dispatch asks this.
 pub(crate) fn is_retryable_dispatch_error(error: &crate::Error) -> bool {
     retryable_refusal_reason(error).is_some() || is_indeterminate(error)
+}
+
+/// Whether `error` leaves the commit of a proposal unknown. An idempotent
+/// write can re-send after it, since a committed first send makes the re-send
+/// a no-op.
+pub(crate) fn is_unknown_commit_outcome(error: &crate::Error) -> bool {
+    matches!(
+        error,
+        crate::Error::ProposalOutcomeUnknown { .. }
+            | crate::Error::CommittedResultUnavailable { .. }
+    )
 }
 
 /// The [`AckStatus`] an engine ack must carry when its dispatch failed.
@@ -451,19 +466,6 @@ pub(super) fn ack_status_for_dispatch_error(error: &crate::Error, next_seq: u64)
     }
     AckStatus::Rejected {
         reason: error.to_string(),
-    }
-}
-
-/// The `reject_reason` field that belongs beside `status` on an engine ack.
-///
-/// Derived from the status rather than passed alongside it, so the two cannot
-/// disagree: only a terminal refusal carries a reason, because only a terminal
-/// refusal asks the sender to compensate. A reason attached to a retryable
-/// status reads as "give up" to any receiver that checks the field first.
-pub(super) fn reject_reason_for(status: &AckStatus) -> Option<String> {
-    match status {
-        AckStatus::Rejected { reason } => Some(reason.clone()),
-        _ => None,
     }
 }
 
@@ -559,20 +561,6 @@ mod tests {
         assert_eq!(
             ack_status_for_dispatch_error(&error, 4),
             AckStatus::Gap { expected: 4 }
-        );
-    }
-
-    #[test]
-    fn a_retryable_status_carries_no_reject_reason() {
-        // A reason beside a retryable status reads as "give up" to a receiver
-        // that checks the field before the status.
-        assert_eq!(reject_reason_for(&AckStatus::Gap { expected: 2 }), None);
-        assert_eq!(reject_reason_for(&AckStatus::Applied), None);
-        assert_eq!(
-            reject_reason_for(&AckStatus::Rejected {
-                reason: "schema mismatch".into()
-            }),
-            Some("schema mismatch".to_string())
         );
     }
 

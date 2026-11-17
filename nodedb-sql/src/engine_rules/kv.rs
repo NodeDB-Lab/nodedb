@@ -95,6 +95,7 @@ impl EngineRules for KvRules {
 
     fn plan_delete(&self, p: DeleteParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Delete {
+            returning: None,
             collection: p.collection,
             engine: EngineType::KeyValue,
             filters: p.filters,

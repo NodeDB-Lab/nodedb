@@ -10,7 +10,9 @@
 
 mod array_sync;
 mod audit;
+mod calvin_frozen;
 mod catalog;
+mod change_feed;
 mod columnar;
 mod continuous_agg;
 mod crdt;
@@ -32,6 +34,7 @@ mod recovery;
 mod redo_stream;
 mod retention;
 mod shared;
+mod spill;
 mod storage_bytes;
 mod vector;
 mod vector_build;
@@ -43,10 +46,12 @@ pub use audit::{
     audit_flush_not_persisted, audit_prune_not_applied, audit_wal_append_failed,
     audit_wal_not_truncated, security_bus_lagged, security_bus_rows_not_recorded,
 };
+pub use calvin_frozen::calvin_frozen_reply_store_failed;
 pub use catalog::{
-    catalog_apply_orphan_row, collection_purge_row_missing, consumer_group_offsets_retained,
-    metadata_apply_wedged, synonym_group_not_applied,
+    catalog_apply_orphan_row, consumer_group_offsets_retained, metadata_apply_wedged,
+    purge_log_prune_not_proposed, synonym_group_not_applied,
 };
+pub use change_feed::{change_journal_failed, change_journal_halted, change_run_rejected};
 pub use columnar::{
     columnar_segment_corrupt, quarantine_record_evicted, timeseries_flush_not_installed,
     timeseries_idle_flush_failed, timeseries_partition_unreadable,
@@ -65,7 +70,9 @@ pub use data_plane::{
 };
 pub use event_image::{strict_row_image_unrendered, timeseries_row_image_undecodable};
 pub use held_entry::{apply_panicked, held_entry_debt_not_recorded, redo_entry_malformed};
-pub use index_rebuild::{IndexRebuildTarget, index_rebuild_not_installed};
+pub use index_rebuild::{
+    IndexRebuildTarget, TextIndexStepTarget, index_rebuild_not_installed, text_index_step_owed,
+};
 pub use ingest::{
     ilp_invalid_utf8_drop, ilp_killed_session_lines_refused, ilp_line_read_drop,
     wal_catchup_record_misnamed,
@@ -92,10 +99,12 @@ pub use recovery::{
     write_acked_without_durability,
 };
 pub use redo_stream::{
-    redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
+    redo_abandon_given_up, redo_changes_unstaged, redo_snapshot_debt_not_recorded,
+    redo_stream_lost_here,
 };
 pub use retention::{retention_autowire_orphaned, sequence_restart_failed};
 pub use shared::entry_kind;
+pub use spill::spill_cleanup_failed;
 pub use storage_bytes::{
     storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,
     storage_share_peer_skipped,

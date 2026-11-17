@@ -196,7 +196,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
         });
     }
     // CRDT partial-update payload, built once from the literal SET assignments.
-    let crdt_fields_json = if is_crdt {
+    let crdt_fields = if is_crdt {
         // The partial upsert merges these fields into the row stored under
         // each target key, so an identity assignment must name that key.
         let identity_column = declared_primary_key
@@ -210,7 +210,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                 &sql_value_to_string(key),
             )?;
         }
-        Some(super::super::crdt_gate::literal_assignments_to_fields_json(
+        Some(super::super::crdt_gate::literal_assignments_to_fields_body(
             assignments,
         )?)
     } else {
@@ -279,14 +279,14 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
         for key in target_keys {
             let pk_string = sql_value_to_string(key);
             let pk_bytes = pk_string.clone().into_bytes();
-            let plan = if let Some(fields_json) = crdt_fields_json.as_ref() {
+            let plan = if let Some(fields) = crdt_fields.as_ref() {
                 // An upsert CREATES the row when the key is absent, so it owns
                 // a real identity and allocates one.
                 let surrogate = ctx.surrogate_for_pk(collection_key, &pk_bytes)?;
                 PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                     collection: qualified_collection.clone(),
                     document_id: pk_string,
-                    fields_json: fields_json.clone(),
+                    fields: fields.clone(),
                     surrogate,
                     partial: true,
                     verb: CrdtWriteVerb::Update,
@@ -453,16 +453,21 @@ mod tests {
         match &tasks[0].plan {
             PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                 document_id,
-                fields_json,
+                fields,
                 partial,
                 ..
             }) => {
                 assert_eq!(document_id, "k1");
                 assert!(partial, "UPDATE SET must be a partial DocUpsert");
-                assert!(fields_json.contains("name") && fields_json.contains("bob"));
+                let fields = nodedb_physical::physical_plan::decode_fields_body(fields)
+                    .expect("typed fields body");
+                assert_eq!(
+                    fields.get("name"),
+                    Some(&nodedb_types::Value::String("bob".into()))
+                );
                 assert!(
-                    !fields_json.contains("\"id\""),
-                    "partial payload must carry only SET fields, got {fields_json}"
+                    !fields.contains_key("id"),
+                    "partial payload must carry only SET fields, got {fields:?}"
                 );
             }
             other => panic!("expected partial CrdtOp::DocUpsert, got {other:?}"),

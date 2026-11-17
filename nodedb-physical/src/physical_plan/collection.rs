@@ -62,6 +62,7 @@ impl PhysicalPlan {
             | PhysicalPlan::Text(TextOp::FtsIndexDoc { collection, .. })
             | PhysicalPlan::Text(TextOp::FtsDeleteDoc { collection, .. })
             | PhysicalPlan::Text(TextOp::SetTextConfig { collection, .. })
+            | PhysicalPlan::Text(TextOp::RebuildIndex { collection, .. })
             | PhysicalPlan::Query(QueryOp::PartialAggregate { collection, .. })
             | PhysicalPlan::Query(QueryOp::FacetCounts { collection, .. })
             | PhysicalPlan::Document(DocumentOp::BulkUpdate { collection, .. })

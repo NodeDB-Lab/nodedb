@@ -27,7 +27,8 @@ use super::{DispatchCtx, error_to_native, handle_reset};
 ///
 /// `sql_params`, when present, carries the caller's bound values for
 /// `$1`, `$2`, … placeholders in `sql`. The handler renders each value
-/// as a SQL literal via `value_to_sql_literal` and substitutes the
+/// as a SQL literal via `inline_params` (a typed literal for a UUID, an
+/// instant, bytes and a decimal) and substitutes the
 /// placeholders before any other dispatch — DDL routing, planner,
 /// transaction buffer — so every downstream sees one canonical SQL
 /// string with literal values in place of placeholders. `None` (the
@@ -71,9 +72,22 @@ async fn handle_sql_inner(
     // substitution invariant in one place so the DDL router, planner,
     // and transaction buffer all see the same SQL shape regardless of
     // whether the caller sent params or inlined values directly.
-    let substituted = sql_params
-        .filter(|params| !params.is_empty())
-        .map(|params| inline_params(sql, params));
+    let substituted = match sql_params.filter(|params| !params.is_empty()) {
+        Some(params) => match inline_params(sql, params) {
+            Ok(bound) => Some(bound),
+            // A statement whose parameters do not bind is refused with the
+            // syntax class pgwire gives a DSL bind failure, never run with
+            // its placeholders rewritten some other way.
+            Err(error) => {
+                return resp(sqlstate_error(
+                    seq,
+                    nodedb_types::error::sqlstate::SYNTAX_ERROR,
+                    format!("parameter bind: {error}"),
+                ));
+            }
+        },
+        None => None,
+    };
     let sql = substituted.as_deref().unwrap_or(sql);
     let sql_trimmed = sql.trim();
     let upper = sql_trimmed.to_uppercase();
@@ -227,10 +241,15 @@ pub(super) fn resp(r: NativeResponse) -> SqlOutcome {
 // Errors here surface as `42P02` (`undefined_parameter`) so the client
 // gets a typed SQLSTATE rather than an opaque internal error.
 
-/// Substitute `$N` placeholders in `sql` with canonical SQL literals.
-fn inline_params(sql: &str, params: &[Value]) -> String {
-    let literals = params.iter().map(Value::to_sql_literal).collect::<Vec<_>>();
-    crate::control::server::shared::sql::placeholder::rewrite_sql_placeholders(sql, &literals)
+/// Substitute `$N` placeholders in `sql` with SQL literals.
+///
+/// The shared binder spells a UUID, an instant, bytes and a decimal as the
+/// typed literal a pgwire parameter of that type resolves through, so a
+/// schemaless field stores the typed value, never its text. Every byte
+/// outside a placeholder is copied unchanged. Text the tokenizer refuses,
+/// or a placeholder with no parameter, is an error.
+fn inline_params(sql: &str, params: &[Value]) -> Result<String, nodedb_sql::SqlError> {
+    nodedb_sql::dsl_bind::bind_values(sql, params)
 }
 
 #[cfg(test)]
@@ -246,15 +265,40 @@ mod tests {
             Value::String("x'; --".into()),
             Value::Array(vec![Value::Integer(1), Value::String("two".into())]),
         ];
-        let sql = inline_params("SELECT $1, $2", &values);
+        let sql = inline_params("SELECT $1, $2", &values).expect("binds");
+        assert_eq!(sql, "SELECT 'x''; --', ARRAY[1, 'two']");
+    }
+
+    /// A UUID, an instant, bytes and a decimal inline as typed literals,
+    /// alone and inside an array.
+    #[test]
+    fn native_params_inline_typed_values_as_typed_literals() {
+        let at = nodedb_types::NdbDateTime::from_micros(0);
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let values = [
+            Value::Uuid(uuid.into()),
+            Value::DateTime(at),
+            Value::Bytes(vec![1, 0xff]),
+            Value::Decimal("12.50".parse().expect("decimal")),
+            Value::Array(vec![Value::Uuid(uuid.into())]),
+        ];
+        let sql = inline_params("SELECT $1, $2, $3, $4, $5", &values).expect("binds");
         assert_eq!(
             sql,
             format!(
-                "SELECT {}, {}",
-                values[0].to_sql_literal(),
-                values[1].to_sql_literal()
+                "SELECT UUID '{uuid}', TIMESTAMPTZ '{}', BYTEA '\\x01ff', 12.50, \
+                 ARRAY[UUID '{uuid}']",
+                at.to_iso8601()
             )
         );
+    }
+
+    /// A statement whose placeholders cannot bind is an error, never a
+    /// rewrite by another rule.
+    #[test]
+    fn unbindable_params_are_errors() {
+        assert!(inline_params("SELECT 'open $1", &[Value::Integer(1)]).is_err());
+        assert!(inline_params("SELECT $3", &[Value::Integer(1)]).is_err());
     }
 
     #[test]

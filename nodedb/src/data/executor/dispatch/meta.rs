@@ -3,6 +3,7 @@
 //! Dispatch for MetaOp variants (WAL, snapshots, retention, continuous aggregates).
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use nodedb_physical::physical_plan::MetaOp;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -11,12 +12,13 @@ use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Run `op`. [`Self::dispatch_meta`] wraps it.
+    /// Run `op`. [`Self::dispatch_meta_with_journal`] wraps it.
     pub(super) fn dispatch_meta_op(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
         op: &MetaOp,
+        permit: Option<RootJournalPermit>,
     ) -> Response {
         match op {
             MetaOp::WalAppend { payload } => self.execute_wal_append(task, payload),
@@ -345,19 +347,52 @@ impl CoreLoop {
                 self.execute_calvin_drop(task, *epoch, *position)
             }
 
-            // Resolve a committing transaction's staged post-images into one
-            // `RedoRecord` and return its bytes. Reads the overlay by `&`; never
-            // mutates base (the redo record is installed separately).
-            MetaOp::ResolveTxn { txn_id, plans } => {
-                self.execute_resolve_session_txn(task, tid, *txn_id, plans)
-            }
+            // Read one part of a committing transaction's resolved redo. Part
+            // 0 resolves it and opens its cursor. Reads the overlay by `&`;
+            // never mutates base (the redo record is installed separately).
+            MetaOp::ResolveTxnPart {
+                txn_id,
+                plans,
+                part,
+                max_part_bytes,
+            } => self.execute_resolve_txn_part(
+                task,
+                tid,
+                crate::data::executor::handlers::transaction::resolve::PartRequest {
+                    txn_id: *txn_id,
+                    part: *part,
+                    max_part_bytes: *max_part_bytes,
+                },
+                plans,
+            ),
 
-            // Same shape as `ResolveTxn` above, but sourced from Calvin's own
+            // One page of a committed chunked redo's content, read back from
+            // this node's WAL for the Control Plane's identity binding and
+            // change stream. Nothing is written.
+            MetaOp::ReadRedoStreamPage {
+                stream,
+                section,
+                from,
+                max_page_bytes,
+            } => self.execute_read_redo_stream_page(task, stream, *section, *from, *max_page_bytes),
+
+            // The resolve of `ResolveTxnPart` above, but sourced from Calvin's own
             // staging state (`commit_pending` + the synthetic-`TxnId` overlay)
             // instead of a session transaction's.
-            MetaOp::CalvinResolve { epoch, position } => {
-                self.execute_calvin_resolve(task, *epoch, *position)
-            }
+            MetaOp::CalvinResolve {
+                epoch,
+                position,
+                part,
+                max_part_bytes,
+            } => self.execute_calvin_resolve(
+                task,
+                crate::data::executor::handlers::control::calvin_resolve::CalvinPartRequest {
+                    epoch: *epoch,
+                    position: *position,
+                    part: *part,
+                    max_part_bytes: *max_part_bytes,
+                },
+            ),
 
             // Install a committed transaction's redo record through the WAL
             // replay arms, on every replica, in Raft log order. A committed
@@ -380,19 +415,20 @@ impl CoreLoop {
                 match (calvin, snapshot_ordinal) {
                     // A Calvin slice's stage vote validated its snapshot.
                     (Some(install), _) => {
-                        self.install_calvin_redo(task, tid, committed, *origin, install)
+                        self.install_calvin_redo(task, tid, committed, *origin, install, permit)
                     }
-                    (None, Some(ordinal)) => self.install_snapshot_redo(
+                    (None, Some(ordinal)) => self.install_redo_authorized(
                         task,
                         tid,
                         committed,
                         *origin,
-                        crate::data::executor::handlers::transaction::redo_apply::RedoSnapshot {
+                        Some(crate::data::executor::handlers::transaction::redo_apply::RedoSnapshot {
                             reads,
                             ordinal: *ordinal,
-                        },
+                        }),
+                        permit,
                     ),
-                    (None, None) => self.install_redo(task, tid, committed, *origin),
+                    (None, None) => self.install_redo_authorized(task, tid, committed, *origin, None, permit),
                 }
             }
 
@@ -427,8 +463,10 @@ impl CoreLoop {
             MetaOp::DropTxnOverlay { txn_id } => {
                 // Behaviour-preserving delegation to the shared teardown, which
                 // the lease reaper also calls (see `CoreLoop::drop_overlay_entry`).
-                self.drop_overlay_entry(*txn_id);
-                self.response_ok(task)
+                match self.drop_overlay_entry(*txn_id) {
+                    Ok(_) => self.response_ok(task),
+                    Err(e) => self.response_error(task, e),
+                }
             }
 
             // A savepoint mark and its rewind are transaction activity: both
@@ -439,8 +477,10 @@ impl CoreLoop {
             }
 
             MetaOp::RollbackToSavepoint { txn_id, savepoint } => {
-                self.rollback_to_savepoint(*txn_id, *savepoint);
-                self.response_ok(task)
+                match self.rollback_to_savepoint(*txn_id, *savepoint) {
+                    Ok(()) => self.response_ok(task),
+                    Err(e) => self.response_error(task, e),
+                }
             }
         }
     }
@@ -486,12 +526,14 @@ mod txn_created_columnar_engine_tests {
         let (_req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("CoreLoop::open");
         (core, dir)
@@ -853,7 +895,8 @@ mod txn_created_columnar_engine_tests {
             "refresh_a".to_string(),
         );
         let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::new();
-        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true);
+        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true)
+            .expect("merge");
 
         core.reap_expired_overlays();
 
@@ -870,6 +913,81 @@ mod txn_created_columnar_engine_tests {
         assert!(
             core.columnar_engines.contains_key(&key_a),
             "read-refreshed txn_A engine must be retained"
+        );
+    }
+
+    // ── Spill directory lifecycle ────────────────────────────────────────
+
+    use crate::data::executor::handlers::transaction::overlay_gauge::txn_spill_dir;
+
+    /// Stage enough rows under a zero hot-tier threshold that the overlay
+    /// spills to its transaction's spill directory.
+    fn stage_spilled(core: &mut CoreLoop, txn_id: TxnId) -> std::path::PathBuf {
+        core.query_tuning.max_txn_overlay_bytes = 0;
+        let coll = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "spilled".to_string(),
+        );
+        for n in 1..=20u32 {
+            let doc_id = nodedb_types::RowIdentity::from_user_key(format!("r{n}"));
+            core.txn_overlay_mut(txn_id)
+                .insert_put(coll.clone(), n, &doc_id, vec![n as u8; 64])
+                .expect("stage a row");
+        }
+        let dir = txn_spill_dir(&core.data_dir, core.core_id, txn_id);
+        assert!(dir.is_dir(), "the overlay spilled into {}", dir.display());
+        dir
+    }
+
+    #[test]
+    fn drop_txn_overlay_removes_the_spill_directory() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(41);
+        let spill_dir = stage_spilled(&mut core, txn_id);
+
+        let task = make_task();
+        let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
+        assert_eq!(resp.status, Status::Ok);
+        assert!(
+            !spill_dir.exists(),
+            "DropTxnOverlay removes the spill directory"
+        );
+        assert!(!core.txn_overlays.contains_key(&txn_id));
+    }
+
+    #[test]
+    fn the_lease_reaper_removes_the_spill_directory() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(42);
+        let spill_dir = stage_spilled(&mut core, txn_id);
+
+        let stamp = core.hlc.peek();
+        core.hlc.update_from_remote(stamp + OVERLAY_LEASE_NS + 1);
+        core.reap_expired_overlays();
+        assert!(!core.txn_overlays.contains_key(&txn_id));
+        assert!(
+            !spill_dir.exists(),
+            "the reaper removes the spill directory"
+        );
+    }
+
+    #[test]
+    fn a_spill_directory_that_cannot_be_removed_fails_the_drop() {
+        let (mut core, _dir) = make_core();
+        let txn_id = TxnId::new(43);
+        let _ = core.txn_overlay_mut(txn_id);
+        // A file where the spill directory goes cannot be removed as one.
+        let spill_dir = txn_spill_dir(&core.data_dir, core.core_id, txn_id);
+        std::fs::create_dir_all(spill_dir.parent().expect("parent")).expect("parent dir");
+        std::fs::write(&spill_dir, b"x").expect("blocking file");
+
+        let task = make_task();
+        let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
+        assert_eq!(resp.status, Status::Error);
+        assert!(
+            !core.txn_overlays.contains_key(&txn_id),
+            "the in-memory release runs before the directory error"
         );
     }
 }

@@ -10,7 +10,9 @@ use std::cmp::Ordering;
 
 use nodedb_types::Value;
 
-use crate::numeric_cmp::{Numeric, cmp_numeric, decimal_reading, numeric_eq, parse_numeric_str};
+use crate::numeric_cmp::{
+    Numeric, cmp_numeric, cmp_numeric_total, decimal_reading, numeric_eq, parse_numeric_str,
+};
 
 /// Coerce a Value to f64.
 ///
@@ -69,11 +71,21 @@ pub fn numeric_order(a: &Value, b: &Value) -> Option<Ordering> {
 /// comparison first (with bool coercion, exact for integers and decimals,
 /// NaN above every number), then string comparison of the display forms.
 pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
+    compare_with(a, b, cmp_numeric)
+}
+
+/// [`partial_compare_values`] with `numeric` ordering a pair that both read
+/// as numbers.
+fn compare_with(
+    a: &Value,
+    b: &Value,
+    numeric: fn(Numeric, Numeric) -> Ordering,
+) -> Option<Ordering> {
     if involves_instant(a, b) {
         return a.partial_cmp_coerced(b);
     }
-    if let Some(order) = numeric_order(a, b) {
-        return Some(order);
+    if let (Some(na), Some(nb)) = (numeric_reading(a), numeric_reading(b)) {
+        return Some(numeric(na, nb));
     }
     let sa = value_to_display_string(a);
     let sb = value_to_display_string(b);
@@ -84,10 +96,12 @@ pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// selection (ORDER BY, MIN / MAX, GREATEST / LEAST, window frames).
 ///
 /// [`partial_compare_values`] with an unordered pair placed as `Equal`, so a
-/// stable sort keeps such rows in their input order. A predicate uses
-/// `partial_compare_values` instead.
+/// stable sort keeps such rows in their input order. Numbers order by
+/// [`cmp_numeric_total`]: a decimal against a float compares exactly, so the
+/// order stays transitive across integer, float and decimal values. A
+/// predicate uses `partial_compare_values` instead.
 pub fn compare_values(a: &Value, b: &Value) -> Ordering {
-    partial_compare_values(a, b).unwrap_or(Ordering::Equal)
+    compare_with(a, b, cmp_numeric_total).unwrap_or(Ordering::Equal)
 }
 
 /// Order of two non-NULL values for an ORDER BY over output rows (window
@@ -162,7 +176,8 @@ pub fn value_to_display_string(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         Value::Integer(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        // PostgreSQL's `float8out` text: `1e+20`, `NaN`, `-0`.
+        Value::Float(f) => nodedb_types::value::float8_text(*f),
         Value::Bool(b) => b.to_string(),
         Value::Uuid(s) | Value::Ulid(s) | Value::Regex(s) => s.clone(),
         Value::DateTime(dt) | Value::NaiveDateTime(dt) => dt.to_iso8601(),
@@ -176,16 +191,14 @@ pub fn value_to_display_string(v: &Value) -> String {
     }
 }
 
-/// Convert an f64 to a Value, preferring integer representation.
-///
-/// Returns `Null` for NaN/Infinity.
+/// A float8 function result as a `Value`: a finite `f64` is a `Float`,
+/// whole or not. NaN and the infinities, the results outside a function's
+/// domain, are `Null`.
 pub fn to_value_number(n: f64) -> Value {
-    if n.is_nan() || n.is_infinite() {
-        Value::Null
-    } else if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
-        Value::Integer(n as i64)
-    } else {
+    if n.is_finite() {
         Value::Float(n)
+    } else {
+        Value::Null
     }
 }
 
@@ -425,12 +438,37 @@ mod tests {
     }
 
     #[test]
-    fn to_value_number_integer() {
-        assert_eq!(to_value_number(42.0), Value::Integer(42));
+    fn to_value_number_whole_is_float() {
+        assert_eq!(to_value_number(42.0), Value::Float(42.0));
     }
 
     #[test]
     fn to_value_number_float() {
         assert_eq!(to_value_number(3.15), Value::Float(3.15));
+    }
+
+    /// A sort orders a decimal against a float exactly, while a predicate
+    /// reads the decimal as its nearest float, as PostgreSQL casts it.
+    #[test]
+    fn sort_order_is_exact_and_predicate_order_casts_decimal() {
+        let tenth = Value::Decimal("0.1".parse().unwrap());
+        assert_eq!(
+            partial_compare_values(&tenth, &Value::Float(0.1)),
+            Some(Ordering::Equal)
+        );
+        assert!(coerced_eq(&tenth, &Value::Float(0.1)));
+        assert_eq!(compare_values(&tenth, &Value::Float(0.1)), Ordering::Less);
+        let mut values = [
+            Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                90071992547409930001,
+                4,
+            )),
+            Value::Integer(9_007_199_254_740_993),
+            Value::Float(9_007_199_254_740_992.0),
+        ];
+        values.sort_by(compare_sort_values);
+        assert_eq!(values[0], Value::Float(9_007_199_254_740_992.0));
+        assert_eq!(values[1], Value::Integer(9_007_199_254_740_993));
+        assert!(matches!(values[2], Value::Decimal(_)));
     }
 }

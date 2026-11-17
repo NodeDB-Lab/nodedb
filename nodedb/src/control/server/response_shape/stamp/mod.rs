@@ -4,7 +4,7 @@
 
 pub mod evaluate;
 pub mod no_access;
-mod substitute;
+pub(crate) mod substitute;
 
 pub use evaluate::stamp_rows;
 pub use no_access::NoSequenceAccess;

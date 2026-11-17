@@ -53,9 +53,9 @@ impl Drop for EnvGuard {
 /// The two `contains` checks guard against the silent fallback this covers.
 /// An error naming neither the variable nor the value reads like a
 /// warn-and-continue log. The operator gets no way to find the typo.
-pub fn assert_rejected(result: nodedb::Result<()>, var: &str, value: &str) {
+pub fn assert_rejected<T>(result: nodedb::Result<T>, var: &str, value: &str) {
     let err = match result {
-        Ok(()) => panic!(
+        Ok(_) => panic!(
             "{var}={value} was accepted; a malformed startup value must fail startup, \
              not fall back to the config value or the compiled default"
         ),

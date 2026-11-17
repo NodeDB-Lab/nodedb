@@ -3,12 +3,14 @@
 //! The reply a staged Calvin transaction answers with when its redo record
 //! installs.
 
-use nodedb_physical::physical_plan::ReturningSpec;
 use nodedb_query::msgpack_scan::{write_kv_i64, write_kv_str, write_map_header};
-use nodedb_types::{RowIdentity, Surrogate};
 
-use super::target::RowEngine;
+use super::chained::ChainedPlan;
+use super::crdt_writes::StagedCrdtWrite;
+use crate::bridge::envelope::ErrorCode;
 use crate::control::server::shared::sql::affected_payload::AffectedFields;
+use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec::{StagedPlanImages, StagedReturningImages};
 
 /// The reply a Calvin transaction's install answers with.
 ///
@@ -22,13 +24,9 @@ pub(in crate::data::executor) enum CalvinReply {
     Count(Vec<u8>),
     /// `RETURNING` rows, decided when the plan staged.
     Rows(Vec<u8>),
-    /// `RETURNING` rows the install reads from base after it writes, so each
-    /// row is exactly what a `SELECT` reads.
-    PostImages(PostImages),
-    /// `RETURNING` rows of a resolved timeseries ingest: the rows its install
-    /// stored, as a scan reads them. Rows the install rejected are reported
-    /// beside them.
-    InstalledTimeseries(InstalledTimeseries),
+    /// The txn's frozen `RETURNING` replies, which the Control Plane reads
+    /// from the slice's log after the install. The install renders nothing.
+    Frozen,
 }
 
 impl Default for CalvinReply {
@@ -38,38 +36,10 @@ impl Default for CalvinReply {
 }
 
 impl CalvinReply {
-    /// A reply the install cannot render: post-images of a columnar row, which
-    /// base keys by no surrogate.
-    #[cfg(test)]
-    pub(in crate::data::executor) fn unrenderable_for_test(collection: &str) -> Self {
-        Self::PostImages(PostImages {
-            spec: ReturningSpec {
-                columns: nodedb_physical::physical_plan::ReturningColumns::Star,
-            },
-            rls_filters: Vec::new(),
-            collection: collection.to_string(),
-            engine: RowEngine::Columnar,
-            rows: vec![(RowIdentity::from_user_key("r1"), Surrogate::new(1))],
-        })
-    }
-
     /// Whether this reply carries `RETURNING` rows.
     pub(super) fn has_rows(&self) -> bool {
         !matches!(self, Self::Count(_))
     }
-}
-
-/// The `RETURNING` projection of a resolved timeseries ingest, rendered from
-/// what its own install stored into `collection`.
-#[derive(Debug)]
-pub(in crate::data::executor) struct InstalledTimeseries {
-    pub(super) spec: ReturningSpec,
-    pub(super) rls_filters: Vec<u8>,
-    pub(super) collection: String,
-    /// The ingest's position among the transaction's timeseries ingests on
-    /// this vShard. Each ingest becomes one redo sub-record in plan order,
-    /// and its install is the install at this position.
-    pub(super) ordinal: usize,
 }
 
 /// What staging a Calvin transaction's plans carries from one plan to the
@@ -78,8 +48,6 @@ pub(in crate::data::executor) struct InstalledTimeseries {
 pub(in crate::data::executor) struct CalvinStaging {
     /// The reply the plans staged so far answer with.
     pub(in crate::data::executor) reply: CalvinReply,
-    /// The timeseries ingests staged so far.
-    pub(super) ts_ingests: usize,
     /// Whether a plan the statement names, not a derived one, decided the
     /// count in `reply`.
     pub(super) user_count: bool,
@@ -91,9 +59,49 @@ pub(in crate::data::executor) struct CalvinStaging {
     pub(super) resolved_ingest: bool,
     /// The edges this home owns among the edge writes staged so far.
     pub(super) owned_edges: u64,
+    /// The plans staged so far, which is the slice index of the next one.
+    pub(super) plans_staged: u32,
+    /// The `RETURNING` images of every plan staged so far, in plan order.
+    /// They ride the stage response, beside `reply`.
+    pub(super) images: Vec<StagedPlanImages>,
+    /// The CRDT row writes of every plan staged so far, in plan order. A
+    /// CRDT image folds the earlier writes to its row.
+    pub(super) crdt_writes: Vec<StagedCrdtWrite>,
+    /// The hash-chained `RETURNING` plans staged so far, in plan order.
+    /// Their images settle once the whole slice staged.
+    pub(super) chained: Vec<ChainedPlan>,
+    /// The chained plan whose rows answer the slice: the last `RETURNING`
+    /// plan, when it is chained.
+    pub(super) chained_reply: Option<u32>,
+}
+
+impl CoreLoop {
+    /// The reply a fully staged slice answers with, and the `RETURNING`
+    /// images its stage response carries. Chained plans settle here.
+    pub(in crate::data::executor) fn finish_calvin_staging(
+        &self,
+        txn_id: crate::types::TxnId,
+        tid: u64,
+        mut staging: CalvinStaging,
+    ) -> Result<(CalvinReply, StagedReturningImages), ErrorCode> {
+        self.settle_chained_plans(txn_id, tid, &mut staging)?;
+        // Chained plans settle after the plans behind them. The stage
+        // response carries every plan's images in plan order.
+        staging.images.sort_by_key(|images| images.plan);
+        Ok(staging.into_parts())
+    }
 }
 
 impl CalvinStaging {
+    /// The reply the staged plans answer with, and the `RETURNING` images
+    /// the stage response carries.
+    fn into_parts(mut self) -> (CalvinReply, StagedReturningImages) {
+        let images = StagedReturningImages {
+            plans: std::mem::take(&mut self.images),
+        };
+        (self.into_reply(), images)
+    }
+
     /// The reply the staged plans answer with. The running total encodes once
     /// here. A slice of resolved ingests alone answers an empty count: its
     /// install counts replace it.
@@ -247,16 +255,4 @@ mod tests {
         };
         assert!(encoded(staging.into_reply()).is_empty());
     }
-}
-
-/// The rows of a `RETURNING` plan the install reads after it writes.
-#[derive(Debug)]
-pub(in crate::data::executor) struct PostImages {
-    pub(super) spec: ReturningSpec,
-    pub(super) rls_filters: Vec<u8>,
-    pub(super) collection: String,
-    pub(super) engine: RowEngine,
-    /// Each row the plan wrote: its client identity and its surrogate, in
-    /// the order the plan wrote them.
-    pub(super) rows: Vec<(RowIdentity, Surrogate)>,
 }

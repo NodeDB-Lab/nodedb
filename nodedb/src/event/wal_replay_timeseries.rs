@@ -169,6 +169,7 @@ mod tests {
         };
         let bytes = batch.to_bytes().expect("encode batch");
         encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             collection: "metrics",
             payload: &bytes,
             provenance: None,
@@ -250,6 +251,7 @@ mod tests {
     #[test]
     fn an_unresolved_ingest_record_rebuilds_nothing() {
         let payload = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             collection: "metrics",
             payload: b"metrics value=1",
             provenance: None,

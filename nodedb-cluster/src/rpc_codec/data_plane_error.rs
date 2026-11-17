@@ -124,10 +124,6 @@ pub enum DataPlaneErrorCode {
         cause: Option<Box<DataPlaneErrorCode>>,
     },
     OllpRetryRequired,
-    /// `limit` is `u64` on the wire, for the same reason as `max_depth`.
-    TxnOverlayMemoryExceeded {
-        limit: u64,
-    },
     DivisionByZero,
     /// Expression evaluation called a function no evaluator implements.
     UndefinedFunction {
@@ -221,6 +217,11 @@ pub enum DataPlaneErrorCode {
     ProgramLimitExceeded {
         detail: String,
     },
+    /// A configured execution limit refused the statement, as
+    /// `ExecutionLimitExceeded` does on the Control Plane (SQLSTATE `54000`).
+    ExecutionLimitExceeded {
+        detail: String,
+    },
     /// Text does not parse as the column's type (SQLSTATE `22P02`).
     InvalidTextRepresentation {
         detail: String,
@@ -252,6 +253,15 @@ pub enum DataPlaneErrorCode {
         core_id: u64,
         detail: String,
     },
+    /// `ln` or `log` of zero or a negative number (SQLSTATE `2201E`).
+    InvalidArgumentForLogarithm {
+        detail: String,
+    },
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number (SQLSTATE `2201F`).
+    InvalidArgumentForPowerFunction {
+        detail: String,
+    },
 }
 
 /// Wire mirror of `nodedb_types::text_search::TextColumnFault`.
@@ -261,6 +271,7 @@ pub enum DataPlaneTextColumnFault {
     NotText { data_type: String },
     NotAColumn,
     NotIndexed,
+    IndexBuilding,
 }
 
 /// Wire mirror of `nodedb::bridge::envelope::SyncHold`.

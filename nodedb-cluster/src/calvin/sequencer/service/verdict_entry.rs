@@ -15,11 +15,16 @@ pub(crate) fn verdict_entry(txn: TxnId, outcome: VerdictOutcome) -> SequencerEnt
             epoch: txn.epoch,
             position: txn.position,
         },
-        VerdictOutcome::Abort(AbortCause { reason, refusal }) => SequencerEntry::AbortVerdict {
+        VerdictOutcome::Abort(AbortCause {
+            reason,
+            refusal,
+            other_refusals,
+        }) => SequencerEntry::AbortVerdict {
             epoch: txn.epoch,
             position: txn.position,
             reason,
             refusal,
+            other_refusals,
         },
     }
 }
@@ -42,6 +47,7 @@ mod tests {
                 position: 1,
                 reason: AbortReason::ParticipantError,
                 refusal: None,
+                other_refusals: Vec::new(),
             }
         );
     }
@@ -59,6 +65,7 @@ mod tests {
                 position: 3,
                 reason: AbortReason::ParticipantError,
                 refusal: Some(vec![5, 6]),
+                other_refusals: Vec::new(),
             }
         );
     }

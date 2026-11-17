@@ -128,6 +128,10 @@ pub(crate) struct SubmitOutcome {
     /// `Error`. Callers that need an error status surfaced as a typed error
     /// check `status` themselves.
     pub response: Response,
+    /// The LSN of the change marker the write appended, `None` for a write
+    /// that applies no replicated entry. Every change event of the entry
+    /// names it.
+    pub change_lsn: Option<crate::types::Lsn>,
 }
 
 /// Inputs for [`super::submit_write`].

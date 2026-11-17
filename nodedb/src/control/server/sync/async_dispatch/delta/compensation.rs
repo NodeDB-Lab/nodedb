@@ -77,8 +77,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
             detail: other.to_string(),
         },
         // Refused on its merits, or a fault the same bytes reproduce.
-        other @ (crate::Error::TxnOverlayMemoryExceeded { .. }
-        | crate::Error::OffsetRegression { .. }
+        other @ (crate::Error::OffsetRegression { .. }
         | crate::Error::AppendOnlyViolation { .. }
         | crate::Error::BalanceViolation { .. }
         | crate::Error::MaterializedSumTargetNotFound { .. }
@@ -125,6 +124,8 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::ExecutionLimitExceeded { .. }
@@ -149,7 +150,6 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::RemoteTyped { .. }
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
@@ -229,7 +229,6 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
@@ -237,6 +236,8 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedObject { .. }
         | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -244,7 +245,8 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
-        | ErrorCode::ProgramLimitExceeded { .. }) => CompensationHint::Custom {
+        | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. }) => CompensationHint::Custom {
             constraint: "apply_failed".into(),
             detail: format!("{other:?}"),
         },

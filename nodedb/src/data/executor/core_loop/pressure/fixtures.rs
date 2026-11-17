@@ -30,12 +30,14 @@ pub(super) fn make_core() -> (
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        Arc::new(nodedb_types::OrdinalClock::new()),
-        make_governor_at(EngineId::Vector, 0),
+        crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            Arc::new(nodedb_types::OrdinalClock::new()),
+            make_governor_at(EngineId::Vector, 0),
+        ),
     )
     .expect("open core");
     (core, req_tx, resp_rx, dir)

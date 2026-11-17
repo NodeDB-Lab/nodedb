@@ -46,7 +46,39 @@ pub enum RedactionMode {
     Null,
 }
 
+/// The longest mask a `MASK` rule replaces a field with, in bytes. A
+/// `RETURNING` cell can hold a mask, so the cap bounds the response.
+pub const MAX_REDACTION_MASK_BYTES: usize = 1024;
+
+/// The length of the text a `HASH` rule replaces a field with, in bytes:
+/// `hash:` and the 64 hex digits of a SHA-256 digest.
+pub const HASH_REDACTION_TEXT_BYTES: usize = 69;
+
 /// Build the lookup key for the policy map: `"{tenant_id}:{collection}:{for_role}"`.
 pub(super) fn policy_key(tenant_id: u64, collection: &str, for_role: &str) -> String {
     format!("{tenant_id}:{collection}:{for_role}")
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::Value;
+
+    use super::super::apply::redacted_typed_value;
+    use super::*;
+
+    #[test]
+    fn a_hash_is_fixed_length_text() {
+        for current in [
+            None,
+            Some(Value::Null),
+            Some(Value::String("s".repeat(10_000))),
+            Some(Value::Integer(-1)),
+        ] {
+            let Value::String(text) = redacted_typed_value(&RedactionMode::Hash, current.as_ref())
+            else {
+                panic!("a hash is text");
+            };
+            assert_eq!(text.len(), HASH_REDACTION_TEXT_BYTES);
+        }
+    }
 }

@@ -84,7 +84,9 @@ pub fn needs_recomputation<V>(
 /// Topological sort of generated column specs by dependency order.
 ///
 /// Returns indices into `specs` in evaluation order. Detects cycles.
-fn topological_sort(specs: &[GeneratedColumnSpec]) -> Result<Vec<usize>, ErrorCode> {
+pub(in crate::data::executor) fn topological_sort(
+    specs: &[GeneratedColumnSpec],
+) -> Result<Vec<usize>, ErrorCode> {
     let n = specs.len();
     let mut in_degree = vec![0usize; n];
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];

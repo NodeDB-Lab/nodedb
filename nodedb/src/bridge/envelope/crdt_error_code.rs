@@ -39,6 +39,7 @@ impl From<&CrdtError> for ErrorCode {
             | CrdtError::PreviewPostImageTooLarge { .. }
             | CrdtError::NonMapRootContainer { .. }
             | CrdtError::NonMapRowValue { .. }
+            | CrdtError::TypedValueMalformed { .. }
             | CrdtError::BlockListPathUnresolved { .. }
             | CrdtError::BlockListIndexOutOfBounds { .. }) => Self::DataException {
                 detail: client.to_string(),
@@ -85,6 +86,7 @@ impl From<&CrdtError> for ErrorCode {
             // Server faults: a Loro failure, a pending transaction on the
             // authoritative document, or an apply this node could not run.
             fault @ (CrdtError::DeltaApplyFailed(_)
+            | CrdtError::SourceTransactionPending { .. }
             | CrdtError::PreviewSourceTransactionPending { .. }
             | CrdtError::Loro(_)) => Self::Internal {
                 detail: fault.to_string(),
@@ -212,6 +214,7 @@ mod tests {
     #[test]
     fn only_server_faults_stay_internal() {
         for e in [
+            CrdtError::SourceTransactionPending { operations: 1 },
             CrdtError::PreviewSourceTransactionPending { operations: 1 },
             CrdtError::Loro("boom".into()),
             CrdtError::DeltaApplyFailed("boom".into()),
@@ -255,6 +258,10 @@ mod tests {
                     field: "blocks".into(),
                 },
                 sqlstate::DATATYPE_MISMATCH,
+            ),
+            (
+                CrdtError::SourceTransactionPending { operations: 1 },
+                sqlstate::INTERNAL_ERROR,
             ),
             (CrdtError::Loro("boom".into()), sqlstate::INTERNAL_ERROR),
         ];

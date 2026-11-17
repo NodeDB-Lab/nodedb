@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use crate::bridge::envelope::Response;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::shared::clone_read::CloneReadAnswer;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::core::NodeDbPgHandler;
@@ -36,14 +36,15 @@ impl NodeDbPgHandler {
         .await
     }
 
-    /// `Some(resp)` when a `Shadowed`/`Materializing` clone read was fully
+    /// `Some(answer)` when a `Shadowed`/`Materializing` clone read was fully
     /// handled — the caller returns it directly. `None` otherwise.
     pub(super) async fn maybe_intercept_clone_read_early(
         &self,
         task: &PhysicalTask,
         identity: &AuthenticatedIdentity,
         perm: Permission,
-    ) -> crate::Result<Option<Response>> {
+        linearizable: bool,
+    ) -> crate::Result<Option<CloneReadAnswer>> {
         if !matches!(perm, Permission::Read) {
             return Ok(None);
         }
@@ -59,12 +60,13 @@ impl NodeDbPgHandler {
                 permissions: &self.state.permissions,
                 roles: &self.state.roles,
                 emitter: &emitter,
+                linearizable,
             },
         )
         .await?
         {
-            crate::control::server::shared::clone_read::CloneReadOutcome::Handled(resp) => {
-                Ok(Some(resp))
+            crate::control::server::shared::clone_read::CloneReadOutcome::Handled(answer) => {
+                Ok(Some(answer))
             }
             crate::control::server::shared::clone_read::CloneReadOutcome::Passthrough => Ok(None),
         }

@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::audit_context::AuditCtx;
 use super::ddl_buffer::DdlBuffer;
@@ -28,9 +28,10 @@ pub(super) struct ConnScope {
     /// `ephemeral_sequence` and `control::sequence::ddl_overlay`.
     pub(super) ephemeral_sequences: RefCell<EphemeralSequences>,
     /// Absolute instant the statement now running on this connection must stop
-    /// at. `None` between statements, and on a connection future that has not
-    /// entered a statement scope. See [`super::deadline`].
-    pub(super) statement_deadline: Cell<Option<Instant>>,
+    /// at, and the budget it was given. `None` between statements, and on a
+    /// connection future that has not entered a statement scope. See
+    /// [`super::deadline`].
+    pub(super) statement_deadline: Cell<Option<(Instant, Duration)>>,
     /// Client-facing notices raised while the current statement ran, below
     /// the response shaper (see [`super::statement_notice`]).
     pub(super) statement_notices: RefCell<Vec<String>>,
@@ -40,6 +41,9 @@ pub(super) struct ConnScope {
     /// The session the running statement reads its consistency from (see
     /// [`super::read_scope`]). `None` outside a statement scope.
     pub(super) read_session: RefCell<Option<ReadSession>>,
+    /// The connection the descriptor lease holds taken on this task belong
+    /// to (see [`super::hold_owner`]).
+    pub(super) hold_owner: u64,
 }
 
 impl ConnScope {
@@ -52,6 +56,7 @@ impl ConnScope {
             statement_notices: RefCell::new(Vec::new()),
             pending_shard_reads: RefCell::new(Vec::new()),
             read_session: RefCell::new(None),
+            hold_owner: super::hold_owner::fresh(),
         }
     }
 }
@@ -75,14 +80,21 @@ pub fn scoped<F: Future>(future: F) -> impl Future<Output = F::Output> {
 ///
 /// The body owns its DDL buffer, so its COMMIT or ROLLBACK never drains the
 /// transaction of a connection it runs inside. It keeps that connection's
-/// statement deadline and audit context.
+/// statement deadline, audit context and lease hold owner.
 pub fn scoped_system_txn<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    let (deadline, audit) = with_scope((None, None), |scope| {
-        (scope.statement_deadline.get(), scope.audit.borrow().clone())
+    let (deadline, audit, owner) = with_scope((None, None, None), |scope| {
+        (
+            scope.statement_deadline.get(),
+            scope.audit.borrow().clone(),
+            Some(scope.hold_owner),
+        )
     });
-    let slots = ConnScope::empty();
+    let mut slots = ConnScope::empty();
     slots.statement_deadline.set(deadline);
     *slots.audit.borrow_mut() = audit;
+    if let Some(owner) = owner {
+        slots.hold_owner = owner;
+    }
     CONN_SCOPE.scope(slots, future)
 }
 

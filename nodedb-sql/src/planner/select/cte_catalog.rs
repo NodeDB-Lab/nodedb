@@ -30,11 +30,11 @@ impl<'a> CteCatalog<'a> {
 }
 
 impl CteCatalog<'_> {
-    fn relation(&self, name: &str) -> Option<CollectionInfo> {
+    fn relation(&self, name: &str) -> Option<&CollectionInfo> {
         self.relations
             .iter()
             .find(|(key, _)| key == name)
-            .map(|(_, info)| info.clone())
+            .map(|(_, info)| info)
     }
 }
 
@@ -43,13 +43,17 @@ impl CteCatalog<'_> {
 /// against this wrapper still sees catalog tables, arrays, types and
 /// sequences.
 impl SqlCatalog for CteCatalog<'_> {
+    fn supports_materialized_relation_column_aliases(&self) -> bool {
+        self.inner.supports_materialized_relation_column_aliases()
+    }
+
     fn get_collection(
         &self,
         database_id: DatabaseId,
         name: &str,
     ) -> std::result::Result<Option<CollectionInfo>, SqlCatalogError> {
         match self.relation(name) {
-            Some(info) => Ok(Some(info)),
+            Some(info) => Ok(Some(info.clone())),
             None => self.inner.get_collection(database_id, name),
         }
     }
@@ -60,7 +64,7 @@ impl SqlCatalog for CteCatalog<'_> {
         name: &str,
     ) -> std::result::Result<Option<CollectionInfo>, SqlCatalogError> {
         match self.relation(name) {
-            Some(info) => Ok(Some(info)),
+            Some(info) => Ok(Some(info.clone())),
             None => self.inner.resolve_relation(database_id, name),
         }
     }

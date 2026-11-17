@@ -117,7 +117,7 @@ pub(super) async fn dispatch_augmented(
             plan,
             target_resp.payload.as_ref(),
             declared_primary_key.as_deref(),
-        ),
+        )?,
         _ => HashSet::new(),
     };
 
@@ -131,7 +131,7 @@ pub(super) async fn dispatch_augmented(
         reject_data_plane_error(&source_resp)?;
 
         // KvOp::Get: inject the primary key field for projection/column checks.
-        let normalized_payload = apply_kv_wrap(&source_task.plan, source_resp.payload.as_ref());
+        let normalized_payload = apply_kv_wrap(&source_task.plan, source_resp.payload.as_ref())?;
         // KvOp::Get responses arrive as a single map; normalize to a
         // 1-element array so tombstone filters and merge work uniformly.
         let normalized_payload = wrap_single_map_as_array(normalized_payload);

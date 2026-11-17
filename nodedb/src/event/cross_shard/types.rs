@@ -99,6 +99,34 @@ pub struct NotifyBroadcastMsg {
     pub after: crate::event::cdc::CdcOffset,
     pub through: crate::event::cdc::CdcOffset,
     pub changes: Vec<NotifyChange>,
+    /// A probe asks only for the receiver's position in the partition. It
+    /// carries no change, and the receiver takes nothing from it.
+    pub probe: bool,
+}
+
+/// The receiver's answer to a [`NotifyBroadcastMsg`], the payload of its
+/// `NotifyBroadcastAck` envelope.
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub struct NotifyBroadcastReply {
+    pub answer: NotifyAnswer,
+    /// The receiver holds every event of the partition up to this position,
+    /// durably in its journal. `None` when it never saw the partition, or
+    /// when the message did not name one.
+    pub through: Option<crate::event::cdc::CdcOffset>,
+}
+
+/// What the receiver did with a [`NotifyBroadcastMsg`].
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub enum NotifyAnswer {
+    /// The journal holds the run, or the message is a probe. The sender
+    /// goes on from the reply's `through`.
+    Taken,
+    /// The receiver took nothing of the run. The sender must send the
+    /// stretch again.
+    Refused { detail: String },
+    /// No node can take the message: it did not decode, or it names an
+    /// unknown partition kind. The sender stops feeding the partition.
+    Rejected { detail: String },
 }
 
 /// `NotifyBroadcastMsg::partition_kind` of a data group's feed.
@@ -170,6 +198,36 @@ mod tests {
     }
 
     #[test]
+    fn notify_broadcast_reply_roundtrip() {
+        use crate::event::cdc::CdcOffset;
+        let replies = [
+            NotifyBroadcastReply {
+                answer: NotifyAnswer::Taken,
+                through: Some(CdcOffset::data_event(0, 4, 2)),
+            },
+            NotifyBroadcastReply {
+                answer: NotifyAnswer::Refused {
+                    detail: "journal".into(),
+                },
+                through: Some(CdcOffset::whole_index(3)),
+            },
+            NotifyBroadcastReply {
+                answer: NotifyAnswer::Rejected {
+                    detail: "kind".into(),
+                },
+                through: None,
+            },
+        ];
+        for reply in replies {
+            let bytes = zerompk::to_msgpack_vec(&reply).expect("encode");
+            let decoded: NotifyBroadcastReply = zerompk::from_msgpack(&bytes).expect("decode");
+            assert_eq!(decoded, reply);
+        }
+        let empty: Result<NotifyBroadcastReply, _> = zerompk::from_msgpack(&[]);
+        assert!(empty.is_err(), "an empty payload is no reply");
+    }
+
+    #[test]
     fn notify_broadcast_roundtrip() {
         use crate::event::cdc::CdcOffset;
         let msg = NotifyBroadcastMsg {
@@ -188,6 +246,7 @@ mod tests {
                 timestamp_ms: 1700000000000,
                 lsn: 500,
             }],
+            probe: false,
         };
         let bytes = zerompk::to_msgpack_vec(&msg).unwrap();
         let decoded: NotifyBroadcastMsg = zerompk::from_msgpack(&bytes).unwrap();

@@ -21,7 +21,7 @@ use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 
 use super::super::super::index_registry::{
-    IndexRegistration, propose_delete_index_record, propose_index_record,
+    IndexRegistration, index_name_holder, propose_delete_index_record, propose_index_record,
 };
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::refuse_gate::RefusingReadGate;
@@ -93,6 +93,25 @@ pub async fn create_sorted_index(
         ));
     }
 
+    // The registry is keyed by name: a second index under a taken name
+    // replaces the first one's record and leaves it undroppable.
+    if let Some(taken) = index_name_holder(
+        state,
+        database_id,
+        tenant_id,
+        &index_name,
+        "CREATE SORTED INDEX",
+    )? {
+        return Err(ddl_err(
+            "42710",
+            format!(
+                "CREATE SORTED INDEX: index '{index_name}' already exists on '{}' ({})",
+                taken.collection,
+                taken.kind.display_type()
+            ),
+        ));
+    }
+
     RefusingReadGate::open(state, identity, database_id, &collection, CREATE_WHAT)?;
 
     let fields: Vec<String> = sort_columns.iter().map(|(name, _)| name.clone()).collect();
@@ -154,6 +173,7 @@ pub async fn create_sorted_index(
             kind: IndexKind::Sorted,
             collection: &collection,
             fields,
+            state: crate::control::security::catalog::IndexRecordState::Ready,
         },
     )
     .await?;
@@ -261,7 +281,15 @@ pub async fn drop_sorted_index(
         drop_in_engine(state, &target, &index_name).await?;
     }
 
-    propose_delete_index_record(state, database_id, tenant_id, &index_name, &collection).await?;
+    propose_delete_index_record(
+        state,
+        database_id,
+        tenant_id,
+        &index_name,
+        &collection,
+        IndexKind::Sorted,
+    )
+    .await?;
     crate::control::server::shared::ddl::owner::propose_delete_owner(
         state,
         IndexKind::Sorted.owner_object_type(),

@@ -86,13 +86,13 @@ async fn ollp_implicit_edge_update_moves_edge_cross_node() {
 
     // PRE-UPDATE: IN-direction traversal from `hub_old` must reach all sources on
     // every node — proves the cross-shard implicit edges dual-homed onto `hub_old`.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub_old"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                cluster.nodes[idx]
+                node
                     .traversed_node_ids(
                         "GRAPH TRAVERSE IN 'ollp_impl_edge_upd' FROM 'hub_old' DEPTH 1 LABEL 'l' DIRECTION in",
                     )
@@ -133,13 +133,13 @@ async fn ollp_implicit_edge_update_moves_edge_cross_node() {
         .await;
 
     // POST-UPDATE: old reverse copies cleaned up — `hub_old` should reach nothing.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse traversal from hub_old finds no sources after update"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                let ids = cluster.nodes[idx].traversed_node_ids(
+                let ids = node.traversed_node_ids(
                     "GRAPH TRAVERSE IN 'ollp_impl_edge_upd' FROM 'hub_old' DEPTH 1 LABEL 'l' DIRECTION in",
                 );
                 // Only the start node `hub_old` itself should remain (or nothing).
@@ -152,13 +152,13 @@ async fn ollp_implicit_edge_update_moves_edge_cross_node() {
     // POST-UPDATE: new reverse copies placed cross-shard — `hub_new` must reach
     // all sources. This is the genuine OLLP proof: a fast-path BulkUpdate never
     // emits cross-shard EdgePut ops so hub_new would be unreachable without OLLP.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse traversal from hub_new reaches all {SOURCES} sources"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                let ids = cluster.nodes[idx].traversed_node_ids(
+                let ids = node.traversed_node_ids(
                     "GRAPH TRAVERSE IN 'ollp_impl_edge_upd' FROM 'hub_new' DEPTH 1 LABEL 'l' DIRECTION in",
                 );
                 (0..SOURCES).all(|i| ids.iter().any(|id| id == &format!("src_{i}")))

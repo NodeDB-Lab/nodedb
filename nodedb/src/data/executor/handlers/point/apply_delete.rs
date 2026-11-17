@@ -157,12 +157,15 @@ impl CoreLoop {
             {
                 run_delete_enforcement(
                     self,
-                    database_id,
-                    tid,
-                    collection,
-                    config,
-                    slot.predecessor.as_deref(),
-                    resolved_targets,
+                    DeleteEnforcement {
+                        database_id,
+                        tid,
+                        collection,
+                        config,
+                        old_value: slot.predecessor.as_deref(),
+                        resolved_targets,
+                        judged_at_ms: self.enforcement_instant_ms(),
+                    },
                 )?;
             }
             return self.apply_history_delete(
@@ -193,12 +196,15 @@ impl CoreLoop {
         {
             run_delete_enforcement(
                 self,
-                database_id,
-                tid,
-                collection,
-                config,
-                prior.as_deref(),
-                resolved_targets,
+                DeleteEnforcement {
+                    database_id,
+                    tid,
+                    collection,
+                    config,
+                    old_value: prior.as_deref(),
+                    resolved_targets,
+                    judged_at_ms: self.enforcement_instant_ms(),
+                },
             )?;
         }
         let mut version_sys_from: Option<i64> = None;
@@ -206,7 +212,13 @@ impl CoreLoop {
         if let Some(ref body) = prior {
             let sys_from = match carried_sys_from {
                 Some(sys_from) => sys_from,
-                None => self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
+                None => self.row_version_ordinal_in_txn(
+                    txn,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                )?,
             };
             version_sys_from = Some(sys_from);
             // A `body` that does not decode fails the delete: its index
@@ -227,7 +239,16 @@ impl CoreLoop {
         // or a fresh one when no row was stored.
         let index_ordinal = match version_sys_from {
             Some(sys_from) => sys_from,
-            None => self.bitemporal_ordinal(),
+            None => match carried_sys_from {
+                Some(sys_from) => sys_from,
+                None => self.row_version_ordinal_in_txn(
+                    txn,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                )?,
+            },
         };
 
         // Cascade 1: Remove from full-text inverted index. The inverted
@@ -241,16 +262,21 @@ impl CoreLoop {
         // would commit an inverted index that disagrees with itself and with
         // the removed row. Returning drops the caller's txn un-committed, which
         // reverses the partial strip along with the row removal.
-        if let Err(e) = self.inverted.remove_document_in_txn(
-            txn,
-            crate::engine::sparse::inverted::IndexDocScope {
-                database_id,
-                tid: crate::types::TenantId::new(tid),
-                collection,
-                surrogate,
-                ordinal: index_ordinal,
-            },
-        ) {
+        //
+        // A collection with no declared text field and no open rebuild holds
+        // no inverted-index state, so the delete touches none, as a put does.
+        if self.removal_touches_text(database_id, tid, collection)
+            && let Err(e) = self.inverted.remove_document_in_txn(
+                txn,
+                crate::engine::sparse::inverted::IndexDocScope {
+                    database_id,
+                    tid: crate::types::TenantId::new(tid),
+                    collection,
+                    surrogate,
+                    ordinal: index_ordinal,
+                },
+            )
+        {
             warn!(core = self.core_id, %collection, %document_id, error = %e, "inverted index removal failed; rejecting the delete");
             return Err(e);
         }
@@ -352,19 +378,37 @@ impl CoreLoop {
     }
 }
 
+/// The delete being admitted, and the pre-image it is judged against.
+pub(in crate::data::executor) struct DeleteEnforcement<'a> {
+    pub database_id: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub config: &'a crate::engine::document::store::CollectionConfig,
+    /// The row as currently stored, when one exists.
+    pub old_value: Option<&'a [u8]>,
+    /// Read by period-lock enforcement to find its reference row.
+    pub resolved_targets: &'a [ResolvedSumTarget],
+    /// The instant retention is judged at, in ms since the Unix epoch.
+    pub judged_at_ms: i64,
+}
+
 /// Stateless DELETE enforcement, unified across the autocommit
 /// (`apply_point_delete`) and transactional (`tx_point_delete`) paths.
 /// These checks have no persistent side effect, so a violation here
 /// simply aborts before the write.
 pub(in crate::data::executor) fn run_delete_enforcement(
     core: &CoreLoop,
-    database_id: u64,
-    tid: u64,
-    collection: &str,
-    config: &crate::engine::document::store::CollectionConfig,
-    old_value: Option<&[u8]>,
-    resolved_targets: &[ResolvedSumTarget],
+    p: DeleteEnforcement<'_>,
 ) -> crate::Result<()> {
+    let DeleteEnforcement {
+        database_id,
+        tid,
+        collection,
+        config,
+        old_value,
+        resolved_targets,
+        judged_at_ms,
+    } = p;
     append_only::check_point_delete(collection, &config.enforcement)
         .map_err(map_enforcement_error)?;
     if let Some(ref pl) = config.enforcement.period_lock
@@ -381,7 +425,115 @@ pub(in crate::data::executor) fn run_delete_enforcement(
         .map_err(map_enforcement_error)?;
     }
     let created_at = old_value.and_then(retention::extract_created_at_secs);
-    retention::check_delete_allowed(collection, &config.enforcement, created_at)
+    retention::check_delete_allowed(collection, &config.enforcement, created_at, judged_at_ms)
         .map_err(map_enforcement_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::StorageKey;
+
+    use super::*;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::doc_format;
+    use crate::engine::durability_gate::GatedDatabase;
+    use crate::engine::sparse::btree_versioned::{TAG_LIVE, encode_value, versioned_doc_key};
+    use crate::engine::sparse::inverted::{DocumentText, FtsInstallOutcome, FtsRebuildBounds};
+    use crate::types::{DatabaseId, TenantId};
+
+    const DB: u64 = 0;
+    const TID: u64 = 1;
+    const COLL: &str = "no_text";
+
+    /// Register `COLL` with no declared text field, store row `id`, and
+    /// leave a text row for it in the inverted index.
+    fn seed(core: &mut CoreLoop, id: u32) {
+        core.doc_configs.insert(
+            (DatabaseId::new(DB), TenantId::new(TID), COLL.to_string()),
+            crate::engine::document::store::CollectionConfig::new(COLL),
+        );
+        let key = StorageKey::for_surrogate(Surrogate::new(id));
+        let body = doc_format::encode_to_msgpack(&serde_json::json!({"title": "alpha"}));
+        let value = encode_value(TAG_LIVE, i64::MIN, i64::MAX, &body);
+        core.sparse
+            .put_versioned_document_raw(&versioned_doc_key(DB, TID, COLL, &key, 10), &value)
+            .expect("store version");
+        let text = DocumentText::from_fields([("title".to_string(), "alpha".to_string())]);
+        core.inverted
+            .index_document(DB, TenantId::new(TID), COLL, Surrogate::new(id), &text)
+            .expect("text row");
+    }
+
+    fn delete(core: &mut CoreLoop, id: u32) {
+        let txn = core.sparse.begin_write().expect("txn");
+        let document_id = id.to_string();
+        core.apply_point_delete(
+            &txn,
+            PointDeleteParams {
+                database_id: DB,
+                tid: TID,
+                collection: COLL,
+                document_id: &document_id,
+                surrogate: Surrogate::new(id),
+                user_roles: &[],
+                enforce: false,
+                resolved_targets: &[],
+            },
+        )
+        .expect("delete");
+        txn.commit().expect("commit");
+    }
+
+    fn text_docs(core: &CoreLoop) -> u32 {
+        core.inverted
+            .corpus_stats(DB, TenantId::new(TID), COLL)
+            .expect("stats")
+            .0
+    }
+
+    /// A delete on a collection with no declared text field writes nothing
+    /// to the text tables. While a rebuild of it is open, the delete still
+    /// removes the text and notes the document in the journal.
+    #[test]
+    fn a_delete_with_no_text_field_leaves_the_text_tables_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        seed(&mut core, 1);
+        seed(&mut core, 2);
+        assert_eq!(text_docs(&core), 2);
+
+        delete(&mut core, 1);
+        assert_eq!(
+            text_docs(&core),
+            2,
+            "the delete wrote nothing to the text tables"
+        );
+
+        let ticket = core
+            .inverted
+            .begin_rebuild(DB, TenantId::new(TID), COLL, FtsRebuildBounds::DEFAULT)
+            .expect("open a rebuild");
+        delete(&mut core, 2);
+        assert_eq!(text_docs(&core), 1, "an open rebuild keeps the removal");
+
+        let path = dir.path().join("scratch.redb");
+        let scratch = std::sync::Arc::new(GatedDatabase::create(&path).expect("scratch"));
+        // A build opens its scratch as an index, which creates every table.
+        crate::engine::sparse::inverted::InvertedIndex::open(
+            std::sync::Arc::clone(&scratch),
+            crate::data::executor::core_loop::test_governor(),
+        )
+        .expect("scratch tables");
+        let mut noted = Vec::new();
+        let outcome = core
+            .inverted
+            .install_rebuild(ticket.finish(scratch, path), &mut |_, touched| {
+                noted.extend_from_slice(touched);
+                Ok(())
+            })
+            .expect("install");
+        assert!(matches!(outcome, FtsInstallOutcome::Installed { .. }));
+        assert_eq!(noted, vec![2], "the journal noted the delete");
+    }
 }

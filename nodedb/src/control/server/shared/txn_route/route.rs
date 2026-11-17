@@ -12,7 +12,9 @@
 //!    into the point ops it writes, and so does a
 //!    predicate `UPDATE` or `DELETE` whose collection fires a row body
 //!    (`predicate`). Each op takes the steps below on its own.
-//! 2. A point write fires its INSTEAD OF and BEFORE bodies (`row_triggers`).
+//! 2. A point write that asks for `RETURNING` rows its staging cannot
+//!    answer is refused. A point write fires its INSTEAD OF and BEFORE
+//!    bodies (`row_triggers`).
 //! 3. A write to a shadowed clone takes its copy-on-write steps, whose
 //!    tombstones and copy-up mappings commit with the transaction.
 //! 4. The write stages into the transaction's overlay, or buffers for COMMIT.
@@ -143,7 +145,6 @@ where
     F: Fn(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
-    refuse_unanswerable_returning(&task.plan)?;
     if ctx.fire_triggers
         && let Some((collection, named)) = task_events(&task)
     {
@@ -158,10 +159,20 @@ where
 
     let sessions = ctx.txn.sessions;
     let session_id = ctx.txn.session_id;
+    // An expanded statement that asks for rows answers its columns even when
+    // it wrote no row.
+    let answers_rows = matches!(describe_plan(&task.plan), PlanKind::ReturningRows);
     if let Some((ops, kind)) =
         expand_in_tx(ctx.state, ctx.identity, sessions, session_id, &mut task).await?
     {
-        return route_expanded(ctx, ops, kind, true, &dispatch).await;
+        return route_expanded(
+            ctx,
+            ops,
+            kind,
+            ExpandedFrom::Statement { answers_rows },
+            &dispatch,
+        )
+        .await;
     }
     // A predicate write whose collection fires a row body writes each row
     // it matches by its primary key, so every row's bodies fire.
@@ -170,19 +181,36 @@ where
             .await
             .map_err(StagingGateError::Dispatch)?
     {
-        return route_expanded(ctx, ops, kind, false, &dispatch).await;
+        return route_expanded(
+            ctx,
+            ops,
+            kind,
+            ExpandedFrom::Predicate { answers_rows },
+            &dispatch,
+        )
+        .await;
     }
     route_point(ctx, task, false, &dispatch).await
 }
 
+/// Which expansion a statement task's point writes came from.
+#[derive(Clone, Copy)]
+enum ExpandedFrom {
+    /// An in-transaction expander (see `fire_before`).
+    Statement { answers_rows: bool },
+    /// A predicate write whose collection fires a row body.
+    Predicate { answers_rows: bool },
+}
+
 /// Route the point writes one statement task expanded to, and answer with
-/// their summed count and rows under the statement's `kind`. `expanded`
-/// marks the ops an in-transaction expander emitted (see `fire_before`).
+/// their summed count and rows under the statement's `kind`. A statement
+/// that asks for rows and staged none answers one empty reply: its columns
+/// and no row.
 async fn route_expanded<F, Fut>(
     ctx: &TxnTaskContext<'_>,
     ops: Vec<PhysicalTask>,
     kind: StagedTagKind,
-    expanded: bool,
+    from: ExpandedFrom,
     dispatch: &F,
 ) -> Result<TxnTaskOutcome, StagingGateError>
 where
@@ -191,6 +219,10 @@ where
 {
     // A balance task the expansion appended stages like any op, but its count
     // describes a row the statement never named.
+    let (expanded, answers_rows) = match from {
+        ExpandedFrom::Statement { answers_rows } => (true, answers_rows),
+        ExpandedFrom::Predicate { answers_rows } => (false, answers_rows),
+    };
     let has_user_write = plans_have_user_write(ops.iter().map(|op| &op.plan));
     let mut affected = 0usize;
     let mut returning_rows = Vec::new();
@@ -221,6 +253,9 @@ where
             }
         }
     }
+    if answers_rows && returning_rows.is_empty() {
+        returning_rows.push(Vec::new());
+    }
     Ok(TxnTaskOutcome::Staged(StagedWriteOutcome {
         kind: tag.fold(kind),
         affected,
@@ -240,6 +275,9 @@ where
     F: Fn(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
+    // Checked on each point write, after its statement expanded: an
+    // expanded op answers `RETURNING` from the row it stages.
+    refuse_unanswerable_returning(&task.plan)?;
     let scope = TriggerScope {
         database_id: task.database_id,
         tenant_id: task.tenant_id,
@@ -339,11 +377,13 @@ async fn fire_after_changed(
     }
 }
 
-/// Refuse a write that asks for `RETURNING` rows its transaction cannot
-/// answer at the statement, before anything stages. A Document point write,
-/// `UPSERT`, predicate `UPDATE` / `DELETE` and a `BatchInsert` or
-/// `BatchUpsert` page answer from the rows they stage. Every other write
-/// stages or buffers without a row image.
+/// Refuse a point write that asks for `RETURNING` rows its transaction
+/// cannot answer at the statement, before it stages. A Document point
+/// write, `UPSERT`, predicate `UPDATE` / `DELETE` and a `BatchInsert` or
+/// `BatchUpsert` page answer from the rows they stage. So do the point
+/// writes an `INSERT ... SELECT`, `UPDATE ... FROM` or `MERGE` expands to,
+/// which reach here one by one. Every other write stages or buffers without
+/// a row image.
 fn refuse_unanswerable_returning(plan: &PhysicalPlan) -> Result<(), StagingGateError> {
     let answers = stages_returning(plan)
         || matches!(

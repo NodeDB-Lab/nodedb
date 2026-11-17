@@ -76,8 +76,11 @@ async fn local_row_images(node: &TestClusterNode, collection: &str) -> Vec<serde
         .into_iter()
         .filter(|(key, _)| key_collection(key) == Some(collection))
         .map(|(key, value)| {
-            nodedb_types::json_from_msgpack(&value)
-                .unwrap_or_else(|e| panic!("stored row {key} decodes: {e}"))
+            // A stored row is an object body, plain or native.
+            serde_json::Value::from(
+                nodedb_types::decode_object(&value)
+                    .unwrap_or_else(|e| panic!("stored row {key} decodes: {e}")),
+            )
         })
         .collect()
 }

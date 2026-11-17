@@ -509,7 +509,7 @@ mod tests {
             .write_set
             .iter()
             .filter_map(|entry| match &entry.effect {
-                RowEffect::Put { version, .. } => Some(version.sys_from),
+                RowEffect::InstalledPut { image, .. } => Some(image.version.sys_from),
                 _ => None,
             })
             .collect();

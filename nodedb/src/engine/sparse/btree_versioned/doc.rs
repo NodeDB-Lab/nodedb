@@ -319,33 +319,15 @@ impl SparseEngine {
         coll: &str,
         mut visit: impl FnMut(&StorageKey, i64, Option<&[u8]>) -> crate::Result<()>,
     ) -> crate::Result<()> {
-        let lo = super::key::coll_prefix(database_id, tenant, coll);
-        let hi = super::key::coll_prefix_end(database_id, tenant, coll);
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
-        let t = txn
-            .open_table(DOCUMENTS_VERSIONED)
-            .map_err(|e| redb_err("open table", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?;
-        for entry in range {
-            let (k, v) = entry.map_err(|e| redb_err("entry", e))?;
-            let key_str = k.value();
-            let invalid = || {
-                crate::engine::sparse::btree::invalid_storage_key_err(
-                    crate::engine::sparse::btree::KeyedTable::DocumentsVersioned,
-                    coll,
-                    key_str,
-                )
-            };
-            let (id_part, suffix) = key_str.rsplit_once('\x00').ok_or_else(invalid)?;
-            let seg = id_part.strip_prefix(lo.as_str()).ok_or_else(invalid)?;
-            let doc_id = StorageKey::parse(seg).ok_or_else(invalid)?;
-            let sys_from = suffix.parse::<i64>().map_err(|_| invalid())?;
-            let decoded = decode_value(v.value())?;
-            visit(&doc_id, sys_from, decoded.is_live().then_some(decoded.body))?;
-        }
-        Ok(())
+        let table = super::version_walk::open_documents(&txn)?;
+        super::version_walk::for_each_collection_version(
+            &table,
+            database_id,
+            tenant,
+            coll,
+            &mut visit,
+        )
     }
 
     /// [`Self::versioned_get_current`] read inside `txn`, so it sees the
@@ -373,6 +355,27 @@ impl SparseEngine {
             None,
         )?
         .map(|(_, body)| body))
+    }
+
+    /// Read the newest version key in the caller's transaction, including pending tombstones and erasures.
+    pub fn versioned_latest_sys_from_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        doc_id: &StorageKey,
+    ) -> crate::Result<Option<i64>> {
+        let table = txn
+            .open_table(DOCUMENTS_VERSIONED)
+            .map_err(|error| redb_err("open table", error))?;
+        let row = RowRef {
+            database_id,
+            tenant,
+            coll,
+            doc_id,
+        };
+        Ok(visible_version(&table, row, None)?.map(|(sys_from, _)| sys_from))
     }
 
     /// The system-time ordinal of the newest stored version of `doc_id`,
@@ -871,5 +874,90 @@ mod tests {
         let r = e.versioned_remove_in_txn(&txn, 1, 1, "c", &key(999), 999);
         assert!(r.is_ok());
         txn.commit().unwrap();
+    }
+    #[test]
+    fn latest_version_in_writer_includes_pending_put_delete_and_abort() {
+        let (engine, _dir) = open_temp();
+        put(&engine, "pending", 1, 10, b"committed");
+        let txn = engine.begin_write().unwrap();
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(10)
+        );
+        for sys_from in [20, 15] {
+            engine
+                .versioned_put_in_txn(
+                    &txn,
+                    VersionedPut {
+                        database_id: 1,
+                        tenant: 1,
+                        coll: "pending",
+                        doc_id: &key(1),
+                        sys_from,
+                        valid_from_ms: i64::MIN,
+                        valid_until_ms: i64::MAX,
+                        body: b"pending",
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(20)
+        );
+        engine
+            .versioned_tombstone_in_txn(&txn, 1, 1, "pending", &key(1), 30)
+            .unwrap();
+        assert!(
+            engine
+                .versioned_get_current_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(30)
+        );
+        {
+            let mut table = txn.open_table(DOCUMENTS_VERSIONED).unwrap();
+            table
+                .insert(
+                    versioned_doc_key(1, 1, "pending", &key(1), 40).as_str(),
+                    encode_value(TAG_GDPR_ERASED, 0, 0, &[]).as_slice(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(40)
+        );
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from(1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(10)
+        );
+        drop(txn);
+        let txn = engine.begin_write().unwrap();
+        assert_eq!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(1))
+                .unwrap(),
+            Some(10)
+        );
+        assert!(
+            engine
+                .versioned_latest_sys_from_in_txn(&txn, 1, 1, "pending", &key(2))
+                .unwrap()
+                .is_none()
+        );
     }
 }

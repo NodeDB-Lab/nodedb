@@ -169,7 +169,13 @@ async fn native_writes_on_a_remote_node_plan_with_the_home_surrogate() {
                     .iter()
                     .map(|id| BatchDocument {
                         id: (*id).to_string(),
-                        fields: serde_json::json!({ "name": id }),
+                        fields: nodedb_types::Value::Object(
+                            [(
+                                "name".to_string(),
+                                nodedb_types::Value::String((*id).to_string()),
+                            )]
+                            .into(),
+                        ),
                     })
                     .collect(),
             ),

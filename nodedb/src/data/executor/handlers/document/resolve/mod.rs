@@ -4,6 +4,7 @@
 
 pub(in crate::data::executor) mod apply;
 mod apply_row;
+mod apply_state;
 mod bulk;
 mod context;
 pub(in crate::data::executor) mod dispatch;
@@ -11,3 +12,6 @@ mod point;
 mod txn_rows;
 mod upsert;
 mod upsert_batch;
+
+#[cfg(test)]
+mod tests;

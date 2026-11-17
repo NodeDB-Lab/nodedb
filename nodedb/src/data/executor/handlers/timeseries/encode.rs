@@ -98,10 +98,17 @@ fn group_key_value(cell: Option<&GroupCell>, kind: TsGroupKeyKind) -> crate::Res
         Some(GroupCell::Float(bits)) => rmpv::Value::F64(f64::from_bits(*bits)),
         Some(GroupCell::Int(n)) => match kind {
             TsGroupKeyKind::Instant(k) => rmpv_time_cell(TimeKind::Instant(k), *n)?,
-            TsGroupKeyKind::Integer | TsGroupKeyKind::Float | TsGroupKeyKind::Text => {
-                rmpv::Value::Integer((*n).into())
-            }
+            TsGroupKeyKind::Integer
+            | TsGroupKeyKind::Float
+            | TsGroupKeyKind::Text
+            | TsGroupKeyKind::Decimal
+            | TsGroupKeyKind::Uuid
+            | TsGroupKeyKind::Bool => rmpv::Value::Integer((*n).into()),
         },
+        // A decimal, UUID or boolean key carries its own type.
+        Some(cell @ (GroupCell::Decimal(_) | GroupCell::Uuid(_) | GroupCell::Bool(_))) => {
+            value_to_rmpv(&cell.to_value())
+        }
     })
 }
 
@@ -195,7 +202,7 @@ pub(in crate::data::executor) fn encode_grouped_results(
             let val = match op.as_str() {
                 "count" => rmpv::Value::Integer((accum.count as i64).into()),
                 "sum" => value_to_rmpv(&accum.sum_value()?),
-                "avg" => accum.avg_f64()?.map_or(rmpv::Value::Nil, rmpv::Value::F64),
+                "avg" => value_to_rmpv(&accum.avg_value()?),
                 "min" => extreme_value(accum.min(), kind)?,
                 "max" => extreme_value(accum.max(), kind)?,
                 "first" => extreme_value(accum.first(), kind)?,
@@ -231,7 +238,30 @@ pub(in crate::data::executor) fn encode_grouped_results(
         rows = kept;
     }
 
-    super::sort::sort_rows(&mut rows, sort_keys, crs)?;
+    // A DECIMAL cell is its text in a row: a key over a decimal GROUP BY
+    // column, over SUM / AVG / MIN / MAX / FIRST / LAST of a decimal column,
+    // or over AVG of an integer column (a numeric, as in PostgreSQL), orders
+    // by value.
+    let decimal_keys: Vec<bool> = sort_keys
+        .iter()
+        .map(|key| {
+            key.as_column().is_some_and(|field| {
+                let grouped = group_by.iter().enumerate().any(|(i, name)| {
+                    name == field && group_key_kinds.get(i) == Some(&TsGroupKeyKind::Decimal)
+                });
+                let aggregated = agg_keys.iter().enumerate().any(|(j, name)| {
+                    let kind = aggregate_kinds.get(j);
+                    let op = aggregates[j].0.as_str();
+                    name == field
+                        && ((kind == Some(&TsGroupKeyKind::Decimal)
+                            && matches!(op, "sum" | "avg" | "min" | "max" | "first" | "last"))
+                            || (kind == Some(&TsGroupKeyKind::Integer) && op == "avg"))
+                });
+                grouped || aggregated
+            })
+        })
+        .collect();
+    super::sort::sort_rows_with(&mut rows, sort_keys, &decimal_keys, crs)?;
     rows.truncate(limit);
     // HAVING and the sort keys read the encoded keys. The output names are
     // applied last.
@@ -450,7 +480,12 @@ mod tests {
             rmpv::Value::Integer(ABOVE.into())
         );
         assert_eq!(*cell(&cells, "last(v)"), rmpv::Value::Integer(AT.into()));
-        assert_eq!(*cell(&cells, "avg(v)"), rmpv::Value::F64(AT as f64));
+        // PostgreSQL: avg over these bigints is numeric 9007199254740992.5000,
+        // carried as its text like every decimal cell.
+        assert_eq!(
+            *cell(&cells, "avg(v)"),
+            rmpv::Value::String("9007199254740992.5000".into())
+        );
     }
 
     #[test]

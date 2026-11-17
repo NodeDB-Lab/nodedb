@@ -3,13 +3,15 @@
 //! Top-level scatter orchestration, result feeding, frontier resolution,
 //! dedup/encode, and shared utilities used across the scatter sub-modules.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::bridge::envelope::Payload;
 use crate::control::gateway::RouteDecision;
 use crate::control::gateway::live_leaders::resolve_live_decision;
 use crate::control::state::SharedState;
-use crate::engine::graph::pattern::executor::{UnresolvedExpansion, VarLenResume, rows_to_msgpack};
+use crate::engine::graph::pattern::executor::{
+    BindingRow, UnresolvedExpansion, VarLenResume, row_fingerprint, rows_to_msgpack,
+};
 use crate::types::{DatabaseId, TenantId, VShardId};
 use nodedb_cluster::distributed_graph::{
     DistributedMatchCoordinator, PatternContinuation, ResolvedContinuationArgs, ShardMatchResult,
@@ -59,7 +61,7 @@ pub struct MatchScatterOutcome {
 /// a cross-shard ghost.
 pub(super) struct TaggedShardResult {
     pub(super) emitting_node: u64,
-    pub(super) rows: Vec<HashMap<String, String>>,
+    pub(super) rows: Vec<BindingRow>,
     pub(super) frontier: Vec<UnresolvedExpansion>,
     /// The variable-length truncation resume cursor(s) this shard produced,
     /// tagged (by `emitting_node`) like the frontier. A node fanned across
@@ -253,7 +255,7 @@ pub(super) fn feed_result(
     // (anchor + frontier + depth) already dispatched this scatter is skipped so
     // visited-less boundary continuations converge instead of fanning out.
     for cursor in resume {
-        if !dispatched_seeds.insert(resume_seed_key(&cursor)) {
+        if !dispatched_seeds.insert(resume_seed_key(&cursor)?) {
             continue;
         }
         if let Some(pending) = resume_to_pending(state, cursor)? {
@@ -326,37 +328,22 @@ fn frontier_to_continuations(
     Ok(out)
 }
 
-/// Decode a bare msgpack rows array (the shape `rows_to_msgpack` produces and
-/// `unwrap_match_envelope` returns) into binding rows. An empty payload is an
-/// empty row set.
-pub(super) fn decode_rows(payload: &Payload) -> crate::Result<Vec<HashMap<String, String>>> {
-    if payload.is_empty() {
-        return Ok(Vec::new());
-    }
-    zerompk::from_msgpack::<Vec<HashMap<String, String>>>(payload.as_ref()).map_err(|e| {
-        crate::Error::Codec {
-            detail: format!("match scatter: invalid rows array: {e}"),
-        }
-    })
+/// Decode a bare msgpack rows array into typed binding rows
+/// ([`crate::control::server::graph_dispatch::decode_match_rows`]).
+pub(super) fn decode_rows(payload: &Payload) -> crate::Result<Vec<BindingRow>> {
+    crate::control::server::graph_dispatch::decode_match_rows(payload.as_ref())
 }
 
-/// Dedup completed rows by a canonical sorted-(k,v) fingerprint and encode them
-/// into the bare msgpack array shape `match_payload_to_response` expects.
+/// Dedup completed rows by their canonical fingerprint and encode them into
+/// the bare msgpack array shape `match_payload_to_response` expects.
 ///
 /// Cross-shard union can legitimately overlap (undirected / edge cases), so we
 /// ALWAYS dedup — not only when `RETURN DISTINCT` was requested.
-fn dedup_and_encode(rows: &[HashMap<String, String>]) -> crate::Result<Payload> {
-    let mut seen: HashSet<Vec<(String, String)>> = HashSet::new();
-    let mut deduped: Vec<HashMap<String, String>> = Vec::with_capacity(rows.len());
+fn dedup_and_encode(rows: &[BindingRow]) -> crate::Result<Payload> {
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut deduped: Vec<BindingRow> = Vec::with_capacity(rows.len());
     for row in rows {
-        // BTreeMap gives a deterministic key order for the fingerprint.
-        let fingerprint: Vec<(String, String)> = row
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .collect();
-        if seen.insert(fingerprint) {
+        if seen.insert(row_fingerprint(row)?) {
             deduped.push(row.clone());
         }
     }

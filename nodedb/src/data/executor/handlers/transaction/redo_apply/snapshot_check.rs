@@ -38,48 +38,76 @@ impl CoreLoop {
         snapshot: i64,
     ) -> Result<(), ErrorCode> {
         let vshard = task.request.vshard_id.as_u32();
-        let unreadable = |error: crate::Error| ErrorCode::RetryableRefusal {
-            reason: format!(
-                "the serialization check of a committed redo on vShard {vshard} could not read \
-                 a store: {error}"
-            ),
-        };
+        let unreadable = |error: crate::Error| snapshot_store_unreadable(vshard, error);
         // A snapshot more than the commit window behind the commit's ordinal
         // can predate a history purge on some replica. The window check reads
         // only values the commit carries, so every replica refuses it alike.
         let ordinal = self.apply_scope.replicated_ordinal;
         if !self.snapshot_within_window(snapshot, ordinal) {
-            return Err(ErrorCode::SerializationConflict {
-                detail: format!(
-                    "the transaction's snapshot {snapshot} trails its commit ordinal {} by more \
-                     than the snapshot window on vShard {vshard}; retry the transaction",
-                    ordinal.unwrap_or_default()
-                ),
-            });
+            return Err(snapshot_outside_window(snapshot, ordinal, vshard));
         }
         if !self
             .txn_reads_unchanged(task, tid, reads, snapshot)
             .map_err(unreadable)?
         {
-            return Err(ErrorCode::SerializationConflict {
-                detail: format!(
-                    "a row the transaction read at snapshot {snapshot} holds a newer committed \
-                     version on vShard {vshard}; retry the transaction"
-                ),
-            });
+            return Err(read_moved_past_snapshot(snapshot, vshard));
         }
         if !self
             .txn_writes_unchanged(task, tid, &redo_writes(ops), snapshot)
             .map_err(unreadable)?
         {
-            return Err(ErrorCode::SerializationConflict {
-                detail: format!(
-                    "a row the transaction writes holds a committed version above its snapshot \
-                     {snapshot} on vShard {vshard}; retry the transaction"
-                ),
-            });
+            return Err(write_moved_past_snapshot(snapshot, vshard));
         }
         Ok(())
+    }
+}
+
+/// The refusal of a serialization check whose store did not read. The
+/// failure is this node's, not the record's, so the refusal is retryable.
+pub(super) fn snapshot_store_unreadable(vshard: u32, error: crate::Error) -> ErrorCode {
+    ErrorCode::RetryableRefusal {
+        reason: format!(
+            "the serialization check of a committed redo on vShard {vshard} could not read \
+             a store: {error}"
+        ),
+    }
+}
+
+/// The refusal of a commit whose snapshot trails its commit ordinal by more
+/// than the snapshot window.
+pub(super) fn snapshot_outside_window(
+    snapshot: i64,
+    ordinal: Option<i64>,
+    vshard: u32,
+) -> ErrorCode {
+    ErrorCode::SerializationConflict {
+        detail: format!(
+            "the transaction's snapshot {snapshot} trails its commit ordinal {} by more than \
+             the snapshot window on vShard {vshard}; retry the transaction",
+            ordinal.unwrap_or_default()
+        ),
+    }
+}
+
+/// The refusal of a commit that read a row which holds a committed version
+/// above its snapshot.
+pub(super) fn read_moved_past_snapshot(snapshot: i64, vshard: u32) -> ErrorCode {
+    ErrorCode::SerializationConflict {
+        detail: format!(
+            "a row the transaction read at snapshot {snapshot} holds a newer committed version \
+             on vShard {vshard}; retry the transaction"
+        ),
+    }
+}
+
+/// The refusal of a commit that writes a row which holds a committed
+/// version above its snapshot.
+pub(super) fn write_moved_past_snapshot(snapshot: i64, vshard: u32) -> ErrorCode {
+    ErrorCode::SerializationConflict {
+        detail: format!(
+            "a row the transaction writes holds a committed version above its snapshot \
+             {snapshot} on vShard {vshard}; retry the transaction"
+        ),
     }
 }
 
@@ -110,6 +138,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo")

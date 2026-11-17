@@ -316,7 +316,7 @@ fn install_async_proposer(
                                 group_id,
                                 through: log_index,
                             }],
-                            crate::control::server::shared::session::StatementDeadline::of_statement(&state).instant(),
+                            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(&state),
                         )
                         .await?;
                     }

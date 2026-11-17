@@ -9,6 +9,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             args: nodedb_sql::InsertVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::InsertVisitArgs {
+                returning: _,
                 collection,
                 engine: _engine,
                 route,
@@ -40,6 +41,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             args: nodedb_sql::UpsertVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::UpsertVisitArgs {
+                returning: _,
                 collection,
                 engine: _engine,
                 route,
@@ -76,6 +78,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             ttl_secs: u64,
             intent: nodedb_sql::types::plan::KvInsertIntent,
             on_conflict_updates: &[(String, nodedb_sql::types_expr::SqlExpr)],
+            _returning: Option<&nodedb_sql::types::ResolvedReturning>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::dml::convert_kv_insert(
                 collection,
@@ -95,7 +98,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             assignments: &[(String, nodedb_sql::types_expr::SqlExpr)],
             filters: &[nodedb_sql::types::filter::Filter],
             target_keys: &[nodedb_sql::types_expr::SqlValue],
-            returning: bool,
+            returning: Option<&nodedb_sql::types::ResolvedReturning>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::dml::convert_update(super::super::dml::UpdateParams {
                 collection,
@@ -103,7 +106,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
                 assignments,
                 filters,
                 target_keys,
-                returning,
+                returning: returning.is_some(),
                 tenant_id: self.tenant_id,
                 ctx: self.ctx,
             })
@@ -132,7 +135,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
                 source_join_col,
                 assignments,
                 target_filters,
-                returning,
+                returning: returning.is_some(),
                 tenant_id: self.tenant_id,
                 ctx: self.ctx,
             })
@@ -144,6 +147,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             engine: nodedb_sql::types::query::EngineType,
             filters: &[nodedb_sql::types::filter::Filter],
             target_keys: &[nodedb_sql::types_expr::SqlValue],
+            _returning: Option<&nodedb_sql::types::ResolvedReturning>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::dml::convert_delete(
                 collection,
@@ -160,6 +164,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             args: nodedb_sql::VectorPrimaryInsertVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::VectorPrimaryInsertVisitArgs {
+                returning: _,
                 collection,
                 field,
                 quantization,
@@ -199,6 +204,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             args: nodedb_sql::VectorPrimaryDeleteVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::VectorPrimaryDeleteVisitArgs {
+                returning: _,
                 collection,
                 field,
                 filters,
@@ -290,7 +296,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
                 source_join_col,
                 source_alias,
                 clauses,
-                returning,
+                returning: returning.is_some(),
                 tenant_id: self.tenant_id,
                 ctx: self.ctx,
             })

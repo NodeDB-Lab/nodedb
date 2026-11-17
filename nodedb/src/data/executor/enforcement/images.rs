@@ -112,4 +112,6 @@ pub(in crate::data::executor) struct EnforcementCtx<'a> {
     /// writes with no threaded LSN. Enforcements that persist derived state
     /// stamp it with this so replay can tell what it has already absorbed.
     pub wal_lsn: Option<Lsn>,
+    /// Who checks the actual final UNIQUE claims of derived target rows.
+    pub target_unique: crate::data::executor::enforcement::unique::UniqueJudge,
 }

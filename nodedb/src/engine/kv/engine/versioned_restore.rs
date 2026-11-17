@@ -8,7 +8,7 @@ use super::write_scope::KvWriteScope;
 use crate::engine::kv::engine_helpers::table_key;
 use crate::engine::kv::hash_table::KvSnapshotTable;
 use crate::engine::kv::history::HistoryVersion;
-use crate::engine::kv::{KvPutParams, UnboundKvWrite};
+use crate::engine::kv::{KvPutParams, KvWriteRefusal};
 
 impl KvEngine {
     /// The tenant-snapshot form of `collection`'s table: every live row at
@@ -37,8 +37,14 @@ impl KvEngine {
         params: KvPutParams<'_>,
         expire_at_ms: u64,
         sys_from: i64,
-    ) -> Result<(), UnboundKvWrite> {
-        UnboundKvWrite::check(params.collection, params.surrogate)?;
+    ) -> Result<(), KvWriteRefusal> {
+        // Both branches install the row, so it is checked before either.
+        KvWriteRefusal::check(
+            params.collection,
+            params.key,
+            params.value,
+            params.surrogate,
+        )?;
         self.observe_ordinal(sys_from);
         let tkey = table_key(params.database_id, params.tenant_id, params.collection);
         let next = self
@@ -179,6 +185,39 @@ mod tests {
 
     fn engine() -> KvEngine {
         KvEngine::new(NOW, 16, 0.75, 4, 64, 1000, 1024)
+    }
+
+    /// A row over the row limit is refused whichever branch would install
+    /// it: as the live row, or spliced into history below a newer version.
+    #[test]
+    fn a_restored_row_over_the_limit_refuses_in_both_branches() {
+        let mut e = engine();
+        let over = vec![0u8; nodedb_types::MAX_ROW_IMAGE_BYTES];
+        fn params(value: &[u8]) -> KvPutParams<'_> {
+            KvPutParams {
+                database_id: 0,
+                tenant_id: 1,
+                collection: "c",
+                key: b"k",
+                value,
+                ttl_ms: 0,
+                now_ms: NOW,
+                surrogate: Surrogate::new(3),
+            }
+        }
+        let live = e.restore_live_row(params(&over), 0, 10);
+        assert!(
+            matches!(live, Err(KvWriteRefusal::RowTooLarge(_))),
+            "{live:?}"
+        );
+        e.restore_live_row(params(b"v"), 0, 10)
+            .expect("a small row restores");
+        let spliced = e.restore_live_row(params(&over), 0, 5);
+        assert!(
+            matches!(spliced, Err(KvWriteRefusal::RowTooLarge(_))),
+            "{spliced:?}"
+        );
+        assert_eq!(e.get(0, 1, "c", b"k", NOW), Some(b"v".to_vec()));
     }
 
     fn restore(e: &mut KvEngine, value: &[u8], sys_from: i64) {

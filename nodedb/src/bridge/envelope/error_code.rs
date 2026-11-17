@@ -156,11 +156,6 @@ pub enum ErrorCode {
     /// Numeric value: `OLLP_RETRY_REQUIRED_CODE` (0xCAAD) — single source of
     /// truth defined in `control/cluster/calvin/executor/ollp/orchestrator.rs`.
     OllpRetryRequired,
-    /// The per-transaction staging overlay exceeded its per-core byte budget.
-    /// Surfaces as `program_limit_exceeded` (54000) so clients know the
-    /// transaction is too large to stage rather than that it hit an internal
-    /// fault.
-    TxnOverlayMemoryExceeded { limit: usize },
     /// Expression evaluation divided or took a modulus by zero. Distinct
     /// from `Internal` so it survives the Data Plane
     /// → pgwire boundary (including `result_stream::stream_response_channel`,
@@ -176,6 +171,13 @@ pub enum ErrorCode {
     /// different dimensions, an argument of the wrong type, a malformed
     /// JSONPath. Surfaces as SQLSTATE `22000` (`data_exception`).
     DataException { detail: String },
+    /// `ln` or `log` of zero or a negative number. SQLSTATE `2201E`
+    /// (`invalid_argument_for_logarithm`).
+    InvalidArgumentForLogarithm { detail: String },
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number. SQLSTATE `2201F`
+    /// (`invalid_argument_for_power_function`).
+    InvalidArgumentForPowerFunction { detail: String },
     /// A computed value lies outside the range of its result type, such as
     /// an exact integer SUM past the decimal range. SQLSTATE `22003`
     /// (`numeric_value_out_of_range`).
@@ -221,6 +223,11 @@ pub enum ErrorCode {
     /// values an exact median holds. `detail` names the limit and the
     /// next action. SQLSTATE `54000` (program_limit_exceeded).
     ProgramLimitExceeded { detail: String },
+    /// A configured execution limit refused the statement, such as the rows
+    /// a `RETURNING` response holds. The Control Plane renders it as
+    /// `crate::Error::ExecutionLimitExceeded`, with that error's public
+    /// code and SQLSTATE `54000` (program_limit_exceeded).
+    ExecutionLimitExceeded { detail: String },
     /// Text does not parse as the type of the column it is written to.
     /// `detail` names the column, the text and the type. SQLSTATE `22P02`
     /// (invalid_text_representation).

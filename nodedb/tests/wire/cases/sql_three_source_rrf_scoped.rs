@@ -22,6 +22,12 @@ async fn create_scoped_triple_collection(server: &TestServer, name: &str) {
         ))
         .await
         .unwrap();
+    server
+        .exec(&format!(
+            "CREATE SEARCH INDEX idx_{name}_fts ON {name} (title, body)"
+        ))
+        .await
+        .unwrap();
     for (id, tag, title, body, emb) in [
         ("s1", "keep", "plain", "alpha", "1.0, 0.0, 0.0"),
         ("s2", "drop", "alpha", "plain", "-1.0, 0.0, 0.0"),

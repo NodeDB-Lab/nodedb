@@ -120,6 +120,15 @@ impl CoreLoop {
             (proposed, None)
         };
         let sidecar = encode_sidecar(&fields)?;
+        crate::data::executor::row_image_native::check_vector_row(
+            collection,
+            || surrogate.as_u32().to_string(),
+            field,
+            vector.len(),
+            &fields,
+            sidecar.len(),
+        )
+        .map_err(ErrorCode::from)?;
 
         let response_payload = match returning {
             Some(spec) => {

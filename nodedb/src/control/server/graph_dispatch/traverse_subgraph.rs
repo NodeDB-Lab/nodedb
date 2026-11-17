@@ -1,60 +1,38 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `cross_core_traverse_subgraph` — BFS that emits the `GRAPH TRAVERSE`
-//! result: `{nodes:[{id,depth}], edges:[{from,to,label,properties}]}` JSON.
+//! result: `{nodes:[{id,depth}], edges:[{from,to,label,properties}]}`, one
+//! typed object.
 //!
-//! Distinct from [`super::bfs::cross_core_bfs_with_options`]: that returns
-//! only the visited node-id set (used by tree DDL aggregates that need a
-//! flat reachable set). Both clients decode this shape with one strict
-//! decoder, so a row of any other shape is an error on the client.
+//! The result is a [`Value`], so every edge property keeps its exact type: a
+//! native client reads a Decimal as a Decimal. pgwire and HTTP render the
+//! same object as JSON. Distinct from
+//! [`super::bfs::cross_core_bfs_with_options`]: that returns only the
+//! visited node-id set (used by tree DDL aggregates that need a flat
+//! reachable set). Both clients decode this shape with one strict decoder,
+//! so a row of any other shape is an error on the client.
 //!
 //! The shared per-hop scatter/decode/merge logic lives in
 //! [`super::hop::execute_neighbor_hop`]; this dispatcher layers depth
 //! tagging and edge recording on top.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nodedb_physical::physical_plan::GraphReadScope;
+use nodedb_types::Value;
 use nodedb_types::filter::MetadataFilter;
-use sonic_rs;
 
-use crate::bridge::envelope::Response;
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::bfs::{admit_by_name, walk_visit_cap, whole_hop};
-use super::helpers::ok_response;
 use super::hop::{NeighborHopParams, execute_neighbor_hop};
 use super::neighbor_rows::NeighborRow;
 use super::presence::{PresenceScope, graph_nodes_present};
 use super::shard_reads::ShardReadLog;
 use super::subgraph_edges::{EdgeOrientation, PhysicalEdges, WalkEdge};
-
-/// Wire-shape JSON node entry.
-#[derive(serde::Serialize)]
-struct WireNode<'a> {
-    id: &'a str,
-    depth: u8,
-}
-
-/// Wire-shape JSON edge entry. `properties` is the edge's property object
-/// at the walk's cut, `{}` for an edge without properties.
-#[derive(serde::Serialize)]
-struct WireEdge<'a> {
-    from: &'a str,
-    to: &'a str,
-    label: &'a str,
-    properties: serde_json::Value,
-}
-
-/// Wire-shape JSON envelope.
-#[derive(serde::Serialize)]
-struct WireSubGraph<'a> {
-    nodes: Vec<WireNode<'a>>,
-    edges: Vec<WireEdge<'a>>,
-}
 
 /// Parameters for [`cross_core_traverse_subgraph`].
 pub struct CrossCoreTraverseSubgraphParams<'a> {
@@ -84,7 +62,8 @@ pub struct CrossCoreTraverseSubgraphParams<'a> {
     pub read_scope: GraphReadScope,
 }
 
-/// BFS that returns a `{nodes,edges}` JSON subgraph for `GRAPH TRAVERSE`.
+/// BFS that returns the `{nodes,edges}` subgraph object for
+/// `GRAPH TRAVERSE`.
 ///
 /// A start no edge names is absent from the graph: the result is
 /// `{nodes:[], edges:[]}`.
@@ -105,44 +84,44 @@ pub struct CrossCoreTraverseSubgraphParams<'a> {
 pub async fn cross_core_traverse_subgraph(
     shared: &SharedState,
     params: CrossCoreTraverseSubgraphParams<'_>,
-) -> crate::Result<Response> {
-    let SubgraphWalk { node_order, edges } = walk_subgraph(shared, params).await?;
-
-    let wire_nodes: Vec<WireNode<'_>> = node_order
-        .iter()
-        .map(|(id, depth)| WireNode {
-            id: id.as_str(),
-            depth: *depth,
-        })
-        .collect();
-    let wire_edges: Vec<WireEdge<'_>> = edges.iter().map(wire_edge).collect();
-    let envelope = WireSubGraph {
-        nodes: wire_nodes,
-        edges: wire_edges,
-    };
-
-    let payload = sonic_rs::to_vec(&envelope).map_err(|e| crate::Error::Serialization {
-        format: "json".into(),
-        detail: e.to_string(),
-    })?;
-
-    Ok(ok_response(payload))
+) -> crate::Result<Value> {
+    let walk = walk_subgraph(shared, params).await?;
+    Ok(subgraph_value(walk))
 }
 
-/// One recorded edge as its wire entry. An edge read without properties
-/// carries `{}`.
-fn wire_edge(edge: &WalkEdge) -> WireEdge<'_> {
-    let properties = edge
-        .properties
-        .clone()
-        .map(|fields| serde_json::Value::from(nodedb_types::Value::Object(fields)))
-        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    WireEdge {
-        from: edge.src.as_str(),
-        to: edge.dst.as_str(),
-        label: edge.label.as_str(),
-        properties,
-    }
+/// The walk as the result object. A node entry is `{id, depth}`. An edge
+/// entry is `{from, to, label, properties}`, `properties` the edge's typed
+/// property object at the walk's cut, `{}` for an edge read without
+/// properties.
+fn subgraph_value(walk: SubgraphWalk) -> Value {
+    let SubgraphWalk { node_order, edges } = walk;
+    let nodes = node_order
+        .into_iter()
+        .map(|(id, depth)| {
+            Value::Object(HashMap::from([
+                ("id".to_string(), Value::String(id)),
+                ("depth".to_string(), Value::Integer(i64::from(depth))),
+            ]))
+        })
+        .collect();
+    let edges = edges
+        .into_iter()
+        .map(|edge| {
+            Value::Object(HashMap::from([
+                ("from".to_string(), Value::String(edge.src)),
+                ("to".to_string(), Value::String(edge.dst)),
+                ("label".to_string(), Value::String(edge.label)),
+                (
+                    "properties".to_string(),
+                    Value::Object(edge.properties.unwrap_or_default()),
+                ),
+            ]))
+        })
+        .collect();
+    Value::Object(HashMap::from([
+        ("nodes".to_string(), Value::Array(nodes)),
+        ("edges".to_string(), Value::Array(edges)),
+    ]))
 }
 
 /// What a subgraph walk found: every visited node in discovery order with
@@ -327,5 +306,59 @@ impl WalkHop<'_> {
             passes.push((pass, rows));
         }
         Ok(passes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The result object keeps each edge property's type, and an edge read
+    /// without properties carries `{}`.
+    #[test]
+    fn the_result_object_keeps_typed_edge_properties() {
+        let price = Value::Decimal("12.50".parse().expect("decimal"));
+        let walk = SubgraphWalk {
+            node_order: vec![("a".to_string(), 0), ("b".to_string(), 1)],
+            edges: vec![
+                WalkEdge {
+                    src: "a".into(),
+                    label: "L".into(),
+                    dst: "b".into(),
+                    properties: Some(HashMap::from([("price".to_string(), price.clone())])),
+                },
+                WalkEdge {
+                    src: "b".into(),
+                    label: "L".into(),
+                    dst: "a".into(),
+                    properties: None,
+                },
+            ],
+        };
+        let Value::Object(mut top) = subgraph_value(walk) else {
+            panic!("the result is an object");
+        };
+        let Some(Value::Array(edges)) = top.remove("edges") else {
+            panic!("edges is an array");
+        };
+        let properties = |index: usize| match &edges[index] {
+            Value::Object(edge) => edge.get("properties").cloned(),
+            other => panic!("edge {index} is not an object: {other:?}"),
+        };
+        assert_eq!(
+            properties(0),
+            Some(Value::Object(HashMap::from([("price".to_string(), price)])))
+        );
+        assert_eq!(properties(1), Some(Value::Object(HashMap::new())));
+        let Some(Value::Array(nodes)) = top.remove("nodes") else {
+            panic!("nodes is an array");
+        };
+        assert_eq!(
+            nodes[1],
+            Value::Object(HashMap::from([
+                ("id".to_string(), Value::String("b".into())),
+                ("depth".to_string(), Value::Integer(1)),
+            ]))
+        );
     }
 }

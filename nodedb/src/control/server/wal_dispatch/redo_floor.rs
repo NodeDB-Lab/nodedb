@@ -16,7 +16,7 @@
 use nodedb_physical::physical_plan::{MetaOp, RedoOrigin};
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::wal::RedoRecord;
+use crate::wal::{RedoRecord, RedoStreamRef};
 
 /// Raise the stamps of `plan`'s redo to `ordinal` when `plan` installs a
 /// session commit's redo. Every other plan stays as it is.
@@ -40,6 +40,14 @@ pub fn floor_redo_stamps(plan: &mut PhysicalPlan, ordinal: Option<i64>) -> crate
     };
     let mut record = RedoRecord::from_bytes(redo)?;
     if record.calvin_stamp.is_some() {
+        return Ok(());
+    }
+    // A stream marker's versions sit in its chunks: the reference carries
+    // the floor, and every install and replay raises them to it.
+    if let Some(mut reference) = RedoStreamRef::of_marker(&record)? {
+        reference.stamp_floor = Some(floor);
+        reference.store_in(&mut record)?;
+        *redo = record.to_bytes()?;
         return Ok(());
     }
     if record.raise_stamps_to(floor)? {
@@ -80,6 +88,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo");

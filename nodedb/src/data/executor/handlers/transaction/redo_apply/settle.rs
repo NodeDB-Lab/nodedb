@@ -13,13 +13,58 @@
 //! pass can predict. So the apply fail-stops the core, and the funnel keeps
 //! the record for restart replay.
 
-use crate::bridge::envelope::ErrorCode;
+use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::task::ExecutionTask;
+use crate::types::Lsn;
 
-use super::state::{CollectionKey, RedoApplyPass, RedoApplyScope};
+use super::state::{CollectionKey, DeferredNote, DeferredNoteKind, RedoApplyPass, RedoApplyScope};
 
 impl CoreLoop {
+    /// Answer `error` for the record at `lsn`, which installed and then
+    /// failed. The work past the install cannot be rolled back, so the live
+    /// state holds what restart replay does not rebuild: the core
+    /// fail-stops. The funnel keeps the record for restart replay.
+    pub(super) fn fail_after_install<E>(
+        &mut self,
+        task: &ExecutionTask,
+        lsn: Lsn,
+        error: E,
+        write_set: Vec<WriteSetEntry>,
+    ) -> Response
+    where
+        E: Into<ErrorCode> + std::fmt::Debug,
+    {
+        self.seal_journalled();
+        self.fail_stop_core(
+            FailStopCause::PostInstallFailed,
+            &format!(
+                "committed redo record at lsn {} installed, then failed: {error:?}",
+                lsn.as_u64()
+            ),
+        );
+        let mut response = self.response_error(task, error);
+        response.write_set = write_set;
+        response
+    }
+
+    /// Publish the write notes the install held back until the record
+    /// settled.
+    pub(super) fn publish_deferred_notes(&mut self, notes: Vec<DeferredNote>) -> crate::Result<()> {
+        for note in notes {
+            match note.kind {
+                DeferredNoteKind::Wipe => {
+                    self.publish_collection_wipe(note.db, note.tenant, &note.collection, note.stamp)
+                }
+                DeferredNoteKind::Row(key) => {
+                    self.publish_write(note.db, note.tenant, &note.collection, key, note.stamp)
+                }
+            }?;
+        }
+        Ok(())
+    }
+
     /// Record that the install wrote rows into the columnar collection `key`.
     pub(in crate::data::executor) fn note_redo_columnar_written(&mut self, key: CollectionKey) {
         if let Some(scope) = self.redo_apply.scope.as_mut()

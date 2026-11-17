@@ -87,6 +87,36 @@ impl CoreLoop {
             rows.push(values);
         }
 
+        let geometry_rows = {
+            let engine = self.columnar_engines.get(engine_key).ok_or_else(|| {
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "columnar engine vanished during restore preparation".into(),
+                    },
+                )
+            })?;
+            let mut seen = std::collections::HashSet::new();
+            let mut candidates = Vec::with_capacity(rows.len());
+            for (values, version) in rows.iter().zip(restored_versions) {
+                let pk = engine
+                    .encode_pk_from_row(values)
+                    .map_err(|error| self.response_error(task, crate::Error::from(error)))?;
+                let occupied = engine.pk_index().contains(&pk)
+                    || engine.closed_location(&pk).is_some()
+                    || !engine.version_chains().get(&pk).is_empty()
+                    || seen.contains(&pk);
+                let skipped = version.clone_copy && occupied;
+                if !skipped {
+                    seen.insert(pk);
+                }
+                candidates
+                    .push((!skipped && version.sys_to.is_none()).then_some(values.as_slice()));
+            }
+            self.prepare_columnar_geometry(task, schema, &engine_key.2, candidates)
+                .map_err(|error| self.response_error(task, error))?
+        };
+
         let Some(engine) = self.columnar_engines.get_mut(engine_key) else {
             return Err(self.response_error(
                 task,
@@ -106,17 +136,35 @@ impl CoreLoop {
                     sys_to: version.sys_to,
                     clone_copy: version.clone_copy,
                 });
-        if let Err(e) = engine.install_versions(install) {
-            return Err(self.response_error(task, ErrorCode::from(crate::Error::from(e))));
+        let results = engine
+            .install_versions(install)
+            .map_err(|error| self.response_error(task, crate::Error::from(error)))?;
+
+        let mut accepted = 0;
+        let mut stored_rows = Vec::new();
+        let mut accepted_geometry = Vec::new();
+        for ((values, result), geometry) in rows.into_iter().zip(results).zip(geometry_rows) {
+            let Some(sys_from) = result.wal_records.iter().find_map(|record| match record {
+                nodedb_columnar::wal_record::ColumnarWalRecord::InsertRow { sys_from, .. } => {
+                    Some(*sys_from)
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            accepted += 1;
+            if collect_stored_rows {
+                stored_rows.push(values);
+            }
+            if let Some(geometry) = geometry {
+                accepted_geometry.push((geometry, sys_from));
+            }
         }
 
         Ok(RowIngestOutcome {
-            accepted: rows.len() as u64,
-            stored_rows: if collect_stored_rows {
-                rows
-            } else {
-                Vec::new()
-            },
+            accepted,
+            stored_rows,
+            geometry_rows: accepted_geometry,
         })
     }
 }

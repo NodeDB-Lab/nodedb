@@ -101,14 +101,17 @@ impl CdcRouter {
         if !event.op.is_data_event() {
             return;
         }
+        // A stream names its collection by the bare catalog name, and a
+        // subscriber reads that name on every event, so both use it.
+        let Some(collection) =
+            event.routed_collection(crate::event::unrouted::UnroutedConsumer::CdcRouter)
+        else {
+            return;
+        };
         let op_str = event.op.to_string();
         let matching: Vec<Arc<ChangeStreamDef>> = self
             .registry
-            .find_matching(
-                event.database_id,
-                event.tenant_id.as_u64(),
-                &event.collection,
-            )
+            .find_matching(event.database_id, event.tenant_id.as_u64(), collection)
             .into_iter()
             .filter(|def| def.op_filter.matches(&op_str))
             .collect();
@@ -170,7 +173,7 @@ impl CdcRouter {
         let cdc_event = Arc::new(CdcEvent {
             sequence: position.sequence,
             partition,
-            collection: event.collection.to_string(),
+            collection: collection.to_string(),
             op: op_str.clone(),
             row_id: event.row_id.as_str().to_string(),
             event_time,
@@ -426,8 +429,9 @@ pub struct BufferStats {
 }
 
 /// Deserialize bytes (MessagePack or JSON) to serde_json::Value.
+/// A native body reads as the plain body of the same values.
 fn deserialize_to_json(bytes: &[u8]) -> Option<serde_json::Value> {
-    nodedb_types::json_from_msgpack(bytes)
+    crate::data::executor::response_codec::decode_body_plain_json(bytes)
         .ok()
         .or_else(|| sonic_rs::from_slice::<serde_json::Value>(bytes).ok())
 }
@@ -445,10 +449,13 @@ mod tests {
         WatermarkTracker::new()
     }
 
+    /// A write of `collection` in database 7, named as storage keys it.
     fn make_write_event(collection: &str, seq: u64) -> WriteEvent {
         WriteEvent {
             sequence: seq,
-            collection: Arc::from(collection),
+            collection: Arc::from(
+                nodedb_types::QualifiedCollection::new(DatabaseId::new(7), collection).as_str(),
+            ),
             op: WriteOp::Insert,
             row_id: RowId::row(nodedb_types::RowIdentity::from_user_key(format!(
                 "row-{seq}"
@@ -511,6 +518,37 @@ mod tests {
             .unwrap();
         assert_eq!(buf.len(), 1);
         let events = buf.read_from(CdcOffset::ZERO, 10);
+        assert_eq!(events[0].collection, "orders");
+    }
+
+    /// Outside the default database a write event names its collection
+    /// qualified. The stream names it bare, and the routed event carries the
+    /// bare name. A bare event name there is not qualified for its database
+    /// and is not routed.
+    #[test]
+    fn a_non_default_database_event_routes_by_its_bare_name() {
+        let registry = Arc::new(StreamRegistry::new());
+        registry.register(sample_def("orders_stream", "orders"));
+        let router = CdcRouter::new(registry);
+        let wt = test_tracker();
+
+        let mut unqualified = make_write_event("orders", 1);
+        unqualified.collection = Arc::from("orders");
+        router.route_event(&unqualified, &wt);
+        assert!(
+            router
+                .get_buffer(DatabaseId::new(7), 1, "orders_stream")
+                .is_none_or(|buf| buf.is_empty())
+        );
+
+        let qualified = make_write_event("orders", 2);
+        assert_eq!(qualified.collection.as_ref(), "7/orders");
+        router.route_event(&qualified, &wt);
+        let buf = router
+            .get_buffer(DatabaseId::new(7), 1, "orders_stream")
+            .expect("the stream buffers the routed event");
+        let events = buf.read_from(CdcOffset::ZERO, 10);
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].collection, "orders");
     }
 

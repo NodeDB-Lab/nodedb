@@ -291,6 +291,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+            text_indexes: None,
         }
     }
 
@@ -360,14 +361,24 @@ mod tests {
         );
     }
 
-    /// A literal the column cannot hold is refused naming the column, on
-    /// both arms: text into INT, a boolean into TIMESTAMP, and an integer
-    /// past the declared SMALLINT width.
+    /// A literal the column cannot hold is refused on both arms. Text into
+    /// INT is invalid text for the type, as in PostgreSQL. A boolean into
+    /// TIMESTAMP and an integer past the declared SMALLINT width name the
+    /// column.
     #[test]
     fn a_literal_the_column_cannot_hold_is_refused_naming_the_column() {
         let err = action("WHEN NOT MATCHED THEN INSERT (id, n) VALUES (s.id, 'abc')")
             .expect_err("'abc' does not fit INT");
-        assert!(err.to_string().contains("'n'"), "{err}");
+        assert!(
+            matches!(
+                err,
+                SqlError::InvalidTextRepresentation {
+                    type_name: "integer",
+                    ref text,
+                } if text == "abc"
+            ),
+            "{err}"
+        );
 
         let err =
             action("WHEN MATCHED THEN UPDATE SET at = true").expect_err("true is not an instant");

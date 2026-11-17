@@ -13,7 +13,7 @@
 //! redo install remains the sole durable apply.
 //!
 //! Split out of `dispatch.rs` (which owns the `MetaOp::StageWrite` routing and
-//! the shared `stage_overlay_pk` / `stage_put_capped` / `stage_count_response`
+//! the shared `stage_overlay_pk` / `stage_put` / `stage_count_response`
 //! helpers these methods call) to keep both files within the source-size
 //! limit.
 
@@ -35,6 +35,7 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         value: &[u8],
         if_absent: bool,
+        rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         if let Some(refusal) = crate::data::executor::handlers::unbound_surrogate::refuse_unbound(
             "document",
@@ -45,8 +46,10 @@ impl CoreLoop {
         }
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
 
-        let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
+        let present = match self
+            .stage_overlay_pk(ctx)
+            .and_then(|overlay_pk| self.stage_pk_present(ctx, &storage_key, overlay_pk))
+        {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -70,13 +73,14 @@ impl CoreLoop {
         if let Err(e) = self.stage_check_unique(ctx, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_encode_and_commit(ctx, value)
+        self.stage_encode_and_commit(ctx, value, rls_write_check)
     }
 
     pub(in crate::data::executor) fn stage_point_put(
         &mut self,
         ctx: &StageCtx<'_>,
         value: &[u8],
+        rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         if let Some(refusal) = crate::data::executor::handlers::unbound_surrogate::refuse_unbound(
             "document",
@@ -90,7 +94,7 @@ impl CoreLoop {
         if let Err(e) = self.stage_check_unique(ctx, value) {
             return self.response_error(ctx.task, e);
         }
-        self.stage_encode_and_commit(ctx, value)
+        self.stage_encode_and_commit(ctx, value, rls_write_check)
     }
 
     pub(in crate::data::executor) fn stage_point_delete(
@@ -105,8 +109,10 @@ impl CoreLoop {
         // and an earlier statement in this transaction may already have
         // tombstoned it.
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
+        let present = match self
+            .stage_overlay_pk(ctx)
+            .and_then(|overlay_pk| self.stage_pk_present(ctx, &storage_key, overlay_pk))
+        {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -139,12 +145,14 @@ impl CoreLoop {
             }
         }
 
-        self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
+        match self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,
-        );
-        self.stage_count_response(ctx.task, 1)
+        ) {
+            Ok(()) => self.stage_count_response(ctx.task, 1),
+            Err(e) => self.response_error(ctx.task, e),
+        }
     }
 
     pub(in crate::data::executor) fn stage_point_update(
@@ -188,6 +196,9 @@ impl CoreLoop {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
+        if let Err(e) = self.stage_check_ctx_row_image(ctx, &body) {
+            return self.response_error(ctx.task, e);
+        }
         // Gate the staged post-image on the collection's write policy: this is
         // the row the COMMIT install will write, and the assignments and any
         // regenerated columns are already applied to it.
@@ -213,7 +224,7 @@ impl CoreLoop {
         ) {
             return self.response_error(ctx.task, e);
         }
-        if let Err(e) = self.stage_put_capped(ctx, body) {
+        if let Err(e) = self.stage_put(ctx, body) {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)
@@ -240,7 +251,14 @@ impl CoreLoop {
         self.stage_unique_check(ctx, &config, &incoming_doc)
     }
 
-    fn stage_encode_and_commit(&mut self, ctx: &StageCtx<'_>, value: &[u8]) -> Response {
+    /// Encode `value` as the row the COMMIT install writes, gate it on the
+    /// collection's write policy, and stage it.
+    fn stage_encode_and_commit(
+        &mut self,
+        ctx: &StageCtx<'_>,
+        value: &[u8],
+        rls_write_check: &nodedb_types::RlsWriteCheck,
+    ) -> Response {
         let body = match self.stage_encode_put_body(
             ctx.database_id,
             ctx.tid,
@@ -251,7 +269,22 @@ impl CoreLoop {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
-        if let Err(e) = self.stage_put_capped(ctx, body) {
+        if let Err(e) = self.stage_check_ctx_row_image(ctx, &body) {
+            return self.response_error(ctx.task, e);
+        }
+        // The encoded body is the materialized row, defaults and generated
+        // columns applied: the image the direct insert's gate decides.
+        if let Err(e) = self.stage_admit_write(
+            rls_write_check,
+            &body,
+            &ctx.document_id,
+            ctx.database_id,
+            ctx.tid,
+            ctx.collection,
+        ) {
+            return self.response_error(ctx.task, e);
+        }
+        if let Err(e) = self.stage_put(ctx, body) {
             return self.response_error(ctx.task, e);
         }
         self.stage_count_response(ctx.task, 1)

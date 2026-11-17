@@ -9,4 +9,7 @@ mod kv;
 mod publish;
 mod redo;
 
-pub(crate) use publish::{PendingChanges, extract_write_change_set, publish_settled_changes};
+pub(crate) use publish::{
+    EntryChanges, PendingChanges, WriteChangeSet, extract_write_change_set, marker_changes_of_plan,
+    publish_settled_changes,
+};

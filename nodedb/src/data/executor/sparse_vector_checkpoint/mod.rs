@@ -20,8 +20,8 @@
 //!
 //! ```text
 //! {data_dir}/sparse-vector-ckpt/core-{core_id}/
-//!     MANIFEST                                       # names the live generation
-//!     gen-{n}/{db}_{tid}_{enc(coll)}_{enc(field)}.ckpt
+//!     MANIFEST                  # names the live generation
+//!     gen-{n}/{hash(key)}.ckpt  # one file per index, key stored inside
 //! ```
 //!
 //! The per-core directory is required because `data_dir` is shared across cores
@@ -57,7 +57,9 @@ mod write;
 #[cfg(test)]
 pub(crate) use format::test_manifest_bytes;
 pub(crate) use manifest::read_sparse_vector_manifest_at;
+#[cfg(test)]
+pub(crate) use paths::sparse_vector_ckpt_key;
 pub(crate) use paths::{
-    SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_checkpoint_prefix, sparse_vector_ckpt_dir,
-    sparse_vector_ckpt_gen_dir,
+    SPARSE_VECTOR_CKPT_MANIFEST, sparse_vector_ckpt_dir, sparse_vector_ckpt_gen_dir,
+    sparse_vector_map_key,
 };

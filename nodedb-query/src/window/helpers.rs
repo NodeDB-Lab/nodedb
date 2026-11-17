@@ -76,18 +76,14 @@ fn partition_key_part(v: &Value) -> String {
 }
 
 /// Decide NULL placement for one ORDER BY column, shared by every window
-/// evaluator's `compare_order_keys`.
+/// evaluator's `compare_order_keys` and the MATCH ORDER BY.
 ///
 /// NULL placement follows PostgreSQL's default: ASC places NULLs last, DESC
-/// places NULLs first. A window spec carries no explicit NULLS FIRST/LAST
+/// places NULLs first. Neither caller carries an explicit NULLS FIRST/LAST
 /// override, so this default is fixed by direction alone. Returns `None`
 /// when neither value is NULL, leaving the non-null comparison to the
 /// caller.
-pub(super) fn null_order(
-    a_null: bool,
-    b_null: bool,
-    ascending: bool,
-) -> Option<std::cmp::Ordering> {
+pub fn null_order(a_null: bool, b_null: bool, ascending: bool) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let nulls_first = !ascending;
     match (a_null, b_null) {

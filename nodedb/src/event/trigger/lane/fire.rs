@@ -154,15 +154,13 @@ fn has_actions(state: &SharedState, event: &WriteEvent) -> bool {
         .trigger_registry
         .interest()
         .contains(event.database_id, &event.collection)
-        || state
-            .credentials
-            .catalog()
-            .event_definitions(
-                event.database_id,
-                event.tenant_id.as_u64(),
-                &event.collection,
-            )
-            .is_some_and(|defs| !defs.is_empty())
+        || event.bare_collection().is_some_and(|collection| {
+            state
+                .credentials
+                .catalog()
+                .event_definitions(event.database_id, event.tenant_id.as_u64(), collection)
+                .is_some_and(|defs| !defs.is_empty())
+        })
 }
 
 /// Fire the held events of every partition this node owns, and release on
@@ -489,5 +487,49 @@ mod tests {
         firing.committed(3);
         assert!(!firing.owes_acted_commit(3, lease));
         assert!(!firing.idle_commit_due(3));
+    }
+
+    /// Outside the default database the event names its collection
+    /// qualified and the trigger is registered under the bare name. The
+    /// action check finds it. A bare event name there finds nothing.
+    #[test]
+    fn a_non_default_database_event_finds_its_trigger() {
+        use crate::control::security::catalog::trigger_types::*;
+
+        let dir = tempfile::tempdir().expect("create fire test directory");
+        let (_wal, _watermarks, state, _dlq, _cdc) =
+            crate::event::test_utils::event_test_deps(&dir);
+        let db = crate::types::DatabaseId::new(7);
+        state.trigger_registry.register(StoredTrigger {
+            tenant_id: 1,
+            database_id: db,
+            name: "on_ins".into(),
+            collection: "orders".into(),
+            timing: TriggerTiming::After,
+            events: TriggerEvents {
+                on_insert: true,
+                on_update: false,
+                on_delete: false,
+            },
+            granularity: TriggerGranularity::Row,
+            when_condition: None,
+            body_sql: "BEGIN RETURN; END".into(),
+            priority: 0,
+            enabled: true,
+            execution_mode: TriggerExecutionMode::default(),
+            security: TriggerSecurity::default(),
+            batch_mode: TriggerBatchMode::default(),
+            owner: "admin".into(),
+            created_at: 0,
+            descriptor_version: 0,
+            modification_hlc: nodedb_types::Hlc::ZERO,
+        });
+
+        let event = crate::event::test_utils::write_event_in(db, "orders");
+        assert!(has_actions(&state, &event));
+
+        let mut unqualified = event.clone();
+        unqualified.collection = std::sync::Arc::from("orders");
+        assert!(!has_actions(&state, &unqualified));
     }
 }

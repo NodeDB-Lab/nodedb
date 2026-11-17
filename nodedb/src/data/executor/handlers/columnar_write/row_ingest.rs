@@ -3,6 +3,8 @@
 //! Core row-ingest path: per-row value coercion, ON CONFLICT DO UPDATE merge
 //! resolution, and the row-level `MutationEngine` insert call.
 
+use std::borrow::Cow;
+
 use nodedb_columnar::{BatchConflict, BatchRow};
 use nodedb_types::columnar::{ColumnarSchema, RestoredVersion};
 use nodedb_types::surrogate::Surrogate;
@@ -16,6 +18,7 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::document::UpdateValue;
 
+use super::geometry_prepare::PreparedGeometryRow;
 use super::restore_ingest::schema_row_values;
 use super::schema::{ndb_field_to_value, row_values_to_object};
 use super::system_stamp::RowStampInput;
@@ -41,6 +44,7 @@ pub(in crate::data::executor) struct RowIngestParams<'a> {
     /// post-image the Control Plane could not see; a plain insert's rows were
     /// already decided at plan time.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    pub provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
     /// Whether the caller needs the stored post-image of every row that was
     /// actually written. Only a `RETURNING` clause sets this; the row images
     /// are cloned, so a plain insert must not pay for them.
@@ -58,6 +62,7 @@ pub(in crate::data::executor) struct RowIngestOutcome {
     /// Schema-ordered stored values, one entry per accepted row, in insert
     /// order. Empty unless `collect_stored_rows` was set.
     pub stored_rows: Vec<Vec<Value>>,
+    pub(super) geometry_rows: Vec<(PreparedGeometryRow, i64)>,
 }
 
 impl CoreLoop {
@@ -104,6 +109,32 @@ impl CoreLoop {
             }
         };
 
+        let geometry_rows = {
+            let engine = self.columnar_engines.get(engine_key).ok_or_else(|| {
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "columnar engine vanished during geometry preparation".into(),
+                    },
+                )
+            })?;
+            let mut seen = std::collections::HashSet::new();
+            let mut candidates = Vec::with_capacity(resolved.len());
+            for row in &resolved {
+                let skipped = if conflict == BatchConflict::Skip {
+                    let pk = engine
+                        .encode_pk_from_row(&row.values)
+                        .map_err(|error| self.response_error(task, crate::Error::from(error)))?;
+                    engine.pk_index().contains(&pk) || !seen.insert(pk)
+                } else {
+                    false
+                };
+                candidates.push((!skipped).then_some(row.values.as_slice()));
+            }
+            self.prepare_columnar_geometry(task, params.schema, &engine_key.2, candidates)
+                .map_err(|error| self.response_error(task, error))?
+        };
+
         let Some(engine) = self.columnar_engines.get_mut(engine_key) else {
             return Err(self.response_error(
                 task,
@@ -129,11 +160,20 @@ impl CoreLoop {
         // row is neither counted nor returned, as it was never stored.
         let mut accepted = 0u64;
         let mut stored_rows: Vec<Vec<Value>> = Vec::new();
-        for (row, result) in resolved.into_iter().zip(results) {
-            if result.wal_records.is_empty() {
+        let mut accepted_geometry = Vec::new();
+        for ((row, result), geometry) in resolved.into_iter().zip(results).zip(geometry_rows) {
+            let Some(sys_from) = result.wal_records.iter().find_map(|record| match record {
+                nodedb_columnar::wal_record::ColumnarWalRecord::InsertRow { sys_from, .. } => {
+                    Some(*sys_from)
+                }
+                _ => None,
+            }) else {
                 continue;
-            }
+            };
             accepted += 1;
+            if let Some(geometry) = geometry {
+                accepted_geometry.push((geometry, sys_from));
+            }
             if collect_stored_rows {
                 stored_rows.push(row.values);
             }
@@ -142,6 +182,7 @@ impl CoreLoop {
         Ok(RowIngestOutcome {
             accepted,
             stored_rows,
+            geometry_rows: accepted_geometry,
         })
     }
 
@@ -152,7 +193,7 @@ impl CoreLoop {
     /// of this batch first, then from the engine: the same prior a
     /// row-by-row write reads.
     fn resolve_columnar_rows(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         params: &RowIngestParams<'_>,
         intent: StampedIntent,
@@ -182,15 +223,21 @@ impl CoreLoop {
             // A row that is not an object has no fields to write. Skipping it
             // would report a statement that stored fewer rows than it sent.
             let nodedb_types::Value::Object(obj) = row else {
-                return Err(self.response_error(
-                    task,
-                    crate::Error::BadRequest {
-                        detail: format!(
-                            "columnar insert into '{}': row {row_idx} is not an object",
-                            engine_key.2
-                        ),
-                    },
-                ));
+                let detail = format!(
+                    "columnar insert into '{}': row {row_idx} is not an object",
+                    engine_key.2
+                );
+                let response = match params.provenance {
+                    Some(prov) => self.sync_reject_response(
+                        task,
+                        nodedb_types::sync::violation::ViolationType::ConstraintViolation {
+                            detail,
+                        },
+                        prov,
+                    ),
+                    None => self.response_error(task, crate::Error::BadRequest { detail }),
+                };
+                return Err(response);
             };
 
             // Build Value slice in schema order. A bitemporal row's
@@ -257,10 +304,10 @@ impl CoreLoop {
                     // A prior row that does not read refuses the statement:
                     // merging against "no prior row" would insert a
                     // duplicate key.
-                    let prior_row = match batch_rows.get(&pk_bytes) {
-                        Some(row) => Some(row.clone()),
+                    let prior_row: Option<Cow<'_, [Value]>> = match batch_rows.get(&pk_bytes) {
+                        Some(row) => Some(Cow::Borrowed(row)),
                         None => match self.read_columnar_row_by_pk(engine_key, &pk_bytes) {
-                            Ok(row) => row,
+                            Ok(row) => row.map(Cow::Owned),
                             Err(e) => return Err(self.response_error(task, e)),
                         },
                     };
@@ -299,6 +346,15 @@ impl CoreLoop {
                 task.request.tenant_id.as_u64(),
                 engine_key.2.as_str(),
                 &self.crs_context(),
+            ) {
+                return Err(self.response_error(task, error));
+            }
+            // A row over the row image limit refuses the statement before any
+            // row is written.
+            if let Err(error) = crate::data::executor::row_image_native::check_columnar_row(
+                engine_key.2.as_str(),
+                schema,
+                &final_values,
             ) {
                 return Err(self.response_error(task, error));
             }
@@ -627,5 +683,98 @@ mod tests {
             Some(ErrorCode::RejectedConstraint { .. })
         ));
         assert_eq!(live_rows(&core), 0);
+    }
+
+    const DECIMAL_COLLECTION: &str = "decimal_rows";
+
+    /// Insert `amount` text into `decimal_rows`, declared
+    /// `id TEXT PRIMARY KEY, amount DECIMAL`.
+    fn insert_amount(
+        core: &mut CoreLoop,
+        id: &str,
+        amount: &str,
+    ) -> crate::bridge::envelope::Response {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::required("amount", ColumnType::Decimal(None)),
+        ])
+        .expect("valid schema");
+        let schema = zerompk::to_msgpack_vec(&schema).expect("encode schema");
+        let row = Value::Object(std::collections::HashMap::from([
+            ("id".to_string(), Value::String(id.into())),
+            ("amount".to_string(), Value::String(amount.into())),
+        ]));
+        let payload =
+            nodedb_types::value_to_msgpack(&Value::Array(vec![row])).expect("encode rows");
+        core.execute_columnar_insert(
+            &task(),
+            ColumnarInsertParams {
+                collection: DECIMAL_COLLECTION,
+                payload: &payload,
+                format: "msgpack",
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: &[],
+                surrogates: &[],
+                schema_bytes: &schema,
+                provenance: None,
+                system_from: None,
+                restored_versions: &[],
+                rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
+                returning: None,
+                rls_filters: &[],
+                spatial_undo: None,
+            },
+        )
+    }
+
+    fn decimal_engine(core: &CoreLoop) -> Option<&nodedb_columnar::MutationEngine> {
+        core.columnar_engines.get(&(
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            DECIMAL_COLLECTION.to_string(),
+        ))
+    }
+
+    /// Text `"1.50"` into a DECIMAL column stores the Decimal 1.50 exactly,
+    /// scale included. Text that is no decimal is refused before the batch
+    /// mutates anything.
+    #[test]
+    fn decimal_text_coerces_exactly_and_invalid_text_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+
+        let stored = insert_amount(&mut core, "a", "1.50");
+        assert_eq!(stored.status, Status::Ok, "{:?}", stored.error_code);
+        let engine = decimal_engine(&core).expect("collection created");
+        let row = engine
+            .memtable()
+            .get_row(0)
+            .expect("row reads")
+            .expect("row present");
+        let amount = row
+            .iter()
+            .find_map(|cell| match cell {
+                Value::Decimal(d) => Some(*d),
+                _ => None,
+            })
+            .expect("amount stored as a Decimal");
+        assert_eq!(amount.to_string(), "1.50");
+        assert_eq!(amount.scale(), 2);
+        assert_eq!(engine.live_row_count(), 1);
+
+        let refused = insert_amount(&mut core, "b", "one fifty");
+        assert_eq!(
+            refused.status,
+            Status::Error,
+            "invalid DECIMAL text is refused"
+        );
+        assert_eq!(
+            decimal_engine(&core)
+                .expect("collection kept")
+                .live_row_count(),
+            1,
+            "the refused batch mutates nothing"
+        );
     }
 }

@@ -107,7 +107,7 @@ impl CoreLoop {
         };
 
         // 1-2. Committed rows: memtable, then flushed partitions.
-        let mut results = match self.gather_ts_rows(super::gather::TsGatherParams {
+        let mut results = match self.gather_ts_rows::<rmpv::Value>(super::gather::TsGatherParams {
             database_id: task.request.database_id,
             tid,
             collection,
@@ -190,8 +190,26 @@ impl CoreLoop {
         // `limit` rows of the requested order rather than an arbitrary `limit`
         // rows sorted among themselves. Audit-log reads keep their system-time
         // order, which is the semantics of `AS OF SYSTEM TIME NULL`.
+        // A DECIMAL cell is its text in a row; its key orders by value.
+        let exact = self.declared_ts_exact_columns(task.request.database_id, tid, collection);
+        let decimal_keys: Vec<bool> =
+            sort_keys
+                .iter()
+                .map(|key| {
+                    key.as_column().is_some_and(|field| {
+                        exact.iter().any(|(name, ty)| {
+                            name == field
+                                && matches!(
+                                ty,
+                                crate::engine::timeseries::columnar_memtable::ColumnType::Decimal(_)
+                            )
+                        })
+                    })
+                })
+                .collect();
         if !all_versions
-            && let Err(e) = super::super::sort::sort_rows(&mut results, sort_keys, &crs)
+            && let Err(e) =
+                super::super::sort::sort_rows_with(&mut results, sort_keys, &decimal_keys, &crs)
         {
             return self.response_error(task, e);
         }
@@ -199,7 +217,15 @@ impl CoreLoop {
 
         let array = rmpv::Value::Array(results);
         let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &array).unwrap_or(());
+        if let Err(e) = rmpv::encode::write_value(&mut buf, &array) {
+            return self.response_error(
+                task,
+                crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("timeseries raw scan result encode: {e}"),
+                },
+            );
+        }
 
         // Bound an unbounded (no-LIMIT) scan by the memory budget. The encoded
         // msgpack payload is the authoritative size of the materialized result;

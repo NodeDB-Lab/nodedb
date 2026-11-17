@@ -621,6 +621,7 @@ pub(super) mod tests {
             crate::rpc_codec::SubmitCalvinTxnResponse {
                 error: None,
                 payload_bytes: None,
+                refused_sequences: None,
             }
         }
 

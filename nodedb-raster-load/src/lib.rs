@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Raster-to-array load planning for NodeDB.
 //!
 //! A load opens one or more raster sources with `nodedb-raster`, describes

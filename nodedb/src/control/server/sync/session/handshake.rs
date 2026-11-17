@@ -26,7 +26,9 @@ impl SyncSession {
     /// SharedState) the handshake proceeds with no fencing (`producer_id = 0`)
     /// and any presented token is refused, since nothing can verify it.
     ///
-    /// Returns a HandshakeAck frame to send back to the client.
+    /// Returns a HandshakeAck frame to send back to the client. An accepted
+    /// handshake also queues its purge catch-up in `purge_catch_up`, which
+    /// the session sends ahead of the ack.
     pub async fn handle_handshake(
         &mut self,
         msg: &HandshakeMsg,
@@ -60,6 +62,7 @@ impl SyncSession {
                 producer_id: 0,
                 accepted_epoch: 0,
                 delta_signing_key: [0; 32],
+                server_watermark: 0,
             };
             return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
         }
@@ -80,6 +83,7 @@ impl SyncSession {
                     producer_id: 0,
                     accepted_epoch: 0,
                     delta_signing_key: [0; 32],
+                    server_watermark: 0,
                 };
                 return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
             };
@@ -91,12 +95,7 @@ impl SyncSession {
             self.client_clock = msg.vector_clock.clone();
             self.subscribed_shapes = msg.subscribed_shapes.clone();
             self.server_clock = current_server_clock.clone();
-            self.last_seen_lsn = msg
-                .vector_clock
-                .values()
-                .flat_map(|m| m.values().copied())
-                .max()
-                .unwrap_or(0);
+            self.client_watermark = msg.last_server_watermark;
             self.device_metadata = DeviceMetadata {
                 client_version: msg.client_version.clone(),
                 // Preserve the accept-time TCP peer address set once in
@@ -138,6 +137,17 @@ impl SyncSession {
                 None => {}
             }
 
+            let server_watermark = match self.prepare_purge_catch_up(shared).await {
+                Ok(watermark) => watermark,
+                Err(error) => {
+                    warn!(session = %self.session_id, %error, "sync purge catch-up unavailable");
+                    return self.transient_reject_frame(
+                        &current_server_clock,
+                        "SYNC_UNAVAILABLE: purge record read failed",
+                    );
+                }
+            };
+
             info!(session = %self.session_id, "sync handshake OK (trust mode)");
 
             let ack = HandshakeAckMsg {
@@ -150,6 +160,7 @@ impl SyncSession {
                 producer_id: self.producer_id,
                 accepted_epoch: self.accepted_epoch,
                 delta_signing_key: [0; 32],
+                server_watermark,
             };
             return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
         }
@@ -183,6 +194,7 @@ impl SyncSession {
                     producer_id: 0,
                     accepted_epoch: 0,
                     delta_signing_key: [0; 32],
+                    server_watermark: 0,
                 };
                 return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
             }
@@ -195,12 +207,7 @@ impl SyncSession {
         self.client_clock = msg.vector_clock.clone();
         self.subscribed_shapes = msg.subscribed_shapes.clone();
         self.server_clock = current_server_clock.clone();
-        self.last_seen_lsn = msg
-            .vector_clock
-            .values()
-            .flat_map(|m| m.values().copied())
-            .max()
-            .unwrap_or(0);
+        self.client_watermark = msg.last_server_watermark;
         self.device_metadata = DeviceMetadata {
             client_version: msg.client_version.clone(),
             // See the trust-mode branch above: preserve the accept-time TCP
@@ -259,6 +266,17 @@ impl SyncSession {
             Some(_) | None => None,
         };
 
+        let server_watermark = match self.prepare_purge_catch_up(shared).await {
+            Ok(watermark) => watermark,
+            Err(error) => {
+                warn!(session = %self.session_id, %error, "sync purge catch-up unavailable");
+                return self.transient_reject_frame(
+                    &current_server_clock,
+                    "SYNC_UNAVAILABLE: purge record read failed",
+                );
+            }
+        };
+
         info!(
             session = %self.session_id,
             user = %identity.username,
@@ -277,6 +295,7 @@ impl SyncSession {
             producer_id: self.producer_id,
             accepted_epoch: self.accepted_epoch,
             delta_signing_key: self.delta_signing_key.unwrap_or([0; 32]),
+            server_watermark,
         };
         SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack)
     }
@@ -324,7 +343,8 @@ impl SyncSession {
         self.client_clock.clear();
         self.server_clock.clear();
         self.subscribed_shapes.clear();
-        self.last_seen_lsn = 0;
+        self.client_watermark = 0;
+        self.purge_catch_up.clear();
         self.producer_id = 0;
         self.accepted_epoch = 0;
         self.delta_signing_key = None;
@@ -340,8 +360,8 @@ impl SyncSession {
             remote_addr: std::mem::take(&mut self.device_metadata.remote_addr),
             ..DeviceMetadata::default()
         };
-        self.tracked_collections.clear();
         self.announced_collections.clear();
+        self.presence_shapes.clear();
     }
 
     /// Build a bounded, generic rejection for a Handshake frame whose body
@@ -371,6 +391,7 @@ impl SyncSession {
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: [0; 32],
+            server_watermark: 0,
         };
         SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack)
     }
@@ -436,6 +457,7 @@ mod tests {
             lite_id: String::new(),
             epoch: 0,
             wire_version,
+            last_server_watermark: 0,
         }
     }
 
@@ -465,6 +487,7 @@ mod tests {
             lite_id: String::new(),
             epoch: 0,
             wire_version: SYNC_WIRE_VERSION,
+            last_server_watermark: 0,
         };
 
         let response = session
@@ -552,6 +575,75 @@ mod tests {
         assert_eq!(identity.username, "nodedb");
         assert_ne!(identity.user_id, 0);
         assert!(identity.is_superuser);
+    }
+
+    /// An accepted handshake queues a `CollectionPurged` for each held
+    /// collection purged past the client's watermark, and nothing for a
+    /// collection it does not hold.
+    #[tokio::test]
+    async fn a_reconnect_queues_the_purges_it_missed() {
+        use crate::control::security::catalog::collection_purge_log::{
+            CollectionPurge, StoredPurgeRecord,
+        };
+        use nodedb_types::sync::wire::CollectionPurgedMsg;
+
+        let (state, _dir) = trust_state();
+        let mut probe = SyncSession::new("probe".into());
+        let ack: HandshakeAckMsg = probe
+            .handle_handshake(
+                &make_handshake(SYNC_WIRE_VERSION),
+                HashMap::new(),
+                Some(&state),
+            )
+            .await
+            .expect("handshake response")
+            .decode_body()
+            .expect("decode handshake ack");
+        assert!(ack.success);
+        assert!(probe.purge_catch_up.is_empty(), "nothing is held");
+        let tenant_id = probe.tenant_id.expect("tenant").as_u64();
+        let database_id = probe.database_id().as_u64();
+        state
+            .credentials
+            .catalog()
+            .record_collection_purge(&CollectionPurge {
+                database_id,
+                tenant_id,
+                purge_index: 3,
+                name: "orders".into(),
+                record: StoredPurgeRecord {
+                    incarnation: nodedb_types::Hlc::new(9, 0),
+                    purged_at_ms: 1,
+                },
+            })
+            .expect("record purge");
+
+        let mut holding = make_handshake(SYNC_WIRE_VERSION);
+        holding.vector_clock.insert("orders".into(), HashMap::new());
+        let mut session = SyncSession::new("holder".into());
+        let ack: HandshakeAckMsg = session
+            .handle_handshake(&holding, HashMap::new(), Some(&state))
+            .await
+            .expect("handshake response")
+            .decode_body()
+            .expect("decode handshake ack");
+        assert!(ack.success);
+        assert_eq!(session.purge_catch_up.len(), 1);
+        let purge: CollectionPurgedMsg = session.purge_catch_up[0]
+            .decode_body()
+            .expect("decode purge");
+        assert_eq!(purge.name, "orders");
+        assert_eq!(purge.purge_index, 3);
+        assert_eq!(purge.incarnation, nodedb_types::Hlc::new(9, 0));
+
+        let mut other = make_handshake(SYNC_WIRE_VERSION);
+        other.vector_clock.insert("users".into(), HashMap::new());
+        let mut bystander = SyncSession::new("bystander".into());
+        bystander
+            .handle_handshake(&other, HashMap::new(), Some(&state))
+            .await
+            .expect("handshake response");
+        assert!(bystander.purge_catch_up.is_empty());
     }
 
     /// The accept-time TCP peer address (`handle_sync_session` sets
@@ -721,13 +813,12 @@ mod tests {
             .insert("orders".into(), HashMap::from([("peer-1".into(), 4)]));
         session.server_clock.insert("orders".into(), 8);
         session.subscribed_shapes.push("orders-shape".into());
-        session.last_seen_lsn = 8;
+        session.client_watermark = 8;
         session.producer_id = 42;
         session.accepted_epoch = 7;
         session.delta_signing_key = Some([9; 32]);
         session.device_metadata.remote_addr = "127.0.0.1:1234".into();
         session.device_metadata.peer_id = 99;
-        session.track_collection(1, "orders");
         session.announced_collections.insert("orders".into());
 
         // Round-trip through the framing codec so this is a CRC-valid
@@ -763,7 +854,7 @@ mod tests {
         assert!(session.client_clock.is_empty());
         assert!(session.server_clock.is_empty());
         assert!(session.subscribed_shapes.is_empty());
-        assert_eq!(session.last_seen_lsn, 0);
+        assert_eq!(session.client_watermark, 0);
         assert_eq!(session.producer_id, 0);
         assert_eq!(session.accepted_epoch, 0);
         assert!(session.delta_signing_key.is_none());
@@ -773,7 +864,6 @@ mod tests {
         // deliberately survives, so the IP blacklist check keeps working on
         // the rest of the connection.
         assert_eq!(session.device_metadata.remote_addr, "127.0.0.1:1234");
-        assert!(session.tracked_collections.is_empty());
         assert!(session.announced_collections.is_empty());
 
         let delta_bytes = nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
@@ -852,8 +942,7 @@ mod tests {
         high_epoch_session
             .subscribed_shapes
             .push("orders-shape".into());
-        high_epoch_session.last_seen_lsn = 8;
-        high_epoch_session.track_collection(1, "orders");
+        high_epoch_session.client_watermark = 8;
         high_epoch_session
             .announced_collections
             .insert("orders".into());
@@ -878,7 +967,7 @@ mod tests {
         assert!(high_epoch_session.client_clock.is_empty());
         assert!(high_epoch_session.server_clock.is_empty());
         assert!(high_epoch_session.subscribed_shapes.is_empty());
-        assert_eq!(high_epoch_session.last_seen_lsn, 0);
+        assert_eq!(high_epoch_session.client_watermark, 0);
         assert_eq!(high_epoch_session.producer_id, 0);
         assert_eq!(high_epoch_session.accepted_epoch, 0);
         assert!(high_epoch_session.delta_signing_key.is_none());
@@ -889,7 +978,6 @@ mod tests {
             high_epoch_session.device_metadata.remote_addr,
             "203.0.113.12:6666"
         );
-        assert!(high_epoch_session.tracked_collections.is_empty());
         assert!(high_epoch_session.announced_collections.is_empty());
 
         // The configured trust identity is a superuser, so this will be

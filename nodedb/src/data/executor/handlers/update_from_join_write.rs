@@ -1,25 +1,18 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The `UPDATE ... FROM` write pass: persist each row [`super::update_from_join`]
-//! already matched and resolved, one row/transaction at a time, with its
-//! secondary-index diff and full-text postings, folding each into its
-//! materialized-sum target and re-indexing its vectors.
+//! already matched and resolved, under one statement-owned transaction.
 
-use nodedb_physical::physical_plan::ResolvedSumTarget;
+use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec};
 use nodedb_types::columnar::StrictSchema;
 
-use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
+use crate::bridge::envelope::{Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::WriteSetRow;
-use crate::data::executor::enforcement::unique::PostImage;
 use crate::data::executor::enforcement::write_hook;
-use crate::data::executor::handlers::partial_refusal::{
-    refusal_after_partial_apply, refusal_after_rows,
+use crate::data::executor::handlers::point::apply_put::InstalledDocumentRow;
+use crate::data::executor::handlers::point::update::prepared::{
+    PreparedUpdateRow, PreparedUpdateUndo,
 };
-use crate::data::executor::handlers::point::update_reindex::UpdateBody;
-use crate::data::executor::handlers::point::update_reindex_secondary::UpdateSecondaryReindex;
-use crate::data::executor::handlers::point::update_reindex_text::UpdateTextReindex;
-use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
 
@@ -32,9 +25,8 @@ pub(in crate::data::executor) struct UpdateFromJoinWriteOutcome {
     /// One post-apply `Put` redo entry per updated row plus every derived
     /// materialized-sum target write.
     pub write_set: Vec<WriteSetEntry>,
-    /// Post-image JSON per affected row, populated only when the caller asked
-    /// for `RETURNING`.
-    pub returned_docs: Vec<nodedb_types::Value>,
+    /// The response payload encoded before the source transaction commits.
+    pub payload: Vec<u8>,
 }
 
 /// Everything the write pass needs about the statement, gathered once by the
@@ -43,22 +35,20 @@ pub(in crate::data::executor) struct WriteResolvedRowsCtx<'a> {
     pub tid: u64,
     pub target_collection: &'a str,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
-    pub has_vectors: bool,
     /// The target collection's strict schema, when it stores Binary Tuples.
     pub strict_schema: Option<&'a StrictSchema>,
     /// The target collection's declared `PRIMARY KEY` column, when it has one.
     pub declared_primary_key: Option<&'a str>,
-    pub want_returning: bool,
+    pub returning: Option<&'a ReturningSpec>,
+    pub rls_filters: &'a [u8],
     /// The system time every new version lands at. The collect pass encoded
     /// the post-images at it.
     pub sys_from: i64,
 }
 
 impl CoreLoop {
-    /// Persist every row in `rows`, one transaction each. Returns `Err(resp)`
-    /// with a ready-to-return error `Response` the moment any row's write,
-    /// enforcement fold, or vector re-index fails — the caller returns it
-    /// immediately rather than continuing the loop.
+    /// Publish the complete matched row set and its derived indexes atomically.
+    /// An error reverses all statement-owned memory effects and leaves no source rows committed.
     pub(in crate::data::executor) fn write_resolved_update_from_join_rows(
         &mut self,
         task: &ExecutionTask,
@@ -69,31 +59,27 @@ impl CoreLoop {
             tid,
             target_collection,
             resolved_sum_targets,
-            has_vectors,
             strict_schema,
             declared_primary_key,
-            want_returning,
+            returning,
+            rls_filters,
             sys_from,
         } = ctx;
-        let is_strict = strict_schema.is_some();
         let database_id = task.request.database_id.as_u64();
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
             target_collection.to_string(),
         );
-        let mut affected = 0u64;
-        let mut write_set: Vec<WriteSetEntry> = Vec::new();
-        let mut returned_docs: Vec<nodedb_types::Value> = if want_returning {
-            Vec::with_capacity(rows.len())
-        } else {
-            Vec::new()
-        };
-
-        // A closed period refuses an edit to a row it holds, and an edit that
-        // assigns the period column into it. Both images of every row are
-        // judged before the first row commits: each row below commits on its
-        // own, so a lock judged there refuses after earlier rows landed.
+        if let Some(config) = self.doc_configs.get(&config_key)
+            && let Err(error) = crate::data::executor::enforcement::append_only::check_point_update(
+                target_collection,
+                &config.enforcement,
+            )
+        {
+            return Err(self.response_error(task, error));
+        }
+        // Judge both period images before the source transaction begins.
         if let Some(lock) = self
             .doc_configs
             .get(&config_key)
@@ -129,213 +115,120 @@ impl CoreLoop {
             }
         }
 
-        // UNIQUE is judged on the statement's post-state before the first row
-        // commits: a value one row releases is free for another.
-        let post_images: Vec<PostImage<'_>> = rows
-            .iter()
-            .map(|row| PostImage {
-                surrogate: row.key.surrogate().as_u32(),
-                doc: Some(&row.doc),
-                judged: true,
-            })
-            .collect();
-        if let Err(e) = self.check_unit_unique(database_id, tid, target_collection, &post_images) {
-            return Err(self.response_error(task, e));
-        }
-
-        for row in rows {
-            let ResolvedUpdateRow {
-                key: storage_key,
-                body: updated_bytes,
-                old_body,
-                doc,
-            } = row;
-
-            // The row's body and the materialized-sum delta it owes share ONE
-            // transaction. `ResolvedUpdateRow` already carries BOTH images —
-            // `old_body` as stored and `body` as the post-image — so the fold
-            // re-reads nothing; the struct was built to carry them.
-            let row_txn = match self.sparse.begin_write() {
-                Ok(txn) => txn,
-                Err(e) => {
-                    let code = refusal_after_rows(affected, e);
-                    return Err(self.refusal_with_landed_rows(task, code, write_set));
-                }
-            };
-            // The body, its secondary-index diff, and the row's full-text
-            // postings land together, as a point update lands them; a row
-            // whose write fails refuses the statement rather than drop out of
-            // its affected count.
-            let stored = self
-                .update_body_in_txn(
-                    &row_txn,
-                    UpdateBody {
-                        config_key: &config_key,
-                        database_id,
-                        tid,
-                        collection: target_collection,
-                        storage_key: &storage_key,
-                        current_bytes: &old_body,
-                        updated_bytes: &updated_bytes,
-                        sys_from,
-                    },
+        let affected = rows.len() as u64;
+        let mut identities = Vec::with_capacity(rows.len());
+        let mut images = Vec::with_capacity(rows.len());
+        let mut notes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            identities.push(stored_row_identity(
+                &row.body,
+                strict_schema,
+                declared_primary_key,
+                row.key,
+            ));
+            let image = self
+                .capture_stored_document(
+                    &config_key,
+                    &row.body,
+                    crate::bridge::envelope::RowVersion::open(sys_from),
                 )
-                .and_then(|()| {
-                    self.update_reindex_text(
-                        &row_txn,
-                        UpdateTextReindex {
-                            database_id,
-                            tid,
-                            collection: target_collection,
-                            surrogate: storage_key.surrogate(),
-                            new_doc: &doc,
-                            ordinal: sys_from,
-                        },
-                    )
-                });
-            if let Err(e) = stored {
-                let code = refusal_after_rows(affected, e);
-                return Err(self.refusal_with_landed_rows(task, code, write_set));
+                .map_err(|error| self.response_error(task, error))?;
+            let note = self
+                .prepare_surrogate_write(task, tid, target_collection, row.key.surrogate().as_u32())
+                .map_err(|error| self.response_error(task, error))?;
+            images.push(image);
+            notes.push(note);
+        }
+        let payload = match returning {
+            Some(spec) => {
+                let stored: Vec<_> = identities
+                    .iter()
+                    .zip(&rows)
+                    .map(|(identity, row)| (identity, row.body.as_slice()))
+                    .collect();
+                super::returning_rows::build_stored_rows_payload(
+                    spec,
+                    rls_filters,
+                    strict_schema,
+                    &self.identity_column(database_id, tid, target_collection),
+                    &stored,
+                    &self.crs_context(),
+                )
+                .map_err(|error| self.response_error(task, error))?
             }
-            {
-                let enforcement = write_hook::run(
-                    self,
-                    &row_txn,
-                    &write_hook::HookCtx {
+            None => crate::data::executor::response_codec::encode_affected(affected),
+        };
+        let txn = self
+            .sparse
+            .begin_write()
+            .map_err(|error| self.response_error(task, error))?;
+        let mut undo = PreparedUpdateUndo::default();
+        let mut write_set = Vec::with_capacity(rows.len());
+        let mut event_images = Vec::with_capacity(rows.len());
+        let hook = write_hook::HookCtx {
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
+            database_id,
+            tid,
+            collection: target_collection,
+            resolved_targets: resolved_sum_targets,
+            deferred_sum_targets: &[],
+            wal_lsn: task.wal_lsn(),
+        };
+        for ((row, image), identity) in rows.iter().zip(images).zip(&identities) {
+            let applied = self.apply_prepared_update_row(
+                &txn,
+                PreparedUpdateRow {
+                    row: InstalledDocumentRow {
                         database_id,
                         tid,
                         collection: target_collection,
-                        resolved_targets: resolved_sum_targets,
-                        deferred_sum_targets: &[],
+                        storage_key: row.key,
+                        surrogate: row.key.surrogate(),
                         wal_lsn: task.wal_lsn(),
                     },
-                    write_hook::WriteImages::Update {
-                        old: write_hook::ImageBody::Stored(&old_body),
-                        new: write_hook::ImageBody::Stored(&updated_bytes),
-                    },
-                );
-                let target_writes = match enforcement {
-                    // Only the target writes are taken: this row's BALANCED
-                    // contribution was settled for the whole statement above,
-                    // before the first row was rewritten, so taking it again
-                    // would count the same update twice.
-                    Ok(outcome) => outcome.target_writes,
-                    // Dropping `row_txn` un-committed reverses the row and every
-                    // target it had already moved.
-                    Err(e) => {
-                        let code = refusal_after_rows(affected, e);
-                        return Err(self.refusal_with_landed_rows(task, code, write_set));
-                    }
-                };
-                if let Err(e) = row_txn.commit() {
-                    let code = refusal_after_rows(
-                        affected,
-                        ErrorCode::Internal {
-                            detail: format!("update-from-join commit: {e}"),
-                        },
-                    );
-                    return Err(self.refusal_with_landed_rows(task, code, write_set));
+                    identity: identity.clone(),
+                    image,
+                    hook: &hook,
+                },
+                &mut undo,
+            );
+            match applied {
+                Ok(applied) => {
+                    write_set.extend(applied.write_set);
+                    event_images.push(applied.event);
                 }
-                // The identity is the one INSERT minted: the declared primary
-                // key when the collection declares one, else the decimal
-                // surrogate. The event and the redo entry journal the same
-                // identity.
-                let row_identity = stored_row_identity(
-                    &updated_bytes,
-                    strict_schema,
-                    declared_primary_key,
-                    storage_key,
-                );
-                // The row's post-image, journalled after apply: this plan
-                // carries no pre-dispatch record of it. Then one entry per
-                // moved target row, naming the TARGET collection.
-                let image = self.stored_row_image(
-                    WriteSetRow {
-                        database_id,
-                        tid,
-                        collection: target_collection,
-                        surrogate: storage_key.surrogate().as_u32(),
-                        identity: row_identity.clone(),
-                    },
-                    &updated_bytes,
-                    // The row's version landed at the statement's system time.
-                    sys_from,
-                );
-                match image {
-                    Ok(image) => write_set.push(image),
-                    // This row committed above, so it counts as landed.
-                    Err(e) => {
-                        let code = refusal_after_rows(affected + 1, e);
-                        return Err(self.refusal_with_landed_rows(task, code, write_set));
-                    }
-                }
-                write_set.extend(write_hook::target_write_set(&target_writes));
-                self.doc_cache.put(
-                    database_id,
-                    tid,
-                    target_collection,
-                    &storage_key,
-                    sys_from,
-                    &updated_bytes,
-                );
-                // Emit an update event per affected row to the Event Plane, so
-                // AFTER-UPDATE triggers and CDC/change-stream consumers see
-                // each row `UPDATE ... FROM` touched — mirroring
-                // `execute_point_update`/`execute_bulk_update`'s single-row
-                // emit. `old_body` is the pre-update stored bytes captured by
-                // `collect_update_from_join_rows`; `emit_put_event` derives
-                // `WriteOp::Update` from the Some prior + Some new pair and
-                // handles strict->msgpack conversion on both sides.
-                //
-                // `row_identity` is read again below for `RETURNING`'s `id`
-                // field, so the event-emit boundary gets a clone rather than
-                // the move.
-                self.emit_put_event(
-                    task,
-                    tid,
-                    target_collection,
-                    row_identity.clone(),
-                    &updated_bytes,
-                    Some(&old_body),
-                );
-                // Re-index the row's vectors and sparse vectors from the new
-                // body, as a point update does: the old versions end at
-                // `sys_from` and the new ones start there. Each half is a no-op
-                // unless the collection declares that kind of field.
-                if let Err(e) = self.update_reindex_vector_and_sparse(UpdateSecondaryReindex {
-                    database_id,
-                    tid,
-                    collection: target_collection,
-                    storage_key,
-                    new_body: &updated_bytes,
-                    is_strict,
-                    has_vectors,
-                    sys_from,
-                }) {
-                    // The row's body already committed.
-                    let code = refusal_after_partial_apply(e.into());
-                    return Err(self.refusal_with_landed_rows(task, code, write_set));
-                }
-                affected += 1;
-                if want_returning {
-                    // `row_identity` fills the identity column only for a row
-                    // that lacks it. A declared key keeps the value the
-                    // client wrote.
-                    let mut row = nodedb_types::Value::from(doc);
-                    returning_doc::attach_row_id(
-                        &mut row,
-                        &row_identity,
-                        &self.identity_column(database_id, tid, target_collection),
-                    );
-                    returned_docs.push(row);
+                Err(error) => {
+                    drop(txn);
+                    let error = undo.abort(self, database_id, tid, error);
+                    return Err(self.response_error(task, error));
                 }
             }
         }
-
+        if let Err(error) = undo.check_unique(self, &txn, database_id, tid) {
+            drop(txn);
+            let error = undo.abort(self, database_id, tid, error);
+            return Err(self.response_error(task, error));
+        }
+        if let Err(error) = txn.commit() {
+            let error = crate::Error::Storage {
+                engine: "sparse".into(),
+                detail: format!("update-from-join commit: {error}"),
+            };
+            self.fail_journalled(&error);
+            let error = undo.abort(self, database_id, tid, error);
+            return Err(self.response_error(task, error));
+        }
+        for note in notes {
+            self.publish_surrogate_write(note, sys_from);
+        }
+        for (identity, event) in identities.into_iter().zip(event_images) {
+            self.emit_prepared_put_event(task, target_collection, identity, &event);
+        }
+        self.checkpoint_coordinator.mark_dirty("sparse", rows.len());
         Ok(UpdateFromJoinWriteOutcome {
             affected,
             write_set,
-            returned_docs,
+            payload,
         })
     }
 }
@@ -343,6 +236,7 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::envelope::ErrorCode;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
     use crate::engine::document::store::{CollectionConfig, DocumentEngine, IndexPath};
@@ -363,6 +257,61 @@ mod tests {
             body: doc_format::encode_to_msgpack(&new),
             old_body: doc_format::encode_to_msgpack(&old),
             doc: new,
+        }
+    }
+
+    #[test]
+    fn join_update_preserves_append_only_and_hash_chained_rows() {
+        for hash_chain in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+            let task = make_default_task();
+            let database_id = task.request.database_id.as_u64();
+            let key = StorageKey::for_surrogate(Surrogate(1));
+            let old = serde_json::json!({"note":"old"});
+            let bytes = doc_format::encode_to_msgpack(&old);
+            core.sparse
+                .put(database_id, TID, COLLECTION, &key, &bytes, 1)
+                .expect("seed");
+            let mut config = CollectionConfig::new(COLLECTION);
+            config.enforcement.append_only = !hash_chain;
+            config.enforcement.hash_chain = hash_chain;
+            core.doc_configs.insert(
+                (
+                    task.request.database_id,
+                    TenantId::new(TID),
+                    COLLECTION.to_owned(),
+                ),
+                config,
+            );
+            let outcome = core.write_resolved_update_from_join_rows(
+                &task,
+                WriteResolvedRowsCtx {
+                    tid: TID,
+                    target_collection: COLLECTION,
+                    resolved_sum_targets: &[],
+                    strict_schema: None,
+                    declared_primary_key: None,
+                    returning: None,
+                    rls_filters: &[],
+                    sys_from: 2,
+                },
+                vec![resolved_row(1, old)],
+            );
+            let Err(response) = outcome else {
+                panic!("immutable row refuses UPDATE");
+            };
+            assert!(matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::AppendOnlyViolation { .. })
+            ));
+            assert!(response.write_set.is_empty());
+            assert_eq!(
+                core.sparse
+                    .get(database_id, TID, COLLECTION, &key)
+                    .expect("read"),
+                Some(bytes)
+            );
         }
     }
 
@@ -410,10 +359,10 @@ mod tests {
                 tid: TID,
                 target_collection: COLLECTION,
                 resolved_sum_targets: &[],
-                has_vectors: false,
                 strict_schema: None,
                 declared_primary_key: None,
-                want_returning: false,
+                returning: None,
+                rls_filters: &[],
                 sys_from: core
                     .row_version_ordinal(
                         database_id,
@@ -534,10 +483,10 @@ mod tests {
                 tid: TID,
                 target_collection: COLLECTION,
                 resolved_sum_targets: &[],
-                has_vectors: false,
                 strict_schema: None,
                 declared_primary_key: None,
-                want_returning: false,
+                returning: None,
+                rls_filters: &[],
                 sys_from: STATEMENT_MS,
             },
             rows,
@@ -579,7 +528,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome.write_set[0].effect,
-                RowEffect::Put { version, .. } if version.sys_from == STATEMENT_MS
+                RowEffect::InstalledPut { image, .. } if image.version.sys_from == STATEMENT_MS
             ),
             "the write set carries the new version: {:?}",
             outcome.write_set
@@ -640,10 +589,10 @@ mod tests {
                 tid: TID,
                 target_collection: COLLECTION,
                 resolved_sum_targets: &[],
-                has_vectors: false,
                 strict_schema: None,
                 declared_primary_key: None,
-                want_returning: false,
+                returning: None,
+                rls_filters: &[],
                 sys_from: 2,
             },
             rows,
@@ -723,6 +672,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &[],
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert_eq!(
             inserted.status,
@@ -756,10 +706,10 @@ mod tests {
                 tid: TID,
                 target_collection: COLLECTION,
                 resolved_sum_targets: &[],
-                has_vectors: false,
                 strict_schema: Some(&schema),
                 declared_primary_key: None,
-                want_returning: false,
+                returning: None,
+                rls_filters: &[],
                 sys_from,
             },
             vec![ResolvedUpdateRow {

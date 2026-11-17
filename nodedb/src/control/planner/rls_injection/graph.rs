@@ -194,6 +194,7 @@ mod tests {
             return_columns: Vec::new(),
             distinct: false,
             limit: None,
+            offset: None,
             order_by: Vec::new(),
             collection: collection.map(str::to_string),
         };

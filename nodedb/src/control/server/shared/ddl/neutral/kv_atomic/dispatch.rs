@@ -21,6 +21,7 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
+use super::super::refusal::{coded_refusal, refusal_to_ddl};
 
 /// The op that [`dispatch_and_respond`] routes: its target shard, plan,
 /// function name, and the collections it touches.
@@ -142,7 +143,7 @@ pub(crate) async fn dispatch_and_respond(
             )));
         }
         Err(StagingGateError::Dispatch(e)) => return Err(DdlError::from_error(&e)),
-        Err(StagingGateError::Rejected { code }) => return Err(data_plane_error(code)),
+        Err(StagingGateError::Rejected { code }) => return Err(refusal_to_ddl(code.as_ref())),
     };
 
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
@@ -195,7 +196,7 @@ async fn dispatch_autocommit(
     // refusal, a type mismatch, an overflow, an insufficient balance, a
     // missing key — so the status decides, never the payload's emptiness.
     if response.status == Status::Error {
-        return Err(data_plane_error(response.error_code.map(|code| *code)));
+        return Err(refusal_to_ddl(response.error_code.as_deref()));
     }
     Ok(response.payload.as_ref().to_vec())
 }
@@ -205,35 +206,13 @@ async fn dispatch_autocommit(
 /// the same way the local route's error status does.
 pub(crate) fn error_to_ddl(error: &crate::Error) -> DdlError {
     match error {
-        crate::Error::DataPlane(code) => data_plane_error(Some(code.clone())),
+        crate::Error::DataPlane(code) => coded_refusal(code),
         other => {
             let (_, sqlstate, message) =
                 crate::control::server::pgwire::types::error_to_sqlstate(other);
             ddl_err(sqlstate, message)
         }
     }
-}
-
-/// Translate a terminal Data-Plane verdict into the client-facing error.
-///
-/// Shared by both routes a refusal can arrive on — the staging gate's
-/// `Rejected`, and an `Ok(Response)` whose status is `Error` — so the same
-/// verdict never reaches the client as two different messages depending on
-/// whether the statement ran inside a transaction.
-///
-/// `None` means the Data Plane reported a failure without a code, which is a
-/// bug in whatever produced it; it is surfaced as an internal error rather than
-/// silently downgraded to success.
-fn data_plane_error(code: Option<crate::bridge::envelope::ErrorCode>) -> DdlError {
-    let Some(code) = code else {
-        return DdlError::internal("unknown data plane error");
-    };
-    let (_, sqlstate, message) =
-        crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(&code);
-    // The public error carries the code a client classifies by and the
-    // details naming the collection, which the SQLSTATE alone cannot give.
-    let public = nodedb_types::NodeDbError::from(crate::Error::DataPlane(code));
-    DdlError::from_public(sqlstate, message, &public)
 }
 
 /// Build a single-text-column row set carrying `text` under `col`.
@@ -300,6 +279,21 @@ pub(crate) fn split_args(s: &str) -> Vec<String> {
         args.push(trimmed);
     }
     args
+}
+
+/// The object name a function argument names, such as a collection or an
+/// index.
+///
+/// A single-quoted literal names the object verbatim, as every query
+/// function's literal argument does. A bare or double-quoted name follows
+/// the SQL identifier rule: a bare name lowercases, a double-quoted name
+/// keeps its case.
+pub(crate) fn name_arg(s: &str) -> Result<String, DdlError> {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        return Ok(t[1..t.len() - 1].to_string());
+    }
+    crate::control::server::shared::ddl::sql_parse::parse_ident_token(t)
 }
 
 /// Remove surrounding single quotes from a string argument.
@@ -370,4 +364,19 @@ fn parse_ttl_seconds(s: &str) -> Result<u64, DdlError> {
 /// Build a [`DdlError`] from an ANSI SQLSTATE code and a message.
 pub(crate) fn ddl_err(sqlstate: &str, message: impl Into<String>) -> DdlError {
     DdlError::new(sqlstate, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A string literal names the object verbatim. A bare name lowercases
+    /// and a double-quoted name keeps its case.
+    #[test]
+    fn name_arg_reads_literals_verbatim_and_names_by_the_identifier_rule() {
+        assert_eq!(name_arg(" 'Counters' ").unwrap(), "Counters");
+        assert_eq!(name_arg("Counters").unwrap(), "counters");
+        assert_eq!(name_arg("\"Counters\"").unwrap(), "Counters");
+        assert!(name_arg("bad-name").is_err());
+    }
 }

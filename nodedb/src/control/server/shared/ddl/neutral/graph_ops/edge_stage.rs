@@ -163,13 +163,8 @@ pub(super) async fn stage_edge_write_in_txn(
             let (_, sqlstate, message) = error_to_sqlstate(&e);
             Err(ddl_err(sqlstate, message))
         }
-        Err(StagingGateError::Rejected { code }) => Err(match code {
-            Some(code) => {
-                let (_, sqlstate, message) =
-                    crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(&code);
-                ddl_err(sqlstate, message)
-            }
-            None => DdlError::internal("unknown data plane error"),
-        }),
+        Err(StagingGateError::Rejected { code }) => Err(
+            crate::control::server::shared::ddl::neutral::refusal::refusal_to_ddl(code.as_ref()),
+        ),
     }
 }

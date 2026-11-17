@@ -42,6 +42,8 @@ pub fn data_entry_leaves(data: &[u8], database: u64) -> bool {
         entry.write,
         ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
+            | ReplicatedWrite::CalvinFrozenReply { .. }
+            | ReplicatedWrite::CalvinSequenceEffects { .. }
             | ReplicatedWrite::MirrorSeal { .. }
             | ReplicatedWrite::TimeseriesAggregateImage { .. }
     );
@@ -119,6 +121,7 @@ mod tests {
                 resolved_sum_targets: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         )
     }
@@ -151,6 +154,7 @@ mod tests {
                 passive_vshard: 2,
                 tenant_id: 1,
                 values: Vec::new(),
+                refused: false,
             },
         );
         assert!(!data_entry_leaves(&result, DB));

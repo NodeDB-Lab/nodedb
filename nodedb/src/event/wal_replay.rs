@@ -39,6 +39,7 @@ use crate::event::wal_replay_parse::{
 use crate::event::wal_replay_scope::{ReplayScope, RowSources};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::WalManager;
+use crate::wal::redo::{ChunkFetch, StreamContents};
 
 use crate::engine::timeseries::install_outcome::TsOutcomeIndex;
 use std::path::Path;
@@ -71,6 +72,7 @@ pub fn replay_wal_to_events(
         num_cores,
         base_sequence,
         &outcomes,
+        &mut |reference| wal.fetch_stream_content(reference),
     )
 }
 
@@ -96,10 +98,13 @@ pub fn replay_wal_mmap(
         num_cores,
         base_sequence,
         &outcomes,
+        &mut |reference| wal.fetch_stream_content(reference),
     )
 }
 
-/// Convert WAL records to WriteEvents, filtering by core affinity.
+/// Convert WAL records to WriteEvents, filtering by core affinity. A stream
+/// marker's events come from the content its chunk records hold: from
+/// `records`, else through `fetch`.
 fn convert_records_to_events(
     records: &[nodedb_wal::WalRecord],
     from_lsn: Lsn,
@@ -107,7 +112,9 @@ fn convert_records_to_events(
     num_cores: usize,
     base_sequence: u64,
     outcomes: &TsOutcomeIndex,
+    fetch: &mut ChunkFetch<'_>,
 ) -> crate::Result<Vec<WriteEvent>> {
+    let mut contents = StreamContents::new(records, fetch);
     let mut events = Vec::new();
     let mut sequence = base_sequence;
     let mut numbering = crate::event::record_numbering::RecordNumbering::new();
@@ -132,7 +139,7 @@ fn convert_records_to_events(
         // `TransactionRedo` (Calvin cross-shard commit) decomposes into one event
         // per write sub-op. Raw Put/Delete records still yield at most one.
         // Numbered before the tombstone filter, as the producer numbered them.
-        let mut record_events = record_events(record, outcomes, &mut sequence);
+        let mut record_events = record_events(record, outcomes, &mut contents, &mut sequence)?;
         for event in &mut record_events {
             numbering.stamp(event);
         }
@@ -169,21 +176,32 @@ fn convert_records_to_events(
 fn record_events(
     record: &WalRecord,
     outcomes: &TsOutcomeIndex,
+    contents: &mut StreamContents<'_, '_, '_>,
     sequence: &mut u64,
-) -> Vec<WriteEvent> {
+) -> crate::Result<Vec<WriteEvent>> {
     let Some(record_type) = RecordType::from_raw(record.logical_record_type()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     match row_kind(record_type) {
-        Some(kind) => row_record_events(record, kind, outcomes, sequence),
-        None => Vec::new(),
+        Some(kind) => row_record_events(record, kind, outcomes, contents, sequence),
+        None => Ok(Vec::new()),
     }
 }
 
-/// [`record_events`] with an empty install-outcome store.
+/// [`record_events`] of `record` read alone, with an empty install-outcome
+/// store.
+#[cfg(test)]
+fn record_events_alone(record: &WalRecord, sequence: &mut u64) -> crate::Result<Vec<WriteEvent>> {
+    let mut fetch = |_: &crate::wal::RedoStreamRef| -> crate::Result<Option<Vec<u8>>> { Ok(None) };
+    let records = std::slice::from_ref(record);
+    let mut contents = StreamContents::new(records, &mut fetch);
+    record_events(record, &TsOutcomeIndex::default(), &mut contents, sequence)
+}
+
+/// [`record_events_alone`], which must succeed.
 #[cfg(test)]
 fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
-    record_events(record, &TsOutcomeIndex::default(), sequence)
+    record_events_alone(record, sequence).expect("events")
 }
 
 /// The events of one row-write record.
@@ -198,10 +216,11 @@ fn row_record_events(
     record: &WalRecord,
     kind: RowRecord,
     outcomes: &TsOutcomeIndex,
+    contents: &mut StreamContents<'_, '_, '_>,
     sequence: &mut u64,
-) -> Vec<WriteEvent> {
+) -> crate::Result<Vec<WriteEvent>> {
     if matches!(kind, RowRecord::Put | RowRecord::Delete) && is_edge_record(&record.payload) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(source) = EventSource::from_wal_code(record.event_source()) else {
         error!(
@@ -210,7 +229,7 @@ fn row_record_events(
             code = record.event_source(),
             "WAL replay: a row-write record carries no event source; no event rebuilt"
         );
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let sources = match kind {
         RowRecord::Redo => RowSources::committed_redo(source),
@@ -232,7 +251,20 @@ fn row_record_events(
         commit_hlc: (record.header.commit_hlc != 0).then_some(record.header.commit_hlc),
     };
     match kind {
-        RowRecord::Redo => decompose_redo_to_events(&record.payload, &scope, outcomes, sequence),
+        RowRecord::Redo => {
+            let redo = crate::wal::RedoRecord::from_bytes(&record.payload)?;
+            // A stream marker's rows sit in its chunk records. Chunks below
+            // the oldest retained segment belong to a marker every engine
+            // checkpointed, whose events no catch-up reads again.
+            let redo = match crate::wal::RedoStreamRef::of_marker(&redo)? {
+                Some(reference) => match contents.installed(&redo, &reference)? {
+                    Some(installed) => installed,
+                    None => return Ok(Vec::new()),
+                },
+                None => redo,
+            };
+            decompose_redo_to_events(redo, &scope, outcomes, sequence)
+        }
         RowRecord::Group => crate::event::wal_replay_group::group_record_events(
             &record.payload,
             &scope,
@@ -257,15 +289,17 @@ pub(super) fn single_row_events(
     scope: &ReplayScope,
     outcomes: &TsOutcomeIndex,
     sequence: &mut u64,
-) -> Vec<WriteEvent> {
+) -> crate::Result<Vec<WriteEvent>> {
     if let RowRecord::Timeseries = kind {
-        return crate::event::wal_replay_timeseries::replayed_timeseries_events(
-            payload, scope, outcomes, sequence,
+        return Ok(
+            crate::event::wal_replay_timeseries::replayed_timeseries_events(
+                payload, scope, outcomes, sequence,
+            ),
         );
     }
     let event = match kind {
         RowRecord::Timeseries => None,
-        RowRecord::Put => parse_put_record(payload, scope, sequence),
+        RowRecord::Put => parse_put_record(payload, scope, sequence)?,
         RowRecord::Delete => parse_delete_record(payload, scope, sequence),
         RowRecord::LabelSet => parse_graph_node_label_record(payload, true, scope, sequence),
         RowRecord::LabelRemove => parse_graph_node_label_record(payload, false, scope, sequence),
@@ -277,7 +311,7 @@ pub(super) fn single_row_events(
             None
         }
     };
-    event.into_iter().collect()
+    Ok(event.into_iter().collect())
 }
 
 /// Decompose a `TransactionRedo` record into per-sub-op WriteEvents.
@@ -290,26 +324,14 @@ pub(super) fn single_row_events(
 /// of a committed redo. A sub-op type with no Event-Plane mapping (VectorPut,
 /// SpatialPut, …) yields no event and does not touch `sequence`.
 ///
-/// A malformed redo payload is logged and skipped (never a panic), mirroring the
-/// decode-failure handling in the Data-Plane redo replay path.
+/// A malformed sub-op returns an error without publishing partial events.
 fn decompose_redo_to_events(
-    payload: &[u8],
+    redo: crate::wal::RedoRecord,
     scope: &ReplayScope,
     outcomes: &TsOutcomeIndex,
     sequence: &mut u64,
-) -> Vec<WriteEvent> {
-    let redo = match crate::wal::RedoRecord::from_bytes(payload) {
-        Ok(redo) => redo,
-        Err(e) => {
-            warn!(
-                lsn = scope.lsn.as_u64(),
-                error = %e,
-                "WAL replay: skipping malformed TransactionRedo payload"
-            );
-            return Vec::new();
-        }
-    };
-
+) -> crate::Result<Vec<WriteEvent>> {
+    let mut next_sequence = *sequence;
     // A row the record lists in its row sources (a trigger body's write)
     // carries that source, as the live install emits it.
     let rows = crate::wal::RowSourceIndex::new(&redo.row_sources);
@@ -341,8 +363,8 @@ fn decompose_redo_to_events(
                 &sub.payload,
                 scope,
                 outcomes,
-                sequence,
-            ));
+                &mut next_sequence,
+            )?);
         }
     }
     apply_committed_row_metadata(&mut events, &rows, &redo.row_changes, scope);
@@ -351,9 +373,10 @@ fn decompose_redo_to_events(
     events.extend(crate::event::topic::committed::replayed_publish_events(
         &redo.publishes,
         scope,
-        sequence,
+        &mut next_sequence,
     ));
-    events
+    *sequence = next_sequence;
+    Ok(events)
 }
 
 /// Give the events of a committed transaction's rows their net kinds and
@@ -474,7 +497,11 @@ mod tests {
         // The same `{key, value}` row image a live KV write event carries.
         assert_eq!(
             event.new_value.as_deref(),
-            Some(nodedb_query::msgpack_scan::kv_row_msgpack("key1", b"val1").as_slice())
+            Some(
+                nodedb_query::msgpack_scan::kv_row_msgpack("key1", b"val1")
+                    .expect("row")
+                    .as_slice()
+            )
         );
     }
 
@@ -585,6 +612,7 @@ mod tests {
                 change("o2", RedoRowKind::NoChange),
             ],
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -655,6 +683,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             };
             let record = make_record(
                 RecordType::TransactionRedo,
@@ -695,6 +724,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -757,6 +787,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,
@@ -801,6 +832,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -818,13 +850,13 @@ mod tests {
         assert_eq!(seq, 1, "the VectorPut sub-op did not consume a sequence");
     }
 
-    /// A malformed `TransactionRedo` payload is skipped (logged, no panic) and
+    /// A malformed `TransactionRedo` payload returns an error and
     /// produces no events.
     #[test]
-    fn malformed_transaction_redo_skipped() {
+    fn malformed_transaction_redo_returns_an_error() {
         let record = make_record(RecordType::TransactionRedo, &[0xff, 0xff, 0xff], 1, 0, 303);
         let mut seq = 0u64;
-        assert!(record_to_events(&record, &mut seq).is_empty());
+        assert!(record_events_alone(&record, &mut seq).is_err());
         assert_eq!(seq, 0);
     }
 
@@ -932,6 +964,7 @@ mod tests {
     /// write whose origin is `origin`.
     fn group_part(rt: RecordType, payload: Vec<u8>, lsn: u64, origin: u64) -> WalRecord {
         let record = crate::wal::WriteGroupRecord {
+            schemas: Vec::new(),
             group: crate::wal::WriteGroup::part_of(origin, 1, 1),
             ops: vec![crate::wal::RedoSubRecord {
                 record_type: rt as u32,
@@ -1052,6 +1085,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1228,6 +1262,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1349,6 +1384,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = redo.to_bytes().unwrap();
         for (source, document, other) in [
@@ -1404,6 +1440,7 @@ mod tests {
             }],
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,
@@ -1419,5 +1456,20 @@ mod tests {
         assert_eq!(events[1].collection.as_ref(), "topic:orders_feed");
         assert_eq!(events[1].lsn, Lsn::new(410));
         assert_eq!(seq, 2);
+    }
+    #[test]
+    fn malformed_later_record_returns_no_partial_event_range() {
+        let first = make_record(RecordType::Put, &doc_put("orders", "a", &[0x80]), 1, 0, 10);
+        let malformed = make_record(RecordType::TransactionRedo, &[0xc0], 1, 0, 11);
+        let result = convert_records_to_events(
+            &[first, malformed],
+            Lsn::new(10),
+            0,
+            1,
+            7,
+            &TsOutcomeIndex::default(),
+            &mut |_| Ok(None),
+        );
+        assert!(result.is_err());
     }
 }

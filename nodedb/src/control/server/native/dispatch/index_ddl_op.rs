@@ -188,9 +188,9 @@ fn vector_set_params(
     fields: &TextFields,
     collection: &str,
 ) -> crate::Result<String> {
-    let collection = ident(collection)?;
+    let collection = resolve_name(collection)?;
     let column = match fields.field_name.as_deref().filter(|f| !f.is_empty()) {
-        Some(column) => Some(ident(column)?),
+        Some(column) => Some(resolve_name(column)?),
         None => None,
     };
     let index_type = fields.index_type.as_deref().map(plain_token).transpose()?;
@@ -226,8 +226,8 @@ fn vector_set_params(
             ));
         }
         let target = match &column {
-            Some(column) => format!("{collection}.{column}"),
-            None => collection.clone(),
+            Some(column) => format!("{}.{}", spell(&collection), spell(column)),
+            None => spell(&collection),
         };
         return Ok(format!(
             "ALTER VECTOR INDEX ON {target} SET ({})",
@@ -238,13 +238,13 @@ fn vector_set_params(
     let name = match fields.index_name.as_deref() {
         Some(name) => ident(name)?,
         None => match &column {
-            Some(column) => ident(&format!("vec_{collection}_{column}"))?,
-            None => ident(&format!("vec_{collection}"))?,
+            Some(column) => spell(&format!("vec_{collection}_{column}")),
+            None => spell(&format!("vec_{collection}")),
         },
     };
-    let mut sql = format!("CREATE VECTOR INDEX {name} ON {collection}");
+    let mut sql = format!("CREATE VECTOR INDEX {name} ON {}", spell(&collection));
     if let Some(column) = &column {
-        sql.push_str(&format!(" ({column})"));
+        sql.push_str(&format!(" ({})", spell(column)));
     }
     sql.push_str(&format!(" DIM {}", fields.vector_dim.unwrap_or(0)));
     if let Some(metric) = &metric {
@@ -289,7 +289,8 @@ fn drop_index_on_field(
         .iter()
         .find(|index| index.field == path)
         .ok_or_else(|| bad_request(format!("no index on field '{field}' of '{collection}'")))?;
-    Ok(format!("DROP INDEX {}", ident(&index.name)?))
+    // The catalog holds the resolved name, so it is spelled, not resolved.
+    Ok(format!("DROP INDEX {}", spell(&plain_token(&index.name)?)))
 }
 
 fn required<'a>(value: Option<&'a str>, name: &str) -> crate::Result<&'a str> {
@@ -298,11 +299,29 @@ fn required<'a>(value: Option<&'a str>, name: &str) -> crate::Result<&'a str> {
         .ok_or_else(|| bad_request(format!("missing '{name}'")))
 }
 
-/// A SQL identifier that renders without quoting.
+/// `raw` spelled as SQL text that resolves back to the same name.
 fn ident(raw: &str) -> crate::Result<String> {
+    Ok(spell(&resolve_name(raw)?))
+}
+
+/// The name `raw` resolves to by the SQL identifier rule: a bare name
+/// lowercases, a double-quoted one keeps its case. The name is letters,
+/// digits and underscores.
+fn resolve_name(raw: &str) -> crate::Result<String> {
     let normalized =
         nodedb_sql::reserved::check_identifier(raw).map_err(|e| bad_request(e.to_string()))?;
     plain_token(&normalized)
+}
+
+/// `name` as SQL text. A bare word lowercases and a reserved word is
+/// refused, so a name with an uppercase letter or a reserved word is
+/// double-quoted.
+fn spell(name: &str) -> String {
+    if name.bytes().any(|b| b.is_ascii_uppercase()) || nodedb_sql::reserved::is_reserved(name) {
+        format!("\"{name}\"")
+    } else {
+        name.to_string()
+    }
 }
 
 /// A token of ASCII letters, digits and underscores.
@@ -393,5 +412,16 @@ mod tests {
         };
         assert!(create_sorted_index(&fields, "scores").is_err());
         assert!(plain_token("cosine) KEY x").is_err());
+    }
+
+    /// A rendered name resolves back to the name it renders: a bare name
+    /// lowercases, and a case-kept or reserved name renders double-quoted.
+    #[test]
+    fn a_rendered_name_resolves_to_itself() {
+        assert_eq!(ident("Emb").expect("bare"), "emb");
+        assert_eq!(ident("\"Emb\"").expect("quoted"), "\"Emb\"");
+        assert_eq!(resolve_name("\"Emb\"").expect("quoted"), "Emb");
+        assert_eq!(spell("search"), "\"search\"");
+        assert_eq!(spell("body"), "body");
     }
 }

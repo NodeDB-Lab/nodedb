@@ -59,8 +59,20 @@ use std::borrow::Cow;
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::{RecordStamp, RecordType, WalRecordArgs};
 
-use super::{RedoRecord, WriteGroupRecord};
+use super::replay_arm::RedoArm;
+use super::replay_origin::GroupedReplayOrigins;
+use super::stream_expand::StreamContents;
+use super::{RedoRecord, RedoStreamRef, WriteGroupRecord, read_stream_content};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::io::uring_wal_cursor::UringWalCursor;
+
+struct ReconstitutedReplay {
+    records: Vec<WalRecord>,
+    grouped_origins: GroupedReplayOrigins,
+    /// The sum targets each committed record's install folded with, by the
+    /// record's LSN. Only records that carry targets appear.
+    sum_targets: Vec<(u64, Vec<nodedb_physical::physical_plan::RedoSumTargets>)>,
+}
 
 /// Reconstitute every sub-record of every `TransactionRedo` record into a flat,
 /// LSN-ordered `Vec<WalRecord>` carrying each sub-record's own engine
@@ -91,20 +103,54 @@ use crate::data::executor::core_loop::CoreLoop;
 /// on its core. Replay then applies a write's rows at the write's place in
 /// the order, wherever its parts sit in the WAL: a part boot journals at the
 /// tail never lands over a later write to the same row.
-fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Vec<WalRecord>> {
+///
+/// A stream marker reconstitutes from the content its chunk records hold
+/// (see [`super::stream_expand`]). A marker whose chunks lie below the
+/// oldest retained segment was checkpointed by every engine, so it
+/// reconstitutes no sub-record.
+///
+/// A committed record's sum targets come from where its install read them:
+/// a whole record's WAL copy, or a stream marker's content header.
+fn reconstitute_redo_records(
+    records: &[WalRecord],
+    contents: &mut StreamContents<'_, '_, '_>,
+) -> crate::Result<ReconstitutedReplay> {
     let mut out = Vec::new();
+    let mut grouped_origins = GroupedReplayOrigins::default();
+    let mut sum_targets = Vec::new();
     for record in records {
         let (lsn, ops) = match RecordType::from_raw(record.logical_record_type()) {
             Some(RecordType::TransactionRedo) => {
                 let redo = RedoRecord::from_bytes(&record.payload)?;
-                (record.header.lsn, redo.ops)
+                let installed = match RedoStreamRef::of_marker(&redo)? {
+                    Some(reference) => match contents.installed(&redo, &reference)? {
+                        Some(installed) => installed,
+                        None => continue,
+                    },
+                    None => redo,
+                };
+                if !installed.sum_targets.is_empty() {
+                    sum_targets.push((record.header.lsn, installed.sum_targets));
+                }
+                (record.header.lsn, installed.ops)
             }
             Some(RecordType::WriteGroup) => {
                 let group = WriteGroupRecord::from_bytes(&record.payload)?;
-                (group.group.origin_at(record.header.lsn), group.ops)
+                let mut ops = group.ops;
+                for sub in &mut ops {
+                    if let Some(installed) =
+                        super::installed_document::InstalledDocumentRedo::<u32>::decode(
+                            &sub.payload,
+                        )?
+                    {
+                        sub.payload = installed.resolve(&group.schemas)?.encode()?;
+                    }
+                }
+                (group.group.origin_at(record.header.lsn), ops)
             }
             _ => continue,
         };
+        grouped_origins.insert(lsn);
         // Every sub-record takes the system ordinal of its record, so every
         // write of the record replays at the ordinal its live apply stamped.
         let stamp = RecordStamp {
@@ -127,7 +173,11 @@ fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Vec<WalReco
             )?);
         }
     }
-    Ok(out)
+    Ok(ReconstitutedReplay {
+        records: out,
+        grouped_origins,
+        sum_targets,
+    })
 }
 
 /// Merge the standalone records with the reconstituted redo sub-records into
@@ -193,27 +243,52 @@ impl CoreLoop {
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> crate::Result<()> {
-        let redo_ops = reconstitute_redo_records(records)?;
+        // A stream marker's chunks the slice lacks are read back through this
+        // core's io_uring cursor.
+        let source = self.wal_source().clone();
+        let mut fetch =
+            |reference: &RedoStreamRef| read_stream_content::<UringWalCursor>(&source, reference);
+        let mut contents = StreamContents::new(records, &mut fetch);
+        // An open committed-redo scope tags each error it records with the
+        // step that ran (`RedoArm`).
+        self.enter_redo_arm(RedoArm::Reconstitute);
+        let ReconstitutedReplay {
+            records: redo_ops,
+            grouped_origins,
+            sum_targets,
+        } = reconstitute_redo_records(records, &mut contents)?;
+        // A never-durable record folds with the targets its install used.
+        self.keep_replay_fold_targets(sum_targets);
         let ordered = merge_by_lsn(records, &redo_ops);
 
-        self.replay_vector_wal(&ordered, num_cores, tombstones);
+        self.enter_redo_arm(RedoArm::Vector);
+        self.replay_vector_wal(&ordered, num_cores, tombstones, &grouped_origins);
         crate::fail_point!(self.fail_scope(), "replay::between_engine_passes");
+        self.enter_redo_arm(RedoArm::VectorExtended);
         self.replay_vector_extended_wal(&ordered, num_cores, tombstones);
         // Every document row the WAL names, standalone and redo alike, in LSN
         // order.
+        self.enter_redo_arm(RedoArm::Document);
         self.replay_document_redo(&ordered, num_cores, tombstones);
+        self.enter_redo_arm(RedoArm::Kv);
         self.replay_kv_wal(&ordered, num_cores, tombstones);
-        self.replay_timeseries_wal(&ordered, num_cores, tombstones);
+        self.enter_redo_arm(RedoArm::Timeseries);
+        self.replay_timeseries_wal_with_origins(&ordered, num_cores, tombstones, &grouped_origins);
+        self.enter_redo_arm(RedoArm::Array);
         self.replay_array_wal(&ordered, num_cores, tombstones);
         // CRDT deltas and document/list intents share Loro state, so replay
         // them together in global LSN order: the standalone records and the
         // intents a committed transaction journalled as redo sub-records.
+        self.enter_redo_arm(RedoArm::Crdt);
         self.replay_crdt_wal_ordered(&ordered, num_cores, tombstones);
-        self.replay_fts_wal(&ordered, num_cores, tombstones);
-        self.replay_spatial_wal(&ordered, num_cores, tombstones);
+        self.enter_redo_arm(RedoArm::Fts);
+        self.replay_fts_wal(&ordered, num_cores, tombstones, &grouped_origins);
+        self.enter_redo_arm(RedoArm::Spatial);
+        self.replay_spatial_wal(&ordered, num_cores, tombstones, &grouped_origins);
         // Graph node labels have no redb-backed durability (unlike edges,
         // rebuilt into the CSR from the `EdgeStore` before this sequence runs) —
         // a WAL record is their only durable backing.
+        self.enter_redo_arm(RedoArm::GraphNodeLabel);
         self.replay_graph_node_label_wal(records, num_cores);
 
         crate::fail_point!(self.fail_scope(), "replay::between_standalone_and_redo");
@@ -222,6 +297,7 @@ impl CoreLoop {
         // LSN order. The edges' CSR is rebuilt from the `EdgeStore` at open, so
         // a restart re-applies versions it already holds at their exact keys,
         // and a point-in-time restore applies the versions its base lacks.
+        self.enter_redo_arm(RedoArm::Graph);
         self.replay_graph_redo(&ordered, num_cores, tombstones);
         // Node-label deltas staged inside a transaction resolve to the same
         // `GraphNodeLabelSet` / `GraphNodeLabelRemove` sub-record shape the
@@ -230,6 +306,7 @@ impl CoreLoop {
         // routes them from a reconstituted `TransactionRedo` record, mirroring
         // `replay_vector_extended_wal`'s role for the vector engine's extended
         // sub-records above.
+        self.enter_redo_arm(RedoArm::GraphNodeLabelRedo);
         self.replay_graph_node_labels_redo(&redo_ops, num_cores);
         Ok(())
     }
@@ -252,290 +329,5 @@ impl CoreLoop {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::wal::{RedoRecord, RedoSubRecord};
-
-    fn redo_wal_record(lsn: u64, tenant_id: u64, vshard_id: u32, record: &RedoRecord) -> WalRecord {
-        WalRecord::new(WalRecordArgs {
-            record_type: RecordType::TransactionRedo as u32,
-            lsn,
-            tenant_id,
-            vshard_id,
-            database_id: 0,
-            payload: record.to_bytes().expect("encode redo record"),
-            encryption_key: None,
-            preamble_bytes: None,
-        })
-        .expect("wal record")
-    }
-
-    #[test]
-    fn reconstitute_preserves_type_payload_and_header() {
-        let redo = RedoRecord {
-            version: 1,
-            ops: vec![
-                RedoSubRecord {
-                    record_type: RecordType::VectorPut as u32,
-                    payload: vec![1, 2, 3],
-                },
-                RedoSubRecord {
-                    record_type: RecordType::SpatialPut as u32,
-                    payload: vec![4, 5],
-                },
-            ],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        let outer = redo_wal_record(77, 9, 3, &redo);
-
-        let recon =
-            reconstitute_redo_records(std::slice::from_ref(&outer)).expect("well-formed redo");
-        assert_eq!(recon.len(), 2);
-        assert_eq!(recon[0].logical_record_type(), RecordType::VectorPut as u32);
-        assert_eq!(recon[0].payload, vec![1, 2, 3]);
-        assert_eq!(
-            recon[1].logical_record_type(),
-            RecordType::SpatialPut as u32
-        );
-        assert_eq!(recon[1].payload, vec![4, 5]);
-        // Enclosing header identity propagates to every sub-record.
-        for r in &recon {
-            assert_eq!(r.header.lsn, 77);
-            assert_eq!(r.header.tenant_id, 9);
-            assert_eq!(r.header.vshard_id, 3);
-        }
-    }
-
-    /// Every sub-record replays at the system ordinal its record carries, the
-    /// one the record's live apply stamped.
-    #[test]
-    fn reconstitute_carries_the_record_system_ordinal() {
-        let redo = RedoRecord {
-            version: 1,
-            ops: vec![
-                RedoSubRecord {
-                    record_type: RecordType::Put as u32,
-                    payload: vec![1],
-                },
-                RedoSubRecord {
-                    record_type: RecordType::Delete as u32,
-                    payload: vec![2],
-                },
-            ],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        let outer = WalRecord::new_stamped(
-            WalRecordArgs {
-                record_type: RecordType::TransactionRedo as u32,
-                lsn: 40,
-                tenant_id: 1,
-                vshard_id: 0,
-                database_id: 0,
-                payload: redo.to_bytes().expect("encode redo record"),
-                encryption_key: None,
-                preamble_bytes: None,
-            },
-            RecordStamp {
-                system_ordinal: 1_800_000_000_000_000_042,
-                ..RecordStamp::NONE
-            },
-        )
-        .expect("wal record");
-
-        let recon =
-            reconstitute_redo_records(std::slice::from_ref(&outer)).expect("well-formed redo");
-        assert_eq!(recon.len(), 2);
-        for r in &recon {
-            assert_eq!(r.system_ordinal(), Some(1_800_000_000_000_000_042));
-        }
-    }
-
-    #[test]
-    fn reconstitute_skips_non_redo_records() {
-        let put = WalRecord::new(WalRecordArgs {
-            record_type: RecordType::Put as u32,
-            lsn: 1,
-            tenant_id: 0,
-            vshard_id: 0,
-            database_id: 0,
-            payload: vec![9, 9, 9],
-            encryption_key: None,
-            preamble_bytes: None,
-        })
-        .expect("wal record");
-
-        let recon = reconstitute_redo_records(&[put]).expect("non-redo records are ignored");
-        assert!(recon.is_empty());
-    }
-
-    fn put_wal_record(lsn: u64, payload: Vec<u8>) -> WalRecord {
-        WalRecord::new(WalRecordArgs {
-            record_type: RecordType::Put as u32,
-            lsn,
-            tenant_id: 0,
-            vshard_id: 0,
-            database_id: 0,
-            payload,
-            encryption_key: None,
-            preamble_bytes: None,
-        })
-        .expect("wal record")
-    }
-
-    /// With no redo groups the merge must not copy the tail at all — the
-    /// ordinary boot walks the borrowed slice.
-    #[test]
-    fn merge_borrows_when_there_are_no_redo_groups() {
-        let standalone = vec![put_wal_record(1, vec![1]), put_wal_record(2, vec![2])];
-        let merged = merge_by_lsn(&standalone, &[]);
-        assert!(matches!(merged, Cow::Borrowed(_)));
-        assert_eq!(merged.len(), 2);
-    }
-
-    /// The defect this ordering exists to prevent: a redo op written at a LOWER
-    /// LSN than a later autocommit write must be applied BEFORE it, or the
-    /// absolute overwrite it carries resurrects the older value.
-    #[test]
-    fn lower_lsn_redo_op_is_ordered_before_a_higher_lsn_autocommit() {
-        let redo = RedoRecord {
-            version: 1,
-            ops: vec![RedoSubRecord {
-                record_type: RecordType::Put as u32,
-                payload: vec![0xAA],
-            }],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        // The transaction committed at LSN 50; an autocommit overwrote the same
-        // key at LSN 100.
-        let standalone = vec![
-            redo_wal_record(50, 0, 0, &redo),
-            put_wal_record(100, vec![0xBB]),
-        ];
-        let redo_ops = reconstitute_redo_records(&standalone).expect("well-formed redo");
-        let merged = merge_by_lsn(&standalone, &redo_ops);
-
-        let applied: Vec<(u64, Vec<u8>)> = merged
-            .iter()
-            .filter(|r| r.logical_record_type() == RecordType::Put as u32)
-            .map(|r| (r.header.lsn, r.payload.clone()))
-            .collect();
-        assert_eq!(
-            applied,
-            vec![(50, vec![0xAA]), (100, vec![0xBB])],
-            "the LSN-50 redo op must be applied before the LSN-100 autocommit"
-        );
-    }
-
-    /// Sub-records of one group share the enclosing record's LSN, so the sort
-    /// must be stable or an intra-transaction write order is lost.
-    #[test]
-    fn merge_preserves_intra_transaction_order() {
-        let redo = RedoRecord {
-            version: 1,
-            ops: vec![
-                RedoSubRecord {
-                    record_type: RecordType::Put as u32,
-                    payload: vec![1],
-                },
-                RedoSubRecord {
-                    record_type: RecordType::Put as u32,
-                    payload: vec![2],
-                },
-                RedoSubRecord {
-                    record_type: RecordType::Put as u32,
-                    payload: vec![3],
-                },
-            ],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        let standalone = vec![redo_wal_record(7, 0, 0, &redo)];
-        let redo_ops = reconstitute_redo_records(&standalone).expect("well-formed redo");
-        let merged = merge_by_lsn(&standalone, &redo_ops);
-        let payloads: Vec<Vec<u8>> = merged
-            .iter()
-            .filter(|r| r.logical_record_type() == RecordType::Put as u32)
-            .map(|r| r.payload.clone())
-            .collect();
-        assert_eq!(payloads, vec![vec![1], vec![2], vec![3]]);
-    }
-
-    /// Merging the same records twice yields the same sequence: replay of an
-    /// already-replayed tail must present engines with an identical stream.
-    #[test]
-    fn merge_is_deterministic_across_repeated_replays() {
-        let redo = RedoRecord {
-            version: 1,
-            ops: vec![RedoSubRecord {
-                record_type: RecordType::Put as u32,
-                payload: vec![9],
-            }],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
-        let standalone = vec![
-            put_wal_record(1, vec![1]),
-            redo_wal_record(2, 0, 0, &redo),
-            put_wal_record(3, vec![3]),
-        ];
-        let redo_ops = reconstitute_redo_records(&standalone).expect("well-formed redo");
-        let first: Vec<u64> = merge_by_lsn(&standalone, &redo_ops)
-            .iter()
-            .map(|r| r.header.lsn)
-            .collect();
-        let second: Vec<u64> = merge_by_lsn(&standalone, &redo_ops)
-            .iter()
-            .map(|r| r.header.lsn)
-            .collect();
-        assert_eq!(first, second);
-        assert_eq!(first, vec![1, 2, 2, 3]);
-    }
-
-    /// A `TransactionRedo` record whose payload is structurally invalid but
-    /// CRC-valid represents a committed transaction that cannot be applied.
-    /// Replay must fail rather than skip it and come up missing those writes.
-    #[test]
-    fn malformed_redo_payload_aborts_replay() {
-        let bad = WalRecord::new(WalRecordArgs {
-            record_type: RecordType::TransactionRedo as u32,
-            lsn: 2,
-            tenant_id: 0,
-            vshard_id: 0,
-            database_id: 0,
-            payload: vec![0xff, 0xff, 0xff],
-            encryption_key: None,
-            preamble_bytes: None,
-        })
-        .expect("wal record");
-        // The CRC is intact — the payload, not the bytes, is what is wrong.
-        bad.verify_checksum().expect("record bytes are consistent");
-
-        assert!(
-            reconstitute_redo_records(&[bad]).is_err(),
-            "a committed redo group that cannot be decoded must abort recovery"
-        );
-    }
-}
+#[path = "replay_tests.rs"]
+mod tests;

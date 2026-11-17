@@ -2,7 +2,7 @@
 
 //! The version keys a record's apply forces on the rows and edges it writes.
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
 
@@ -10,6 +10,13 @@ use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
 /// apply of the record writes the same version keys.
 #[derive(Default)]
 pub(in crate::data::executor) struct ApplyScope {
+    /// Complete storage witnesses shared by installed outcomes in this mutation scope.
+    pub(in crate::data::executor) storage_schemas: RefCell<
+        HashMap<
+            (crate::types::DatabaseId, crate::types::TenantId, String),
+            Arc<nodedb_physical::physical_plan::StorageMode>,
+        >,
+    >,
     /// Surrogate to resolve-time bitemporal stamp, read ONLY by
     /// `apply_point_put` and `apply_point_delete`. Set right before a
     /// bitemporal document apply, from a committing transaction's overlay
@@ -40,6 +47,22 @@ pub(in crate::data::executor) struct ApplyScope {
     /// applies the write with the same value, so all of them stamp the same
     /// version keys.
     pub(in crate::data::executor) replicated_ordinal: Option<i64>,
+    /// The current apply installs a record a log holds: a journaled write
+    /// (its task carries a WAL LSN, as a Raft entry's apply on every replica
+    /// and a local autocommit append do), or a WAL replay. Every install of
+    /// such a record must store the same bytes, so the apply never evaluates
+    /// a volatile DEFAULT: the proposer bound it into the body. A Calvin
+    /// stage or resolve is the same, through `calvin_txn_ordinal`.
+    pub(in crate::data::executor) journaled: bool,
+}
+
+impl ApplyScope {
+    /// Whether the current apply installs a logged record, per
+    /// [`ApplyScope::journaled`]. A fresh evaluation on the proposer, such as
+    /// a governed write's resolve, is not one.
+    pub(in crate::data::executor) fn applies_logged_record(&self) -> bool {
+        self.journaled || self.calvin_txn_ordinal.is_some()
+    }
 }
 
 impl super::CoreLoop {
@@ -52,6 +75,7 @@ impl super::CoreLoop {
         &mut self,
         record: &nodedb_wal::WalRecord,
     ) -> Option<i64> {
+        self.apply_scope.storage_schemas.get_mut().clear();
         let outer = self.apply_scope.replicated_ordinal;
         if let Some(ordinal) = record.system_ordinal() {
             self.apply_scope.replicated_ordinal = Some(ordinal);

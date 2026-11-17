@@ -338,7 +338,7 @@ fn merge_plan(
     resolved_sum_targets: Vec<nodedb_physical::physical_plan::ResolvedSumTarget>,
 ) -> crate::Result<PhysicalPlan> {
     // Only APPLY can project rows; RESOLVE's payload is the fixed
-    // `(updates, deletes, inserts)` tuple `decode_resolve` expects. RESOLVE
+    // `(updates, deletes, inserts, ordinals)` tuple `decode_resolve` expects. RESOLVE
     // carries the live check unread; APPLY carries the decision the
     // orchestrator made over the resolved arms, which is what replicates.
     let (returning, resolved_inserts, resolved_insert_identities, rls_write_check) = match pass {

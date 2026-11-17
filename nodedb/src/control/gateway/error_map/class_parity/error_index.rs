@@ -13,7 +13,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
     use crate::Error as E;
     match err {
         E::RejectedConstraint { .. } => 0,
-        E::TxnOverlayMemoryExceeded { .. } => 1,
         E::RejectedAuthz { .. } => 2,
         E::OffsetRegression { .. } => 3,
         E::DeadlineExceeded { .. } => 4,
@@ -97,7 +96,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::Shaping(_) => 81,
         E::RemoteTyped { .. } => 82,
         E::DescriptorVersionAnomaly { .. } => 83,
-        E::CollectionPurgeRowMissing { .. } => 84,
         E::CatalogIntegrityViolation { .. } => 85,
         E::DataPlane(_) => 86,
         E::Promql(_) => 87,
@@ -141,5 +139,7 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::UnknownSrid { .. } => 126,
         E::TxnSnapshotTooOld { .. } => 97,
         E::StorageQuotaExceeded { .. } => 127,
+        E::InvalidArgumentForLogarithm { .. } => 84,
+        E::InvalidArgumentForPowerFunction { .. } => 1,
     }
 }

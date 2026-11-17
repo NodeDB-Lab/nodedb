@@ -19,7 +19,6 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             constraint: "unique".into(),
             detail: text(),
         },
-        E::TxnOverlayMemoryExceeded { limit: 1 << 20 },
         E::RejectedAuthz {
             tenant_id: TenantId::new(1),
             resource: text(),
@@ -204,6 +203,11 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::TextColumn {
             collection: collection(),
+            column: "x".into(),
+            fault: nodedb_types::text_search::TextColumnFault::IndexBuilding,
+        },
+        E::TextColumn {
+            collection: collection(),
             column: "n".into(),
             fault: nodedb_types::text_search::TextColumnFault::NotText {
                 data_type: "INT".into(),
@@ -219,6 +223,8 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::DivisionByZero,
         E::DataException { detail: text() },
+        E::InvalidArgumentForLogarithm { detail: text() },
+        E::InvalidArgumentForPowerFunction { detail: text() },
         E::MixedSrid {
             collection: collection(),
             field: "loc".into(),
@@ -334,11 +340,6 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             descriptor: "orders".into(),
             carried: 5,
             prior: 2,
-        },
-        E::CollectionPurgeRowMissing {
-            database_id: 1,
-            tenant_id: 1,
-            name: collection(),
         },
         E::CollectionUnstamped {
             database_id: 1,

@@ -19,10 +19,12 @@ pub mod node_delete_txn;
 pub mod predicate;
 pub mod preexec;
 pub mod read_dependent;
+pub mod refused_sequences;
 pub mod reservation;
 pub mod retry_budget;
 pub mod retry_loop;
 pub mod settling_writes;
+pub(crate) mod single_vshard_route;
 pub mod submit;
 pub mod tx_class;
 pub mod txn_predict;
@@ -47,8 +49,7 @@ pub use graph_sequencing::{
 pub use predicate::predicate_class_for_filters;
 pub use retry_loop::{DependentOutcome, DependentRetryArgs, run_dependent_with_retry};
 pub use settling_writes::{
-    refuse_repeated_settled_rows, refuse_several_returning_tasks, refuse_several_settling_writes,
-    ships_balance_delta,
+    refuse_repeated_settled_rows, refuse_several_settling_writes, ships_balance_delta,
 };
 pub use submit::{
     RoutedAssignment, submit_and_await_calvin, submit_and_await_calvin_until, submit_calvin_routed,

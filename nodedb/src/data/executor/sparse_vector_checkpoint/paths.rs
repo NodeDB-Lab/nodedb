@@ -1,24 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Filesystem naming for sparse-vector checkpoints: directories, per-index
-//! filenames, and the inverse parse.
+//! Filesystem naming for sparse-vector checkpoints: directories, generation
+//! directories, and the per-index checkpoint key.
 //!
-//! The write path, the load path, and reclaim all build every path through these
-//! helpers so the three can never drift. A path divergence between writer and
-//! reader is silent, and its symptom is indistinguishable from data loss.
-//!
-//! ## Filename encoding
-//!
-//! Each index is checkpointed to a file whose stem encodes its logical key:
-//! `{db}_{tid}_{enc(coll)}_{enc(field)}.ckpt`. `db`/`tid` are numeric and pass
-//! through unchanged; `coll`/`field` are percent-encoded by [`enc_component`] so
-//! the structural `_` separator can never collide with a literal underscore in a
-//! collection or field name. This makes the encoding round-trippable for
-//! arbitrary names.
+//! The write path, the load path, and reclaim all build every key through
+//! these helpers so the three can never drift. Each index is checkpointed to
+//! `{hash(key)}.ckpt`, where the key is `(db, tid, collection, field)` and the
+//! file stores it.
 
 use nodedb_types::DatabaseId;
 
-use crate::data::executor::checkpoint_encoding::{dec_component, enc_component};
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 use crate::types::TenantId;
 
 /// Filename of the manifest that names the live generation.
@@ -47,41 +39,30 @@ pub(crate) fn sparse_vector_ckpt_gen_dir(
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// Build the full filename stem for a sparse-vector checkpoint:
-/// `{db}_{tid}_{enc(coll)}_{enc(field)}`.
-pub(super) fn sparse_vector_checkpoint_stem(db: u64, tid: u64, coll: &str, field: &str) -> String {
-    format!(
-        "{}_{}_{}_{}",
+/// The checkpoint key for one sparse-vector index.
+pub(crate) fn sparse_vector_ckpt_key(db: u64, tid: u64, coll: &str, field: &str) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::SparseVector,
         db,
         tid,
-        enc_component(coll),
-        enc_component(field)
+        vec![coll.to_string(), field.to_string()],
     )
 }
 
-/// Shared prefix builder for reclaim: every checkpoint file for
-/// `(db, tid, coll)` begins with `{db}_{tid}_{enc(coll)}_`. This is the single
-/// authority on the filename encoding so reclaim can never drift from the write
-/// path (the field is always present, so the prefix ends with `_`).
-pub(crate) fn sparse_vector_checkpoint_prefix(db: u64, tid: u64, coll: &str) -> String {
-    format!("{}_{}_{}_", db, tid, enc_component(coll))
-}
-
-/// Parse a stem `{db}_{tid}_{enc(coll)}_{enc(field)}` into a logical key.
-/// Requires EXACTLY 4 underscore-separated parts with numeric db + tid.
-/// Returns `None` on any structural or numeric parse failure.
-pub(super) fn parse_sparse_vector_key(
-    stem: &str,
+/// The `(db, tid, collection, field)` map key a stored key restores under, or
+/// `None` when the key is not a sparse-vector key.
+pub(crate) fn sparse_vector_map_key(
+    key: &CheckpointKey,
 ) -> Option<(DatabaseId, TenantId, String, String)> {
-    let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() != 4 {
-        return None;
+    match (key.engine, key.parts.as_slice()) {
+        (CheckpointEngine::SparseVector, [coll, field]) => Some((
+            DatabaseId::new(key.database_id),
+            TenantId::new(key.tenant_id),
+            coll.clone(),
+            field.clone(),
+        )),
+        _ => None,
     }
-    let db: u64 = parts[0].parse().ok()?;
-    let tid: u64 = parts[1].parse().ok()?;
-    let coll = dec_component(parts[2]);
-    let field = dec_component(parts[3]);
-    Some((DatabaseId::new(db), TenantId::new(tid), coll, field))
 }
 
 #[cfg(test)]
@@ -110,9 +91,9 @@ mod tests {
     }
 
     #[test]
-    fn stem_roundtrips_through_parse() {
-        let stem = sparse_vector_checkpoint_stem(7, 42, "my_docs", "title_field");
-        let parsed = parse_sparse_vector_key(&stem).expect("stem must parse");
+    fn key_roundtrips_through_map_key() {
+        let key = sparse_vector_ckpt_key(7, 42, "my_docs", "title_field");
+        let parsed = sparse_vector_map_key(&key).expect("sparse key");
         assert_eq!(parsed.0, DatabaseId::new(7));
         assert_eq!(parsed.1, TenantId::new(42));
         assert_eq!(parsed.2, "my_docs");
@@ -120,35 +101,19 @@ mod tests {
     }
 
     #[test]
-    fn prefix_matches_stem_for_same_collection() {
-        let stem = sparse_vector_checkpoint_stem(3, 9, "d_b", "f");
-        let prefix = sparse_vector_checkpoint_prefix(3, 9, "d_b");
-        assert!(
-            stem.starts_with(&prefix),
-            "stem {stem} must start with prefix {prefix}"
+    fn max_length_names_fit() {
+        let name = sparse_vector_ckpt_key(0, 1, &"c".repeat(255), &"f".repeat(200)).file_name();
+        assert!(name.len() < 64, "{name}");
+    }
+
+    #[test]
+    fn non_sparse_key_is_none() {
+        let key = CheckpointKey::new(
+            CheckpointEngine::Spatial,
+            0,
+            1,
+            vec!["a".into(), "b".into()],
         );
-    }
-
-    /// A prefix must not match a DIFFERENT collection whose encoded name merely
-    /// starts with the same bytes — that would unlink a live index's checkpoint.
-    #[test]
-    fn prefix_does_not_match_a_longer_collection_name() {
-        let other = sparse_vector_checkpoint_stem(3, 9, "docs_archive", "f");
-        let prefix = sparse_vector_checkpoint_prefix(3, 9, "docs");
-        assert!(
-            !other.starts_with(&prefix),
-            "prefix {prefix} must not swallow {other}"
-        );
-    }
-
-    #[test]
-    fn non_numeric_stem_is_none() {
-        assert!(parse_sparse_vector_key("a_b_c_d").is_none());
-    }
-
-    #[test]
-    fn wrong_part_count_is_none() {
-        assert!(parse_sparse_vector_key("1_2_3").is_none());
-        assert!(parse_sparse_vector_key("1_2_3_4_5").is_none());
+        assert!(sparse_vector_map_key(&key).is_none());
     }
 }

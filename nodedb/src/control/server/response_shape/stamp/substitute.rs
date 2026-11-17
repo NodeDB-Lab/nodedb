@@ -15,7 +15,7 @@ use crate::control::sequence::SequenceAccess;
 
 /// Resolve every sequence accessor call in `expr` against `row`, returning
 /// an expression with each call replaced by its integer result.
-pub(super) fn resolve_accessors(
+pub(crate) fn resolve_accessors(
     expr: &SqlExpr,
     row: &Value,
     access: &dyn SequenceAccess,
@@ -36,7 +36,7 @@ pub(super) fn resolve_accessors(
         )?))),
         SqlExpr::Cast { expr, to_type } => Ok(SqlExpr::Cast {
             expr: Box::new(resolve_accessors(expr, row, access, crs)?),
-            to_type: to_type.clone(),
+            to_type: *to_type,
         }),
         SqlExpr::Case {
             operand,

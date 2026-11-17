@@ -69,7 +69,10 @@ impl CoreLoop {
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the bidirectional search, including a path that must pass
         // through a node reachable only via a staged edge.
-        let delta = self.live_overlay_delta(task, tid, scope);
+        let delta = match self.live_overlay_delta(task, tid, scope) {
+            Ok(delta) => delta,
+            Err(e) => return self.response_error(task, e),
+        };
         let csr = match self.csr_view(database_id, tid, collection, scope) {
             Ok(csr) => csr,
             Err(e) => return self.response_error(task, e),
@@ -134,7 +137,10 @@ impl CoreLoop {
         let direction = crate::engine::graph::edge_store::Direction::Out;
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the materialized subgraph, including through staged-only nodes.
-        let delta = self.live_overlay_delta(task, tid, scope);
+        let delta = match self.live_overlay_delta(task, tid, scope) {
+            Ok(delta) => delta,
+            Err(e) => return self.response_error(task, e),
+        };
         let csr = match self.csr_view(database_id, tid, collection, scope) {
             Ok(csr) => csr,
             Err(e) => return self.response_error(task, e),
@@ -181,18 +187,23 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u64,
         scope: &GraphReadScope,
-    ) -> Option<crate::engine::graph::csr::GraphOverlayDelta> {
+    ) -> crate::Result<Option<crate::engine::graph::csr::GraphOverlayDelta>> {
         if !scope.merges_txn_overlay() {
-            return None;
+            return Ok(None);
         }
-        let txn_id = task.request.txn_id?;
+        let Some(txn_id) = task.request.txn_id else {
+            return Ok(None);
+        };
         self.touch_overlay(txn_id);
-        self.graph_txn_overlays.get(&txn_id).map(|ov| {
-            super::graph_txn_merge::build_graph_overlay_delta(
-                ov,
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-            )
-        })
+        self.graph_txn_overlays
+            .get(&txn_id)
+            .map(|ov| {
+                super::graph_txn_merge::build_graph_overlay_delta(
+                    ov,
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                )
+            })
+            .transpose()
     }
 }

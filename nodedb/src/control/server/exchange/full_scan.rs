@@ -11,6 +11,9 @@
 //! - `resolve::shuffle` — encodes each side's scan as `plan_bytes` for the
 //!   distributed shuffle producers.
 //!
+//! Both resolve through [`require_full_scan_plan`]: a collection the catalog
+//! does not hold is a typed error, never a by-name scan.
+//!
 //! Both need the SAME "scan everything for this engine, no projection" plan,
 //! so it lives here once. The plan is fabricated on the coordinator AFTER the
 //! RLS pass has run over the query, so it can never be reached by that pass:
@@ -124,10 +127,10 @@ fn combine_side_filters(rls_filters: &[u8], scan_filters: &[u8]) -> crate::Resul
 /// Build a full-collection scan plan for `side`, or `Ok(None)` when the
 /// catalog has no record for it on this node.
 ///
-/// `Ok(None)` is a graceful "fall back to a by-name scan on the executing
-/// node" signal for callers that have a name-scan fallback — it is never an
-/// error. Callers that REQUIRE a scan plan (the shuffle producer cannot scan
-/// by name across nodes) treat `None` as a typed error themselves.
+/// A read-set capture uses [`read_set_scan_plan`], which records an absence
+/// read for a missing collection. A join side that must read rows uses
+/// [`require_full_scan_plan`], which answers a missing collection with a
+/// typed error.
 pub fn full_scan_plan_for_collection(
     state: &SharedState,
     database_id: DatabaseId,
@@ -149,8 +152,144 @@ pub fn full_scan_plan_for_collection(
         Some(s) => s,
         None => return Ok(None),
     };
+    Ok(Some(scan_plan_for_stored(
+        &stored,
+        qualified,
+        side_filters,
+        system_time,
+    )))
+}
 
-    let plan = match &stored.collection_type {
+/// The scan plan a transaction read-set capture records for `side`: the
+/// collection's engine scan, or an absence read when the catalog holds no
+/// collection by that name.
+///
+/// An absence read is a document scan of the bare name. The read-set records
+/// it as a collection-scoped predicate on the name's vShard, which commit
+/// validates against the newest stored version of that name's slice in
+/// every engine. A conflicting transaction that creates and populates the
+/// collection after the snapshot writes a version above it, so the commit
+/// fails. A create that writes no row changes nothing a reader observed:
+/// "absent" and "empty" return the same rows, so the reader still orders
+/// first.
+pub fn read_set_scan_plan(
+    state: &SharedState,
+    database_id: DatabaseId,
+    tenant_id: TenantId,
+    side: ScanSide<'_>,
+) -> crate::Result<PhysicalPlan> {
+    let collection = side.collection;
+    match full_scan_plan_for_collection(state, database_id, tenant_id, side)? {
+        Some(plan) => Ok(plan),
+        None => absence_read_plan(database_id, collection),
+    }
+}
+
+/// The predicate read of a collection name the catalog does not hold.
+pub(crate) fn absence_read_plan(
+    database_id: DatabaseId,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Document(DocumentOp::Scan {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_string(),
+        )?,
+        limit: COMPLETE_SCAN,
+        offset: 0,
+        filters: Vec::new(),
+        sort_keys: Vec::new(),
+        distinct: false,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
+        window_functions: Vec::new(),
+        system_time: SystemTimeScope::Current,
+        valid_at_ms: None,
+        prefilter: None,
+    }))
+}
+
+/// Build the full-collection scan plan a join build side MUST read: every
+/// row, under the side's policy, gathered from every vShard.
+///
+/// The collection is resolved through the node's `SystemCatalog`, the
+/// authoritative store the planner resolved the same name through (cluster
+/// followers apply every replicated catalog record to it before serving).
+/// A miss here means the collection does not exist for this tenant: it was
+/// never created, or it was dropped and purged after the statement was
+/// planned. A soft-deleted row means it was dropped after planning. Both
+/// are typed errors, never a by-name scan: a by-name scan on one core reads
+/// only that core's part of a sharded collection and joins silently wrong.
+pub fn require_full_scan_plan(
+    state: &SharedState,
+    database_id: DatabaseId,
+    tenant_id: TenantId,
+    side: ScanSide<'_>,
+) -> crate::Result<PhysicalPlan> {
+    let qualified =
+        nodedb_types::QualifiedCollection::from_stored(database_id, side.collection.to_string())?;
+    let side_filters = combine_side_filters(side.rls_filters, side.scan_filters)?;
+    let stored = require_active_collection(state, database_id, tenant_id, side.collection)?;
+    Ok(scan_plan_for_stored(
+        &stored,
+        qualified,
+        side_filters,
+        side.system_time,
+    ))
+}
+
+/// The catalog row of the stored `collection` name, which a by-name read
+/// executed after planning must find active. A miss is `CollectionNotFound`
+/// and a soft-deleted row is `CollectionDeactivated`.
+pub fn require_active_collection(
+    state: &SharedState,
+    database_id: DatabaseId,
+    tenant_id: TenantId,
+    collection: &str,
+) -> crate::Result<crate::control::security::catalog::StoredCollection> {
+    let key = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?;
+    let catalog = state.credentials.catalog();
+    let Some(stored) = catalog.get_collection(database_id, tenant_id.as_u64(), key.name())? else {
+        return Err(crate::Error::CollectionNotFound {
+            tenant_id,
+            collection: key.name().to_owned(),
+        });
+    };
+    if !stored.is_active {
+        return Err(crate::Error::CollectionDeactivated {
+            tenant_id,
+            collection: key.name().to_owned(),
+            retention_expires_at_ns: deactivated_retention_expires_at_ns(&stored),
+        });
+    }
+    Ok(stored)
+}
+
+/// When a soft-deleted collection's UNDROP window closes, under the default
+/// retention. A drop time of `0` is unknown (a row the GC sweeper has not yet
+/// adopted a time for, which it never purges), so the window reads as open
+/// forever rather than already past.
+pub(crate) fn deactivated_retention_expires_at_ns(
+    stored: &crate::control::security::catalog::StoredCollection,
+) -> u64 {
+    if stored.deactivated_at_ns == 0 {
+        return u64::MAX;
+    }
+    let retention = crate::config::server::RetentionSettings::default()
+        .retention_window()
+        .as_nanos() as u64;
+    stored.deactivated_at_ns.saturating_add(retention)
+}
+
+/// The engine scan of every row of `stored`, under `side_filters`, read at
+/// `system_time`. Exhaustive over `CollectionType`.
+fn scan_plan_for_stored(
+    stored: &crate::control::security::catalog::StoredCollection,
+    qualified: nodedb_types::QualifiedCollection,
+    side_filters: Vec<u8>,
+    system_time: SystemTimeScope,
+) -> PhysicalPlan {
+    match &stored.collection_type {
         CollectionType::Document(DocumentMode::Schemaless)
         | CollectionType::Document(DocumentMode::Strict(_)) => {
             PhysicalPlan::Document(DocumentOp::Scan {
@@ -217,7 +356,131 @@ pub fn full_scan_plan_for_collection(
                 output_columns: Vec::new(),
             })
         }
-    };
+    }
+}
 
-    Ok(Some(plan))
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::control::security::catalog::StoredCollection;
+    use crate::wal::WalManager;
+
+    const TENANT: TenantId = TenantId::new(7);
+    const DB: DatabaseId = DatabaseId::DEFAULT;
+
+    fn test_state() -> (Arc<SharedState>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("create full-scan test directory");
+        let wal = Arc::new(
+            WalManager::open_for_testing(&directory.path().join("full_scan.wal"))
+                .expect("open full-scan test WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(2, 64);
+        let state = SharedState::new(dispatcher, wal).expect("construct full-scan state");
+        (state, directory)
+    }
+
+    /// A build side resolves straight from the authoritative catalog row, with
+    /// no planner or cache in between, to an unbounded scan of every row under
+    /// the side's filters: the gather then reads every vShard.
+    #[test]
+    fn build_side_resolves_from_the_catalog_to_a_complete_scan() {
+        let (state, _dir) = test_state();
+        state
+            .credentials
+            .catalog()
+            .put_collection(
+                DB,
+                &StoredCollection::stamped_for_test(TENANT.as_u64(), "orders", "tester"),
+            )
+            .expect("persist collection");
+        let plan =
+            require_full_scan_plan(&state, DB, TENANT, ScanSide::join_side("orders", &[], &[]))
+                .expect("an existing collection resolves");
+        let PhysicalPlan::Document(DocumentOp::Scan {
+            collection, limit, ..
+        }) = plan
+        else {
+            panic!("expected a document scan, got {plan:?}");
+        };
+        assert_eq!(collection.as_str(), "orders");
+        assert_eq!(limit, COMPLETE_SCAN);
+    }
+
+    /// A collection the catalog does not hold is a typed error, never a
+    /// by-name scan of one core's part of it.
+    #[test]
+    fn nonexistent_build_side_is_collection_not_found() {
+        let (state, _dir) = test_state();
+        let error =
+            require_full_scan_plan(&state, DB, TENANT, ScanSide::join_side("missing", &[], &[]))
+                .expect_err("a missing collection must not resolve");
+        assert!(
+            matches!(&error, crate::Error::CollectionNotFound { collection, .. } if collection == "missing"),
+            "{error:?}"
+        );
+        // The lenient builder the read-set capture uses still answers `None`.
+        assert!(
+            full_scan_plan_for_collection(&state, DB, TENANT, ScanSide::read_set_only("missing"))
+                .expect("lookup")
+                .is_none()
+        );
+    }
+
+    /// A read-set capture of a collection the catalog does not hold records
+    /// an absence read: a document scan of the bare name, never nothing.
+    #[test]
+    fn read_set_capture_of_a_missing_collection_is_an_absence_read() {
+        let (state, _dir) = test_state();
+        let plan = read_set_scan_plan(&state, DB, TENANT, ScanSide::read_set_only("missing"))
+            .expect("an absent collection still yields a capture");
+        let PhysicalPlan::Document(DocumentOp::Scan { collection, .. }) = &plan else {
+            panic!("expected a document scan, got {plan:?}");
+        };
+        assert_eq!(collection.as_str(), "missing");
+
+        state
+            .credentials
+            .catalog()
+            .put_collection(
+                DB,
+                &StoredCollection::stamped_for_test(TENANT.as_u64(), "present", "tester"),
+            )
+            .expect("persist collection");
+        let present = read_set_scan_plan(&state, DB, TENANT, ScanSide::read_set_only("present"))
+            .expect("an existing collection resolves");
+        assert!(matches!(
+            present,
+            PhysicalPlan::Document(DocumentOp::Scan { .. })
+        ));
+    }
+
+    /// A collection dropped after planning is `CollectionDeactivated`, never a
+    /// scan of its soft-deleted rows.
+    #[test]
+    fn soft_deleted_build_side_is_collection_deactivated() {
+        let (state, _dir) = test_state();
+        let mut dropped = StoredCollection::stamped_for_test(TENANT.as_u64(), "gone", "tester");
+        dropped.is_active = false;
+        state
+            .credentials
+            .catalog()
+            .put_collection(DB, &dropped)
+            .expect("persist collection");
+        let error =
+            require_full_scan_plan(&state, DB, TENANT, ScanSide::join_side("gone", &[], &[]))
+                .expect_err("a dropped collection must not resolve");
+        assert!(
+            matches!(
+                error,
+                crate::Error::CollectionDeactivated {
+                    retention_expires_at_ns: u64::MAX,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 }

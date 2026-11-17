@@ -9,6 +9,8 @@ pub mod atomic;
 pub mod dispatch;
 pub mod edge_recon;
 pub mod error;
+pub mod fallible_returning;
+pub mod several_writes;
 pub mod task_loop;
 
 pub(crate) use answer::StatementAnswer;
@@ -18,6 +20,7 @@ pub(crate) use edge_recon::{
     EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 pub(crate) use error::StatementError;
+pub(crate) use several_writes::{SeveralWrites, several_writes_route};
 pub(crate) use task_loop::{
     PlannedStatement, StatementExec, run_implicit_statement, run_statement_loop,
 };

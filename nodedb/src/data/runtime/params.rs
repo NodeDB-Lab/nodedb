@@ -20,8 +20,14 @@ pub struct SpawnCoreParams<'a> {
     pub request_rx: Consumer<BridgeRequest>,
     pub response_tx: Producer<BridgeResponse>,
     pub data_dir: &'a Path,
+    /// The node's WAL directory and key ring. A committed chunked redo's
+    /// install reads its stream back from the WAL through it.
+    pub wal_source: crate::wal::WalReadSource,
     pub wal_records: Arc<[nodedb_wal::WalRecord]>,
     pub tombstones: nodedb_wal::TombstoneSet,
+    /// The committed records boot settle judged never durable. Replay folds
+    /// the ones this core owns.
+    pub never_durable: Arc<crate::wal::NeverDurableRedos>,
     pub num_cores: usize,
     pub compaction_config: CoreCompactionConfig,
     pub system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
@@ -65,10 +71,10 @@ pub struct SpawnCoreParams<'a> {
     /// opening the client gateway, so `/healthz` never reports ready while a
     /// core is still rebuilding its in-memory indexes (HNSW, etc.) from the
     /// WAL — which would otherwise let a just-restarted node serve half-rebuilt
-    /// results. It carries the scopes that owe edge cascades after replay, or
-    /// the replay's error when replay failed, and is
-    /// dropped without firing if the core panics during open/replay. Boot
-    /// fails its readiness gate on either.
+    /// results. It carries the fold rows replay stored for the never-durable
+    /// records, which boot journals, or the replay's error when replay
+    /// failed, and is dropped without firing if the core panics during
+    /// open/replay. Boot fails its readiness gate on either.
     // no-plane-separation: passive one-shot readiness Sender, fired once (`send(..)`, synchronous and runtime-free) at the end of WAL replay to signal Boot; no tokio runtime or tasks run in the Data Plane.
-    pub replay_done: tokio::sync::oneshot::Sender<crate::Result<()>>,
+    pub replay_done: tokio::sync::oneshot::Sender<crate::Result<crate::wal::ReplayedCaptures>>,
 }

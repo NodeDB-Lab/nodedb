@@ -61,7 +61,8 @@ impl CoreLoop {
             for (key, value) in entries {
                 if !predicates.is_empty() {
                     let (_key_str, row) =
-                        crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value);
+                        crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value)
+                            .map_err(ErrorCode::from)?;
                     match ScanFilter::all_match_binary(&predicates, &row, &crs) {
                         Ok(true) => {}
                         Ok(false) => continue,
@@ -104,7 +105,8 @@ impl CoreLoop {
         for (key, value) in self.kv_engine.collection_rows_at(did, tid, collection, at) {
             if !predicates.is_empty() {
                 let (_key_str, row) =
-                    crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value);
+                    crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value)
+                        .map_err(ErrorCode::from)?;
                 if !ScanFilter::all_match_binary(&predicates, &row, &crs)
                     .map_err(ErrorCode::from)?
                 {

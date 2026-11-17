@@ -21,8 +21,8 @@ use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
 use super::super::super::result::{DdlError, DdlResult};
+use super::collection_column::parse_collection_column;
 use super::support::ddl_err;
-use super::vector_index::parse_collection_column;
 
 /// The fields one SET clause names. Zero / `None` means the statement left the
 /// field alone and the stored value stands.

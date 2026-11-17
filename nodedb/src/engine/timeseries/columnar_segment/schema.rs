@@ -5,7 +5,7 @@
 use nodedb_codec::ColumnCodec;
 use nodedb_types::InstantKind;
 
-use super::super::columnar_memtable::{ColumnType, ColumnarSchema, TimeKind};
+use super::super::columnar_memtable::{ColumnType, ColumnarSchema, TimeKind, TsDecimalTypmod};
 use super::error::SegmentError;
 
 /// On-disk type name of a millisecond time column read back as an integer.
@@ -48,19 +48,29 @@ pub(super) fn schema_to_json(schema: &ColumnarSchema) -> Vec<SchemaEntry> {
         .iter()
         .enumerate()
         .map(|(i, (name, ty))| {
-            let ty_str = match ty {
-                ColumnType::Timestamp(TimeKind::Millis) => TYPE_TIMESTAMP,
-                ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive)) => TYPE_INSTANT_NAIVE,
-                ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)) => TYPE_INSTANT_UTC,
-                ColumnType::Float64 => "float64",
-                ColumnType::Int64 => "int64",
-                ColumnType::Symbol => "symbol",
-                ColumnType::Text => "text",
+            let ty_str: std::borrow::Cow<'static, str> = match ty {
+                ColumnType::Timestamp(TimeKind::Millis) => TYPE_TIMESTAMP.into(),
+                ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive)) => {
+                    TYPE_INSTANT_NAIVE.into()
+                }
+                ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)) => {
+                    TYPE_INSTANT_UTC.into()
+                }
+                ColumnType::Float64 => "float64".into(),
+                ColumnType::Int64 => "int64".into(),
+                ColumnType::Symbol => "symbol".into(),
+                ColumnType::Text => "text".into(),
+                ColumnType::Decimal(None) => "decimal".into(),
+                ColumnType::Decimal(Some(t)) => {
+                    format!("decimal({},{})", t.precision, t.scale).into()
+                }
+                ColumnType::Uuid => "uuid".into(),
+                ColumnType::Bool => "bool".into(),
             };
             let codec = schema.codecs.get(i).copied();
             SchemaEntry {
                 name: name.clone(),
-                col_type: ty_str.to_string(),
+                col_type: ty_str.into_owned(),
                 codec,
                 time_key: i == schema.timestamp_idx,
             }
@@ -106,10 +116,27 @@ fn parse_column_type(ty_str: &str) -> Result<ColumnType, SegmentError> {
         "int64" => Ok(ColumnType::Int64),
         "symbol" => Ok(ColumnType::Symbol),
         "text" => Ok(ColumnType::Text),
-        other => Err(SegmentError::Corrupt(format!(
-            "unknown column type: {other}"
-        ))),
+        "decimal" => Ok(ColumnType::Decimal(None)),
+        "uuid" => Ok(ColumnType::Uuid),
+        "bool" => Ok(ColumnType::Bool),
+        other => parse_decimal_typmod(other)
+            .map(|typmod| ColumnType::Decimal(Some(typmod)))
+            .ok_or_else(|| SegmentError::Corrupt(format!("unknown column type: {other}"))),
     }
+}
+
+/// The typmod of a `decimal(p,s)` schema entry. `None` for any other text,
+/// or digit counts that are not a typmod.
+fn parse_decimal_typmod(ty_str: &str) -> Option<TsDecimalTypmod> {
+    let (precision, scale) = ty_str
+        .strip_prefix("decimal(")?
+        .strip_suffix(')')?
+        .split_once(',')?;
+    let typmod = TsDecimalTypmod {
+        precision: precision.trim().parse().ok()?,
+        scale: scale.trim().parse().ok()?,
+    };
+    typmod.typmod().ok().map(TsDecimalTypmod::of)
 }
 
 #[cfg(test)]
@@ -124,6 +151,16 @@ mod tests {
                 ("cpu".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
                 ("msg".into(), ColumnType::Text),
+                ("plain".into(), ColumnType::Decimal(None)),
+                (
+                    "price".into(),
+                    ColumnType::Decimal(Some(TsDecimalTypmod {
+                        precision: 10,
+                        scale: 2,
+                    })),
+                ),
+                ("device".into(), ColumnType::Uuid),
+                ("ok".into(), ColumnType::Bool),
             ],
             timestamp_idx: 0,
             codecs: vec![
@@ -131,6 +168,10 @@ mod tests {
                 ColumnCodec::Gorilla,
                 ColumnCodec::Raw,
                 ColumnCodec::Raw,
+                ColumnCodec::Lz4,
+                ColumnCodec::Lz4,
+                ColumnCodec::Lz4,
+                ColumnCodec::Lz4,
             ],
         };
         let json = sonic_rs::to_vec(&schema_to_json(&schema)).unwrap();

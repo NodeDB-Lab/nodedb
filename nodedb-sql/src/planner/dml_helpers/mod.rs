@@ -19,6 +19,7 @@ mod insert_columns;
 mod insert_select_bind;
 mod kv_counter;
 mod kv_insert;
+mod object_value;
 mod params;
 mod range_check;
 mod value_convert;
@@ -34,12 +35,14 @@ pub(super) use insert_select_bind::{
 };
 pub use kv_counter::{KvCounterFreshRow, KvCounterKind, plan_kv_counter_fresh_row};
 pub(super) use kv_insert::build_kv_insert_plan;
+pub(crate) use object_value::OBJECT_FUNCTION;
 pub(super) use params::KvInsertParams;
 pub(super) use range_check::{
     check_declared_float_ranges, check_declared_float_ranges_in_assignments,
     check_declared_int_ranges, check_declared_int_ranges_in_assignments, coerce_and_check_rows,
 };
 pub(super) use value_convert::convert_value_rows;
+pub use value_convert::parse_values_cell;
 pub(super) use vector_primary_dml::{
     VectorPrimaryUpdateParams, build_vector_primary_delete_plan,
     build_vector_primary_truncate_plan, build_vector_primary_update_plan, is_vector_primary,

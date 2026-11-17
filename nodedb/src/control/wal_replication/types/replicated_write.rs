@@ -38,6 +38,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// Read filters gating what `returning` can show back.
         rls_filters: Vec<u8>,
+        /// Authenticated policy evaluated against the materialized row on apply.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     PointInsert {
         collection: String,
@@ -55,6 +57,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
+        /// See `PointPut::rls_write_check`.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     PointDelete {
         collection: String,
@@ -124,6 +128,8 @@ pub enum ReplicatedWrite {
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
+        /// See `PointPut::rls_write_check`.
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
     VectorInsert {
         collection: String,
@@ -562,7 +568,9 @@ pub enum ReplicatedWrite {
         document_id: String,
         list_path: String,
         index: u64,
-        fields_json: String,
+        /// The inserted block's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
         /// Surrogate of the parent document hosting this block list. See
         /// `ReplicatedWrite::CrdtApply::surrogate`.
         surrogate: u32,
@@ -588,7 +596,9 @@ pub enum ReplicatedWrite {
         collection: String,
         document_id: String,
         surrogate: u32,
-        fields_json: String,
+        /// The row's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
         partial: bool,
         /// The statement verb, so a decoded plan matches the proposed one.
         verb: CrdtWriteVerb,
@@ -607,12 +617,18 @@ pub enum ReplicatedWrite {
         /// See `ReplicatedWrite::PointPut::rls_filters`.
         rls_filters: Vec<u8>,
     },
+    /// A passive vShard's read of Calvin txn `(epoch, position)`, for the
+    /// dependent-read barrier of an active vShard. `values` is the
+    /// zerompk-encoded `Vec<(PassiveReadKeyId, Value)>` the read returned.
+    /// `refused` marks a read that failed: `values` is empty, and the
+    /// barrier votes abort at once.
     CalvinReadResult {
         epoch: u64,
         position: u32,
         passive_vshard: u32,
         tenant_id: u64,
         values: Vec<u8>,
+        refused: bool,
     },
     DocTruncate {
         collection: String,
@@ -894,8 +910,8 @@ pub enum ReplicatedWrite {
     /// Every replica, the proposer included, appends the body's redo to its
     /// own WAL and applies it through the WAL replay arms, in Raft log order.
     /// The record is resolved once, on the proposer; no replica re-derives
-    /// it. A chunked body assembles from the `RedoChunk` entries of its
-    /// stream.
+    /// it. A chunked body travels as the `RedoChunk` entries of its stream,
+    /// and its final entry applies a marker that names them.
     TransactionRedo {
         body: RedoBody,
         /// Every collection the transaction wrote, for the collection write
@@ -1040,6 +1056,26 @@ pub enum ReplicatedWrite {
         /// The encoded image. Its buckets count every row of the root.
         image: Vec<u8>,
     },
+    /// The frozen `RETURNING` replies of a Calvin txn's slice on this
+    /// vShard. Its data-group leader proposes it before its commit vote.
+    /// Every replica stores the first copy, keyed by the txn, and the
+    /// slice's install answers it.
+    CalvinFrozenReply {
+        reply: super::calvin_frozen_reply::CalvinFrozenReply,
+    },
+    /// The sequence changes the frozen `RETURNING` plans of Calvin txn
+    /// `(epoch, position)` on `source_vshard` made, for the data group of a
+    /// vShard whose evaluation follows them. The source's data-group leader
+    /// proposes it once its frozen reply is stored, before its commit vote.
+    /// Every replica folds it into the txn's barrier log in log order: a
+    /// plan's first copy below the barrier's timeout entry counts.
+    CalvinSequenceEffects {
+        epoch: u64,
+        position: u32,
+        source_vshard: u32,
+        tenant_id: u64,
+        plans: Vec<super::calvin_frozen_reply::PlanSequenceEffects>,
+    },
 }
 
 #[cfg(test)]
@@ -1114,6 +1150,7 @@ mod tests {
                 }],
                 returning: None,
                 rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
             ReplicatedWrite::PointDelete {
                 collection: "c".into(),
@@ -1230,6 +1267,30 @@ mod tests {
             ReplicatedWrite::TimeseriesAggregateImage {
                 collection: "metrics".into(),
                 image: vec![1, 2, 3],
+            },
+            ReplicatedWrite::CalvinFrozenReply {
+                reply: super::super::calvin_frozen_reply::CalvinFrozenReply {
+                    epoch: 2,
+                    position: 1,
+                    vshard: 0,
+                    plans: Vec::new(),
+                },
+            },
+            ReplicatedWrite::CalvinSequenceEffects {
+                epoch: 2,
+                position: 1,
+                source_vshard: 3,
+                tenant_id: 1,
+                plans: vec![super::super::calvin_frozen_reply::PlanSequenceEffects {
+                    plan_index: 0,
+                    effects: vec![
+                        super::super::calvin_frozen_reply::FrozenSequenceEffect::Nextval {
+                            name: "s".into(),
+                            value: 4,
+                        },
+                    ],
+                    refused: false,
+                }],
             },
         ];
 

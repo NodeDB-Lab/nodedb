@@ -3,7 +3,7 @@
 # Requires Linux kernel >= 5.1 (io_uring)
 
 # ── Stage 1: Chef base (rust + build deps + cargo-chef) ──────────────────────
-FROM rust:1.95-bookworm AS chef
+FROM rust:1.96-bookworm AS chef
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \

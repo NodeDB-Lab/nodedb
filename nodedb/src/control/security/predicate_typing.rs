@@ -45,6 +45,7 @@ pub fn type_predicate_literals(
         }
         RlsPredicate::Contains { .. }
         | RlsPredicate::Intersects { .. }
+        | RlsPredicate::CompareValues { .. }
         | RlsPredicate::AlwaysTrue
         | RlsPredicate::AlwaysFalse => predicate,
     })
@@ -124,8 +125,11 @@ fn sql_literal_to_predicate_value(
         | SqlValue::Decimal(_)
         | SqlValue::String(_)
         | SqlValue::Bytes(_)
+        | SqlValue::Uuid(_)
         | SqlValue::Array(_)
-        | SqlValue::Geometry(_) => PredicateValue::Literal(original),
+        | SqlValue::Object(_)
+        | SqlValue::Geometry(_)
+        | SqlValue::Duration(_) => PredicateValue::Literal(original),
     }
 }
 

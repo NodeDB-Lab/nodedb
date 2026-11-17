@@ -25,6 +25,12 @@ pub(super) struct WireReturning<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// Public projection and authenticated policy of a materialized document write.
+pub(super) struct WirePut<'a> {
+    pub returning: WireReturning<'a>,
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+}
+
 /// Flatten a plan's resolution into the authoritative wire shape (`Surrogate`
 /// travels as bare `u32`, like every other identity on this wire).
 pub(super) fn wire_target_bindings(resolved: &[ResolvedSumTarget]) -> Vec<ReplicatedSumTarget> {
@@ -44,8 +50,7 @@ pub(super) fn point_put(
     value: &[u8],
     surrogate: u32,
     resolved_sum_targets: &[ResolvedSumTarget],
-    returning: Option<Vec<u8>>,
-    rls_filters: &[u8],
+    fields: WirePut<'_>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::PointPut {
         collection: collection.to_owned(),
@@ -53,8 +58,9 @@ pub(super) fn point_put(
         value: value.to_vec(),
         surrogate,
         resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
-        returning,
-        rls_filters: rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
     }
 }
 
@@ -65,7 +71,7 @@ pub(super) fn point_insert(
     if_absent: bool,
     surrogate: u32,
     sums: SumFields<'_>,
-    returning: WireReturning<'_>,
+    fields: WirePut<'_>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::PointInsert {
         collection: collection.to_owned(),
@@ -75,8 +81,9 @@ pub(super) fn point_insert(
         surrogate,
         resolved_sum_targets: wire_target_bindings(sums.resolved),
         deferred_sum_targets: sums.deferred.to_vec(),
-        returning: returning.returning,
-        rls_filters: returning.rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
     }
 }
 
@@ -177,8 +184,7 @@ pub(super) fn batch_insert(
     rows: BatchRows<'_>,
     resolved_sum_targets: &[ResolvedSumTarget],
     deferred_sum_targets: &[String],
-    returning: Option<Vec<u8>>,
-    rls_filters: &[u8],
+    fields: WirePut<'_>,
 ) -> ReplicatedWrite {
     let BatchRows {
         documents,
@@ -192,8 +198,9 @@ pub(super) fn batch_insert(
         if_absent,
         resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         deferred_sum_targets: deferred_sum_targets.to_vec(),
-        returning,
-        rls_filters: rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
     }
 }
 

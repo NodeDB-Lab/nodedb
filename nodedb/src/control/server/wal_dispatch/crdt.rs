@@ -153,7 +153,7 @@ pub(crate) fn encode_crdt_op_record(
             document_id,
             list_path,
             index,
-            fields_json,
+            fields,
             surrogate,
         } => {
             // The Data Plane never appends to the WAL and the Control Plane
@@ -166,7 +166,7 @@ pub(crate) fn encode_crdt_op_record(
                 surrogate: bound_document_surrogate(collection.as_str(), document_id, *surrogate)?,
                 list_path: list_path.clone(),
                 index: *index as u64,
-                fields_json: fields_json.clone(),
+                fields: fields.clone(),
             };
             let bytes = encode_crdt_list_op_payload(payload)?;
             Some((CrdtRecordKind::ListOp, bytes))
@@ -210,7 +210,7 @@ pub(crate) fn encode_crdt_op_record(
         CrdtOp::DocUpsert {
             collection,
             document_id,
-            fields_json,
+            fields,
             surrogate,
             partial,
             verb: _,
@@ -225,7 +225,7 @@ pub(crate) fn encode_crdt_op_record(
                 collection: collection.to_string(),
                 document_id: document_id.clone(),
                 surrogate: bound_document_surrogate(collection.as_str(), document_id, *surrogate)?,
-                fields_json: fields_json.clone(),
+                fields: fields.clone(),
                 partial: *partial,
             };
             let bytes = encode_crdt_doc_op_payload(payload)?;
@@ -403,7 +403,7 @@ mod tests {
             document_id: "d1".to_string(),
             list_path: "blocks".to_string(),
             index: 0,
-            fields_json: "{}".to_string(),
+            fields: Vec::new(),
             surrogate: Surrogate::new(3),
         });
 
@@ -460,7 +460,13 @@ mod tests {
         let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             document_id: "d1".to_string(),
-            fields_json: r#"{"a":1}"#.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "a".to_string(),
+                    nodedb_types::Value::Integer(1),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: Surrogate::new(3),
             partial: false,
             verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,

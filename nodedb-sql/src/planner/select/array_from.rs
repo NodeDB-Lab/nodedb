@@ -195,6 +195,7 @@ impl RelationRead {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: false,
+            text_indexes: None,
         };
         let relation_catalog = CteCatalog {
             inner: ctx.catalog,
@@ -352,6 +353,7 @@ mod tests {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: true,
+                text_indexes: None,
             }))
         }
 

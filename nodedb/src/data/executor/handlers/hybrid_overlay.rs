@@ -57,19 +57,15 @@ pub(in crate::data::executor) struct HybridOverlayParams<'a> {
 
 impl CoreLoop {
     /// The text leg of a hybrid search: BM25 over `index`, with the issuing
-    /// transaction's staged rows ranked in before the cut. Empty when the
-    /// collection holds no text.
+    /// transaction's staged rows ranked in before the cut.
     pub(in crate::data::executor) fn hybrid_text_leg(
         &self,
         task: &ExecutionTask,
         tid: u64,
-        index: Option<IndexScope<'_>>,
+        index: IndexScope<'_>,
         params: FtsSearchParams<'_>,
         cut: super::search_cut::SearchCut,
     ) -> crate::Result<Vec<TextSearchResult>> {
-        let Some(index) = index else {
-            return Ok(Vec::new());
-        };
         let staged = self.text_staged_view(task, tid, index, cut)?;
         self.inverted.search_staged(
             task.request.database_id.as_u64(),

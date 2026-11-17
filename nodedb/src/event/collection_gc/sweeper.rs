@@ -73,6 +73,7 @@ async fn run_loop(shared: Arc<SharedState>) {
         if let Err(e) = sweep_once(&shared, retention).await {
             warn!(error = %e, "collection-gc sweep failed; will retry next tick");
         }
+        super::purge_log_prune::propose_purge_log_prune(&shared).await;
         tokio::time::sleep(interval).await;
     }
 }

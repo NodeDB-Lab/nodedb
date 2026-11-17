@@ -349,11 +349,6 @@ impl<'a> Pipeline<'a> {
                         restore_id,
                     )
                 });
-            // A second copy of an applied proposal never reaches the funnel,
-            // so its plan is classified here. Its first copy can sit above
-            // the saved floor, and this copy then carries the mark again.
-            let repeat_writes =
-                self.gate.prior_wrote_rows(proposal_key) && queued.plan_writes_user_data();
             let held = HeldEntry {
                 group_id,
                 log_index,
@@ -375,7 +370,10 @@ impl<'a> Pipeline<'a> {
             let (state, blocks, user_write) = match prepared {
                 Prepared::Concluded(outcome) => {
                     release_admission_holds(shared, group_id, log_index);
-                    let user_write = matches!(outcome, EntryOutcome::Repeat) && repeat_writes;
+                    // A second copy carries its first copy's mark: the first
+                    // copy can sit above the saved floor.
+                    let user_write =
+                        matches!(outcome, EntryOutcome::Repeat { .. }) && outcome.wrote_rows();
                     hold = outcome.hold_reason();
                     (
                         SlotState::from(self.gate.conclude(proposal_key, false, outcome)),
@@ -488,8 +486,8 @@ impl<'a> Pipeline<'a> {
 
     /// Settle every group's concluded entries in log order. See
     /// [`super::settle::settle_lanes`].
-    pub fn settle(&mut self) {
-        super::settle::settle_lanes(self.ctx, &mut self.lanes);
+    pub async fn settle(&mut self) {
+        super::settle::settle_lanes(self.ctx, &mut self.lanes).await;
     }
 }
 
@@ -551,7 +549,7 @@ mod tests {
         pipeline.lanes.insert(GROUP, lane);
 
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert_eq!(
             pipeline.lanes[&GROUP].backlog.len(),
             1,
@@ -572,14 +570,14 @@ mod tests {
         // A snapshot through entry 4 installs: entry 5 still holds.
         gates.install(GROUP).await.adopted(4);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert!(pipeline.lanes[&GROUP].is_held());
         assert_eq!(watchers.get_or_create(GROUP).current(), 4);
 
         // A snapshot through entry 6 installs.
         gates.install(GROUP).await.adopted(6);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         let lane = &pipeline.lanes[&GROUP];
         assert!(!lane.is_held());
         assert!(lane.backlog.is_empty());
@@ -641,7 +639,7 @@ mod tests {
         assert!(matches!(event, LoopEvent::Panicked { log_index: 5, .. }));
         pipeline.handle(event);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
 
         let answered = waiter.await.expect("the waiter is answered");
         assert!(answered.is_err(), "a panicked apply answers with an error");

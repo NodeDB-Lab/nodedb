@@ -29,30 +29,33 @@ pub(super) fn convert_constant_result(
     let mut obj = std::collections::HashMap::with_capacity(columns.len());
     for ((_col, val), key) in columns.iter().zip(values.iter()).zip(cell_keys) {
         let cell = match val {
+            // A Decimal keeps its type, so a constant branch of a set
+            // operation or a joined constant compares by value; its cell text
+            // is the same `to_string` form either way.
             SqlValue::Int(_)
             | SqlValue::Float(_)
             | SqlValue::Bool(_)
             | SqlValue::Null
             | SqlValue::String(_)
-            | SqlValue::Geometry(_) => sql_value_to_nodedb_value(val),
+            | SqlValue::Decimal(_)
+            | SqlValue::Uuid(_)
+            | SqlValue::Geometry(_)
+            | SqlValue::Duration(_) => sql_value_to_nodedb_value(val),
             // The shaper has no typed renderer that reproduces PostgreSQL's
             // text form for these — `\x..` for bytes, `{1,2}` for arrays, the
             // ISO string for timestamps — from a typed value, so they keep
             // that text form under a `Text` column instead.
-            SqlValue::Decimal(_)
-            | SqlValue::Bytes(_)
+            SqlValue::Bytes(_)
             | SqlValue::Array(_)
+            | SqlValue::Object(_)
             | SqlValue::Timestamp(_)
             | SqlValue::Timestamptz(_) => Value::String(sql_value_to_string(val)),
         };
         obj.insert(key, cell);
     }
-    let arr = Value::Array(vec![Value::Object(obj)]);
-    let payload =
-        nodedb_types::value_to_msgpack(&arr).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("constant result: {e}"),
-        })?;
+    // The row reaches the next operator as a native object, so each cell
+    // keeps its type.
+    let payload = crate::data::executor::response_codec::encode_native_rows(&[Value::Object(obj)])?;
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: nodedb_types::CollectionKey::from_bare(ctx.database_id, "").vshard(),
@@ -151,22 +154,41 @@ pub(super) fn convert_truncate(
     }])
 }
 
+/// Lower a statement-level `UNION [ALL]`, `INTERSECT [ALL]` or
+/// `EXCEPT [ALL]` to ONE coordinator-local `QueryOp::SetOp` task.
+///
+/// The set operation lowers exactly as a derived-table body does, so every
+/// transport merges it in one place: the resolver materializes each branch
+/// and merges the rows by each branch's column positions, which the
+/// `SetOp` carries from the branches' SELECT lists.
+fn convert_set_op_statement(
+    body: &SqlPlan,
+    tenant_id: TenantId,
+    ctx: &ConvertContext,
+) -> crate::Result<Vec<PhysicalTask>> {
+    let plan = convert_body_to_single_plan(body, tenant_id, ctx)?;
+    Ok(vec![PhysicalTask {
+        tenant_id,
+        // Coordinator-local: the resolver runs it where the statement runs.
+        vshard_id: nodedb_types::CollectionKey::from_bare(ctx.database_id, "").vshard(),
+        database_id: ctx.database_id,
+        plan,
+        post_set_op: PostSetOp::None,
+        txn_id: None,
+    }])
+}
+
 pub(super) fn convert_union(
     inputs: &[SqlPlan],
     distinct: bool,
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    let mut all_tasks = Vec::new();
-    for input in inputs {
-        all_tasks.extend(convert_one(input, tenant_id, ctx)?);
-    }
-    if distinct {
-        for task in &mut all_tasks {
-            task.post_set_op = PostSetOp::UnionDistinct;
-        }
-    }
-    Ok(all_tasks)
+    let body = SqlPlan::Union {
+        inputs: inputs.to_vec(),
+        distinct,
+    };
+    convert_set_op_statement(&body, tenant_id, ctx)
 }
 
 pub(super) fn convert_intersect(
@@ -176,21 +198,12 @@ pub(super) fn convert_intersect(
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    let mut left_tasks = convert_one(left, tenant_id, ctx)?;
-    let mut right_tasks = convert_one(right, tenant_id, ctx)?;
-    let op = if all {
-        PostSetOp::IntersectAll
-    } else {
-        PostSetOp::Intersect
+    let body = SqlPlan::Intersect {
+        left: Box::new(left.clone()),
+        right: Box::new(right.clone()),
+        all,
     };
-    for task in &mut left_tasks {
-        task.post_set_op = op;
-    }
-    for task in &mut right_tasks {
-        task.post_set_op = op;
-    }
-    left_tasks.extend(right_tasks);
-    Ok(left_tasks)
+    convert_set_op_statement(&body, tenant_id, ctx)
 }
 
 pub(super) fn convert_except(
@@ -200,21 +213,12 @@ pub(super) fn convert_except(
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    let mut left_tasks = convert_one(left, tenant_id, ctx)?;
-    let mut right_tasks = convert_one(right, tenant_id, ctx)?;
-    let op = if all {
-        PostSetOp::ExceptAll
-    } else {
-        PostSetOp::Except
+    let body = SqlPlan::Except {
+        left: Box::new(left.clone()),
+        right: Box::new(right.clone()),
+        all,
     };
-    for task in &mut left_tasks {
-        task.post_set_op = op;
-    }
-    for task in &mut right_tasks {
-        task.post_set_op = op;
-    }
-    left_tasks.extend(right_tasks);
-    Ok(left_tasks)
+    convert_set_op_statement(&body, tenant_id, ctx)
 }
 
 pub(super) fn convert_cte(

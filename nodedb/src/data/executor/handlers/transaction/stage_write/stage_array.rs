@@ -11,9 +11,7 @@ use nodedb_physical::physical_plan::ArrayOp;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{
-    ArrayTxnOverlay, MAX_TXN_OVERLAY_BYTES, StagedCellPut,
-};
+use crate::data::executor::handlers::transaction::overlay::{ArrayTxnOverlay, StagedCellPut};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 use crate::types::TxnId;
@@ -58,13 +56,10 @@ impl CoreLoop {
                         return self.response_error(task, refusal);
                     }
                 }
-                if let Err(e) = self.stage_array_capped(cells_msgpack.len()) {
-                    return self.response_error(task, e);
-                }
                 let overlay: &mut ArrayTxnOverlay = self.array_txn_overlay_mut(txn_id);
                 let count = cells.len();
                 for cell in cells {
-                    overlay.stage_cell_put(
+                    let staged = overlay.stage_cell_put(
                         array_id.clone(),
                         cell.coord,
                         StagedCellPut {
@@ -75,6 +70,9 @@ impl CoreLoop {
                             valid_until_ms: cell.valid_until_ms,
                         },
                     );
+                    if let Err(e) = staged {
+                        return self.response_error(task, e);
+                    }
                 }
                 self.stage_count_response(task, count)
             }
@@ -107,9 +105,13 @@ impl CoreLoop {
                     // it has already touched the cell; otherwise fall back to
                     // the durable store, exactly like every other stage
                     // handler's real affected-count computation.
-                    let staged = self
+                    let staged = match self
                         .array_txn_overlay_mut(txn_id)
-                        .staged_cell_presence(array_id, &cell.coord);
+                        .staged_cell_presence(array_id, &cell.coord)
+                    {
+                        Ok(staged) => staged,
+                        Err(e) => return self.response_error(task, e),
+                    };
                     let present = match staged {
                         Some(present) => present,
                         None => match self.array_engine.contains_cell(array_id, &cell.coord) {
@@ -127,8 +129,12 @@ impl CoreLoop {
                     if present {
                         existed += 1;
                     }
-                    self.array_txn_overlay_mut(txn_id)
-                        .stage_cell_delete(array_id.clone(), cell.coord);
+                    if let Err(e) = self
+                        .array_txn_overlay_mut(txn_id)
+                        .stage_cell_delete(array_id.clone(), cell.coord)
+                    {
+                        return self.response_error(task, e);
+                    }
                 }
                 self.stage_count_response(task, existed)
             }
@@ -144,22 +150,5 @@ impl CoreLoop {
             | ArrayOp::RekeyArray { .. }
             | ArrayOp::PurgeArrayDrop { .. } => self.stage_not_point_write(task),
         }
-    }
-
-    /// Enforce the per-transaction ARRAY overlay memory cap, reusing the same
-    /// budget the surrogate-keyed overlay uses (summed across every in-flight
-    /// transaction's ARRAY overlay on this core).
-    fn stage_array_capped(&self, incoming_bytes: usize) -> crate::Result<()> {
-        let current: usize = self
-            .array_txn_overlays
-            .values()
-            .map(ArrayTxnOverlay::memory_size_estimate)
-            .sum();
-        if current.saturating_add(incoming_bytes) > MAX_TXN_OVERLAY_BYTES {
-            return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
-            });
-        }
-        Ok(())
     }
 }

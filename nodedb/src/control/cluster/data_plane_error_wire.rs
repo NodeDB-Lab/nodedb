@@ -136,12 +136,15 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 cause: cause.map(|cause| Box::new(Self::from(*cause))),
             },
             ErrorCode::OllpRetryRequired => Self::OllpRetryRequired,
-            ErrorCode::TxnOverlayMemoryExceeded { limit } => Self::TxnOverlayMemoryExceeded {
-                limit: to_wire_count(limit),
-            },
             ErrorCode::DivisionByZero => Self::DivisionByZero,
             ErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             ErrorCode::DataException { detail } => Self::DataException { detail },
+            ErrorCode::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            ErrorCode::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
+            }
             ErrorCode::NumericValueOutOfRange { detail } => Self::NumericValueOutOfRange { detail },
             ErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
             ErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
@@ -158,6 +161,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 limit: to_wire_count(limit),
             },
             ErrorCode::ProgramLimitExceeded { detail } => Self::ProgramLimitExceeded { detail },
+            ErrorCode::ExecutionLimitExceeded { detail } => Self::ExecutionLimitExceeded { detail },
             ErrorCode::InvalidTextRepresentation { detail } => {
                 Self::InvalidTextRepresentation { detail }
             }
@@ -301,11 +305,6 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 cause: cause.map(|cause| Box::new(Self::from(*cause))),
             },
             DataPlaneErrorCode::OllpRetryRequired => Self::OllpRetryRequired,
-            DataPlaneErrorCode::TxnOverlayMemoryExceeded { limit } => {
-                Self::TxnOverlayMemoryExceeded {
-                    limit: from_wire_count(limit),
-                }
-            }
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
             DataPlaneErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             DataPlaneErrorCode::DataException { detail } => Self::DataException { detail },
@@ -335,6 +334,9 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::ProgramLimitExceeded { detail } => {
                 Self::ProgramLimitExceeded { detail }
             }
+            DataPlaneErrorCode::ExecutionLimitExceeded { detail } => {
+                Self::ExecutionLimitExceeded { detail }
+            }
             DataPlaneErrorCode::InvalidTextRepresentation { detail } => {
                 Self::InvalidTextRepresentation { detail }
             }
@@ -344,6 +346,12 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             }
             DataPlaneErrorCode::DatetimeFieldOverflow { detail } => {
                 Self::DatetimeFieldOverflow { detail }
+            }
+            DataPlaneErrorCode::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            DataPlaneErrorCode::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
             }
             DataPlaneErrorCode::UndefinedObject { object } => Self::UndefinedObject { object },
             DataPlaneErrorCode::ObjectNotInPrerequisiteState { object, detail } => {
@@ -378,6 +386,7 @@ mod tests {
             },
             TextColumnFault::NotAColumn,
             TextColumnFault::NotIndexed,
+            TextColumnFault::IndexBuilding,
         ] {
             let original = ErrorCode::TextColumn {
                 collection: "docs".into(),
@@ -447,6 +456,12 @@ mod tests {
                 detail: detail.clone(),
             },
             ErrorCode::DatetimeFieldOverflow {
+                detail: detail.clone(),
+            },
+            ErrorCode::InvalidArgumentForLogarithm {
+                detail: detail.clone(),
+            },
+            ErrorCode::InvalidArgumentForPowerFunction {
                 detail: detail.clone(),
             },
         ] {

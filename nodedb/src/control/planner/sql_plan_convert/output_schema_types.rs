@@ -46,20 +46,27 @@ fn bare_column_type(expr: &SqlExpr, types: &HashMap<String, DdlColType>) -> Opti
 ///
 /// - A bare column reference resolves to its catalog type (default `Text`).
 /// - Comparison / logical / null / membership predicates are `Bool`.
-/// - Numeric literals type as their literal kind; a boolean literal is `Bool`.
-/// - Everything else — string functions, arithmetic, casts, arbitrary
-///   functions — defaults to `Text`, the safe fallback.
+/// - An integer literal is `Int4` when `i32` holds it, else `Int8`, as
+///   PostgreSQL types it. Other numeric literals type as their literal
+///   kind; a boolean literal is `Bool`.
+/// - Arithmetic, math functions and casts take the type the evaluator gives
+///   their result. The resolver casts an integer operation whose
+///   PostgreSQL result is `smallint` or `integer` to that type, so the cast
+///   carries its width.
+/// - Everything else — string functions, arbitrary functions — defaults to
+///   `Text`, the safe fallback.
 pub fn infer_computed_expr_type(expr: &SqlExpr, types: &HashMap<String, DdlColType>) -> DdlColType {
     match expr {
         SqlExpr::Column { .. } => bare_column_type(expr, types).unwrap_or(DdlColType::Text),
         SqlExpr::Literal(v) => match v {
-            SqlValue::Int(_) => DdlColType::Int8,
+            SqlValue::Int(i) => int_width_type(nodedb_query::cast::IntWidth::of_literal(*i)),
             SqlValue::Float(_) => DdlColType::Float8,
             SqlValue::Bool(_) => DdlColType::Bool,
             SqlValue::Timestamp(_) => DdlColType::Timestamp,
             SqlValue::Timestamptz(_) => DdlColType::Timestamptz,
-            // String / Decimal / Null / Bytes / Array: no certain non-TEXT
-            // wire type — stay Text.
+            SqlValue::Decimal(_) => DdlColType::Numeric,
+            // String / Null / Bytes / Array: no certain non-TEXT wire type —
+            // stay Text.
             _ => DdlColType::Text,
         },
         SqlExpr::BinaryOp { left, op, right } => match op {
@@ -72,35 +79,22 @@ pub fn infer_computed_expr_type(expr: &SqlExpr, types: &HashMap<String, DdlColTy
             | BinaryOp::Le
             | BinaryOp::And
             | BinaryOp::Or => DdlColType::Bool,
-            // Integer and float operands evaluate in `f64` and yield an
-            // integer when the result is whole, else a float. Integer `+`,
-            // `-`, `*`, `%` stay whole, so they are `Int8`. Integer `/`
-            // yields `5` for `10 / 2` and `3.5` for `7 / 2`. `Numeric`
-            // renders both as the evaluator produced them. A float operand
-            // makes the result `Float8`. A numeric (decimal) or text operand
-            // stays Text.
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
-                match (
-                    numeric_class(infer_computed_expr_type(left, types)),
-                    numeric_class(infer_computed_expr_type(right, types)),
-                ) {
-                    (Some(NumericClass::Integer), Some(NumericClass::Integer)) => match op {
-                        BinaryOp::Div => DdlColType::Numeric,
-                        _ => DdlColType::Int8,
-                    },
-                    (Some(_), Some(_)) => DdlColType::Float8,
-                    _ => DdlColType::Text,
-                }
+                arithmetic_type(
+                    infer_computed_expr_type(left, types),
+                    infer_computed_expr_type(right, types),
+                )
             }
             // `||` is string concatenation.
             BinaryOp::Concat => DdlColType::Text,
         },
         SqlExpr::UnaryOp { op, expr } => match op {
             UnaryOp::Not => DdlColType::Bool,
-            // `-x` keeps an integer or float operand's class.
+            // `-x` keeps an integer, float or numeric operand's class.
             UnaryOp::Neg => match numeric_class(infer_computed_expr_type(expr, types)) {
                 Some(NumericClass::Integer) => DdlColType::Int8,
                 Some(NumericClass::Float) => DdlColType::Float8,
+                Some(NumericClass::Numeric) => DdlColType::Numeric,
                 None => DdlColType::Text,
             },
         },
@@ -114,18 +108,6 @@ pub fn infer_computed_expr_type(expr: &SqlExpr, types: &HashMap<String, DdlColTy
             match (columns.next(), columns.next()) {
                 (Some(column), None) => time_bucket_type(bare_column_type(column, types)),
                 _ => DdlColType::Text,
-            }
-        }
-        // A math function computes in `f64` and yields an integer when the
-        // result is whole, else a float: `Float8` renders both. Its first
-        // argument must be an integer or a float.
-        SqlExpr::Function { name, args, .. } if is_float_math_function(name) => {
-            match args
-                .first()
-                .and_then(|arg| numeric_class(infer_computed_expr_type(arg, types)))
-            {
-                Some(_) => DdlColType::Float8,
-                None => DdlColType::Text,
             }
         }
         // A CASE yields one of its branches. When every non-NULL branch has
@@ -146,29 +128,32 @@ pub fn infer_computed_expr_type(expr: &SqlExpr, types: &HashMap<String, DdlColTy
                 Some(_) | None => DdlColType::Text,
             }
         }
-        // String functions, casts, subqueries, wildcards, array literals and
-        // any other function call are not certainly non-TEXT — stay Text.
-        SqlExpr::Function { .. }
-        | SqlExpr::Cast { .. }
-        | SqlExpr::Subquery(_)
-        | SqlExpr::Wildcard
-        | SqlExpr::ArrayLiteral(_) => DdlColType::Text,
+        // A cast yields its target type, or NULL.
+        SqlExpr::Cast { to_type, .. } => cast_type(to_type),
+        // A math function is typed as the evaluator types its result. String
+        // functions and any other call are not certainly non-TEXT.
+        SqlExpr::Function { name, args, .. } => {
+            math_function_type(name, args, types).unwrap_or(DdlColType::Text)
+        }
+        // Subqueries, wildcards and array literals stay Text.
+        SqlExpr::Subquery(_) | SqlExpr::Wildcard | SqlExpr::ArrayLiteral(_) => DdlColType::Text,
     }
 }
 
-/// Whether a numeric wire type holds integer or float cells.
+/// Whether a numeric wire type holds integer, float or numeric cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericClass {
     Integer,
     Float,
+    Numeric,
 }
 
-/// The class of an integer or float wire type. `None` for every other type,
-/// `Numeric` included: a decimal operand evaluates as a decimal.
+/// The class of a numeric wire type. `None` for every other type.
 fn numeric_class(ty: DdlColType) -> Option<NumericClass> {
     match ty {
         DdlColType::Int8 | DdlColType::Int4 | DdlColType::Int2 => Some(NumericClass::Integer),
         DdlColType::Float8 | DdlColType::Float4 => Some(NumericClass::Float),
+        DdlColType::Numeric => Some(NumericClass::Numeric),
         DdlColType::Text
         | DdlColType::Varchar
         | DdlColType::Bool
@@ -177,20 +162,118 @@ fn numeric_class(ty: DdlColType) -> Option<NumericClass> {
         | DdlColType::Jsonb
         | DdlColType::Timestamp
         | DdlColType::Timestamptz
-        | DdlColType::Numeric
         | DdlColType::Uuid
         | DdlColType::Float4Array
         | DdlColType::Float8Array => None,
     }
 }
 
-/// Whether `name` is a math function that computes in `f64`.
-fn is_float_math_function(name: &str) -> bool {
-    const FLOAT_MATH: &[&str] = &[
-        "abs", "round", "ceil", "ceiling", "floor", "power", "pow", "sqrt", "mod", "sign", "log",
-        "ln", "log10", "log2", "exp",
-    ];
-    FLOAT_MATH.iter().any(|f| name.eq_ignore_ascii_case(f))
+/// The type of `left op right` for an arithmetic operator.
+///
+/// - A float operand makes the result `Float8`, whatever the other: the
+///   evaluator reads the other operand as a float, or yields NULL.
+/// - Two integers are `Int8`: `/` and `%` truncate toward zero. An
+///   operation the resolver typed `smallint` or `integer` reaches here as a
+///   cast to that type, so an uncast one is evaluated as `bigint`.
+/// - A numeric with an integer or a numeric is `Numeric`.
+/// - Any other pair is `Text`.
+fn arithmetic_type(left: DdlColType, right: DdlColType) -> DdlColType {
+    match (numeric_class(left), numeric_class(right)) {
+        (Some(NumericClass::Float), _) | (_, Some(NumericClass::Float)) => DdlColType::Float8,
+        (Some(NumericClass::Integer), Some(NumericClass::Integer)) => DdlColType::Int8,
+        (Some(_), Some(_)) => DdlColType::Numeric,
+        _ => DdlColType::Text,
+    }
+}
+
+/// The type of a math function call, as the evaluator types its result.
+/// `None` for a name that is not a math function.
+///
+/// - `abs` keeps its argument's type.
+/// - `ceil`, `floor` and `sign` are `Numeric` over a numeric, else `Float8`.
+/// - `round` is `Numeric` over a numeric, and over an integer with places;
+///   `Float8` over a float or a lone integer.
+/// - `mod` is the `%` operator.
+/// - `power`, `sqrt`, `exp` and the logarithms are `Numeric` when an
+///   argument is numeric and none is a float, else `Float8`. `log(b, x)` is
+///   `Numeric` over integers too. An untyped argument is `Text`.
+fn math_function_type(
+    name: &str,
+    args: &[SqlExpr],
+    types: &HashMap<String, DdlColType>,
+) -> Option<DdlColType> {
+    let arg = |i: usize| {
+        args.get(i)
+            .map_or(DdlColType::Text, |a| infer_computed_expr_type(a, types))
+    };
+    let first = || numeric_class(arg(0));
+    let exact_or_float = || match first() {
+        Some(NumericClass::Numeric) => DdlColType::Numeric,
+        Some(_) => DdlColType::Float8,
+        None => DdlColType::Text,
+    };
+    Some(match name.to_ascii_lowercase().as_str() {
+        "abs" => match first() {
+            Some(NumericClass::Integer) => DdlColType::Int8,
+            Some(NumericClass::Float) => DdlColType::Float8,
+            Some(NumericClass::Numeric) => DdlColType::Numeric,
+            None => DdlColType::Text,
+        },
+        "ceil" | "ceiling" | "floor" | "sign" => exact_or_float(),
+        "round" => match first() {
+            Some(NumericClass::Integer) if args.len() >= 2 => DdlColType::Numeric,
+            _ => exact_or_float(),
+        },
+        "mod" => arithmetic_type(arg(0), arg(1)),
+        "power" | "pow" | "sqrt" | "exp" | "ln" | "log" | "log10" | "log2" => {
+            let lower = name.to_ascii_lowercase();
+            let two_arg_log = lower == "log" && args.len() >= 2;
+            let arity = if two_arg_log || matches!(lower.as_str(), "power" | "pow") {
+                2
+            } else {
+                1
+            };
+            let classes: Option<Vec<NumericClass>> =
+                (0..arity).map(|i| numeric_class(arg(i))).collect();
+            match classes {
+                None => DdlColType::Text,
+                Some(classes) if classes.contains(&NumericClass::Float) => DdlColType::Float8,
+                Some(classes) if two_arg_log || classes.contains(&NumericClass::Numeric) => {
+                    DdlColType::Numeric
+                }
+                Some(_) => DdlColType::Float8,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The wire type of an integer of `width`.
+fn int_width_type(width: nodedb_query::cast::IntWidth) -> DdlColType {
+    use nodedb_query::cast::IntWidth;
+    match width {
+        IntWidth::Int2 => DdlColType::Int2,
+        IntWidth::Int4 => DdlColType::Int4,
+        IntWidth::Int8 => DdlColType::Int8,
+    }
+}
+
+/// The type a `CAST` to `to_type` yields. A name no runtime cast covers is
+/// `Text`.
+pub fn cast_type(to_type: &str) -> DdlColType {
+    use nodedb_query::CastType;
+    match CastType::from_type_name(to_type) {
+        Some(CastType::Int) => DdlColType::Int8,
+        Some(CastType::Int4) => DdlColType::Int4,
+        Some(CastType::Int2) => DdlColType::Int2,
+        Some(CastType::Float) => DdlColType::Float8,
+        Some(CastType::Bool) => DdlColType::Bool,
+        Some(CastType::Decimal(_)) => DdlColType::Numeric,
+        Some(CastType::Uuid) => DdlColType::Uuid,
+        Some(CastType::Timestamp) => DdlColType::Timestamp,
+        Some(CastType::Timestamptz) => DdlColType::Timestamptz,
+        Some(CastType::String | CastType::Duration) | None => DdlColType::Text,
+    }
 }
 
 /// The result type of a `time_bucket` call over a column of type `source`.
@@ -209,8 +292,15 @@ pub fn time_bucket_type(source: Option<DdlColType>) -> DdlColType {
 /// - `COUNT(...)` is always Postgres `bigint` (`Int8`).
 /// - `MIN`/`MAX` preserve the input type when the argument is a resolvable
 ///   bare column; otherwise `Text`.
-/// - `SUM`/`AVG` promote a floating-point argument to `Float8`; integer and
-///   numeric sums (which map to `Text` in this codebase anyway) stay `Text`.
+/// - `SUM` is typed from its argument's inferred type, as PostgreSQL types
+///   it: `Int8` over a `smallint` or `integer`, `Numeric` over a `bigint` or
+///   a numeric, `Float8` over a float. The run-time SUM of integers is an
+///   integer while the total fits `i64`, else a numeric, and both render as
+///   valid `numeric` text. An untyped argument is `Text`.
+/// - `AVG` is typed from its argument's inferred type, as PostgreSQL types
+///   it: `Float8` over a float argument, `Numeric` over an integer or a
+///   numeric one. An untyped argument can hold either kind, so its AVG is a
+///   float or a numeric by the data: `Text`.
 /// - Any other aggregate, or an unresolvable argument, is `Text`.
 pub fn infer_aggregate_type(
     agg: &AggregateExpr,
@@ -228,9 +318,27 @@ pub fn infer_aggregate_type(
         // `{item, count, error}` objects.
         "approx_topk" => DdlColType::Json,
         "min" | "max" => arg_bare_type().unwrap_or(DdlColType::Text),
-        "sum" | "avg" => match arg_bare_type() {
-            Some(DdlColType::Float8) | Some(DdlColType::Float4) => DdlColType::Float8,
+        "sum" => match agg
+            .args
+            .first()
+            .map(|arg| infer_computed_expr_type(arg, types))
+        {
+            Some(DdlColType::Int2 | DdlColType::Int4) => DdlColType::Int8,
+            Some(DdlColType::Int8 | DdlColType::Numeric) => DdlColType::Numeric,
+            Some(DdlColType::Float8 | DdlColType::Float4) => DdlColType::Float8,
             _ => DdlColType::Text,
+        },
+        // PostgreSQL's `avg` is float8 over a float and numeric over an
+        // integer or a numeric. The run-time AVG is a float when a float
+        // cell is fed, else a numeric. `avg_distinct` is the same.
+        "avg" | "avg_distinct" => match agg
+            .args
+            .first()
+            .and_then(|arg| numeric_class(infer_computed_expr_type(arg, types)))
+        {
+            Some(NumericClass::Float) => DdlColType::Float8,
+            Some(NumericClass::Integer | NumericClass::Numeric) => DdlColType::Numeric,
+            None => DdlColType::Text,
         },
         _ => DdlColType::Text,
     }
@@ -300,7 +408,8 @@ mod tests {
     /// numeric type. A CASE takes its branches' one type.
     #[test]
     fn numeric_expressions_take_a_numeric_type() {
-        let t = types_map();
+        let mut t = types_map();
+        t.insert("price".to_string(), DdlColType::Numeric);
         let call = |name: &str, args: Vec<SqlExpr>| SqlExpr::Function {
             name: name.to_string(),
             args,
@@ -312,6 +421,39 @@ mod tests {
             right: Box::new(right),
         };
         let one = || SqlExpr::Literal(SqlValue::Int(1));
+        // A float with a numeric is float8, in either order. Two numerics
+        // are numeric.
+        assert_eq!(
+            infer_computed_expr_type(
+                &binary(column("amount"), BinaryOp::Mul, column("price")),
+                &t
+            ),
+            DdlColType::Float8
+        );
+        assert_eq!(
+            infer_computed_expr_type(
+                &binary(column("price"), BinaryOp::Sub, column("amount")),
+                &t
+            ),
+            DdlColType::Float8
+        );
+        assert_eq!(
+            infer_computed_expr_type(&binary(column("price"), BinaryOp::Add, column("price")), &t),
+            DdlColType::Numeric
+        );
+        assert_eq!(
+            infer_computed_expr_type(&binary(column("n"), BinaryOp::Mul, column("price")), &t),
+            DdlColType::Numeric
+        );
+        // A float with an untyped operand is float8: the evaluator reads the
+        // other operand as a float, or yields NULL.
+        assert_eq!(
+            infer_computed_expr_type(
+                &binary(column("label"), BinaryOp::Add, column("amount")),
+                &t
+            ),
+            DdlColType::Float8
+        );
         assert_eq!(
             infer_computed_expr_type(&call("round", vec![column("amount"), one()]), &t),
             DdlColType::Float8
@@ -320,6 +462,37 @@ mod tests {
             infer_computed_expr_type(&call("round", vec![column("label"), one()]), &t),
             DdlColType::Text
         );
+        // Math functions take PostgreSQL's result types.
+        for (name, args, want) in [
+            ("abs", vec![column("n")], DdlColType::Int8),
+            ("abs", vec![column("price")], DdlColType::Numeric),
+            ("ceil", vec![column("n")], DdlColType::Float8),
+            ("floor", vec![column("price")], DdlColType::Numeric),
+            ("round", vec![column("n")], DdlColType::Float8),
+            ("round", vec![column("n"), one()], DdlColType::Numeric),
+            ("round", vec![column("price"), one()], DdlColType::Numeric),
+            ("sqrt", vec![column("price")], DdlColType::Numeric),
+            ("sqrt", vec![column("n")], DdlColType::Float8),
+            (
+                "power",
+                vec![column("price"), column("n")],
+                DdlColType::Numeric,
+            ),
+            (
+                "power",
+                vec![column("price"), column("amount")],
+                DdlColType::Float8,
+            ),
+            ("log", vec![column("n"), column("n")], DdlColType::Numeric),
+            ("ln", vec![column("label")], DdlColType::Text),
+            ("mod", vec![column("n"), column("n")], DdlColType::Int8),
+        ] {
+            assert_eq!(
+                infer_computed_expr_type(&call(name, args), &t),
+                want,
+                "{name}"
+            );
+        }
         assert_eq!(
             infer_computed_expr_type(&binary(column("n"), BinaryOp::Add, one()), &t),
             DdlColType::Int8
@@ -330,7 +503,7 @@ mod tests {
         );
         assert_eq!(
             infer_computed_expr_type(&binary(column("n"), BinaryOp::Div, column("n")), &t),
-            DdlColType::Numeric
+            DdlColType::Int8
         );
         assert_eq!(
             infer_computed_expr_type(&binary(column("n"), BinaryOp::Mod, column("n")), &t),
@@ -402,6 +575,17 @@ mod tests {
         let t = types_map();
         assert_eq!(
             infer_computed_expr_type(&SqlExpr::Literal(SqlValue::Int(1)), &t),
+            DdlColType::Int4
+        );
+        assert_eq!(
+            infer_computed_expr_type(&SqlExpr::Literal(SqlValue::Int(i64::from(i32::MIN))), &t),
+            DdlColType::Int4
+        );
+        assert_eq!(
+            infer_computed_expr_type(
+                &SqlExpr::Literal(SqlValue::Int(i64::from(i32::MAX) + 1)),
+                &t
+            ),
             DdlColType::Int8
         );
         assert_eq!(
@@ -411,6 +595,13 @@ mod tests {
         assert_eq!(
             infer_computed_expr_type(&SqlExpr::Literal(SqlValue::Bool(true)), &t),
             DdlColType::Bool
+        );
+        assert_eq!(
+            infer_computed_expr_type(
+                &SqlExpr::Literal(SqlValue::Decimal(rust_decimal::Decimal::new(15, 1))),
+                &t
+            ),
+            DdlColType::Numeric
         );
         // A string literal has no certain non-TEXT wire type.
         assert_eq!(
@@ -463,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn sum_of_float_is_float8_sum_of_int_is_text() {
+    fn sum_follows_the_postgres_result_type() {
         let t = types_map();
         assert_eq!(
             infer_aggregate_type(&agg("sum", Some(column("amount"))), &t),
@@ -473,11 +664,100 @@ mod tests {
             infer_aggregate_type(&agg("avg", Some(column("amount"))), &t),
             DdlColType::Float8
         );
-        // SUM/AVG over an integer column stays Text (numeric, no regression).
+        // SUM over a bigint column is numeric. AVG over it is numeric.
         assert_eq!(
             infer_aggregate_type(&agg("sum", Some(column("n"))), &t),
-            DdlColType::Text
+            DdlColType::Numeric
         );
+        let mut t = t;
+        t.insert("i".to_string(), DdlColType::Int4);
+        t.insert("s".to_string(), DdlColType::Int2);
+        t.insert("price".to_string(), DdlColType::Numeric);
+        for (arg, want) in [
+            (column("i"), DdlColType::Int8),
+            (column("s"), DdlColType::Int8),
+            (column("price"), DdlColType::Numeric),
+            (column("label"), DdlColType::Text),
+            (column("missing"), DdlColType::Text),
+            (
+                SqlExpr::Cast {
+                    expr: Box::new(column("i")),
+                    to_type: "INTEGER".into(),
+                },
+                DdlColType::Int8,
+            ),
+        ] {
+            assert_eq!(
+                infer_aggregate_type(&agg("sum", Some(arg.clone())), &t),
+                want,
+                "{arg:?}"
+            );
+        }
+        assert_eq!(
+            infer_aggregate_type(&agg("avg", Some(column("n"))), &t),
+            DdlColType::Numeric
+        );
+    }
+
+    /// AVG takes its type from the argument's inferred type where the
+    /// run-time result type is certain, else `Text`.
+    #[test]
+    fn avg_type_follows_the_argument_type() {
+        let mut t = types_map();
+        t.insert("price".to_string(), DdlColType::Numeric);
+        t.insert("ratio".to_string(), DdlColType::Float4);
+        let avg = |arg: SqlExpr| infer_aggregate_type(&agg("avg", Some(arg)), &t);
+        let one = || SqlExpr::Literal(SqlValue::Int(1));
+        let add = |left: SqlExpr, right: SqlExpr| SqlExpr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOp::Add,
+            right: Box::new(right),
+        };
+        assert_eq!(avg(column("ratio")), DdlColType::Float8);
+        assert_eq!(avg(column("price")), DdlColType::Numeric);
+        assert_eq!(avg(add(column("n"), one())), DdlColType::Numeric);
+        // Float arithmetic yields float cells, so its AVG is float8.
+        assert_eq!(avg(add(column("amount"), one())), DdlColType::Float8);
+        // A schemaless field can hold integers or floats.
+        assert_eq!(avg(column("missing")), DdlColType::Text);
+        assert_eq!(avg(column("label")), DdlColType::Text);
+        let case = SqlExpr::Case {
+            operand: None,
+            when_then: vec![(SqlExpr::Literal(SqlValue::Bool(true)), column("amount"))],
+            else_expr: Some(Box::new(SqlExpr::Literal(SqlValue::Null))),
+        };
+        assert_eq!(avg(case), DdlColType::Float8);
+        assert_eq!(
+            infer_aggregate_type(&agg("avg_distinct", Some(column("n"))), &t),
+            DdlColType::Numeric
+        );
+    }
+
+    /// A cast yields its target type.
+    #[test]
+    fn cast_takes_its_target_type() {
+        let t = types_map();
+        let cast = |to_type: &str| SqlExpr::Cast {
+            expr: Box::new(column("label")),
+            to_type: to_type.to_string(),
+        };
+        for (to_type, want) in [
+            ("SMALLINT", DdlColType::Int2),
+            ("INTEGER", DdlColType::Int4),
+            ("INT", DdlColType::Int4),
+            ("BIGINT", DdlColType::Int8),
+            ("DOUBLE PRECISION", DdlColType::Float8),
+            ("NUMERIC(10,2)", DdlColType::Numeric),
+            ("BOOLEAN", DdlColType::Bool),
+            ("TEXT", DdlColType::Text),
+            ("JSONB", DdlColType::Text),
+        ] {
+            assert_eq!(
+                infer_computed_expr_type(&cast(to_type), &t),
+                want,
+                "{to_type}"
+            );
+        }
     }
 
     #[test]

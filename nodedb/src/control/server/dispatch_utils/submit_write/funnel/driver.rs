@@ -7,9 +7,6 @@
 use std::sync::Arc;
 
 use crate::bridge::dispatch::JournalGroup;
-use crate::control::server::dispatch_utils::change_events::{
-    PendingChanges, extract_write_change_set,
-};
 use crate::control::server::dispatch_utils::durability_barrier::funnel_minted_redo_engine;
 use crate::control::server::dispatch_utils::minted::{
     Collect, MintedRecords, OwnedWait, RecordOwner, spawn_owned_wait,
@@ -22,11 +19,10 @@ use crate::control::server::wal_dispatch;
 use crate::control::state::SharedState;
 use crate::engine::timeseries::resolved_ingest::TsDriftPolicy;
 
-use super::super::params::{
-    ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering,
-};
+use super::super::params::{SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering};
 use super::admission::{AdmissionOutcome, AdmissionTarget, admit_write};
 use super::answer::Answer;
+use super::changes::entry_changes;
 use super::dispatch::{DispatchTarget, HeldGuards, dispatch_to_data_plane};
 use super::late_parts::LateParts;
 use super::pending::PendingWrite;
@@ -102,45 +98,16 @@ pub(crate) async fn enqueue_write(
     // the two halves cannot disagree about when this statement expires.
     let deadline = statement_deadline(shared.tuning.network.default_deadline_secs);
 
-    // Change metadata is derived from the plan HERE, before it is moved into
-    // the request — the publish itself happens after apply, once the response
-    // (which carries the event's LSN) exists, by which point the plan is gone.
-    // Extraction is a pure match that clones out collection / document
-    // identity, so a caller whose change feed is `Unowned` skips it rather than
-    // allocating tuples nothing will read.
-    let change_set = match change_feed {
-        // A staged write's rows are not committed: it yields no event yet.
-        ChangeFeedOwner::LocalApply if txn_id.is_some() => None,
-        // Every committed user write applies through a replicated entry, so a
-        // write that yields change events on a route no other replica applies
-        // is refused before any record of it lands.
-        ChangeFeedOwner::LocalApply => {
-            if !extract_write_change_set(&plan, tenant_id).is_empty() {
-                if let Some(minted) = caller_minted {
-                    minted.cancel(&shared.wal, owner, 0).await?;
-                }
-                return Err(
-                    crate::control::change_stream::ChangeStreamError::UnreplicatedChange {
-                        collection: plan
-                            .named_collections()
-                            .first()
-                            .map(|collection| (*collection).to_owned())
-                            .unwrap_or_default(),
-                    }
-                    .into(),
-                );
+    // Change metadata is derived from the plan HERE, before the plan moves
+    // into the request. See `changes`.
+    let changes = match entry_changes(change_feed, txn_id.is_some(), &plan, tenant_id) {
+        Ok(changes) => changes,
+        Err(error) => {
+            if let Some(minted) = caller_minted {
+                minted.cancel(&shared.wal, owner, 0).await?;
             }
-            None
+            return Err(error);
         }
-        ChangeFeedOwner::Replicated {
-            group_id,
-            log_index,
-        } => Some(PendingChanges::staged(
-            extract_write_change_set(&plan, tenant_id),
-            group_id,
-            log_index,
-        )),
-        ChangeFeedOwner::Unowned => None,
     };
 
     // Post-apply redo classification, computed before `plan` is moved (the
@@ -251,6 +218,7 @@ pub(crate) async fn enqueue_write(
             return Ok(PendingWrite::done(SubmitOutcome {
                 response: routed
                     .unwrap_or_else(|| bare_ok_response(crate::types::RequestId::new(0))),
+                change_lsn: None,
             }));
         }
     };
@@ -328,6 +296,7 @@ pub(crate) async fn enqueue_write(
             event_source,
             commit_hlc: upstream_commit_hlc,
             groups,
+            changes,
         },
     ) {
         Ok(outcome) => outcome,
@@ -343,7 +312,10 @@ pub(crate) async fn enqueue_write(
     // The write's events date by its commit HLC. A replicated write's is the
     // HLC its proposer stamped on the entry, which every replica shares:
     // every proposal path stamps one.
-    let change_set = change_set.map(|changes| changes.committed_at(commit_hlc));
+    let change_set = wal_append_outcome
+        .changes
+        .map(|changes| changes.committed_at(commit_hlc));
+    let change_marker = wal_append_outcome.change_marker;
     let user_write = user_write_origin.map(|(site, collection)| UserWriteMark {
         site,
         collection,
@@ -492,6 +464,7 @@ pub(crate) async fn enqueue_write(
         post_apply,
         funnel_redo_engine,
         change_set,
+        change_marker,
         deferred_guards: dispatch_outcome.deferred_guards,
         user_write,
         late_parts,

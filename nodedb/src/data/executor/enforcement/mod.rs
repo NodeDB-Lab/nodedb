@@ -16,5 +16,6 @@ pub mod statement;
 pub mod transition_check;
 pub mod typeguard;
 pub mod unique;
+mod unique_written;
 pub mod update_transitions;
 pub mod write_hook;

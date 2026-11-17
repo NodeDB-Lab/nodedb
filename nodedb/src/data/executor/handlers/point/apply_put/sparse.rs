@@ -60,22 +60,6 @@ impl CoreLoop {
             .unwrap_or_default()
     }
 
-    /// Whether `collection` declares any strict-schema `SparseVector` column —
-    /// the single gate callers check before paying for any sparse-index
-    /// maintenance. Callers looping over many rows must call this ONCE before
-    /// the loop and thread the resulting bool through, mirroring the
-    /// `collection_has_vectors` contract.
-    pub(in crate::data::executor) fn collection_has_sparse(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-    ) -> bool {
-        !self
-            .strict_sparse_fields(database_id, tid, collection)
-            .is_empty()
-    }
-
     /// Sparse inverted-index side-effect: for every declared `SparseVector`
     /// column, extract its string literal from the document body, parse it, and
     /// upsert it into the corresponding `SparseInvertedIndex` keyed by
@@ -118,7 +102,7 @@ impl CoreLoop {
         // Decode from MessagePack (internal format) — not JSON. Matches the
         // `value` `apply_point_put` feeds the dense-vector indexer. A body
         // that is no object carries no literal.
-        let obj = match nodedb_types::value_from_msgpack(value) {
+        let obj = match crate::data::executor::doc_format::decode_document_value(value) {
             Ok(nodedb_types::Value::Object(obj)) => obj,
             _ => std::collections::HashMap::new(),
         };
@@ -263,12 +247,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {
@@ -541,11 +527,10 @@ mod tests {
         let collection = "plain";
 
         // No strict sparse schema registered.
-        assert!(!core.collection_has_sparse(
-            crate::types::DatabaseId::DEFAULT.as_u64(),
-            tid,
-            collection,
-        ));
+        assert!(
+            core.strict_sparse_fields(crate::types::DatabaseId::DEFAULT.as_u64(), tid, collection,)
+                .is_empty()
+        );
 
         put(
             core,

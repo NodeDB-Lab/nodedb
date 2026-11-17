@@ -3,7 +3,9 @@
 //! Shaping for an `ArrayOp::Slice` response.
 
 use crate::control::sequence::SequenceAccess;
-use crate::data::executor::response_codec::{ArraySliceResponse, decode_payload_value};
+use crate::data::executor::response_codec::{
+    ArraySliceResponse, RowContext, decode_payload_value, decode_row_payload_value,
+};
 
 use super::super::redaction::RedactionCtx;
 use super::super::schema::OutputSchema;
@@ -35,18 +37,28 @@ pub(super) fn shape_array_slice(
     if payload.is_empty() {
         return Ok(empty_shaped());
     }
-    let (rows, truncated) = if let Ok(resp) = zerompk::from_msgpack::<ArraySliceResponse>(payload) {
-        (
-            decode_payload_value(&resp.rows_msgpack),
-            resp.truncated_before_horizon,
-        )
-    } else {
-        (decode_payload_value(payload), false)
+    let decoded = zerompk::from_msgpack::<ArraySliceResponse>(payload).ok();
+    let (rows_bytes, truncated) = match &decoded {
+        Some(resp) => (resp.rows_msgpack.as_slice(), resp.truncated_before_horizon),
+        None => (payload, false),
     };
     let notice = truncated.then(|| TRUNCATED_BEFORE_HORIZON_NOTICE.to_string());
 
-    let mut shaped = match rows {
-        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences, crs_set)?,
+    // Array cells answer flat rows. A relational tail over the slice (a
+    // computed column, a filter, an ordering) answers native object rows,
+    // which decode with their field types.
+    let mut shaped = match decode_row_payload_value(rows_bytes, RowContext::Flat) {
+        Ok(value) => shape_decoded_rows(
+            value,
+            RowContext::Flat,
+            projection,
+            redaction,
+            sequences,
+            crs_set,
+        )?,
+        // Readable msgpack whose row decode failed holds a corrupt native
+        // row: that is an error, never an empty result.
+        Err(error) if decode_payload_value(rows_bytes).is_ok() => return Err(error),
         Err(_) => empty_shaped(),
     };
     shaped.notice = notice;

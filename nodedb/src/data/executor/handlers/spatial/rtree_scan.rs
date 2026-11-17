@@ -168,7 +168,7 @@ impl CoreLoop {
         let rtree = match self.spatial_indexes.get(&spatial_key) {
             Some(rt) => rt,
             None => {
-                return match response_codec::encode_value_vec(&[]) {
+                return match response_codec::encode_native_rows(&[]) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
                 };
@@ -306,7 +306,7 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        match response_codec::encode_value_vec(&hit_rows(results)) {
+        match response_codec::encode_native_rows(&hit_rows(results)) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),
         }
@@ -336,12 +336,14 @@ mod tests {
         let (resp_tx, resp_rx) = RingBuffer::channel::<crate::bridge::dispatch::BridgeResponse>(64);
         drop(req_tx);
         let core = crate::data::executor::core_loop::CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .unwrap();
         (core, resp_rx, dir)

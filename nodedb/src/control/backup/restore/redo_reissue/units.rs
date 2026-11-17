@@ -4,7 +4,8 @@
 //! chunk or edge re-issues as.
 
 use nodedb_physical::physical_plan::{
-    RestoredColumnarKey, RestoredEdgeVersion, RestoredKvKey, RestoredRow, RestoredVectorRow,
+    RestoredColumnarKey, RestoredEdgeVersion, RestoredKvKey, RestoredRow, RestoredSyncedText,
+    RestoredVectorRow,
 };
 
 use crate::control::surrogate::CarriedIdentity;
@@ -30,6 +31,9 @@ pub(super) struct RowUnit {
     pub columnar_keys: Vec<RestoredColumnarKey>,
     /// The vector row the unit writes, as its writers lock it.
     pub vector_rows: Vec<RestoredVectorRow>,
+    /// The row whose stored sync-frame text the unit writes, as its writers
+    /// lock it.
+    pub synced_text: Vec<RestoredSyncedText>,
     /// The timeseries collection the unit appends to, as its writers lock
     /// it: whole.
     pub timeseries: Vec<String>,

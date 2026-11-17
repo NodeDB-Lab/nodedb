@@ -8,13 +8,18 @@ use nodedb_physical::physical_plan::{
     ColumnarOp, CrdtOp, DocumentOp, KvOp, PhysicalPlan, ReturningSpec, TimeseriesOp, VectorOp,
 };
 
+use crate::types::{DatabaseId, TenantId};
+
+/// The overlay key of a collection: database, tenant and name.
+pub(super) type CollKey = (DatabaseId, TenantId, String);
+
 /// The row shape an engine's `RETURNING` rows take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum RowEngine {
     /// Stored document bodies in the sparse store.
     Document,
-    /// CRDT rows: MessagePack bodies in the sparse store in either storage
-    /// mode.
+    /// CRDT rows: their sparse-store projection, stored as a document body
+    /// is, a Binary Tuple on a strict collection.
     Crdt,
     /// KV values, keyed by their raw key.
     Kv,

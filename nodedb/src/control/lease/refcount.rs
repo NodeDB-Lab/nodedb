@@ -204,8 +204,9 @@ impl QueryLeaseScope {
 
     /// Build a scope from exact descriptor-version holds already incremented
     /// on the node's `lease_refcount`, and register it in the node's holder
-    /// table. Only cloneable capabilities are retained, so the scope neither
-    /// owns nor weak-references `SharedState`.
+    /// table under the connection running on this task. Only cloneable
+    /// capabilities are retained, so the scope neither owns nor
+    /// weak-references `SharedState`.
     ///
     /// Fails with a retryable error when the holder table is full. The
     /// caller still owns the refcounts and rolls them back.
@@ -213,14 +214,11 @@ impl QueryLeaseScope {
         descriptor_versions: Vec<(DescriptorId, u64)>,
         shared: &SharedState,
     ) -> Result<Self, Error> {
-        let mut seen = std::collections::HashSet::new();
-        let descriptors: Vec<DescriptorId> = descriptor_versions
-            .iter()
-            .filter(|(id, _)| seen.insert(id.clone()))
-            .map(|(id, _)| id.clone())
-            .collect();
         let holders = Arc::clone(&shared.lease_runtime.holders);
-        let ticket = holders.register(descriptors)?;
+        let ticket = holders.register(
+            &descriptor_versions,
+            crate::control::server::shared::session::hold_owner::current(),
+        )?;
         Ok(Self {
             descriptor_versions,
             release: Some(HoldRelease::for_state(shared)),

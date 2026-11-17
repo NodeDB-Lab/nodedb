@@ -18,11 +18,7 @@ pub fn bytes_to_binary_tuple(
     schema: &StrictSchema,
     collection: &str,
 ) -> crate::Result<Vec<u8>> {
-    let value =
-        nodedb_types::value_from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".to_string(),
-            detail: format!("zerompk decode: {e}"),
-        })?;
+    let value = crate::data::executor::doc_format::decode_document_value(bytes)?;
     value_to_binary_tuple(&value, schema, collection)
 }
 
@@ -125,11 +121,7 @@ pub fn bytes_to_binary_tuple_bitemporal(
     valid_until_ms: i64,
     collection: &str,
 ) -> crate::Result<Vec<u8>> {
-    let value =
-        nodedb_types::value_from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".to_string(),
-            detail: format!("zerompk decode: {e}"),
-        })?;
+    let value = crate::data::executor::doc_format::decode_document_value(bytes)?;
     value_to_binary_tuple_bitemporal(
         &value,
         schema,

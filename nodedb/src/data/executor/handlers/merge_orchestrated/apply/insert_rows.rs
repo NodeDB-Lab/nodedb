@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The MERGE NOT-MATCHED INSERT arm, applied inside the phase-A transaction
-//! shared with the UPDATE arm.
+//! The MERGE NOT-MATCHED INSERT arm, applied inside the statement transaction
+//! shared with the UPDATE and DELETE arms.
 
 use std::collections::HashMap;
 
@@ -9,7 +9,7 @@ use redb::WriteTransaction;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::submitted_row_image;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::balanced::BalancedEntry;
 use crate::data::executor::enforcement::chain_guard::ChainGuard;
 use crate::data::executor::enforcement::write_hook;
@@ -20,7 +20,9 @@ use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 
 use super::super::abort::MergeAbort;
-use super::super::apply_support::{MergePutEvent, record_put_index_undo, returning_doc};
+use super::super::apply_support::{
+    MergeEvent, gate_merge_row, record_put_index_undo, retain_target_writes, returning_doc,
+};
 use super::super::plan::MergeInsert;
 
 /// Read-only context the INSERT arm needs from the shared apply pass.
@@ -38,15 +40,16 @@ pub(super) struct InsertRowsCtx<'a> {
     /// The target's declared `PRIMARY KEY` column, when it has one. Names
     /// each row in its event and redo entry.
     pub(super) declared_primary_key: Option<&'a str>,
+    pub(super) rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 /// Mutable accumulators the INSERT arm folds into. Owned by the caller for
 /// the whole apply pass and borrowed here rather than cloned.
-pub(super) struct InsertRowsTally<'a, 'p> {
+pub(super) struct InsertRowsTally<'a> {
     pub(super) affected: &'a mut u64,
-    pub(super) applied_keys: &'a mut Vec<String>,
+    pub(super) applied_keys: &'a mut Vec<(String, crate::engine::document::store::StorageKey)>,
     pub(super) undo_log: &'a mut Vec<UndoEntry>,
-    pub(super) put_events: &'a mut Vec<MergePutEvent<'p>>,
+    pub(super) events: &'a mut Vec<MergeEvent>,
     pub(super) write_set: &'a mut Vec<WriteSetEntry>,
     pub(super) balanced_entries: &'a mut Vec<BalancedEntry>,
     pub(super) returned_docs: &'a mut Vec<nodedb_types::Value>,
@@ -57,12 +60,12 @@ impl CoreLoop {
     /// transaction. `Err(response)` is the terminating error response the
     /// caller must return as-is — the transaction is left uncommitted for the
     /// caller to abort.
-    pub(super) fn apply_merge_insert_arm<'p>(
+    pub(super) fn apply_merge_insert_arm(
         &mut self,
         txn: &WriteTransaction,
-        inserts: &'p [MergeInsert],
+        inserts: &[MergeInsert],
         ctx: InsertRowsCtx<'_>,
-        tally: InsertRowsTally<'_, 'p>,
+        tally: InsertRowsTally<'_>,
     ) -> Result<(), Response> {
         let InsertRowsCtx {
             task,
@@ -73,12 +76,13 @@ impl CoreLoop {
             resolved_sum_targets,
             surrogate_for,
             declared_primary_key,
+            rls_write_check,
         } = ctx;
         let InsertRowsTally {
             affected,
             applied_keys,
             undo_log,
-            put_events,
+            events,
             write_set,
             balanced_entries,
             returned_docs,
@@ -106,7 +110,6 @@ impl CoreLoop {
                         task,
                         database_id,
                         tid,
-                        collection,
                         applied_keys: applied_keys.as_slice(),
                         undo_log: std::mem::take(undo_log),
                         err: ErrorCode::OllpRetryRequired,
@@ -114,7 +117,7 @@ impl CoreLoop {
                 }
             };
             let storage_key = StorageKey::for_surrogate(surrogate);
-            applied_keys.push(storage_key.to_string());
+            applied_keys.push((collection.to_owned(), storage_key));
             // The identity INSERT minted for this row, from its MessagePack
             // body: the declared primary key, else the decimal surrogate.
             let row_identity =
@@ -125,13 +128,12 @@ impl CoreLoop {
                     task,
                     database_id,
                     tid,
-                    collection,
                     applied_keys: applied_keys.as_slice(),
                     undo_log: std::mem::take(undo_log),
                     err: e.into(),
                 }));
             }
-            match self.apply_point_put(
+            let prepared = match self.prepare_point_put(
                 txn,
                 PointPutParams {
                     database_id,
@@ -149,15 +151,60 @@ impl CoreLoop {
                     guards: crate::data::executor::enforcement::typeguard::GuardScope::Document,
                 },
             ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    chain.restore(self);
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
+                }
+            };
+            let image = prepared.installed();
+            let schema = match image.schema.as_ref() {
+                nodedb_physical::physical_plan::StorageMode::Schemaless => None,
+                nodedb_physical::physical_plan::StorageMode::Strict { schema } => Some(schema),
+            };
+            if let Err(error) = gate_merge_row(
+                self,
+                &WriteSetRow {
+                    database_id,
+                    tid,
+                    collection,
+                    identity: row_identity.clone(),
+                },
+                rls_write_check,
+                &image.stored,
+                schema,
+            ) {
+                chain.restore(self);
+                return Err(self.abort_merge_apply(MergeAbort {
+                    task,
+                    database_id,
+                    tid,
+                    applied_keys,
+                    undo_log: std::mem::take(undo_log),
+                    err: error.into(),
+                }));
+            }
+            match self.apply_prepared_point_put(txn, prepared) {
                 Ok(mut outcome) => {
                     record_put_index_undo(undo_log, &mut outcome);
-                    if let Err(e) = chain.settle(self, surrogate, &outcome.stored_value) {
+                    // The head persists with each row, so the next row's link
+                    // reads the head this transaction already holds.
+                    if let Err(e) = chain
+                        .settle_installed(self, surrogate, &mut outcome.installed)
+                        .and_then(|()| chain.persist_head(self, txn))
+                    {
                         chain.restore(self);
                         return Err(self.abort_merge_apply(MergeAbort {
                             task,
                             database_id,
                             tid,
-                            collection,
                             applied_keys: applied_keys.as_slice(),
                             undo_log: std::mem::take(undo_log),
                             err: e.into(),
@@ -166,6 +213,39 @@ impl CoreLoop {
                     // A NOT-MATCHED INSERT arm credits its target with the whole
                     // new row — post-image only, which is exactly what
                     // `RowImages::Insert` expresses.
+                    let event = match self.prepare_installed_put_event(
+                        &WriteSetRow {
+                            database_id,
+                            tid,
+                            collection,
+                            identity: row_identity.clone(),
+                        },
+                        &outcome.installed,
+                        outcome.prior_value.as_deref(),
+                    ) {
+                        Ok(event) => event,
+                        Err(error) => {
+                            return Err(self.abort_merge_apply(MergeAbort {
+                                task,
+                                database_id,
+                                tid,
+                                applied_keys: applied_keys.as_slice(),
+                                undo_log: std::mem::take(undo_log),
+                                err: error.into(),
+                            }));
+                        }
+                    };
+                    write_set.push(WriteSetEntry::installed_put(
+                        surrogate.as_u32(),
+                        row_identity.clone(),
+                        outcome.installed.clone(),
+                        event.clone(),
+                    ));
+                    events.push(MergeEvent::Put {
+                        collection: collection.to_owned(),
+                        identity: row_identity.clone(),
+                        event,
+                    });
                     match write_hook::run(
                         self,
                         txn,
@@ -176,14 +256,27 @@ impl CoreLoop {
                             resolved_targets: resolved_sum_targets,
                             deferred_sum_targets: &[],
                             wal_lsn: task.wal_lsn(),
+                            target_unique:
+                                crate::data::executor::enforcement::unique::UniqueJudge::Unit,
                         },
-                        write_hook::WriteImages::Insert {
-                            new: write_hook::ImageBody::Submitted(&ins.body),
+                        match outcome.prior_value.as_deref() {
+                            Some(old) => write_hook::WriteImages::Update {
+                                old: write_hook::ImageBody::Stored(old),
+                                new: write_hook::ImageBody::Stored(&outcome.installed.stored),
+                            },
+                            None => write_hook::WriteImages::Insert {
+                                new: write_hook::ImageBody::Stored(&outcome.installed.stored),
+                            },
                         },
                     ) {
                         Ok(enforcement) => {
-                            write_set
-                                .extend(write_hook::target_write_set(&enforcement.target_writes));
+                            retain_target_writes(
+                                enforcement.target_writes,
+                                undo_log,
+                                applied_keys,
+                                events,
+                                write_set,
+                            );
                             balanced_entries.extend(enforcement.balanced_entries);
                         }
                         Err(e) => {
@@ -191,30 +284,24 @@ impl CoreLoop {
                                 task,
                                 database_id,
                                 tid,
-                                collection,
                                 applied_keys: applied_keys.as_slice(),
                                 undo_log: std::mem::take(undo_log),
                                 err: e.into(),
                             }));
                         }
                     }
-                    // The inserted row, journalled after the phase-A commit
-                    // from the MessagePack body `apply_point_put` took.
-                    write_set.push(submitted_row_image(
-                        surrogate.as_u32(),
-                        row_identity.clone(),
-                        ins.body.clone(),
-                        outcome.version_sys_from,
-                    ));
                     if returning {
-                        match returning_doc(&ins.body, &storage_key, &identity_column) {
+                        match returning_doc(
+                            &outcome.installed.canonical,
+                            &storage_key,
+                            &identity_column,
+                        ) {
                             Ok(doc) => returned_docs.push(doc),
                             Err(e) => {
                                 return Err(self.abort_merge_apply(MergeAbort {
                                     task,
                                     database_id,
                                     tid,
-                                    collection,
                                     applied_keys: applied_keys.as_slice(),
                                     undo_log: std::mem::take(undo_log),
                                     err: e.into(),
@@ -222,7 +309,7 @@ impl CoreLoop {
                             }
                         }
                     }
-                    put_events.push((row_identity, ins.body.as_slice(), None));
+
                     *affected += 1;
                 }
                 Err(e) => {
@@ -231,7 +318,6 @@ impl CoreLoop {
                         task,
                         database_id,
                         tid,
-                        collection,
                         applied_keys: applied_keys.as_slice(),
                         undo_log: std::mem::take(undo_log),
                         err: e.into(),
@@ -245,7 +331,6 @@ impl CoreLoop {
                 task,
                 database_id,
                 tid,
-                collection,
                 applied_keys: applied_keys.as_slice(),
                 undo_log: std::mem::take(undo_log),
                 err: e.into(),

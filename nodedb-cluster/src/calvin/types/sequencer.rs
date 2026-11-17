@@ -84,6 +84,8 @@ pub struct LocalPlans {
     pub plans: Vec<u8>,
     /// Indexes into `plans` of the tasks a trigger body buffered. Sorted, no repeats.
     pub body_plans: Vec<u32>,
+    /// The index in the whole txn of each task in `plans`, in `plans` order.
+    pub task_indexes: Vec<u32>,
 }
 
 impl SequencedTxn {
@@ -100,6 +102,19 @@ impl SequencedTxn {
         match &self.local_plans {
             Some(local) => &local.body_plans,
             None => &self.tx_class.body_plans,
+        }
+    }
+
+    /// The index in the whole txn of the plan at `local` in [`Self::plans`].
+    /// A txn with no assembled local plans runs the class's plans, so the
+    /// index is its own. `None` when the assembled plans hold no such task.
+    pub fn task_index(&self, local: u32) -> Option<u32> {
+        match &self.local_plans {
+            Some(plans) => usize::try_from(local)
+                .ok()
+                .and_then(|local| plans.task_indexes.get(local))
+                .copied(),
+            None => Some(local),
         }
     }
 }
@@ -205,10 +220,13 @@ mod tests {
             local_plans: Some(std::sync::Arc::new(LocalPlans {
                 plans: vec![0x09],
                 body_plans: vec![0],
+                task_indexes: vec![4],
             })),
         };
         assert_eq!(st.plans(), &[0x09]);
         assert_eq!(st.body_plans(), &[0]);
+        assert_eq!(st.task_index(0), Some(4));
+        assert_eq!(st.task_index(1), None);
         let bytes = zerompk::to_msgpack_vec(&st).unwrap();
         let mut decoded: SequencedTxn = zerompk::from_msgpack(&bytes).unwrap();
         std::sync::Arc::make_mut(&mut decoded.tx_class)

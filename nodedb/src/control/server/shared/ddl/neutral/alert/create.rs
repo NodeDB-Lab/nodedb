@@ -14,10 +14,12 @@ use crate::control::state::SharedState;
 use crate::event::alert::types::{AlertCondition, AlertDef, CompareOp, NotifyTarget};
 
 use super::super::super::result::{DdlError, DdlResult};
+use super::super::super::sql_parse::resolve_name_token;
 use super::super::auth_support::{require_tenant_admin, status};
 
 /// CRDT collection name for alert rule sync between Origin and Lite.
-const ALERT_RULES_CRDT_COLLECTION: &str = "_alert_rules";
+const ALERT_RULES_CRDT_COLLECTION: &str =
+    crate::event::crdt_sync::types::DefinitionFamily::AlertRules.collection();
 
 fn err(sqlstate: &str, message: String) -> DdlError {
     DdlError::new(sqlstate, message)
@@ -140,23 +142,16 @@ pub async fn create_alert(
     // Replicate the row and the registry install to every node.
     super::replicate::propose_put(state, &def).await?;
 
-    // Emit CRDT sync delta for Lite visibility. Handler-scoped: the apply
-    // path runs on every node, so emitting there will duplicate the delta.
-    {
-        let delta_payload = zerompk::to_msgpack_vec(&def).unwrap_or_default();
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: ALERT_RULES_CRDT_COLLECTION.into(),
-            document_id: def.name.clone(),
-            payload: delta_payload,
-            op: crate::event::crdt_sync::types::DeltaOp::Upsert,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Definition notice for the tenant admins' Lite sessions. Handler-scoped:
+    // the apply path runs on every node, so emitting there duplicates it.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: ALERT_RULES_CRDT_COLLECTION,
+        document_id: def.name.clone(),
     }
+    .upsert(&def);
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
@@ -206,7 +201,7 @@ fn parse_condition_raw(raw: &str) -> Result<AlertCondition, DdlError> {
             ),
         ));
     }
-    let column = s[open + 1..close].trim().to_lowercase();
+    let column = resolve_name_token(s[open + 1..close].trim());
     let remainder = s[close + 1..].trim();
 
     let (op_str, rest) = if remainder.starts_with(">=")
@@ -312,7 +307,7 @@ fn extract_inner_quoted(s: &str, offset: usize) -> Result<String, DdlError> {
 fn parse_insert_target(s: &str) -> Result<(String, Vec<String>), DdlError> {
     let s = s.trim();
     if let Some(paren_start) = s.find('(') {
-        let table = s[..paren_start].trim().to_lowercase();
+        let table = resolve_name_token(s[..paren_start].trim());
         let paren_end = s
             .rfind(')')
             .ok_or_else(|| err("42601", "missing ')' in INSERT INTO target".to_string()))?;
@@ -324,8 +319,9 @@ fn parse_insert_target(s: &str) -> Result<(String, Vec<String>), DdlError> {
         }
         let cols: Vec<String> = s[paren_start + 1..paren_end]
             .split(',')
-            .map(|c| c.trim().to_lowercase())
+            .map(|c| c.trim())
             .filter(|c| !c.is_empty())
+            .map(resolve_name_token)
             .collect();
         if table.is_empty() || cols.len() != 7 {
             return Err(err(
@@ -335,7 +331,7 @@ fn parse_insert_target(s: &str) -> Result<(String, Vec<String>), DdlError> {
         }
         Ok((table, cols))
     } else {
-        let table = s.split_whitespace().next().unwrap_or(s).to_lowercase();
+        let table = resolve_name_token(s.split_whitespace().next().unwrap_or(s));
         if table.is_empty() {
             return Err(err(
                 "42601",

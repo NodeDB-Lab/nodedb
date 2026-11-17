@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod column_data;
 mod memtable;
 mod snapshot;
 mod time_literal;
@@ -9,5 +10,6 @@ pub use memtable::ColumnarMemtable;
 pub use snapshot::{ColumnSnapshot, MemtableSnapshot};
 pub use types::{
     ColumnData, ColumnType, ColumnValue, ColumnarDrainResult, ColumnarFlushView,
-    ColumnarMemtableConfig, ColumnarSchema, NULL_SYMBOL_ID, TimeKind, max_system_ts_of,
+    ColumnarMemtableConfig, ColumnarSchema, NULL_SYMBOL_ID, TimeKind, TsDecimalTypmod,
+    max_system_ts_of,
 };

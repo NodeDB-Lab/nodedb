@@ -169,6 +169,12 @@ impl CoreLoop {
                     SnapshotComponent::Array,
                     out,
                 )?;
+                // The directory name is a hash; the key file says which array
+                // it holds, and a restored store is refused without a match.
+                let key_rel = rel_dir.join(crate::engine::array::store_dir::ARRAY_KEY_FILE);
+                if self.data_dir.join(&key_rel).is_file() {
+                    collect_file(&self.data_dir, &key_rel, SnapshotComponent::Array, out)?;
+                }
                 for segment in &manifest.segments {
                     let rel = segment_path(&rel_dir, &segment.id);
                     collect_file(&self.data_dir, &rel, SnapshotComponent::Array, out)?;

@@ -2,9 +2,13 @@
 
 //! Shared, protocol-neutral response shaping helpers.
 
+mod calvin_contract;
 pub mod calvin_fold;
+mod calvin_tag;
 pub mod cell;
 pub mod compose;
+pub mod frozen_answer;
+mod int_fit;
 pub mod kv;
 pub mod project;
 pub mod redaction;

@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape, row_to_kv_body};
+use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape, kv_body_to_row, row_to_kv_body};
 use nodedb_types::Value;
 
 use super::counter_fault::CounterFault;
@@ -25,15 +25,19 @@ use crate::physical_plan::KvCounterShape;
 /// The field of a typed row an atomic never targets.
 const KEY_FIELD: &str = "key";
 
-/// Decode a map-shaped body into its typed columns. Returns `Ok(None)` for a
-/// raw body, and `TypeMismatch` for a map-shaped body that does not decode.
-fn typed_row(bytes: &[u8]) -> Result<Option<HashMap<String, Value>>, AtomicComputeError> {
-    if kv_body_shape(bytes) != KvBodyShape::Map {
+/// The typed columns of a typed body and the shape it is stored in: a plain
+/// map or a native row.
+type TypedRow = (HashMap<String, Value>, KvBodyShape);
+
+/// Decode a typed body into its columns and shape. Returns `Ok(None)` for a
+/// raw body, and `TypeMismatch` for a typed body that does not decode.
+fn typed_row_shaped(bytes: &[u8]) -> Result<Option<TypedRow>, AtomicComputeError> {
+    if kv_body_shape(bytes) == KvBodyShape::Raw {
         return Ok(None);
     }
-    match nodedb_types::value_from_msgpack(bytes) {
-        Ok(Value::Object(map)) => Ok(Some(map)),
-        Ok(other) => Err(AtomicComputeError::TypeMismatch {
+    match kv_body_to_row(bytes) {
+        Ok((Value::Object(map), shape)) => Ok(Some((map, shape))),
+        Ok((other, _)) => Err(AtomicComputeError::TypeMismatch {
             detail: format!("stored row is {}, not an object", other.type_name()),
         }),
         Err(e) => Err(AtomicComputeError::TypeMismatch {
@@ -42,11 +46,20 @@ fn typed_row(bytes: &[u8]) -> Result<Option<HashMap<String, Value>>, AtomicCompu
     }
 }
 
-/// Encode typed columns back into a map-shaped body. The fields are written
-/// in key order, so every replica and every WAL replay stores the same
-/// bytes.
-fn encode_map(map: HashMap<String, Value>) -> Result<Vec<u8>, AtomicComputeError> {
-    row_to_kv_body(&Value::Object(map), KvBodyShape::Map).map_err(|e| AtomicComputeError::Encode {
+/// [`typed_row_shaped`] without the shape.
+#[cfg(test)]
+fn typed_row(bytes: &[u8]) -> Result<Option<HashMap<String, Value>>, AtomicComputeError> {
+    typed_row_shaped(bytes).map(|row| row.map(|(map, _)| map))
+}
+
+/// Encode typed columns back into the shape they were read in, so a native
+/// row keeps its typed columns. The fields are written in key order, so
+/// every replica and every WAL replay stores the same bytes.
+fn encode_map(
+    map: HashMap<String, Value>,
+    shape: KvBodyShape,
+) -> Result<Vec<u8>, AtomicComputeError> {
+    row_to_kv_body(&Value::Object(map), shape).map_err(|e| AtomicComputeError::Encode {
         detail: format!("typed row re-encode: {e}"),
     })
 }
@@ -155,11 +168,11 @@ fn fresh_typed_row(
     missing_column: AtomicComputeError,
 ) -> Result<Vec<u8>, AtomicComputeError> {
     let column = column.as_ref().ok_or(missing_column)?;
-    let mut map = typed_row(template)?.ok_or(AtomicComputeError::TypeMismatch {
+    let (mut map, shape) = typed_row_shaped(template)?.ok_or(AtomicComputeError::TypeMismatch {
         detail: "fresh row template is not a typed row".into(),
     })?;
     map.insert(column.clone(), value);
-    encode_map(map)
+    encode_map(map, shape)
 }
 
 /// Compute the new value for `INCR`, given the current body (if any).
@@ -186,11 +199,11 @@ pub fn incr(
         };
         return Ok((delta, written));
     };
-    if let Some(mut map) = typed_row(bytes)? {
+    if let Some((mut map, shape)) = typed_row_shaped(bytes)? {
         let (field, old_i64) = target_field(&map, column_i64).ok_or(not_an_integer_column())?;
         let new_i64 = old_i64.checked_add(delta).ok_or(overflow)?;
         map.insert(field, Value::Integer(new_i64));
-        return Ok((new_i64, encode_map(map)?));
+        return Ok((new_i64, encode_map(map, shape)?));
     }
     let new_i64 = parse_raw_i64(bytes)?.checked_add(delta).ok_or(overflow)?;
     Ok((new_i64, raw_decimal(new_i64)))
@@ -223,7 +236,7 @@ pub fn incr_float(
             }
         };
     };
-    let Some(mut map) = typed_row(bytes)? else {
+    let Some((mut map, shape)) = typed_row_shaped(bytes)? else {
         return float_text::add(bytes, delta);
     };
     let delta = float_text::delta_to_f64(delta)?;
@@ -233,13 +246,13 @@ pub fn incr_float(
         return Err(AtomicComputeError::Counter(CounterFault::NonFinite));
     }
     map.insert(field, Value::Float(new_f64));
-    Ok((new_f64, encode_map(map)?))
+    Ok((new_f64, encode_map(map, shape)?))
 }
 
 /// Write `new_value` into the string column of the typed row `row` and
 /// encode it. `column` is the column [`target_field`] picked.
 fn swap_string_column(
-    mut row: HashMap<String, Value>,
+    (mut row, shape): TypedRow,
     column: String,
     new_value: &[u8],
 ) -> Result<Vec<u8>, AtomicComputeError> {
@@ -247,15 +260,15 @@ fn swap_string_column(
         column,
         Value::String(String::from_utf8_lossy(new_value).into_owned()),
     );
-    encode_map(row)
+    encode_map(row, shape)
 }
 
 /// A typed row and its string column, when `current` is a typed row with
 /// one. [`cas`] and [`getset`] address the same column.
-fn string_column(current: Option<&[u8]>) -> Option<(HashMap<String, Value>, String, String)> {
-    let row = typed_row(current?).ok().flatten()?;
+fn string_column(current: Option<&[u8]>) -> Option<(TypedRow, String, String)> {
+    let (row, shape) = typed_row_shaped(current?).ok().flatten()?;
     let (column, text) = target_field(&row, column_string)?;
-    Some((row, column, text))
+    Some(((row, shape), column, text))
 }
 
 /// Compute the CAS outcome: whether `expected` matches the current value,

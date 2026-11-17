@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use nodedb_test_support::native_harness::{RESPONSE_BOUND, do_handshake, send_request_within};
+use nodedb_test_support::native_harness::{do_handshake, response_bound, send_request_within};
 use nodedb_types::protocol::opcodes::ResponseStatus;
 use nodedb_types::protocol::text_fields::TextFields;
 use nodedb_types::protocol::{HelloFrame, NativeResponse, OpCode};
@@ -33,7 +33,7 @@ pub(super) async fn native_session(node: &TestClusterNode) -> TcpStream {
 }
 
 /// Ingest the raw ILP `lines` into `collection` through the native
-/// `TimeseriesIngest` opcode, waiting at most [`RESPONSE_BOUND`] for the
+/// `TimeseriesIngest` opcode, waiting at most [`response_bound`] for the
 /// response.
 pub(super) async fn ingest_native(
     stream: &mut TcpStream,
@@ -41,7 +41,7 @@ pub(super) async fn ingest_native(
     collection: &str,
     lines: &str,
 ) -> NativeResponse {
-    ingest_native_within(stream, seq, collection, lines, Some(RESPONSE_BOUND)).await
+    ingest_native_within(stream, seq, collection, lines, Some(response_bound())).await
 }
 
 /// [`ingest_native`] waiting at most `bound` for the response, or without

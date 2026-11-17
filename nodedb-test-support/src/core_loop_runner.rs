@@ -74,6 +74,9 @@ pub struct CoreLoopSpawn {
     pub data_side: CoreChannelDataSide,
     /// Storage directory shared with the rest of the harness.
     pub core_dir: PathBuf,
+    /// The node's WAL directory and key ring. A committed chunked redo's
+    /// install reads its stream back through it.
+    pub wal_source: nodedb::wal::WalReadSource,
     /// Per-core array catalog handle from `SharedState::array_catalog`.
     pub core_array_catalog: Arc<RwLock<ArrayCatalog>>,
     /// Event Plane producer endpoint for this core.
@@ -142,6 +145,7 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
         num_cores,
         data_side,
         core_dir,
+        wal_source,
         core_array_catalog,
         event_producer,
         core_metrics,
@@ -162,12 +166,15 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
             .stack_size(CORE_LOOP_STACK_SIZE)
             .spawn(move || {
                 let mut core = CoreLoop::open_with_array_catalog(
-                    idx,
-                    data_side.request_rx,
-                    data_side.response_tx,
-                    &core_dir,
-                    Arc::new(OrdinalClock::new()),
-                    governor,
+                    nodedb::data::executor::core_loop::CoreOpenParams {
+                        core_id: idx,
+                        request_rx: data_side.request_rx,
+                        response_tx: data_side.response_tx,
+                        data_dir: &core_dir,
+                        wal_source,
+                        hlc: Arc::new(OrdinalClock::new()),
+                        governor,
+                    },
                     core_array_catalog,
                 )
                 .expect("CoreLoop::open_with_array_catalog");

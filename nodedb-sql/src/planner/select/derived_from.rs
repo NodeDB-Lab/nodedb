@@ -51,6 +51,11 @@ pub(in crate::planner::select) fn try_plan_derived_from(
     };
 
     let alias_name = crate::reserved::check_ast_identifier(&alias_ident.name)?;
+    crate::resolver::derived::check_materialized_column_aliases(
+        catalog,
+        &alias_name,
+        alias_ident.columns.len(),
+    )?;
     let declared: Vec<String> = alias_ident
         .columns
         .iter()

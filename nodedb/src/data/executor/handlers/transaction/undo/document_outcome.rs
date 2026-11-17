@@ -44,7 +44,7 @@ pub(in crate::data::executor::handlers) fn push_target_undo(
         undo_log.push(put_entry(
             target.collection.clone(),
             StorageKey::for_surrogate(target.surrogate),
-            outcome.version_sys_from,
+            outcome.installed.version.sys_from,
             outcome.index_tuples.clone(),
             outcome.history.clone(),
             None,
@@ -65,7 +65,7 @@ pub(in crate::data::executor::handlers) fn push_put_undo(
     undo_log.push(put_entry(
         row.collection.to_string(),
         row.storage_key,
-        outcome.version_sys_from,
+        outcome.installed.version.sys_from,
         outcome.index_tuples,
         outcome.history,
         chain_hash_prior,

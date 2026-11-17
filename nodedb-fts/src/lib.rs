@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Full-text search engine shared by Origin, Lite, and WASM: BMW-optimized
 //! BM25 with 128-doc block pruning, 16 Snowball stemmers, 27-language stop
 //! words, CJK bigram tokenization (always available) plus optional
@@ -20,10 +23,12 @@ pub mod codec;
 pub mod document_text;
 pub mod fuzzy;
 pub mod highlight;
+pub mod history;
 pub mod index;
 pub mod lsm;
 mod mem_scope;
 pub mod posting;
+mod retained_size;
 pub mod scope;
 pub mod search;
 #[cfg(test)]
@@ -33,10 +38,11 @@ pub use analyzer::{
     AnalyzerRegistry, EdgeNgramAnalyzer, KeywordAnalyzer, LanguageAnalyzer, NgramAnalyzer,
     SimpleAnalyzer, StandardAnalyzer, SynonymMap, TextAnalyzer, analyze,
 };
-pub use backend::FtsBackend;
+pub use backend::{FtsBackend, FtsHistoryRead, FtsHistoryWrite};
 pub use block::{CompactPosting, PostingBlock};
 pub use document_text::DocumentText;
 pub use fuzzy::{fuzzy_discount, fuzzy_match, levenshtein, max_distance_for_length};
+pub use history::{EndedVersion, TextCut, TextCutView, UNVERSIONED};
 pub use index::{FtsIndex, FtsIndexError, MAX_INDEXABLE_SURROGATE, SynonymGroupRecord};
 pub use nodedb_types::Surrogate;
 pub use posting::{Bm25Params, MatchOffset, Posting, QueryMode, TextSearchResult};

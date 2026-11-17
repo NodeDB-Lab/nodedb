@@ -3,9 +3,10 @@
 //! Graph serializer for transaction resolve. Turns staged edge post-images
 //! into the same WAL sub-record shapes the autocommit path produces. Each
 //! edge put and delete carries its two endpoint surrogates, which the overlay
-//! does not hold (`entry.rs` collects them from the plan nodes). Overlay entries
-//! are `HashMap`/`HashSet`-keyed, so they're sorted before emitting so
-//! replicas produce identical ops.
+//! does not hold (`entry.rs` collects them from the plan nodes). Edges and
+//! label deltas emit in the overlay's merged encoded-key order, a function
+//! of the staged state alone, so replicas produce identical ops. A label
+//! set is a `HashSet`, so it is sorted before it encodes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,11 +15,12 @@ use nodedb_wal::record::RecordType;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{
-    GraphCollKey, GraphTxnOverlay, NodeLabelDelta,
+    EdgeValidTime, GraphCollKey, GraphTxnOverlay, StagedEdge,
 };
 use crate::wal::{NodeLabelRedo, RedoSubRecord};
 
 use super::edge_ordinal::EdgeOrdinals;
+use super::sink::OpSink;
 
 /// Edge identity key: `(collection, src_id, label, dst_id)`. Scoped by
 /// collection because `entry.rs` collects surrogates for every touched
@@ -26,96 +28,127 @@ use super::edge_ordinal::EdgeOrdinals;
 pub(super) type EdgeIdentityKey = (String, String, String, String);
 
 /// Append the redo sub-records for every graph edge post-image staged in
-/// `overlay` for `coll_key` to `ops`, in deterministic edge-identity order.
-/// `edge_surrogates` maps identity to the `(src, dst)` surrogate pair
-/// `entry.rs` collected from the plan nodes — the overlay carries none. A
-/// staged edge with no bound pair is refused. `ordinals` names each
-/// version's system-time ordinal.
+/// `overlay` for `coll_key` to `ops`: every put, then every delete, each in
+/// the overlay's encoded edge-key order. `edge_surrogates` maps identity to
+/// the `(src, dst)` surrogate pair `entry.rs` collected from the plan nodes —
+/// the overlay carries none. A staged edge with no bound pair is refused.
+/// `ordinals` names each version's system-time ordinal. Each pass streams
+/// the overlay and holds no edge it has passed.
 pub(super) fn serialize_graph_collection(
     overlay: &GraphTxnOverlay,
     coll_key: &GraphCollKey,
     collection: &str,
     edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
     ordinals: &EdgeOrdinals<'_>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut puts: BTreeMap<(String, String, String), Vec<u8>> = BTreeMap::new();
-    for (src, label, dst, properties) in overlay.staged_edges_for_collection(coll_key) {
-        puts.insert(
-            (src.to_string(), label.to_string(), dst.to_string()),
-            properties.to_vec(),
-        );
-    }
-
-    let mut deletes: BTreeSet<(String, String, String)> = BTreeSet::new();
-    for (src, label, dst) in overlay.staged_tombstones_for_collection(coll_key) {
-        deletes.insert((src.to_string(), label.to_string(), dst.to_string()));
-    }
-
-    for ((src, label, dst), properties) in puts {
-        let valid = overlay.staged_edge_valid_time(coll_key, &src, &label, &dst);
-        let identity_key = (
-            collection.to_string(),
-            src.clone(),
-            label.clone(),
-            dst.clone(),
-        );
-        let (src_surrogate, dst_surrogate) =
-            bound_endpoints(edge_surrogates, &identity_key, "put")?;
-        let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
-        let payload = zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
-            collection: collection.to_string(),
-            src_id: src,
+    for edge in overlay.iter_staged_edges(coll_key) {
+        let StagedEdge::Put {
+            src,
             label,
-            dst_id: dst,
+            dst,
             properties,
-            src_surrogate,
-            dst_surrogate,
-            system_from: Some(stamp.system_from),
-            applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
-            valid_from_ms: valid.valid_from_ms,
-            valid_until_ms: valid.valid_until_ms,
-        })
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("graph resolve edge put: {e}"),
-        })?;
-        ops.push(RedoSubRecord {
-            record_type: RecordType::Put as u32,
-            payload,
-        });
+            valid,
+        } = edge?
+        else {
+            continue;
+        };
+        ops.push(edge_put_record(
+            collection,
+            (src, label, dst),
+            properties,
+            valid,
+            edge_surrogates,
+            ordinals,
+        )?);
     }
-
-    for (src, label, dst) in deletes {
-        let identity_key = (
-            collection.to_string(),
-            src.clone(),
-            label.clone(),
-            dst.clone(),
-        );
-        let (src_surrogate, dst_surrogate) =
-            bound_endpoints(edge_surrogates, &identity_key, "delete")?;
-        let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
-        let payload = zerompk::to_msgpack_vec(&crate::wal::EdgeDeleteRedo {
-            collection: collection.to_string(),
-            src_id: src,
-            label,
-            dst_id: dst,
-            src_surrogate,
-            dst_surrogate,
-            system_from: Some(stamp.system_from),
-            applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
-        })
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("graph resolve edge delete: {e}"),
-        })?;
-        ops.push(RedoSubRecord {
-            record_type: RecordType::Delete as u32,
-            payload,
-        });
+    for edge in overlay.iter_staged_edges(coll_key) {
+        let StagedEdge::Tombstone { src, label, dst } = edge? else {
+            continue;
+        };
+        ops.push(edge_delete_record(
+            collection,
+            (src, label, dst),
+            edge_surrogates,
+            ordinals,
+        )?);
     }
     Ok(())
+}
+
+/// The redo `Put` of one staged edge.
+fn edge_put_record(
+    collection: &str,
+    (src, label, dst): (String, String, String),
+    properties: Vec<u8>,
+    valid: EdgeValidTime,
+    edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
+    ordinals: &EdgeOrdinals<'_>,
+) -> crate::Result<RedoSubRecord> {
+    let identity_key = (
+        collection.to_string(),
+        src.clone(),
+        label.clone(),
+        dst.clone(),
+    );
+    let (src_surrogate, dst_surrogate) = bound_endpoints(edge_surrogates, &identity_key, "put")?;
+    let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
+    let payload = zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
+        collection: collection.to_string(),
+        src_id: src,
+        label,
+        dst_id: dst,
+        properties,
+        src_surrogate,
+        dst_surrogate,
+        system_from: Some(stamp.system_from),
+        applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
+        valid_from_ms: valid.valid_from_ms,
+        valid_until_ms: valid.valid_until_ms,
+    })
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("graph resolve edge put: {e}"),
+    })?;
+    Ok(RedoSubRecord {
+        record_type: RecordType::Put as u32,
+        payload,
+    })
+}
+
+/// The redo `Delete` of one staged edge tombstone.
+fn edge_delete_record(
+    collection: &str,
+    (src, label, dst): (String, String, String),
+    edge_surrogates: &BTreeMap<EdgeIdentityKey, (u32, u32)>,
+    ordinals: &EdgeOrdinals<'_>,
+) -> crate::Result<RedoSubRecord> {
+    let identity_key = (
+        collection.to_string(),
+        src.clone(),
+        label.clone(),
+        dst.clone(),
+    );
+    let (src_surrogate, dst_surrogate) = bound_endpoints(edge_surrogates, &identity_key, "delete")?;
+    let stamp = ordinals.for_edge(collection, &src, &label, &dst)?;
+    let payload = zerompk::to_msgpack_vec(&crate::wal::EdgeDeleteRedo {
+        collection: collection.to_string(),
+        src_id: src,
+        label,
+        dst_id: dst,
+        src_surrogate,
+        dst_surrogate,
+        system_from: Some(stamp.system_from),
+        applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
+    })
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("graph resolve edge delete: {e}"),
+    })?;
+    Ok(RedoSubRecord {
+        record_type: RecordType::Delete as u32,
+        payload,
+    })
 }
 
 /// The bound `(src, dst)` surrogate pair of a staged edge. Refuses an edge the
@@ -146,7 +179,8 @@ fn bound_endpoints(
 }
 
 /// Append the redo sub-records for every staged node-label delta in
-/// `overlay` under `label_coll_key`, in deterministic node-id order.
+/// `overlay` under `label_coll_key`, in the overlay's encoded node-id order.
+/// The walk holds no delta it has passed.
 /// `added`/`removed` are disjoint by construction. Each `HashSet` is sorted
 /// into a `Vec` first, so replicas produce byte-identical payloads. Every
 /// sub-record of a node carries `ordinal_of(node)` as its `system_from`, so
@@ -155,15 +189,11 @@ pub(super) fn serialize_node_label_deltas(
     overlay: &GraphTxnOverlay,
     label_coll_key: &GraphCollKey,
     ordinal_of: impl Fn(&str) -> crate::Result<i64>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut deltas: BTreeMap<&str, &NodeLabelDelta> = BTreeMap::new();
-    for (node_id, delta) in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
-        deltas.insert(node_id, delta);
-    }
-
-    for (node_id, delta) in deltas {
-        let system_from = Some(ordinal_of(node_id)?);
+    for item in overlay.staged_node_label_deltas_for_collection(label_coll_key) {
+        let (node_id, delta) = item?;
+        let system_from = Some(ordinal_of(&node_id)?);
         let parts = [
             (RecordType::GraphNodeLabelSet, &delta.added),
             (RecordType::GraphNodeLabelRemove, &delta.removed),
@@ -173,7 +203,7 @@ pub(super) fn serialize_node_label_deltas(
                 continue;
             }
             let payload = NodeLabelRedo {
-                node_id: node_id.to_string(),
+                node_id: node_id.clone(),
                 labels: sorted_labels(labels),
                 system_from,
                 exact: false,
@@ -329,7 +359,7 @@ pub(super) fn classify_graph_op(
 
         // A guard writes nothing. A Calvin transaction checks it when it
         // stages, and a session COMMIT checks it before its resolve
-        // (`execute_resolve_session_txn`).
+        // (`session_guards_hold`).
         GraphOp::NodeEdgeGuard { .. } | GraphOp::NodePresenceGuard { .. } => Ok(()),
 
         // Stages nothing: `serialize_truncated_edges` writes the share's cut.
@@ -349,7 +379,7 @@ impl CoreLoop {
     pub(super) fn serialize_truncated_edges(
         &self,
         plans: &[PhysicalPlan],
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         for plan in plans {
             let PhysicalPlan::Graph(GraphOp::TruncateEdges { collection, .. }) = plan else {
@@ -404,7 +434,9 @@ mod tests {
     #[test]
     fn edge_put_emits_timestamped_tuple_with_surrogates() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", vec![1, 2, 3]);
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![1, 2, 3])
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         surrogates.insert(
@@ -417,7 +449,7 @@ mod tests {
             (10u32, 20u32),
         );
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -445,10 +477,12 @@ mod tests {
     #[test]
     fn edge_put_without_bound_surrogates_is_typed_error() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "a", "knows", "b", vec![]);
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "knows", "b", vec![])
+            .unwrap();
 
         let surrogates = BTreeMap::new();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         let result = serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -466,7 +500,9 @@ mod tests {
     #[test]
     fn edge_delete_emits_timestamped_redo() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         surrogates.insert(
@@ -478,7 +514,7 @@ mod tests {
             ),
             (10u32, 20u32),
         );
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -510,7 +546,9 @@ mod tests {
     #[test]
     fn edge_delete_without_bound_surrogates_is_typed_error() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_delete(coll_key("g"), "a", "knows", "b");
+        overlay
+            .stage_edge_delete(coll_key("g"), "a", "knows", "b")
+            .unwrap();
         let key = (
             "g".to_string(),
             "a".to_string(),
@@ -521,7 +559,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::from([(key.clone(), (10u32, 0u32))]),
         ] {
-            let mut ops = Vec::new();
+            let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
             let result = serialize_graph_collection(
                 &overlay,
                 &coll_key("g"),
@@ -537,9 +575,15 @@ mod tests {
     #[test]
     fn entries_emit_in_deterministic_edge_identity_order() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_edge_put(coll_key("g"), "c", "l", "z", vec![]);
-        overlay.stage_edge_put(coll_key("g"), "a", "l", "x", vec![]);
-        overlay.stage_edge_put(coll_key("g"), "b", "l", "y", vec![]);
+        overlay
+            .stage_edge_put(coll_key("g"), "c", "l", "z", vec![])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "a", "l", "x", vec![])
+            .unwrap();
+        overlay
+            .stage_edge_put(coll_key("g"), "b", "l", "y", vec![])
+            .unwrap();
 
         let mut surrogates = BTreeMap::new();
         for (s, d) in [("a", "x"), ("b", "y"), ("c", "z")] {
@@ -554,7 +598,7 @@ mod tests {
             );
         }
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_graph_collection(
             &overlay,
             &coll_key("g"),
@@ -578,9 +622,11 @@ mod tests {
     #[test]
     fn node_label_set_emits_graph_node_label_set_subrecord() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(ops.len(), 1);
@@ -599,9 +645,11 @@ mod tests {
     #[test]
     fn node_label_remove_emits_graph_node_label_remove_subrecord() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(ops.len(), 1);
@@ -616,10 +664,14 @@ mod tests {
     #[test]
     fn node_label_added_and_removed_on_same_node_emit_both_subrecords() {
         let mut overlay = GraphTxnOverlay::new();
-        overlay.stage_node_labels_set(coll_key("g"), "n1", &["Robot".to_string()]);
-        overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
+        overlay
+            .stage_node_labels_set(coll_key("g"), "n1", &["Robot".to_string()])
+            .unwrap();
+        overlay
+            .stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()])
+            .unwrap();
 
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert_eq!(
@@ -638,23 +690,27 @@ mod tests {
         // Two overlays, same final delta, different HashSet insertion order —
         // the encoded redo sub-record bytes must be byte-identical.
         let mut overlay_a = GraphTxnOverlay::new();
-        overlay_a.stage_node_labels_set(
-            coll_key("g"),
-            "n1",
-            &["Zeta".to_string(), "Alpha".to_string(), "Mu".to_string()],
-        );
+        overlay_a
+            .stage_node_labels_set(
+                coll_key("g"),
+                "n1",
+                &["Zeta".to_string(), "Alpha".to_string(), "Mu".to_string()],
+            )
+            .unwrap();
 
         let mut overlay_b = GraphTxnOverlay::new();
-        overlay_b.stage_node_labels_set(
-            coll_key("g"),
-            "n1",
-            &["Mu".to_string(), "Zeta".to_string(), "Alpha".to_string()],
-        );
+        overlay_b
+            .stage_node_labels_set(
+                coll_key("g"),
+                "n1",
+                &["Mu".to_string(), "Zeta".to_string(), "Alpha".to_string()],
+            )
+            .unwrap();
 
-        let mut ops_a = Vec::new();
+        let mut ops_a: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay_a, &coll_key("g"), |_| Ok(123), &mut ops_a)
             .expect("serialize a");
-        let mut ops_b = Vec::new();
+        let mut ops_b: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay_b, &coll_key("g"), |_| Ok(123), &mut ops_b)
             .expect("serialize b");
 
@@ -669,7 +725,7 @@ mod tests {
     #[test]
     fn no_staged_labels_emits_nothing() {
         let overlay = GraphTxnOverlay::new();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
             .expect("serialize");
         assert!(ops.is_empty());

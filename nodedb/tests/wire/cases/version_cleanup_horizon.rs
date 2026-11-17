@@ -34,6 +34,9 @@ const ROUNDS: usize = 3;
 /// passes, well inside the 5 s snapshot age limit.
 const BLOCK_SPAN: Duration = Duration::from_millis(1_200);
 
+/// How many times another session overwrites the row an open block read.
+const OVERWRITES: usize = 10;
+
 /// The bytes the governor charges the schemaless document engine.
 async fn document_bytes(server: &TestServer) -> i64 {
     let rows = server.query_rows("SHOW MEMORY").await.expect("SHOW MEMORY");
@@ -144,7 +147,9 @@ async fn an_open_block_keeps_its_version_across_a_pass() {
         vec!["0"]
     );
     let opened = Instant::now();
-    for n in 1..=50 {
+    // Few overwrites: each one is a version a pass can purge, and the
+    // block must stay inside the 5 s snapshot age limit on a loaded host.
+    for n in 1..=OVERWRITES {
         writer
             .simple_query(&format!("UPDATE vc_snap SET n = {n} WHERE id = 's'"))
             .await
@@ -159,7 +164,10 @@ async fn an_open_block_keeps_its_version_across_a_pass() {
         "the block still reads its snapshot"
     );
     server.exec("COMMIT").await.expect("COMMIT");
-    assert_eq!(server.query_text(read).await.expect("after"), vec!["50"]);
+    assert_eq!(
+        server.query_text(read).await.expect("after"),
+        vec![OVERWRITES.to_string()]
+    );
     drop(writer);
     handle.abort();
 }

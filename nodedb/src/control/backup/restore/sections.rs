@@ -2,14 +2,14 @@
 
 //! Catalog-section and data-section helpers for RESTORE TENANT.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nodedb_types::backup_envelope::{
     DatabaseDataSection, Envelope, SECTION_ORIGIN_ARRAY_CATALOG, SECTION_ORIGIN_CATALOG_ROWS,
-    SECTION_ORIGIN_DATABASES, SECTION_ORIGIN_SOURCE_TOMBSTONES, SECTION_ORIGIN_SURROGATE_PK,
-    SECTION_ORIGIN_VERIFICATION, Section, SourceTombstoneEntry, StoredCollectionBlob,
-    SurrogateBindBlob,
+    SECTION_ORIGIN_DATABASES, SECTION_ORIGIN_INDEX_RECORDS, SECTION_ORIGIN_SOURCE_TOMBSTONES,
+    SECTION_ORIGIN_SURROGATE_PK, SECTION_ORIGIN_VERIFICATION, Section, SourceTombstoneEntry,
+    StoredCollectionBlob, SurrogateBindBlob,
 };
 
 use crate::Error;
@@ -20,6 +20,17 @@ use crate::control::state::SharedState;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot};
 
 use super::databases::DatabaseMap;
+use super::index_records::{TextBuild, apply_index_records};
+use super::unchanged::leaves_row_unchanged;
+
+/// What [`apply_metadata_sections`] wrote to the destination catalog.
+pub(super) struct RestoredMetadata {
+    /// Every collection written to the catalog, in section order.
+    pub collections: Vec<StoredCollection>,
+    /// The full-text records put `Building`. Their text indexes rebuild once
+    /// every row re-issued.
+    pub text_builds: Vec<TextBuild>,
+}
 
 /// Merge every data section and the surrogate-pk section into one
 /// `TenantDataSnapshot` per source database, keyed by source database id.
@@ -101,6 +112,7 @@ pub(in crate::control::backup) fn append_snapshot(
         group_proposal_keys,
         group_proposal_keys_complete_from,
         documents_versioned,
+        synced_text,
         indexes_versioned,
         vector_multi_documents,
         // The restore installs every vector node at its span.
@@ -134,6 +146,7 @@ pub(in crate::control::backup) fn append_snapshot(
     // union.
     into.vector_multi_documents.extend(vector_multi_documents);
     into.documents_versioned.extend(documents_versioned);
+    into.synced_text.extend(synced_text);
     into.indexes_versioned.extend(indexes_versioned);
     into.edges.extend(edges);
     into.vectors.extend(vectors);
@@ -171,6 +184,7 @@ pub(super) fn is_metadata_section(section: &Section) -> bool {
         section.origin_node_id,
         SECTION_ORIGIN_CATALOG_ROWS
             | SECTION_ORIGIN_ARRAY_CATALOG
+            | SECTION_ORIGIN_INDEX_RECORDS
             | SECTION_ORIGIN_SOURCE_TOMBSTONES
             | SECTION_ORIGIN_SURROGATE_PK
             | SECTION_ORIGIN_DATABASES
@@ -178,7 +192,8 @@ pub(super) fn is_metadata_section(section: &Section) -> bool {
     )
 }
 
-/// Apply catalog-row and source-tombstone sections to the destination catalog.
+/// Apply the catalog-row, source-tombstone and index-record sections to the
+/// destination catalog.
 /// Runs BEFORE the data-section restore, after `databases` maps every source
 /// database to its destination.
 ///
@@ -188,6 +203,10 @@ pub(super) fn is_metadata_section(section: &Section) -> bool {
 /// collection and can serve it. A catalog-propose failure on this path is
 /// FATAL: returning the data restored but unqueryable on non-coordinator nodes
 /// is the silent-partial-success anti-pattern this codebase forbids.
+///
+/// The index records land after every collection row, whatever the section
+/// order. A full-text record then names an existing collection, and its
+/// fields are declared when the caller registers that collection.
 ///
 /// Returns every collection written to the catalog, in section order. The
 /// caller registers each one with this node's Data Plane before any restored
@@ -199,8 +218,11 @@ pub(super) async fn apply_metadata_sections(
     tenant_id: u64,
     env: &Envelope,
     databases: &DatabaseMap,
-) -> Result<Vec<StoredCollection>, Error> {
+) -> Result<RestoredMetadata, Error> {
     let mut restored: Vec<StoredCollection> = Vec::new();
+    // Every collection the destination held no row of, by destination
+    // database id and name.
+    let mut fresh: BTreeSet<(u64, String)> = BTreeSet::new();
 
     for section in &env.sections {
         match section.origin_node_id {
@@ -227,11 +249,26 @@ pub(super) async fn apply_metadata_sections(
                     // Restored rows arrive as new writes in the row's mode. An
                     // existing collection keeps its conversion generation, so
                     // its replicas stay in step with it. A new one has none.
-                    coll.storage_conversion = state
-                        .credentials
-                        .catalog()
-                        .get_collection(coll.database_id, coll.tenant_id, &coll.name)?
-                        .and_then(|existing| existing.storage_conversion);
+                    let existing = state.credentials.catalog().get_committed_collection(
+                        coll.database_id,
+                        coll.tenant_id,
+                        &coll.name,
+                    )?;
+                    if existing.is_none() {
+                        fresh.insert((coll.database_id.as_u64(), coll.name.clone()));
+                    }
+                    coll.storage_conversion = existing
+                        .as_ref()
+                        .and_then(|existing| existing.storage_conversion.clone());
+                    // A row the destination already holds as is needs no
+                    // put. Skipping it skips the version bump and the drain
+                    // that would stall concurrent writes on the collection.
+                    if let Some(existing) = existing
+                        && leaves_row_unchanged(&existing, &coll)?
+                    {
+                        restored.push(existing);
+                        continue;
+                    }
                     // Propose the collection so every node's applier
                     // (`catalog_entry::apply::collection::put`) writes the
                     // row — mirroring CREATE COLLECTION and DROP COLLECTION.
@@ -265,5 +302,9 @@ pub(super) async fn apply_metadata_sections(
             _ => {}
         }
     }
-    Ok(restored)
+    let text_builds = apply_index_records(state, tenant_id, env, databases, &fresh).await?;
+    Ok(RestoredMetadata {
+        collections: restored,
+        text_builds,
+    })
 }

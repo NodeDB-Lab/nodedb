@@ -16,6 +16,7 @@ use super::error::MsgpackResult;
 use super::geometry_ext::geometry_from_ext;
 use super::instant_ext::instant_from_ext;
 use super::reader::{Cursor, base64_encode};
+use super::scalar_ext::scalar_ext_json_text;
 use crate::datetime::NdbDateTime;
 use crate::geometry::geojson_tree;
 use crate::value::float_text::non_finite_float_text;
@@ -193,11 +194,19 @@ fn transcode_value(c: &mut Cursor<'_>, out: &mut String) -> zerompk::Result<()> 
     Ok(())
 }
 
-/// An ext value of `len` payload bytes: a geometry renders as GeoJSON,
-/// any other type as `null`.
+/// An ext value of `len` payload bytes: a geometry renders as GeoJSON, a
+/// UUID or decimal as its text, any other type as `null`.
 fn transcode_ext(c: &mut Cursor<'_>, out: &mut String, len: usize) -> zerompk::Result<()> {
     let ext_type = c.take()? as i8;
     let payload = c.take_n(len)?;
+    // A UUID or decimal ext: its text as a JSON string. Neither text holds a
+    // character JSON escapes.
+    if let Some(text) = scalar_ext_json_text(ext_type, payload) {
+        out.push('"');
+        out.push_str(&text);
+        out.push('"');
+        return Ok(());
+    }
     match geometry_from_ext(ext_type, payload)
         .and_then(|g| sonic_rs::to_string(&geojson_tree(&g)).ok())
     {
@@ -287,11 +296,22 @@ fn transcode_map(c: &mut Cursor<'_>, out: &mut String, len: usize) -> zerompk::R
         {
             transcode_value(c, out)?;
         } else {
+            // A key that is not a string renders as the JSON readers render
+            // it: a container as its kind, so a key nested in a key never
+            // renders again, a string ext as its text, a scalar as its JSON
+            // text in quotes.
             let mut tmp = String::new();
             transcode_value(c, &mut tmp)?;
-            out.push('"');
-            out.push_str(&tmp);
-            out.push('"');
+            match tmp.as_bytes().first() {
+                Some(b'[') => out.push_str("\"<array>\""),
+                Some(b'{') => out.push_str("\"<map>\""),
+                Some(b'"') => out.push_str(&tmp),
+                _ => {
+                    out.push('"');
+                    out.push_str(&tmp);
+                    out.push('"');
+                }
+            }
         }
         out.push(':');
         transcode_value(c, out)?;

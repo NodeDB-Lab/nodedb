@@ -123,7 +123,7 @@ impl CoreLoop {
                 // WHERE-filter evaluation is fatal to the whole accumulation
                 // on a division/modulo-by-zero, exactly like a spill error
                 // below — both break out via `spill_err`.
-                let outer_key = if use_field_index {
+                let (outer_key, outer_values) = if use_field_index {
                     let idx = msgpack_scan::FieldIndex::build(value, 0)
                         .unwrap_or_else(msgpack_scan::FieldIndex::empty);
                     match ScanFilter::all_match_binary_indexed(
@@ -139,9 +139,8 @@ impl CoreLoop {
                             break;
                         }
                     }
-                    match msgpack_scan::group_key::build_group_key_indexed(
-                        value, group_by, &idx, &crs,
-                    ) {
+                    match msgpack_scan::build_group_key_values_indexed(value, group_by, &idx, &crs)
+                    {
                         Ok(k) => k,
                         Err(e) => {
                             spill_err = Some(crate::Error::from(e));
@@ -157,7 +156,7 @@ impl CoreLoop {
                             break;
                         }
                     }
-                    match msgpack_scan::build_group_key(value, group_by, &crs) {
+                    match msgpack_scan::build_group_key_values(value, group_by, &crs) {
                         Ok(k) => k,
                         Err(e) => {
                             spill_err = Some(crate::Error::from(e));
@@ -166,22 +165,27 @@ impl CoreLoop {
                     }
                 };
 
-                if let Err(e) = spiller.feed(outer_key.clone(), aggregates, value, &crs) {
+                if let Err(e) =
+                    spiller.feed_keyed(outer_key.clone(), outer_values, aggregates, value, &crs)
+                {
                     spill_err = Some(e);
                     break;
                 }
 
                 if need_sub {
-                    let sub_key = match msgpack_scan::build_group_key(value, &sub_specs, &crs) {
-                        Ok(k) => k,
-                        Err(e) => {
-                            spill_err = Some(crate::Error::from(e));
-                            break;
-                        }
-                    };
+                    let (sub_key, sub_values) =
+                        match msgpack_scan::build_group_key_values(value, &sub_specs, &crs) {
+                            Ok(k) => k,
+                            Err(e) => {
+                                spill_err = Some(crate::Error::from(e));
+                                break;
+                            }
+                        };
                     // Composite key: outer + U+001F + sub.
                     let composite = format!("{outer_key}\x1F{sub_key}");
-                    if let Err(e) = spiller.feed(composite, sub_aggregates, value, &crs) {
+                    if let Err(e) =
+                        spiller.feed_keyed(composite, sub_values, sub_aggregates, value, &crs)
+                    {
                         spill_err = Some(e);
                         break;
                     }

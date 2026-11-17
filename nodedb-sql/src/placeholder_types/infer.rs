@@ -132,6 +132,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+            text_indexes: None,
         }
     }
 
@@ -247,7 +248,23 @@ mod tests {
 
     #[test]
     fn double_colon_cast_resolves_target_type() {
-        assert_eq!(infer("SELECT $1::INT"), vec![from_sql(SqlDataType::Int64)]);
+        // `INT` is `int4`, as the cast evaluates it and PostgreSQL describes it.
+        assert_eq!(
+            infer("SELECT $1::INT"),
+            vec![from_col(SqlDataType::Int64, Some(IntWidth::I32))]
+        );
+        assert_eq!(
+            infer("SELECT $1::INT4"),
+            vec![from_col(SqlDataType::Int64, Some(IntWidth::I32))]
+        );
+        assert_eq!(
+            infer("SELECT $1::SMALLINT"),
+            vec![from_col(SqlDataType::Int64, Some(IntWidth::I16))]
+        );
+        assert_eq!(
+            infer("SELECT $1::BIGINT"),
+            vec![from_col(SqlDataType::Int64, Some(IntWidth::I64))]
+        );
     }
 
     #[test]
@@ -261,10 +278,6 @@ mod tests {
     #[test]
     fn cast_target_types_cover_each_mapped_family() {
         let cases: &[(&str, SqlDataType)] = &[
-            ("BIGINT", SqlDataType::Int64),
-            ("SMALLINT", SqlDataType::Int64),
-            ("DOUBLE PRECISION", SqlDataType::Float64),
-            ("REAL", SqlDataType::Float64),
             ("VARCHAR(10)", SqlDataType::String),
             ("BOOLEAN", SqlDataType::Bool),
             ("BYTEA", SqlDataType::Bytes),
@@ -283,6 +296,20 @@ mod tests {
     /// Types with no faithful wire representation on the pgwire side stay
     /// unresolved rather than being narrowed to something a client cannot
     /// round-trip.
+    /// A float cast target carries its width: `REAL` is `float4`, `DOUBLE
+    /// PRECISION` `float8`.
+    #[test]
+    fn float_cast_targets_carry_their_width() {
+        assert_eq!(
+            infer("SELECT CAST($1 AS REAL)"),
+            vec![from_float_col(FloatWidth::F32)]
+        );
+        assert_eq!(
+            infer("SELECT CAST($1 AS DOUBLE PRECISION)"),
+            vec![from_float_col(FloatWidth::F64)]
+        );
+    }
+
     #[test]
     fn unmapped_cast_target_stays_none() {
         assert_eq!(infer("SELECT $1::NUMERIC"), vec![None]);
@@ -385,7 +412,7 @@ mod tests {
     fn cte_cast_placeholder_resolves() {
         assert_eq!(
             infer("WITH x AS (SELECT $1::BIGINT AS v) SELECT v FROM x"),
-            vec![from_sql(SqlDataType::Int64)]
+            vec![from_col(SqlDataType::Int64, Some(IntWidth::I64))]
         );
     }
 

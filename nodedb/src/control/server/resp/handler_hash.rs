@@ -50,7 +50,12 @@ pub(super) async fn handle_hget(
             // A field-get payload is already a map keyed by the stored field
             // names the rules name, so it is redacted exactly as a result row.
             let mut json = payload_json(&resp.payload);
-            redact_envelope_row(redaction.as_ref(), &state.redaction, &mut json);
+            redact_envelope_row(
+                redaction.as_ref(),
+                &state.redaction,
+                crate::data::executor::response_codec::RowContext::Flat,
+                &mut json,
+            );
             match json.get(&field) {
                 Some(serde_json::Value::Null) | None => RespValue::nil(),
                 Some(serde_json::Value::String(s)) => RespValue::bulk_str(s),
@@ -98,7 +103,12 @@ pub(super) async fn handle_hmget(
         Ok(resp) if resp.status == Status::Ok => {
             // See `handle_hget`: the payload is a stored-field-keyed map.
             let mut json = payload_json(&resp.payload);
-            redact_envelope_row(redaction.as_ref(), &state.redaction, &mut json);
+            redact_envelope_row(
+                redaction.as_ref(),
+                &state.redaction,
+                crate::data::executor::response_codec::RowContext::Flat,
+                &mut json,
+            );
             let items: Vec<RespValue> = fields
                 .iter()
                 .map(|f| match json.get(f) {

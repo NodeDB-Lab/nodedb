@@ -8,6 +8,9 @@
 //! never under a fixed database 0.
 
 use super::index_record::{IndexKind, StoredIndexRecord};
+use super::index_registry_by_collection::{
+    decode_index_record, put_collection_key, remove_collection_key,
+};
 use super::types::{INDEX_REGISTRY, SystemCatalog, catalog_err};
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -35,7 +38,7 @@ fn database_upper_bound(database_id: u64) -> String {
 }
 
 impl SystemCatalog {
-    /// Upsert one index record.
+    /// Upsert one index record and its collection key.
     pub fn put_index_record(&self, record: &StoredIndexRecord) -> crate::Result<()> {
         let key = index_key(record.database_id, record.tenant_id, &record.name);
         let bytes = zerompk::to_msgpack_vec(record)
@@ -48,9 +51,12 @@ impl SystemCatalog {
             let mut table = write_txn
                 .open_table(INDEX_REGISTRY)
                 .map_err(|e| catalog_err("open index_registry", e))?;
-            table
+            let prior = table
                 .insert(key.as_str(), bytes.as_slice())
-                .map_err(|e| catalog_err("insert index record", e))?;
+                .map_err(|e| catalog_err("insert index record", e))?
+                .map(|prior| decode_index_record(prior.value()))
+                .transpose()?;
+            put_collection_key(&write_txn, prior.as_ref(), record)?;
         }
         write_txn.commit().map_err(|e| catalog_err("commit", e))
     }
@@ -120,7 +126,8 @@ impl SystemCatalog {
             .map(|record| record.collection))
     }
 
-    /// Remove one index record. Returns whether a record was present.
+    /// Remove one index record and its collection key. Returns whether a
+    /// record was present.
     pub fn delete_index_record(
         &self,
         database_id: u64,
@@ -136,10 +143,15 @@ impl SystemCatalog {
             let mut table = write_txn
                 .open_table(INDEX_REGISTRY)
                 .map_err(|e| catalog_err("open index_registry", e))?;
-            table
+            let prior = table
                 .remove(key.as_str())
                 .map_err(|e| catalog_err("remove index record", e))?
-                .is_some()
+                .map(|prior| decode_index_record(prior.value()))
+                .transpose()?;
+            if let Some(prior) = &prior {
+                remove_collection_key(&write_txn, prior)?;
+            }
+            prior.is_some()
         };
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
         Ok(removed)
@@ -166,29 +178,11 @@ impl SystemCatalog {
         database_id: u64,
         tenant_id: u64,
     ) -> crate::Result<Vec<StoredIndexRecord>> {
-        let prefix = tenant_prefix(database_id, tenant_id);
         let read_txn = self
             .db
             .begin_read()
             .map_err(|e| catalog_err("read txn", e))?;
-        let table = read_txn
-            .open_table(INDEX_REGISTRY)
-            .map_err(|e| catalog_err("open index_registry", e))?;
-        let mut out = Vec::new();
-        for item in table
-            .range(prefix.as_str()..)
-            .map_err(|e| catalog_err("range index_registry", e))?
-        {
-            let (key, value) = item.map_err(|e| catalog_err("read index record", e))?;
-            if !key.value().starts_with(prefix.as_str()) {
-                break;
-            }
-            out.push(
-                zerompk::from_msgpack(value.value())
-                    .map_err(|e| catalog_err("deser index record", e))?,
-            );
-        }
-        Ok(out)
+        list_committed_index_records_in(&read_txn, database_id, tenant_id)
     }
 
     /// Every index record of one database, across every tenant, in key order.
@@ -221,18 +215,25 @@ impl SystemCatalog {
         Ok(out)
     }
 
-    /// Every index record attached to one collection.
+    /// Every index record attached to one collection, with the calling
+    /// connection's buffered transactional DDL merged in. The committed read
+    /// scans the collection's keys only.
     pub fn list_index_records_for_collection(
         &self,
         database_id: u64,
         tenant_id: u64,
         collection: &str,
     ) -> crate::Result<Vec<StoredIndexRecord>> {
-        Ok(self
-            .list_index_records(database_id, tenant_id)?
-            .into_iter()
-            .filter(|r| r.collection == collection)
-            .collect())
+        let committed =
+            self.list_committed_index_records_for_collection(database_id, tenant_id, collection)?;
+        Ok(crate::control::catalog_overlay::resolve_index_records(
+            database_id,
+            tenant_id,
+            committed,
+        )
+        .into_iter()
+        .filter(|r| r.collection == collection)
+        .collect())
     }
 
     /// Every index record in the catalog, across databases and tenants. Used
@@ -301,6 +302,34 @@ impl SystemCatalog {
     }
 }
 
+/// Every committed index record of one (database, tenant), read inside
+/// `read_txn`. Shared by [`SystemCatalog`] and the read-only boot handle.
+pub(super) fn list_committed_index_records_in(
+    read_txn: &redb::ReadTransaction,
+    database_id: u64,
+    tenant_id: u64,
+) -> crate::Result<Vec<StoredIndexRecord>> {
+    let prefix = tenant_prefix(database_id, tenant_id);
+    let table = read_txn
+        .open_table(INDEX_REGISTRY)
+        .map_err(|e| catalog_err("open index_registry", e))?;
+    let mut out = Vec::new();
+    for item in table
+        .range(prefix.as_str()..)
+        .map_err(|e| catalog_err("range index_registry", e))?
+    {
+        let (key, value) = item.map_err(|e| catalog_err("read index record", e))?;
+        if !key.value().starts_with(prefix.as_str()) {
+            break;
+        }
+        out.push(
+            zerompk::from_msgpack(value.value())
+                .map_err(|e| catalog_err("deser index record", e))?,
+        );
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::index_record::{IndexKind, StoredIndexRecord};
@@ -322,6 +351,9 @@ mod tests {
             collection: collection.to_string(),
             fields: vec!["embedding".to_string()],
             is_active: true,
+            state: crate::control::security::catalog::IndexRecordState::Ready,
+            analyzer: None,
+            fuzzy_default: None,
         }
     }
 

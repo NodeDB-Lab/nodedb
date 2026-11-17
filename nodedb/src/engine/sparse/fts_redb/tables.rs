@@ -88,3 +88,16 @@ pub type TextEndedKey = (u64, u64, &'static str, &'static str, i64, u32, i64);
 /// versions ended after it. A purge ranges over the versions ended at or
 /// below its horizon.
 pub const TEXT_ENDED: TableDefinition<TextEndedKey, &[u8]> = TableDefinition::new("text.ended");
+
+/// The key of one synced-text frame version: `(database_id, tenant_id,
+/// collection, surrogate, ordinal)`.
+pub type SyncedTextKey = (u64, u64, &'static str, u32, i64);
+
+/// Text sync frames delivered, kept so a rebuild can re-derive the index of
+/// a document whose body the document store does not hold. One row per
+/// frame version, keyed by [`SyncedTextKey`] at the frame's system-time
+/// ordinal. The value is the MessagePack `Vec<(field, text)>` the frame
+/// carried. An empty value is a tombstone: a sync delete, or a frame with
+/// no pairs. A Lite columnar row and a schemaless row whose CRDT delta has
+/// not landed have no stored body.
+pub const SYNCED_TEXT: TableDefinition<SyncedTextKey, &[u8]> = TableDefinition::new("text.synced");

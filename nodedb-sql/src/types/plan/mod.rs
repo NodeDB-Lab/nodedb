@@ -5,6 +5,7 @@
 mod cacheability;
 mod expr_scan;
 mod merge_types;
+mod returning;
 mod row_types;
 mod search_cells;
 mod search_temporal;
@@ -19,6 +20,7 @@ pub use expr_scan::{
     referenced_columns,
 };
 pub use merge_types::{MergeClauseKind, MergePlanAction, MergePlanClause};
+pub use returning::ResolvedReturning;
 pub use row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute};
 /// Per-family payloads of the larger `SqlPlan` variants.
 pub use variants::{

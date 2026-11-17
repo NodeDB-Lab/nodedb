@@ -5,7 +5,7 @@
 //!
 //! Single-shard COMMIT journals the transaction as one replayable
 //! `TransactionRedo` WAL record (built overlay-driven from the transaction's
-//! staged post-images by `MetaOp::ResolveTxn`), not the non-replayable
+//! staged post-images by `MetaOp::ResolveTxnPart`), not the non-replayable
 //! `Transaction` placeholder. On a WAL-only restart (no vector checkpoint), the
 //! base document/KV rows survive via redb, but the in-memory secondary indexes
 //! (HNSW vector graph, FTS postings) have no other durable backing — they are
@@ -288,6 +288,9 @@ async fn fts_matched(srv: &TestServer, coll: &str, term: &str) -> Vec<String> {
 async fn txn_fts_insert_survives_restart() {
     let srv = TestServer::start().await;
     srv.exec("CREATE COLLECTION fts_docs WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec("CREATE SEARCH INDEX ON fts_docs (body)")
         .await
         .unwrap();
 

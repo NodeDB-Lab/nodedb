@@ -13,7 +13,7 @@ use nodedb_sql::ddl_ast::CloneAsOf;
 use nodedb_types::{DatabaseId, MAX_CLONE_DEPTH};
 
 use crate::control::catalog_entry::entry::CatalogEntry;
-use crate::control::clone::lsn_resolve::wall_ms_to_lsn;
+use crate::control::clone::lsn_resolve::{anchored_clone_point, wall_ms_to_lsn};
 use crate::control::metadata_proposer::propose_catalog_entry_async;
 use crate::control::security::catalog::UNASSIGNED_OID;
 use crate::control::security::catalog::database_types::{
@@ -123,10 +123,19 @@ pub async fn clone_database(
     // the oldest retained anchor is refused. So is a `t` before the source
     // database existed: it predates the commit of the WAL state the database
     // was created on.
+    //
+    // The clone's creation LSN is the WAL frontier, durable and anchored
+    // before the clone exists. `Latest` clones at that frontier. A raw
+    // frontier counts records no read cut reaches yet. A transaction that
+    // reads the clone after its creation then resolves below it and reads
+    // the clone as empty.
     let now_ms =
         current_wall_ms().map_err(|e| DdlError::from_error_in_context("clock read failed", &e))?;
+    let clone_created_at = anchored_clone_point(state)
+        .await
+        .map_err(|e| DdlError::from_error_in_context("clone point fsync failed", &e))?;
     let (as_of_lsn, as_of_ms) = match params.as_of {
-        CloneAsOf::Latest => (state.wal.next_lsn(), now_ms),
+        CloneAsOf::Latest => (clone_created_at, now_ms),
         CloneAsOf::SystemTimeMs(ms) => {
             let lsn = wall_ms_to_lsn(state, *ms).map_err(|e| {
                 ddl_err(
@@ -151,8 +160,6 @@ pub async fn clone_database(
             (lsn, *ms)
         }
     };
-
-    let clone_created_at = state.wal.next_lsn();
 
     // ── Allocate target database id ───────────────────────────────────────────
     let target_db_id = crate::control::database::allocate_database_id(state)

@@ -118,8 +118,7 @@ fn read_rows(
         }
         None => send_ok(core, tx, rx, plan),
     };
-    let rows: Vec<serde_json::Value> =
-        serde_json::from_value(payload_value(&payload)).expect("rows array");
+    let rows = neighbor_rows_value(&payload);
     let mut out: Vec<(String, String, Option<serde_json::Value>)> = rows
         .iter()
         .map(|row| {

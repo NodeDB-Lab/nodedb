@@ -10,11 +10,12 @@
 //! - datetime, or a string that reads as an instant: its epoch microseconds;
 //! - any other string: its text;
 //! - bool: its value;
+//! - bytes: the bytes;
 //! - ND cell: one shared key.
 //!
 //! One key can hold values that are not equal, such as the strings `'1'`
 //! and `'1.0'`, so a probe's candidates are confirmed by the full predicate.
-//! NULL, and a value that equals nothing (array, object, bytes), get keys
+//! NULL, and a value that equals nothing (array, object), get keys
 //! no probe asks for: a composite index still files the row under them.
 //!
 //! Every key starts with a type tag. Within the number and instant tags,
@@ -32,6 +33,7 @@ const TAG_INSTANT: u8 = 0x04;
 const TAG_TEXT: u8 = 0x05;
 const TAG_CELL: u8 = 0x06;
 const TAG_UNCOMPARABLE: u8 = 0x07;
+const TAG_BYTES: u8 = 0x08;
 
 /// The key of a NULL or absent field.
 pub const NULL_KEY: &[u8] = &[TAG_NULL];
@@ -78,6 +80,12 @@ fn bucket_key(bucket: &EqCoercedBucket) -> Vec<u8> {
             key
         }
         EqCoercedBucket::Cell => vec![TAG_CELL],
+        EqCoercedBucket::Bytes(bytes) => {
+            let mut key = Vec::with_capacity(1 + bytes.len());
+            key.push(TAG_BYTES);
+            key.extend_from_slice(bytes);
+            key
+        }
     }
 }
 
@@ -87,6 +95,15 @@ mod tests {
 
     fn text(s: &str) -> Value {
         Value::String(s.into())
+    }
+
+    /// Equal bytes share a key, distinct from text and from other bytes.
+    #[test]
+    fn equal_bytes_share_a_key() {
+        let key = kv_index_key(&Value::Bytes(vec![1, 2]));
+        assert_eq!(kv_probe_key(&Value::Bytes(vec![1, 2])), Some(key.clone()));
+        assert_ne!(kv_index_key(&Value::Bytes(vec![1, 3])), key);
+        assert_ne!(kv_index_key(&text("\u{1}\u{2}")), key);
     }
 
     /// An integer, its numeric string, and the equal float share a key.

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Sans-IO raster decoding for NodeDB array bulk loads.
 //!
 //! A [`RasterOpener`] reads a raster header from a [`RangeCache`] and

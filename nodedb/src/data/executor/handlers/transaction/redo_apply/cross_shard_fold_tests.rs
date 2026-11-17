@@ -111,6 +111,7 @@ fn source_slice() -> Vec<PhysicalPlan> {
             rls_filters: Vec::new(),
             resolved_sum_targets: vec![ResolvedSumTarget::new(TARGET, ACCOUNT, TARGET_SURROGATE)],
             deferred_sum_targets: vec![TARGET.to_string()],
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,

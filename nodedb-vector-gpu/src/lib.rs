@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! GPU-accelerated vector index build (NVIDIA cuVS / CAGRA).
 //!
 //! This crate is feature-gated: enable `cuvs` to compile against the CUDA

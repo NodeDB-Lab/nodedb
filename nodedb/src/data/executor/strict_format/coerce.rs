@@ -352,12 +352,17 @@ fn instant_overflow(column: &str, value: &str, kind: &str) -> crate::Error {
 }
 
 /// The `f32` elements of a `Value::Array` bound for a `VECTOR(dim)` column.
+/// An integer, float, or decimal element is a number, as the planner's
+/// vector coercion reads it. A decimal past the `f64` range is out of range.
 /// An element that is not a number is the wrong kind.
 fn extract_vector_floats(arr: &[Value], col_name: &str, dim: u32) -> crate::Result<Vec<f32>> {
     arr.iter()
         .map(|v| match v {
             Value::Float(f) => Ok(*f as f32),
             Value::Integer(n) => Ok(*n as f32),
+            Value::Decimal(d) => rust_decimal::prelude::ToPrimitive::to_f64(d)
+                .map(|f| f as f32)
+                .ok_or_else(|| out_of_range(col_name, &d.to_string(), &format!("VECTOR({dim})"))),
             other => Err(wrong_kind(
                 col_name,
                 other,

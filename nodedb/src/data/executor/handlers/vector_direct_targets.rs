@@ -14,7 +14,7 @@ use nodedb_types::{StorageKey, Surrogate};
 use crate::bridge::envelope::ErrorCode;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::scan_normalize::sparse_row_to_doc;
+use crate::data::executor::scan_normalize::sparse_row_to_native_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 
 /// Decode the serialized `ScanFilter`s of a predicate write. A malformed
@@ -47,12 +47,13 @@ pub(in crate::data::executor) fn vector_sidecar_matches(
     if filters.is_empty() {
         return Ok(true);
     }
-    let (_id, mp) = sparse_row_to_doc(
+    let (_id, mp) = sparse_row_to_native_doc(
         key,
         sidecar,
         SparseBodyFormatRef::VectorSidecar,
         identity_column,
-    );
+    )
+    .map_err(ErrorCode::from)?;
     ScanFilter::all_match_binary(filters, &mp, crs).map_err(ErrorCode::from)
 }
 

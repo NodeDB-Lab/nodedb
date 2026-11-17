@@ -83,6 +83,11 @@ fn plan_query_at(
         let mut relations = Vec::new();
         for cte in &with.cte_tables {
             let name = check_ast_identifier(&cte.alias.name)?;
+            crate::resolver::derived::check_materialized_column_aliases(
+                catalog,
+                &name,
+                cte.alias.columns.len(),
+            )?;
             let declared: Vec<String> = cte
                 .alias
                 .columns
@@ -183,6 +188,21 @@ mod tests {
         assert_eq!(join_type, JoinType::Semi);
         assert_eq!(on, vec![("category".into(), "category".into())]);
         assert!(matches!(*left, SqlPlan::Scan { .. }));
+    }
+
+    /// `NOT IN (subquery)` plans the null-aware anti join, so the executor
+    /// applies SQL's NULL rules. `NOT EXISTS` keeps the plain anti join.
+    #[test]
+    fn not_in_subquery_plans_a_null_aware_anti_join() {
+        let plan = plan_select_sql(
+            "SELECT category FROM products WHERE category NOT IN (SELECT category FROM products WHERE qty > 100)",
+        );
+        let SqlPlan::Join { join_type, on, .. } = plan else {
+            panic!("expected anti join");
+        };
+        assert_eq!(join_type, JoinType::AntiNullAware);
+        assert_eq!(join_type.as_str(), "anti_null_aware");
+        assert_eq!(on, vec![("category".into(), "category".into())]);
     }
 
     #[test]

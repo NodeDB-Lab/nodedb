@@ -3,8 +3,10 @@
 //! Resolve + emit the concrete point ops for one in-transaction
 //! `INSERT ... SELECT`.
 //!
-//! Only an in-transaction `INSERT ... SELECT` reaches here (autocommit uses
-//! the orchestrator's batched `BatchInsert` path instead). The plan is
+//! Only an `INSERT ... SELECT` in a transaction reaches here: a client's
+//! block, or the implicit transaction a statement whose `RETURNING` list can
+//! fail runs in. Every other autocommit copy takes the orchestrator's paged
+//! `BatchInsert` path. The plan is
 //! resolved NOW, not buffered for COMMIT: the source reads base ∪ overlay,
 //! each copied row gets its own fresh registered surrogate, and the
 //! resulting `PointInsert` ops stage into the overlay via the normal
@@ -44,6 +46,8 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
     let PhysicalPlan::Document(DocumentOp::InsertSelect {
         target_collection,
         source,
+        returning,
+        rls_filters,
     }) = &task.plan
     else {
         // Callers only pass an `InsertSelect` task; a mismatch is a bug.
@@ -102,14 +106,16 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
                 value,
                 if_absent: false,
                 surrogate,
-                // Expanded internal writes answer no client — see the
-                // orchestrator's batched insert.
-                returning: None,
-                rls_filters: Vec::new(),
+                // Each copied row answers the statement's `RETURNING` from
+                // the row it stages, in copy order, under the target's read
+                // policy.
+                returning: returning.clone(),
+                rls_filters: rls_filters.clone(),
                 // Filled by the caller's sum and period-lock pass, the one
                 // a plain INSERT takes.
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             post_set_op: PostSetOp::None,
             txn_id: task.txn_id,

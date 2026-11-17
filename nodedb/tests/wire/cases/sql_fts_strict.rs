@@ -317,6 +317,10 @@ const TYPED_DDL: &str = "CREATE COLLECTION docs_typed TYPE DOCUMENT STRICT (\
 async fn seed_typed(server: &TestServer) {
     server.exec(TYPED_DDL).await.unwrap();
     server
+        .exec("CREATE SEARCH INDEX ON docs_typed (title, body)")
+        .await
+        .unwrap();
+    server
         .exec(
             "INSERT INTO docs_typed (id, title, body, views) VALUES \
              ('t1', 'consensus primer', 'nothing else', 1), \

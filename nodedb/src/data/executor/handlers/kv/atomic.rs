@@ -48,6 +48,7 @@ pub(in crate::data::executor) fn atomic_error_code(
         // installs the computed value.
         AtomicError::Declared(error) | AtomicError::Rejected(error) => (*error).into(),
         AtomicError::Unbound(error) => error.into(),
+        AtomicError::RowTooLarge(error) => error.into(),
     }
 }
 
@@ -462,12 +463,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let mut core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         let (mut producers, mut consumers) = create_event_bus_with_capacity(1, 64);
@@ -532,7 +535,7 @@ mod tests {
 
     /// The `{key, value}` row a KV write event carries for `stored`.
     fn kv_row(key: &str, stored: &[u8]) -> Vec<u8> {
-        nodedb_query::msgpack_scan::kv_row_msgpack(key, stored)
+        nodedb_query::msgpack_scan::kv_row_msgpack(key, stored).expect("row")
     }
 
     fn columns(bytes: &[u8]) -> HashMap<String, Value> {

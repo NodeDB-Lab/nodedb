@@ -43,12 +43,14 @@ pub fn make_core_with_id(
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        core_id,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            core_id,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx, dir)
@@ -141,13 +143,56 @@ pub fn send_raw(
     resp_rx.try_pop().unwrap().inner
 }
 
+/// Render a Data-Plane payload as JSON text the way a client JSON path
+/// does. Executor fixtures read scan payloads, so rows decode as
+/// `{id, data}` scan envelopes; a native row renders as its typed values.
 pub fn payload_json(payload: &[u8]) -> String {
-    nodedb::data::executor::response_codec::decode_payload_to_json(payload)
+    nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("payload rows decode")
+}
+
+/// Render a query or join payload as JSON text. Each row is a flat body,
+/// a plain map or a native object, and renders as its typed values.
+pub fn rows_json(payload: &[u8]) -> String {
+    nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::Flat,
+    )
+    .expect("payload rows decode")
 }
 
 pub fn payload_value(payload: &[u8]) -> serde_json::Value {
     let json = payload_json(payload);
     serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)
+}
+
+/// The rows of a `NeighborsMulti` payload as JSON. A row's `properties`
+/// travel as the edge's stored property image (`bin`). Each renders here as
+/// its decoded property object.
+pub fn neighbor_rows_value(payload: &[u8]) -> Vec<serde_json::Value> {
+    use nodedb_types::Value;
+    if payload.is_empty() {
+        return Vec::new();
+    }
+    let Value::Array(rows) = nodedb_types::value_from_msgpack(payload).expect("rows decode") else {
+        panic!("neighbor rows are an array");
+    };
+    rows.into_iter()
+        .map(|row| {
+            let Value::Object(mut fields) = row else {
+                panic!("a neighbor row is a map: {row:?}");
+            };
+            if let Some(Value::Bytes(image)) = fields.remove("properties") {
+                let properties =
+                    nodedb_graph::decode_edge_properties(&image).expect("properties decode");
+                fields.insert("properties".to_string(), Value::Object(properties));
+            }
+            serde_json::Value::from(Value::Object(fields))
+        })
+        .collect()
 }
 
 /// A deterministic bound surrogate for a document id, never
@@ -194,6 +239,47 @@ pub fn send_ok_as_tenant(
         resp.inner.error_code
     );
     resp.inner.payload.to_vec()
+}
+
+/// Register `collection` of database DEFAULT under `tenant_id` as a
+/// schemaless collection whose full-text index covers `text_fields`.
+///
+/// A write indexes only declared fields, and a text read on an undeclared
+/// field errors. A fixture that searches text registers its fields first.
+pub fn register_text_fields(
+    core: &mut CoreLoop,
+    req_tx: &mut Producer<BridgeRequest>,
+    resp_rx: &mut Consumer<BridgeResponse>,
+    tenant_id: u64,
+    collection: &str,
+    text_fields: &[&str],
+) {
+    let fields: Vec<String> = text_fields.iter().map(|f| f.to_string()).collect();
+    send_ok_as_tenant(
+        core,
+        req_tx,
+        resp_rx,
+        tenant_id,
+        PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::Register {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb::types::DatabaseId::DEFAULT,
+                collection,
+            ),
+            indexes: Vec::new(),
+            crdt_enabled: false,
+            storage_mode: Default::default(),
+            enforcement: Box::default(),
+            bitemporal: false,
+            conflict_policy: None,
+            timeseries: None,
+            vector_primary: None,
+            vector_fields: Vec::new(),
+            declared_columns: Vec::new(),
+            declared_key: None,
+            text_fields: nodedb_physical::physical_plan::TextFieldSet::all_readable(fields),
+            incarnation: nodedb_types::Hlc::ZERO,
+        }),
+    );
 }
 
 /// Push a request as a specific tenant, tick, pop response — returns raw response.

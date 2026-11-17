@@ -184,8 +184,13 @@ impl CoreLoop {
                 return self.response_error(task, e);
             }
             let identity = columnar_row_identity(&schema, &row, surrogate);
-            self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, &identity);
+            if let Err(e) = self.txn_overlay_mut(txn_id).insert_tombstone(
+                coll_key.clone(),
+                surrogate,
+                &identity,
+            ) {
+                return self.response_error(task, e);
+            }
         }
 
         self.stage_columnar_dml_response(task, affected)
@@ -273,6 +278,14 @@ impl CoreLoop {
                 }
             }
         }
+        // Every row is held to the row image limit before the first stages.
+        for (_, row) in &new_rows {
+            if let Err(e) = crate::data::executor::row_image_native::check_columnar_row(
+                collection, &schema, row,
+            ) {
+                return self.response_error(task, e);
+            }
+        }
         if let Err(response) = self.stage_admit_columnar_rows(
             task,
             rls_write_check,
@@ -306,9 +319,7 @@ impl CoreLoop {
                     );
                 }
             };
-            if let Err(e) =
-                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, body)
-            {
+            if let Err(e) = self.stage_bulk_put(txn_id, &coll_key, surrogate, &identity, body) {
                 return self.response_error(task, e);
             }
         }

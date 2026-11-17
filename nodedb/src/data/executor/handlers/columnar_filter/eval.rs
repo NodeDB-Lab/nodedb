@@ -82,6 +82,9 @@ pub(crate) fn eval_filters_sparse(
             ColumnType::Symbol | ColumnType::Text => {
                 eval_symbol_filter(src, col_pos, col_data, f, indices, &mut mask)?;
             }
+            // A decimal, UUID or boolean predicate compares typed values:
+            // the caller evaluates it on the decoded row.
+            ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => return None,
         }
     }
 
@@ -257,6 +260,9 @@ pub(crate) fn eval_filters_bitmask(
                     _ => return None,
                 }
             }
+            // A decimal, UUID or boolean predicate compares typed values:
+            // the caller evaluates it on the decoded row.
+            ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => return None,
         };
 
         mask = simd_filter::bitmask_and(&mask, &filter_mask);

@@ -22,7 +22,8 @@ use crate::control::server::shared::ddl::neutral::collection::dispatch_register_
 use crate::control::state::SharedState;
 
 use super::super::databases::{DatabaseMap, resolve_databases};
-use super::super::sections::apply_metadata_sections;
+use super::super::index_records::TextBuild;
+use super::super::sections::{RestoredMetadata, apply_metadata_sections};
 use super::super::target::RestoreMark;
 use super::super::validate::{ValidatedEnvelope, validate_envelope};
 use super::rebind;
@@ -101,12 +102,15 @@ pub async fn restore_tenant(
         }
     }
 
-    if !dry_run {
-        restore_metadata(state, tenant_id, &env, &databases).await?;
+    let text_builds = if dry_run {
+        Vec::new()
+    } else {
+        let text_builds = restore_metadata(state, tenant_id, &env, &databases).await?;
         stats.arrays =
             super::super::array_reissue::restore_array_rows(state, tenant_id, &env, &databases)
                 .await?;
-    }
+        text_builds
+    };
 
     for snap in merged.values() {
         stats.count_sections(snap);
@@ -127,6 +131,9 @@ pub async fn restore_tenant(
         let target = databases.target(source)?;
         super::database::reissue_database(state, tenant_id, target, snap, &mut stats).await?;
     }
+    // A full-text record put `Building` rebuilds from every row the
+    // destination stores, the re-issued ones included, then turns `Ready`.
+    super::super::index_records::build_text_indexes(state, tenant_id, text_builds).await?;
 
     verify_restored(state, tenant_id, expectation, &databases, &mut stats).await?;
     Ok(stats)
@@ -217,13 +224,20 @@ async fn refuse_stale_envelope(
 /// and it replaces any registration already present, so a cluster applier's
 /// own register hook and a later boot seed are both idempotent with it. A
 /// registration failure fails the restore.
+///
+/// The index records are in the catalog before the registration, so each
+/// collection registers with the text fields its full-text records declare.
+/// Returns the full-text records put `Building`.
 async fn restore_metadata(
     state: &Arc<SharedState>,
     tenant_id: u64,
     env: &Envelope,
     databases: &DatabaseMap,
-) -> Result<(), Error> {
-    let restored_collections = apply_metadata_sections(state, tenant_id, env, databases).await?;
+) -> Result<Vec<TextBuild>, Error> {
+    let RestoredMetadata {
+        collections: restored_collections,
+        text_builds,
+    } = apply_metadata_sections(state, tenant_id, env, databases).await?;
     for coll in &restored_collections {
         // A classified error keeps its class. Only a machinery failure
         // gains the restore context.
@@ -242,7 +256,7 @@ async fn restore_metadata(
                 }
             })?;
     }
-    Ok(())
+    Ok(text_builds)
 }
 
 /// Check that the destination holds every backed-up row, and record the

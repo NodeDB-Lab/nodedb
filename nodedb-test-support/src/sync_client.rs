@@ -20,8 +20,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 use nodedb_types::Hlc;
 use nodedb_types::sync::wire::{
-    CollectionDescriptor, CollectionSchemaSyncMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg,
-    HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType,
+    CollectionDescriptor, CollectionSchemaRejectMsg, CollectionSchemaSyncMsg, DeltaAckMsg,
+    DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType,
 };
 
 /// Bound on how long a single frame receive may take before the test client
@@ -33,6 +33,15 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum DeltaOutcome {
     Ack(DeltaAckMsg),
     Reject(DeltaRejectMsg),
+}
+
+/// The server's answer to one `push_collection_schema` call.
+#[derive(Debug)]
+pub enum SchemaOutcome {
+    /// The collection the server holds, with its incarnation.
+    Held(Box<CollectionSchemaSyncMsg>),
+    /// The server refused the announce.
+    Reject(CollectionSchemaRejectMsg),
 }
 
 /// A connected, handshake-completed sync WebSocket test client.
@@ -90,6 +99,7 @@ impl SyncTestClient {
             lite_id,
             epoch,
             wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
+            last_server_watermark: 0,
         };
         let frame = SyncFrame::try_encode(SyncMessageType::Handshake, &handshake)
             .ok_or_else(|| "failed to encode HandshakeMsg".to_string())?;
@@ -194,14 +204,16 @@ impl SyncTestClient {
         }
     }
 
-    /// Announce a collection descriptor to the server. Fire-and-forget:
-    /// the CollectionSchema announce has no ack frame, so this only sends
-    /// the frame and returns once it is flushed onto the socket.
+    /// Announce a collection descriptor to the server and wait for its answer.
+    ///
+    /// The server answers with the collection it holds, or with a typed
+    /// refusal. A held answer also records the collection's incarnation.
     pub async fn push_collection_schema(
         &mut self,
         descriptor: CollectionDescriptor,
         creation_hlc: Hlc,
-    ) -> Result<(), String> {
+    ) -> Result<SchemaOutcome, String> {
+        let name = descriptor.name.clone();
         let msg = CollectionSchemaSyncMsg {
             descriptor,
             creation_hlc,
@@ -212,7 +224,30 @@ impl SyncTestClient {
             .send(Message::Binary(frame.to_bytes().into()))
             .await
             .map_err(|e| format!("failed to send CollectionSchema frame: {e}"))?;
-        Ok(())
+
+        loop {
+            let frame = self.recv_next_frame().await?;
+            match frame.msg_type {
+                SyncMessageType::CollectionSchema => {
+                    let held: CollectionSchemaSyncMsg = frame.decode_body().ok_or_else(|| {
+                        "failed to decode CollectionSchemaSyncMsg body".to_string()
+                    })?;
+                    if held.descriptor.name == name {
+                        return Ok(SchemaOutcome::Held(Box::new(held)));
+                    }
+                }
+                SyncMessageType::CollectionSchemaReject => {
+                    let reject: CollectionSchemaRejectMsg =
+                        frame.decode_body().ok_or_else(|| {
+                            "failed to decode CollectionSchemaRejectMsg body".to_string()
+                        })?;
+                    if reject.name == name {
+                        return Ok(SchemaOutcome::Reject(reject));
+                    }
+                }
+                _ => continue,
+            }
+        }
     }
 
     /// Subscribe to a Document shape covering all documents in `collection`

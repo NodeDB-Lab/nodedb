@@ -544,7 +544,7 @@ mod tests {
                     document_id: "id1".to_owned(),
                     list_path: "blocks".to_owned(),
                     index: 0,
-                    fields_json: "{}".to_owned(),
+                    fields: Vec::new(),
                     surrogate: Surrogate::new(1),
                 }),
             ),

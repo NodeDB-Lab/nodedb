@@ -84,7 +84,7 @@ async fn edge_predicate_and_properties_hold_from_any_coordinator() {
 
     let unfiltered = "GRAPH TRAVERSE IN 'ep_xnode' FROM 'root' DEPTH 2 DIRECTION out";
     let total = 1 + 4 * FAN;
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reaches every seeded node"),
             Duration::from_secs(20),
@@ -92,8 +92,7 @@ async fn edge_predicate_and_properties_hold_from_any_coordinator() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        node_ids(&result_json(&cluster.nodes[idx].client, unfiltered).await).len()
-                            == total
+                        node_ids(&result_json(&node.client, unfiltered).await).len() == total
                     })
                 })
             },
@@ -104,8 +103,8 @@ async fn edge_predicate_and_properties_hold_from_any_coordinator() {
     let expected: BTreeSet<String> = std::iter::once("root".to_string())
         .chain((0..FAN).flat_map(|i| [format!("hot_{i}"), format!("deep_{i}")]))
         .collect();
-    for idx in 0..cluster.nodes.len() {
-        let client = &cluster.nodes[idx].client;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let client = &node.client;
         let got = result_json(
             client,
             "GRAPH TRAVERSE IN 'ep_xnode' FROM 'root' DEPTH 2 DIRECTION out EDGE WHERE score > 5",

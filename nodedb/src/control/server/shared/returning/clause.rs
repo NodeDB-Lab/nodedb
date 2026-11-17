@@ -10,63 +10,31 @@
 //! attaches to the plan.
 
 use nodedb_physical::physical_plan::{ReturningColumns, ReturningItem, ReturningSpec};
-
-use crate::Error;
-use crate::control::planner::plan_error_map::map_plan_error;
-use nodedb_sql::catalog::SqlCatalog;
+use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::plan::referenced_columns;
 use nodedb_sql::types::query::Projection;
-use nodedb_sql::types::{
-    InsertPlan, KvInsertPlan, MergePlan, SqlPlan, TimeseriesIngestPlan, UpsertPlan,
-    VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
-};
 
-/// A resolved RETURNING clause: the Control-Plane projection and the
-/// Data-Plane spec derived from it.
-#[derive(Debug, Clone)]
-pub struct ReturningClause {
-    /// The announced output columns, in clause order. A `CpComputed` entry is
-    /// evaluated by the response shaper per returned row.
-    pub projection: Vec<Projection>,
-    /// The base columns the Data Plane returns by name. Display names and
-    /// drops are the shaper's job.
-    pub spec: ReturningSpec,
-}
+pub use nodedb_sql::types::ResolvedReturning as ReturningClause;
 
-/// Resolve the item text after `RETURNING` against `target`.
+/// The stored columns the Data Plane returns for a resolved projection:
+/// `Star` when any item is a star, otherwise every named column plus every
+/// base column a computed item reads, deduplicated in first-seen order.
 ///
-/// `tenant_id` scopes the planner error mapping so an unknown target names
-/// the tenant it was looked up under.
-pub fn resolve_returning_clause(
-    items_sql: &str,
-    target: &str,
-    catalog: &dyn SqlCatalog,
-    tenant_id: crate::types::TenantId,
-) -> crate::Result<ReturningClause> {
-    let projection = nodedb_sql::resolve_returning_items(items_sql, target, catalog)
-        .map_err(|error| map_plan_error(error, tenant_id))?;
-    let spec = spec_from_projection(&projection);
-    Ok(ReturningClause { projection, spec })
-}
-
-/// The Data-Plane spec a resolved projection needs: `Star` for a lone star,
-/// otherwise every named column plus every base column a computed entry
-/// reads, deduplicated in first-seen order.
-///
-/// Names are bare: a stored row keys its fields by column name, and the
-/// Control-Plane evaluator reads a column by its bare name too, so a
-/// `target.col` qualifier is dropped here.
-fn spec_from_projection(projection: &[Projection]) -> ReturningSpec {
-    if matches!(projection, [Projection::Star]) {
-        return ReturningSpec {
-            columns: ReturningColumns::Star,
-        };
-    }
+/// This is the stored half of a plan's response spec. The Data Plane reads
+/// only these columns. The precommit half, `ResolvedReturning.spec`, holds
+/// the full ordered item list with aliases and computed items. It rides in
+/// the plan's `precommit` slot (see [`plan_returning_spec`]) and is
+/// evaluated on the Control Plane after column redaction and with the
+/// session's sequence access. A masked column never reaches an expression,
+/// and a sequence accessor advances once per returned row. Names are bare: a
+/// stored row keys its fields by column name, so a `target.col` qualifier is
+/// dropped.
+pub fn stored_columns_spec(projection: &[Projection]) -> ReturningSpec {
     let mut names: Vec<String> = Vec::with_capacity(projection.len());
     let mut push = |qualified: &str| {
         let bare = qualified.rsplit('.').next().unwrap_or(qualified);
-        if !names.iter().any(|n| n == bare) {
-            names.push(bare.to_string());
+        if !names.iter().any(|name| name == bare) {
+            names.push(bare.to_owned());
         }
     };
     for entry in projection {
@@ -77,11 +45,10 @@ fn spec_from_projection(projection: &[Projection]) -> ReturningSpec {
                     push(&name);
                 }
             }
-            // A star among named items still needs every stored column; the
-            // shaper projects the announced list onto whatever came back.
             Projection::Star | Projection::QualifiedStar(_) => {
                 return ReturningSpec {
                     columns: ReturningColumns::Star,
+                    precommit: None,
                 };
             }
         }
@@ -90,98 +57,30 @@ fn spec_from_projection(projection: &[Projection]) -> ReturningSpec {
         columns: ReturningColumns::Named(
             names
                 .into_iter()
-                .map(|name| ReturningItem { name, alias: None })
+                .map(|name| ReturningItem::Column { name, alias: None })
                 .collect(),
         ),
+        precommit: None,
     }
 }
 
-/// The collection a DML plan's RETURNING clause projects, `None` for a plan
-/// that has no such clause. Exhaustive so a new plan variant decides here.
-pub fn returning_target_collection(plans: &[SqlPlan]) -> Option<String> {
-    let plan = plans.first()?;
-    match plan {
-        SqlPlan::Insert(InsertPlan { collection, .. })
-        | SqlPlan::KvInsert(KvInsertPlan { collection, .. })
-        | SqlPlan::Upsert(UpsertPlan { collection, .. })
-        | SqlPlan::Update { collection, .. }
-        | SqlPlan::UpdateFrom { collection, .. }
-        | SqlPlan::Delete { collection, .. }
-        | SqlPlan::TimeseriesIngest(TimeseriesIngestPlan { collection, .. })
-        | SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan { collection, .. })
-        | SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan { collection, .. })
-        | SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan { collection, .. }) => {
-            Some(collection.clone())
-        }
-        SqlPlan::Merge(MergePlan { target, .. }) | SqlPlan::InsertSelect { target, .. } => {
-            Some(target.clone())
-        }
-        SqlPlan::ConstantResult { .. }
-        | SqlPlan::Scan { .. }
-        | SqlPlan::PointGet { .. }
-        | SqlPlan::DocumentIndexLookup { .. }
-        | SqlPlan::RangeScan { .. }
-        | SqlPlan::Truncate { .. }
-        | SqlPlan::VectorPrimaryTruncate { .. }
-        | SqlPlan::Join { .. }
-        | SqlPlan::Aggregate { .. }
-        | SqlPlan::TimeseriesScan { .. }
-        | SqlPlan::VectorSearch { .. }
-        | SqlPlan::MultiVectorSearch { .. }
-        | SqlPlan::SparseSearch { .. }
-        | SqlPlan::TextSearch { .. }
-        | SqlPlan::HybridSearch { .. }
-        | SqlPlan::HybridSearchTriple { .. }
-        | SqlPlan::SpatialScan { .. }
-        | SqlPlan::Union { .. }
-        | SqlPlan::Intersect { .. }
-        | SqlPlan::Except { .. }
-        | SqlPlan::RecursiveScan { .. }
-        | SqlPlan::RecursiveValue { .. }
-        | SqlPlan::Cte { .. }
-        | SqlPlan::Subquery { .. }
-        | SqlPlan::CreateArray { .. }
-        | SqlPlan::DropArray { .. }
-        | SqlPlan::AlterArray { .. }
-        | SqlPlan::InsertArray { .. }
-        | SqlPlan::DeleteArray { .. }
-        | SqlPlan::ArraySlice { .. }
-        | SqlPlan::ArrayAgg { .. }
-        | SqlPlan::ArrayElementwise { .. }
-        | SqlPlan::ArrayFlush { .. }
-        | SqlPlan::ArrayCompact { .. }
-        | SqlPlan::LateralTopK { .. }
-        | SqlPlan::LateralLoop { .. }
-        | SqlPlan::CreateIndex { .. }
-        | SqlPlan::DropIndex { .. } => None,
-    }
+/// The spec a plan carries for a resolved clause: the stored columns for the
+/// Data Plane, with the full precommit item list beside them.
+pub fn plan_returning_spec(returning: &ReturningClause) -> ReturningSpec {
+    let mut spec = stored_columns_spec(&returning.projection);
+    spec.precommit = Some(returning.spec.columns.clone());
+    spec
 }
 
-/// Resolve `returning_items` against the target the planned statement names.
-///
-/// `None` when the statement carries no clause. A clause on a plan with no
-/// RETURNING target is refused by name rather than dropped.
-pub fn resolve_returning_for_plans(
-    plans: &[SqlPlan],
-    returning_items: Option<&str>,
-    catalog: &dyn SqlCatalog,
-    tenant_id: crate::types::TenantId,
-) -> crate::Result<Option<ReturningClause>> {
-    let Some(items) = returning_items else {
-        return Ok(None);
-    };
-    let Some(target) = returning_target_collection(plans) else {
-        let shape = plans
-            .first()
-            .map_or("an empty statement", SqlPlan::variant_name);
-        return Err(Error::BadRequest {
-            detail: format!(
-                "RETURNING is not supported on {shape}; it is supported on INSERT, UPSERT, \
-                 UPDATE, DELETE, and MERGE against a collection"
-            ),
-        });
-    };
-    resolve_returning_clause(items, &target, catalog, tenant_id).map(Some)
+/// Read the outer statement's response clause from its resolved plan.
+pub fn resolve_returning_for_plans(plans: &[SqlPlan]) -> Option<ReturningClause> {
+    fn clause(plan: &SqlPlan) -> Option<&ReturningClause> {
+        match plan {
+            SqlPlan::Cte(cte) => clause(&cte.outer),
+            _ => plan.returning(),
+        }
+    }
+    plans.first().and_then(clause).cloned()
 }
 
 #[cfg(test)]
@@ -196,18 +95,10 @@ mod tests {
         }
     }
 
-    /// A lone star asks the Data Plane for every stored column.
+    /// A computed item ships the base columns it reads, never the expression,
+    /// so the shaper evaluates it after redaction with sequence access.
     #[test]
-    fn spec_for_a_star_is_star() {
-        let spec = spec_from_projection(&[Projection::Star]);
-        assert_eq!(spec.columns, ReturningColumns::Star);
-    }
-
-    /// Named columns and the base columns computed entries read reach the
-    /// Data Plane as bare names, deduplicated in first-seen order, with no
-    /// alias: display names are the shaper's job.
-    #[test]
-    fn spec_lists_named_and_referenced_base_columns_once() {
+    fn stored_spec_ships_the_columns_an_expression_reads() {
         let projection = vec![
             Projection::Column("id".into()),
             Projection::CpComputed {
@@ -216,69 +107,63 @@ mod tests {
                     op: BinaryOp::Add,
                     right: Box::new(column("id")),
                 },
-                alias: "d".into(),
-            },
-            Projection::Computed {
-                expr: column("score"),
-                alias: "s".into(),
+                alias: "total".into(),
             },
         ];
-        let spec = spec_from_projection(&projection);
-        assert_eq!(
-            spec.columns,
-            ReturningColumns::Named(vec![
-                ReturningItem {
-                    name: "id".into(),
-                    alias: None,
-                },
-                ReturningItem {
-                    name: "score".into(),
-                    alias: None,
-                },
-            ])
-        );
+        let spec = stored_columns_spec(&projection);
+        assert_eq!(spec.source_names(), Some(vec!["id".into(), "score".into()]));
+        let starred = stored_columns_spec(&[Projection::Column("id".into()), Projection::Star]);
+        assert_eq!(starred.columns, ReturningColumns::Star);
     }
 
-    /// A computed entry that reads no column (a bare accessor) adds nothing
-    /// to the Data Plane list.
+    /// A lone star asks the Data Plane for every stored column.
     #[test]
-    fn spec_for_a_bare_accessor_reads_only_the_named_columns() {
+    fn spec_for_a_star_is_star() {
+        let spec = nodedb_sql::planner::returning::returning_spec(&[Projection::Star])
+            .expect("projection");
+        assert_eq!(spec.columns, ReturningColumns::Star);
+    }
+
+    #[test]
+    fn computed_items_keep_expression_order_and_names() {
         let projection = vec![
             Projection::Column("id".into()),
             Projection::CpComputed {
-                expr: SqlExpr::Function {
-                    name: "nextval".into(),
-                    args: vec![SqlExpr::Literal(SqlValue::String("s".into()))],
-                    distinct: false,
+                expr: SqlExpr::BinaryOp {
+                    left: Box::new(column("score")),
+                    op: BinaryOp::Add,
+                    right: Box::new(SqlExpr::Literal(SqlValue::Int(2))),
                 },
-                alias: "n".into(),
+                alias: "total".into(),
             },
         ];
-        let spec = spec_from_projection(&projection);
-        assert_eq!(
-            spec.columns,
-            ReturningColumns::Named(vec![ReturningItem {
-                name: "id".into(),
-                alias: None,
-            }])
-        );
-    }
-
-    #[test]
-    fn a_read_plan_has_no_returning_target() {
-        let plan = SqlPlan::ConstantResult {
-            columns: Vec::new(),
-            values: Vec::new(),
-            volatile: false,
+        let spec = nodedb_sql::planner::returning::returning_spec(&projection).expect("projection");
+        assert_eq!(spec.output_names(), Some(vec!["id".into(), "total".into()]));
+        let ReturningColumns::Named(items) = spec.columns else {
+            panic!("named projection")
         };
-        assert!(returning_target_collection(&[plan]).is_none());
-        assert!(returning_target_collection(&[]).is_none());
+        let ReturningItem::Computed { expression, name } = &items[1] else {
+            panic!("computed item")
+        };
+        assert_eq!(name, "total");
+        let expr: nodedb_query::expr::SqlExpr =
+            zerompk::from_msgpack(expression).expect("expression");
+        let row = nodedb_types::Value::Object(std::collections::HashMap::from([(
+            "score".into(),
+            nodedb_types::Value::Integer(3),
+        )]));
+        assert_eq!(
+            expr.eval(&row, &nodedb_crs::CrsContext::builtin_only())
+                .expect("evaluate"),
+            nodedb_types::Value::Integer(5)
+        );
     }
 
     #[test]
     fn output_names_star_returns_none() {
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         };
         assert!(spec.output_names().is_none());
     }
@@ -287,15 +172,16 @@ mod tests {
     fn output_names_named_uses_aliases() {
         let spec = ReturningSpec {
             columns: ReturningColumns::Named(vec![
-                ReturningItem {
+                ReturningItem::Column {
                     name: "id".into(),
                     alias: None,
                 },
-                ReturningItem {
+                ReturningItem::Column {
                     name: "x".into(),
                     alias: Some("val".into()),
                 },
             ]),
+            precommit: None,
         };
         assert_eq!(
             spec.output_names(),

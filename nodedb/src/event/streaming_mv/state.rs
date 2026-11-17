@@ -11,8 +11,9 @@
 //! - COUNT counts events.
 //! - SUM / AVG take numeric inputs into an [`ExactSum`]: an integer adds
 //!   exactly, a float adds Kahan-compensated. SUM is an `Integer`, a
-//!   `Decimal` past `i64`, or a `Float` when any input was a float. AVG is a
-//!   `Float` from the exact total.
+//!   `Decimal` past `i64`, or a `Float` when any input was a float. AVG is
+//!   [`ExactSum::avg_value`]: a `Float` over float input, else a `Decimal`
+//!   at PostgreSQL's division scale.
 //! - MIN / MAX keep the original non-null input, compared exactly by
 //!   [`value_replaces`].
 //! - An aggregate with no input is NULL, except COUNT, which is `0`.
@@ -106,7 +107,7 @@ impl GroupState {
                 .map(Value::Integer)
                 .map_err(|_| EvalError::NumericOverflow { function: "count" }),
             AggFunction::Sum => self.sum.sum(),
-            AggFunction::Avg => self.sum.avg(),
+            AggFunction::Avg => self.sum.avg_value(),
             AggFunction::Min => Ok(self.min.clone().unwrap_or(Value::Null)),
             AggFunction::Max => Ok(self.max.clone().unwrap_or(Value::Null)),
         }
@@ -324,8 +325,16 @@ mod tests {
         );
         assert_eq!(row[2], Value::Integer(AT));
         assert_eq!(row[3], Value::Integer(i64::MAX));
-        let exact_mean = (i128::from(ABOVE) + i128::from(AT) + i128::from(i64::MAX)) / 3;
-        assert_eq!(row[4], Value::Float(exact_mean as f64));
+        // PostgreSQL: the total 9241386435364257792 has weight 4, so avg over
+        // these bigints keeps no fraction: 3080462145121419264.
+        assert_eq!(
+            row[4],
+            Value::Decimal(rust_decimal::Decimal::from(3_080_462_145_121_419_264i64))
+        );
+        let Value::Decimal(mean) = &row[4] else {
+            panic!("AVG over integers is numeric");
+        };
+        assert_eq!(mean.to_string(), "3080462145121419264");
     }
 
     #[test]

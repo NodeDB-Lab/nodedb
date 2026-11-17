@@ -231,8 +231,8 @@ pub(crate) fn coerce_value(
         }
         SqlDataType::Decimal(Some(typmod)) => coerce_to_decimal(column, value, *typmod),
         SqlDataType::Vector(dim) => coerce_to_vector(column, value, *dim),
-        SqlDataType::String
-        | SqlDataType::Bool
+        SqlDataType::String => Ok(coerce_to_text(value)),
+        SqlDataType::Bool
         | SqlDataType::Bytes
         | SqlDataType::Decimal(None)
         | SqlDataType::Uuid
@@ -259,10 +259,10 @@ fn coerce_to_int(column: &str, value: SqlValue) -> Result<SqlValue> {
             Some(n) => Ok(SqlValue::Int(n)),
             None => Err(not_representable(column, &d.to_string(), "INT")),
         },
-        SqlValue::String(s) => s
-            .parse::<i64>()
-            .map(SqlValue::Int)
-            .map_err(|_| not_representable(column, &s, "INT")),
+        SqlValue::String(s) => match s.trim().parse::<i64>() {
+            Ok(n) => Ok(SqlValue::Int(n)),
+            Err(_) => Err(invalid_text("integer", s)),
+        },
         other => Ok(other),
     }
 }
@@ -280,10 +280,10 @@ fn coerce_to_float(column: &str, value: SqlValue) -> Result<SqlValue> {
             .to_f64()
             .map(SqlValue::Float)
             .ok_or_else(|| not_representable(column, &d.to_string(), "FLOAT")),
-        SqlValue::String(s) => s
-            .parse::<f64>()
-            .map(SqlValue::Float)
-            .map_err(|_| not_representable(column, &s, "FLOAT")),
+        SqlValue::String(s) => match s.trim().parse::<f64>() {
+            Ok(f) => Ok(SqlValue::Float(f)),
+            Err(_) => Err(invalid_text("double precision", s)),
+        },
         other => Ok(other),
     }
 }
@@ -301,9 +301,10 @@ fn coerce_to_decimal(column: &str, value: SqlValue, typmod: DecimalTypmod) -> Re
         SqlValue::Int(i) => Decimal::from(i),
         SqlValue::Float(f) => Decimal::try_from(f)
             .map_err(|_| not_representable(column, &f.to_string(), "DECIMAL"))?,
-        SqlValue::String(s) => s
-            .parse::<Decimal>()
-            .map_err(|_| not_representable(column, &s, "DECIMAL"))?,
+        SqlValue::String(s) => match s.trim().parse::<Decimal>() {
+            Ok(d) => d,
+            Err(_) => return Err(invalid_text("numeric", s)),
+        },
         other => return Ok(other),
     };
     typmod
@@ -363,14 +364,29 @@ fn coerce_to_instant(column: &str, value: SqlValue, declared: &SqlDataType) -> R
             .and_then(|millis| NdbDateTime::from_millis(millis).ok())
             .map(tag)
             .ok_or_else(|| not_representable(column, &d.to_string(), declared_name)),
-        SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) | SqlValue::Geometry(_) => {
-            Err(SqlError::TypeMismatch {
-                detail: format!(
-                    "column '{column}': {} is not representable as {declared_name}",
-                    literal_kind(&value)
-                ),
-            })
-        }
+        SqlValue::Bool(_)
+        | SqlValue::Bytes(_)
+        | SqlValue::Uuid(_)
+        | SqlValue::Array(_)
+        | SqlValue::Object(_)
+        | SqlValue::Geometry(_)
+        | SqlValue::Duration(_) => Err(SqlError::TypeMismatch {
+            detail: format!(
+                "column '{column}': {} is not representable as {declared_name}",
+                literal_kind(&value)
+            ),
+        }),
+    }
+}
+
+/// Text column: a UUID or an instant becomes its PostgreSQL text, the
+/// assignment cast PostgreSQL applies storing either into `text`. Every
+/// other literal passes through.
+fn coerce_to_text(value: SqlValue) -> SqlValue {
+    match value {
+        SqlValue::Uuid(u) => SqlValue::String(u),
+        SqlValue::Timestamp(at) | SqlValue::Timestamptz(at) => SqlValue::String(at.to_iso8601()),
+        other => other,
     }
 }
 
@@ -403,16 +419,25 @@ fn literal_kind(value: &SqlValue) -> &'static str {
         SqlValue::Decimal(_) => "a decimal",
         SqlValue::String(_) => "text",
         SqlValue::Bytes(_) => "bytes",
+        SqlValue::Uuid(_) => "a uuid",
+        SqlValue::Object(_) => "an object",
         SqlValue::Array(_) => "an array",
         SqlValue::Timestamp(_) => "a timestamp",
         SqlValue::Timestamptz(_) => "a timestamptz",
         SqlValue::Geometry(_) => "a geometry",
+        SqlValue::Duration(_) => "a duration",
     }
 }
 
 /// `Some(n)` when `f` is a whole number inside `i64`'s range.
 fn whole_f64(f: f64) -> Option<i64> {
     (f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64).then_some(f as i64)
+}
+
+/// Text that spells no value of a numeric column's type. PostgreSQL refuses
+/// the same input with SQLSTATE `22P02` (`invalid_text_representation`).
+fn invalid_text(type_name: &'static str, text: String) -> SqlError {
+    SqlError::InvalidTextRepresentation { type_name, text }
 }
 
 fn not_representable(column: &str, value: &str, declared: &str) -> SqlError {
@@ -628,12 +653,40 @@ mod tests {
         assert!(matches!(err, SqlError::DecimalOutOfRange { .. }), "{err:?}");
     }
 
-    /// Text that names no decimal is a type mismatch naming the column.
+    /// Text that names no decimal is invalid text for the type, as in
+    /// PostgreSQL.
     #[test]
     fn constrained_decimal_refuses_non_numeric_text() {
         let columns = [column("d", decimal_5_2())];
         let err = coerced(&columns, "d", SqlValue::String("abc".into())).expect_err("abc");
-        assert!(matches!(err, SqlError::TypeMismatch { .. }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                SqlError::InvalidTextRepresentation {
+                    type_name: "numeric",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Text that names no number is invalid text for an integer or float
+    /// column, as in PostgreSQL.
+    #[test]
+    fn numeric_columns_refuse_non_numeric_text_as_invalid_text() {
+        let columns = [
+            column("n", SqlDataType::Int64),
+            column("r", SqlDataType::Float64),
+        ];
+        for (name, type_name) in [("n", "integer"), ("r", "double precision")] {
+            let err =
+                coerced(&columns, name, SqlValue::String("x".into())).expect_err("x is no number");
+            assert!(
+                matches!(err, SqlError::InvalidTextRepresentation { type_name: t, .. } if t == type_name),
+                "{name}: {err:?}"
+            );
+        }
     }
 
     /// `2020-03-05T10:00:00Z` as microseconds since the Unix epoch.
@@ -950,6 +1003,29 @@ mod tests {
                 SqlError::VectorElementNotNumeric { ref column, dim: 2, .. } if column == "embedding"
             ),
             "{err}"
+        );
+    }
+
+    /// A UUID or an instant written to a text column is stored as its
+    /// PostgreSQL text. A UUID column keeps the typed UUID.
+    #[test]
+    fn a_uuid_or_instant_into_a_text_column_is_its_text() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let columns = [
+            column("note", SqlDataType::String),
+            column("uid", SqlDataType::Uuid),
+        ];
+        assert_eq!(
+            coerced(&columns, "note", SqlValue::Uuid(uuid.into())).expect("uuid to text"),
+            SqlValue::String(uuid.into())
+        );
+        assert_eq!(
+            coerced(&columns, "note", SqlValue::Timestamptz(early())).expect("instant to text"),
+            SqlValue::String(early().to_iso8601())
+        );
+        assert_eq!(
+            coerced(&columns, "uid", SqlValue::Uuid(uuid.into())).expect("uuid stays"),
+            SqlValue::Uuid(uuid.into())
         );
     }
 }

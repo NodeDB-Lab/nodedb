@@ -8,7 +8,7 @@ use nodedb_types::QualifiedCollection;
 use nodedb_types::TenantId;
 
 use crate::control::state::SharedState;
-use nodedb_physical::physical_plan::{ExchangeOp, PhysicalPlan, QueryOp, SetOpKind};
+use nodedb_physical::physical_plan::{ExchangeOp, PhysicalPlan, QueryOp};
 use nodedb_types::SystemTimeScope;
 
 use super::refusal::{SourceRewrite, plan_reads_cloned_collection, refuse_clone_read_shape};
@@ -239,49 +239,9 @@ async fn rewrite_query(
                 })
             }))
         }
-        QueryOp::SetOp { inputs, op } => rewrite_set_op(inputs, op, ctx).await,
+        // A set operation never reaches here with a clone branch: the clone
+        // read reads each such branch on its own first (`clone_read::set_op`).
         _ => refuse_or_skip(plan, ctx),
-    }
-}
-
-/// Rewrite every branch of a set operation.
-///
-/// Branches that do not read the cloned collection yield no source task and
-/// are dropped, so the source-side node carries only the rows the target side
-/// is missing. That is sound for `UNION ALL` (the merge appends). Any other
-/// kind dedups or subtracts by exact row match against the target rows, which
-/// is unsound across an unmaterialized clone. It is refused the same way the
-/// task-level `post_set_op` refusal does.
-async fn rewrite_set_op(
-    inputs: &[PhysicalPlan],
-    op: &SetOpKind,
-    ctx: &RewriteCtx<'_>,
-) -> crate::Result<SourceRewrite> {
-    let mut rewritten_inputs = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        if let SourceRewrite::Task(child) = Box::pin(rewrite(input, ctx)).await? {
-            rewritten_inputs.push(*child);
-        }
-    }
-    if rewritten_inputs.is_empty() {
-        return Ok(SourceRewrite::NoSourceTask);
-    }
-    match op {
-        SetOpKind::UnionAll => Ok(SourceRewrite::task(PhysicalPlan::Query(QueryOp::SetOp {
-            inputs: rewritten_inputs,
-            op: SetOpKind::UnionAll,
-        }))),
-        SetOpKind::UnionDistinct
-        | SetOpKind::Intersect
-        | SetOpKind::IntersectAll
-        | SetOpKind::Except
-        | SetOpKind::ExceptAll => Err(crate::Error::PlanError {
-            detail: format!(
-                "a set operation over '{}' cannot be read through an \
-                 unmaterialized clone; run ALTER DATABASE <clone> MATERIALIZE first",
-                ctx.target_coll
-            ),
-        }),
     }
 }
 

@@ -16,6 +16,9 @@ pub(super) struct MatchView<'a> {
     pub(super) collection: Option<String>,
     pub(super) document_cut: crate::engine::graph::pattern::executor::DocumentCut,
     pub(super) overlay: Option<crate::engine::graph::csr::GraphOverlayDelta>,
+    /// The reading transaction's staged edge puts in the collection, for
+    /// relationship properties. `None` outside a live transaction read.
+    pub(super) staged_edges: Option<crate::engine::graph::pattern::executor::StagedEdgeProperties>,
 }
 
 impl CoreLoop {
@@ -81,12 +84,28 @@ impl CoreLoop {
             }
             _ => crate::engine::graph::pattern::executor::DocumentCut::Plain,
         };
-        let overlay = self.live_overlay_delta(task, tid, scope);
+        let overlay = self.live_overlay_delta(task, tid, scope)?;
+        let staged_edges = match task.request.txn_id {
+            Some(txn_id) if scope.merges_txn_overlay() => self
+                .graph_txn_overlays
+                .get(&txn_id)
+                .map(|ov| {
+                    super::graph::graph_txn_merge::staged_edge_property_map(
+                        ov,
+                        task.request.database_id,
+                        crate::types::TenantId::new(tid),
+                        collection.as_deref(),
+                    )
+                })
+                .transpose()?,
+            _ => None,
+        };
         Ok(Some(MatchView {
             csr,
             collection,
             document_cut,
             overlay,
+            staged_edges,
         }))
     }
 }

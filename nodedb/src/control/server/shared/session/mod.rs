@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub mod announced_returning;
 mod array_fanout_stage;
 pub mod audit_context;
 pub mod commit;
@@ -20,6 +21,7 @@ pub mod deadline;
 pub mod ephemeral_sequence;
 pub mod expand_pages;
 pub mod expander_stage;
+pub mod hold_owner;
 mod hot_key;
 mod leader_forward;
 pub mod lifecycle;
@@ -60,6 +62,7 @@ pub use self::connection::{
 pub use self::cross_shard_mode::{CrossShardTxnMode, parse_value as parse_cross_shard_value};
 pub use self::deadline::{
     StatementDeadline, statement_budget, statement_deadline, statement_deadline_ms,
+    statement_total_budget,
 };
 pub use self::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 pub use self::params::{parse_set_command, parse_show_command};

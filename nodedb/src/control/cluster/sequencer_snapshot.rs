@@ -134,10 +134,13 @@ impl SequencerSnapshotStore {
     /// The kept snapshot, or `None` when no file exists.
     fn read_kept(&self) -> crate::Result<Option<SequencerSnapshot>> {
         let path = self.dir.join(SNAPSHOT_FILE);
-        let bytes = match std::fs::read(&path) {
+        let bytes = match nodedb_wal::segment::read_checkpoint_dontneed(&path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(storage_error(&path, "read", e)),
+            Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(nodedb_wal::WalError::Io(e)) => return Err(storage_error(&path, "read", e)),
+            Err(e) => return Err(storage_error(&path, "read", std::io::Error::other(e))),
         };
         SequencerSnapshot::decode(&bytes)
             .map(Some)

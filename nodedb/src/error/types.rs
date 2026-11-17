@@ -31,9 +31,6 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("transaction staging overlay exceeded its {limit}-byte per-core budget")]
-    TxnOverlayMemoryExceeded { limit: usize },
-
     #[error("authorization denied for tenant {tenant_id} on {resource}")]
     RejectedAuthz {
         tenant_id: TenantId,
@@ -351,7 +348,7 @@ pub enum Error {
     /// The column argument of a full-text search cannot serve it. Propagated
     /// from `SqlError::TextColumn` or the Data-Plane `ErrorCode::TextColumn`.
     /// The pgwire layer renders `fault.sqlstate()`.
-    #[error("column \"{column}\" of collection \"{collection}\" {fault}")]
+    #[error("{}", fault.describe(collection, column))]
     TextColumn {
         collection: String,
         column: String,
@@ -391,6 +388,17 @@ pub enum Error {
     /// SQLSTATE `22000` (data_exception) at the pgwire layer.
     #[error("{detail}")]
     DataException { detail: String },
+
+    /// `ln` or `log` of zero or a negative number. Rendered as SQLSTATE
+    /// `2201E` (invalid_argument_for_logarithm) at the pgwire layer.
+    #[error("{detail}")]
+    InvalidArgumentForLogarithm { detail: String },
+
+    /// Zero to a negative power, a negative number to a non-integer power,
+    /// or the square root of a negative number. Rendered as SQLSTATE
+    /// `2201F` (invalid_argument_for_power_function) at the pgwire layer.
+    #[error("{detail}")]
+    InvalidArgumentForPowerFunction { detail: String },
 
     /// A geometry's SRID differs from the SRID of the spatial index it
     /// writes to or queries. The index SRID is fixed by its first entry, and
@@ -663,19 +671,6 @@ pub enum Error {
         descriptor: String,
         carried: u64,
         prior: u64,
-    },
-
-    /// A collection purge found no catalog row to deactivate, so the
-    /// fail-closed CREATE/UNDROP barrier was never written — the lookup key
-    /// and stored key disagree, or another writer removed it concurrently.
-    #[error(
-        "purge of collection '{name}' (database {database_id}, tenant {tenant_id}) \
-         found no catalog row to deactivate"
-    )]
-    CollectionPurgeRowMissing {
-        database_id: u64,
-        tenant_id: u64,
-        name: String,
     },
 
     /// A collection row reached the catalog with no incarnation. Every writer

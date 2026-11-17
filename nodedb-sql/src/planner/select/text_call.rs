@@ -56,7 +56,8 @@ fn check_qualifier(qualifier: &str, table: &ResolvedTable) -> Result<()> {
 ///
 /// The first argument is a text column of `table` (bare or qualified by the
 /// table's name or alias), or `*` / `<table>.*` for the whole document. Any
-/// other expression is a typed error. Named options follow the query; see
+/// other expression is a typed error. A ready full-text index must serve the
+/// field, or the whole document for `*`. Named options follow the query; see
 /// [`parse_text_options`].
 pub(super) fn resolve_text_call(
     function: &str,
@@ -95,6 +96,7 @@ pub(super) fn resolve_text_call(
             return Err(not_a_column(function, table, first));
         }
     };
+    table.check_text_index(function, field.as_deref())?;
     Ok(TextCall {
         field,
         query: extract_string_literal(query_expr)?,

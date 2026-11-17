@@ -133,6 +133,42 @@ impl ColumnarMemtable {
                     }
                     row_bytes += 8;
                 }
+                (ColumnValue::Decimal(bytes), ColumnType::Decimal(_)) => {
+                    if let ColumnData::Decimal(ref mut v) = self.columns[i] {
+                        v.push(Some(rust_decimal::Decimal::deserialize(*bytes)));
+                    }
+                    row_bytes += 16;
+                }
+                (ColumnValue::Uuid(bytes), ColumnType::Uuid) => {
+                    if let ColumnData::Uuid(ref mut v) = self.columns[i] {
+                        v.push(Some(*bytes));
+                    }
+                    row_bytes += 16;
+                }
+                (ColumnValue::Bool(b), ColumnType::Bool) => {
+                    if let ColumnData::Bool(ref mut v) = self.columns[i] {
+                        v.push(Some(*b));
+                    }
+                    row_bytes += 1;
+                }
+                (ColumnValue::Null, ColumnType::Decimal(_)) => {
+                    if let ColumnData::Decimal(ref mut v) = self.columns[i] {
+                        v.push(None);
+                    }
+                    row_bytes += 16;
+                }
+                (ColumnValue::Null, ColumnType::Uuid) => {
+                    if let ColumnData::Uuid(ref mut v) = self.columns[i] {
+                        v.push(None);
+                    }
+                    row_bytes += 16;
+                }
+                (ColumnValue::Null, ColumnType::Bool) => {
+                    if let ColumnData::Bool(ref mut v) = self.columns[i] {
+                        v.push(None);
+                    }
+                    row_bytes += 1;
+                }
                 _ => {
                     self.rollback_partial_row(i);
                     return Err(crate::Error::BadRequest {
@@ -149,24 +185,7 @@ impl ColumnarMemtable {
     /// Roll back a partially written row (called on error during `ingest_row`).
     fn rollback_partial_row(&mut self, columns_written: usize) {
         for col in self.columns.iter_mut().take(columns_written) {
-            match col {
-                ColumnData::Timestamp(v) => {
-                    v.pop();
-                }
-                ColumnData::Float64(v) => {
-                    v.pop();
-                }
-                ColumnData::Int64(v) => {
-                    v.pop();
-                }
-                ColumnData::Symbol(v) => {
-                    v.pop();
-                }
-                ColumnData::DictEncoded { ids, valid, .. } => {
-                    ids.pop();
-                    valid.pop();
-                }
-            }
+            col.pop_row();
         }
     }
 

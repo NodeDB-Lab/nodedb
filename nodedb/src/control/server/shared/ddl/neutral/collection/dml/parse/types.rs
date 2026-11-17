@@ -37,6 +37,10 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn extract_vect
                     .map(|item| match item {
                         nodedb_types::Value::Float(v) => Some(*v as f32),
                         nodedb_types::Value::Integer(v) => Some(*v as f32),
+                        // A fractional literal reads as an exact decimal.
+                        nodedb_types::Value::Decimal(d) => {
+                            rust_decimal::prelude::ToPrimitive::to_f32(d)
+                        }
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()?;

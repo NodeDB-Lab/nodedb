@@ -43,9 +43,7 @@ use nodedb::bridge::envelope::{ErrorCode, Status};
 #[cfg(feature = "failpoints")]
 use nodedb::fail_point::{FailAction, FailGuard};
 #[cfg(feature = "failpoints")]
-use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinResolved, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
-};
+use nodedb_physical::physical_plan::{CalvinInstall, KvOp, MetaOp, PhysicalPlan, RedoOrigin};
 #[cfg(feature = "failpoints")]
 use nodedb_types::TenantId as NodedbTenantId;
 #[cfg(feature = "failpoints")]
@@ -95,7 +93,7 @@ fn stage_then_install(
         core,
         tx,
         rx,
-        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+        nodedb_test_support::calvin_resolve::whole_calvin_resolve(epoch, 0),
     );
     assert_eq!(
         resolved.status,
@@ -103,10 +101,11 @@ fn stage_then_install(
         "resolve must succeed; got {:?}",
         resolved.error_code
     );
-    let answer: CalvinResolved =
-        zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer");
+    let (redo, reply) = nodedb_test_support::calvin_resolve::decode_whole_calvin_resolve(
+        resolved.payload.as_bytes(),
+    );
     let mut request = make_request(PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
-        redo: answer.redo,
+        redo,
         collections: Vec::new(),
         sum_targets: Vec::new(),
         origin: RedoOrigin::Commit,
@@ -114,7 +113,7 @@ fn stage_then_install(
             epoch,
             position: 0,
             epoch_system_ms: 1_700_000_000_000,
-            reply: answer.reply,
+            reply,
             user_write: true,
             mirror: false,
         }),
@@ -364,12 +363,14 @@ fn calvin_static_replay_sees_only_committed_data() {
         let (req_tx, req_rx) = RingBuffer::channel(64);
         let (resp_tx, resp_rx) = RingBuffer::channel(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            &data_path,
-            Arc::new(OrdinalClock::new()),
-            nodedb::data::executor::core_loop::test_governor(),
+            nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                &data_path,
+                Arc::new(OrdinalClock::new()),
+                nodedb::data::executor::core_loop::test_governor(),
+            ),
         )
         .unwrap();
         (core, req_tx, resp_rx)
@@ -428,12 +429,14 @@ fn calvin_static_replay_sees_only_committed_data() {
         let (req_tx, req_rx) = RingBuffer::channel(64);
         let (resp_tx, resp_rx) = RingBuffer::channel(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            &data_path,
-            Arc::new(OrdinalClock::new()),
-            nodedb::data::executor::core_loop::test_governor(),
+            nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                &data_path,
+                Arc::new(OrdinalClock::new()),
+                nodedb::data::executor::core_loop::test_governor(),
+            ),
         )
         .unwrap();
         (core, req_tx, resp_rx)

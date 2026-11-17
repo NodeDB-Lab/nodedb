@@ -6,7 +6,6 @@
 use redb::WriteTransaction;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::doc_format;
 use crate::data::executor::handlers::point::history_install::{HistoryIndex, HistorySlot};
 use crate::engine::document::store::StorageKey;
 use crate::engine::sparse::btree_versioned::VersionedPut;
@@ -20,13 +19,8 @@ pub(in crate::data::executor::handlers::point) struct HistoryPut<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub storage_key: &'a StorageKey,
-    /// The body the write submitted, guards applied.
-    pub value: &'a [u8],
-    /// The bytes the version stores.
-    pub stored: Vec<u8>,
-    pub sys_from: i64,
-    pub valid_from_ms: i64,
-    pub valid_until_ms: i64,
+    pub installed: crate::types::SharedInstalledDocument,
+    pub read_projection: serde_json::Value,
     pub slot: HistorySlot,
 }
 
@@ -43,13 +37,15 @@ impl CoreLoop {
             tid,
             collection,
             storage_key,
-            value,
-            stored,
+            installed,
+            read_projection,
+            slot,
+        } = put;
+        let crate::bridge::envelope::RowVersion {
             sys_from,
             valid_from_ms,
             valid_until_ms,
-            slot,
-        } = put;
+        } = installed.version;
         self.sparse.versioned_put_in_txn(
             txn,
             VersionedPut {
@@ -60,7 +56,7 @@ impl CoreLoop {
                 sys_from,
                 valid_from_ms,
                 valid_until_ms,
-                body: &stored,
+                body: &installed.stored,
             },
         )?;
         // An indexed collection's body must decode, as on the current path.
@@ -70,9 +66,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         let doc = match self.doc_configs.get(&config_key) {
-            Some(config) if !config.index_paths.is_empty() => {
-                Some(doc_format::decode_document(value)?)
-            }
+            Some(config) if !config.index_paths.is_empty() => Some(read_projection),
             _ => None,
         };
         let index = self.write_history_index_in_txn(
@@ -89,8 +83,7 @@ impl CoreLoop {
         )?;
         Ok(PointPutOutcome {
             prior_value: slot.predecessor,
-            stored_value: stored,
-            version_sys_from: sys_from,
+            installed,
             index_tuples: index.at_version,
             memory_undo: Vec::new(),
             stats_prior: Vec::new(),

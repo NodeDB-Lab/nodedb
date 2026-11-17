@@ -103,3 +103,14 @@ impl Deref for SequencedChangeEvent {
         &self.event
     }
 }
+
+/// What a node did with a run a peer forwarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The journal holds every event of the run: this call wrote it, or an
+    /// earlier call took it.
+    Durable,
+    /// The node took nothing of the run: its journal did not write it. The
+    /// sender must send it again. Carries the journal's error.
+    Refused(String),
+}

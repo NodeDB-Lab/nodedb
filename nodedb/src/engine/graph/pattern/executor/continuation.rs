@@ -10,10 +10,13 @@
 
 use super::super::ast::{MatchQuery, PatternChain};
 use super::core::{MatchExecCtx, bind_node, binding_compatible, execute_triple};
+use super::edge_props::EdgeCapture;
 use super::expansion::{VarLenCaps, VarLenCursor, VarLenPattern, resume_variable_length};
+use super::order;
 use super::overlay_expand;
 use super::predicates;
 use super::predicates::PropertyLookup;
+use super::row::{Bound, lookup, strip_hidden, visible_fingerprint};
 use super::types::{BindingRow, ContinuationSeed, ExecutionState, MatchOutcome, VarLenResume};
 use super::varlen_named::{self, NameOrId};
 use crate::engine::graph::csr::{CsrIndex, GraphOverlayDelta};
@@ -65,8 +68,9 @@ pub(super) fn run_chain_from(
     Ok(rows)
 }
 
-/// Apply the query tail — WHERE predicates, LIMIT, RETURN projection, and
-/// DISTINCT — to a fully-expanded set of binding rows.
+/// Apply the query tail — WHERE predicates, RETURN projection, DISTINCT,
+/// and this core's share of ORDER BY / OFFSET / LIMIT — to a fully-expanded
+/// set of binding rows.
 ///
 /// This is the shared post-chain finalization step. Both the from-scratch
 /// path (`execute_query`) and the cross-shard resume path
@@ -81,6 +85,12 @@ pub(super) fn finalize_rows(
     props: &PropertyLookup<'_>,
     overlay: Option<&GraphOverlayDelta>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
+    let edge_vars: std::collections::HashSet<String> =
+        query.bound_edge_names().into_iter().collect();
+    let tail = predicates::QueryTail {
+        edge_vars: &edge_vars,
+        props,
+    };
     for predicate in &query.where_predicates {
         rows = predicates::apply_predicate(
             &rows,
@@ -88,33 +98,49 @@ pub(super) fn finalize_rows(
             csr,
             edge_store,
             varlen_caps,
-            props,
+            &tail,
             overlay,
         )?;
     }
 
-    if let Some(limit) = query.limit {
-        rows.truncate(limit);
-    }
+    // ORDER BY keys read the bindings, so they are evaluated before the
+    // projection drops them, and travel as hidden keys to the coordinator.
+    let order_keys = if query.order_by.is_empty() {
+        Vec::new()
+    } else {
+        rows.iter()
+            .map(|row| order::order_values(query, &tail, row))
+            .collect::<crate::Result<Vec<_>>>()?
+    };
 
-    if !query.return_columns.is_empty() {
-        rows = predicates::project_columns(&rows, &query.return_columns, props)?;
+    if query.return_columns.is_empty() {
+        // An unprojected row carries its bindings only.
+        rows.iter_mut().for_each(strip_hidden);
+    } else {
+        rows = predicates::project_columns(&rows, &query.return_columns, &tail)?;
+    }
+    if !query.order_by.is_empty() {
+        for (row, keys) in rows.iter_mut().zip(order_keys) {
+            order::attach_order_keys(row, keys);
+        }
     }
 
     if query.distinct {
+        // The canonical encoding sorts every object's keys, so two rows
+        // with equal visible entries in any `HashMap` order are one row.
         let mut seen = std::collections::HashSet::new();
-        rows.retain(|row| {
-            // Build a sorted-key representation so that two BindingRows with
-            // the same entries but different HashMap iteration orders are
-            // treated as identical. `format!("{row:?}")` on a HashMap is
-            // non-deterministic in key order, which would miss duplicates.
-            let mut pairs: Vec<(&String, &String)> = row.iter().collect();
-            pairs.sort_unstable_by_key(|(k, _)| *k);
-            let key = format!("{pairs:?}");
-            seen.insert(key)
-        });
+        let mut kept = Vec::with_capacity(rows.len());
+        for row in rows {
+            if seen.insert(visible_fingerprint(&row)?) {
+                kept.push(row);
+            }
+        }
+        rows = kept;
     }
 
+    // This core's share of ORDER BY / OFFSET / LIMIT. The coordinator
+    // applies the window to the merged rows (`order::finish_match_rows`).
+    order::push_down(query, &mut rows);
     Ok(rows)
 }
 
@@ -202,9 +228,11 @@ pub fn execute_continuation<'a>(
         });
     }
 
+    let capture_vars = query.edge_property_vars();
     let mut state = ExecutionState::new(is_remote_node, varlen_caps);
     state.collection_filter =
         super::expansion::query_collection_filter(query, props.collection, csr);
+    state.edge_capture = EdgeCapture::for_query(&capture_vars, edge_store, props);
 
     // Resume the chain from the originating shard's stopping point. The seed
     // row already carries the bindings for triples [0, seed.triple_idx).
@@ -318,9 +346,11 @@ pub fn execute_varlen_resume<'a>(
         });
     }
 
+    let capture_vars = query.edge_property_vars();
     let mut state = ExecutionState::new(is_remote_node, varlen_caps);
     state.collection_filter =
         super::expansion::query_collection_filter(query, props.collection, csr);
+    state.edge_capture = EdgeCapture::for_query(&capture_vars, edge_store, props);
 
     // Rebuild the pattern shape for the truncated triple verbatim (no
     // re-optimization). `want_path` matches the from-scratch branch in
@@ -373,7 +403,7 @@ pub fn execute_varlen_resume<'a>(
     // `execute_triple` (handles anonymous/unbound source shapes).
     let bind_source = |row: &mut BindingRow| {
         if let Some(src_name) = src_binding.name.as_deref()
-            && let Some(src_value) = resume.source_row.get(src_name)
+            && let Bound::Text(src_value) = lookup(&resume.source_row, src_name)
             && let Some(src_id) = csr.node_id_raw(src_value)
         {
             bind_node(row, src_binding, csr, src_id);
@@ -388,7 +418,7 @@ pub fn execute_varlen_resume<'a>(
         bind_source(&mut row);
         bind_node(&mut row, dst_binding, csr, dst_id);
         if let Some(ref edge_name) = triple.edge.name {
-            row.insert(edge_name.clone(), path);
+            row.insert(edge_name.clone(), nodedb_types::Value::String(path));
         }
         resumed_rows.push(row);
     }
@@ -405,7 +435,7 @@ pub fn execute_varlen_resume<'a>(
                 bind_source(&mut row);
                 bind_node(&mut row, dst_binding, csr, dst_id);
                 if let Some(ref edge_name) = triple.edge.name {
-                    row.insert(edge_name.clone(), path);
+                    row.insert(edge_name.clone(), nodedb_types::Value::String(path));
                 }
                 resumed_rows.push(row);
             }
@@ -418,7 +448,7 @@ pub fn execute_varlen_resume<'a>(
                 bind_source(&mut row);
                 overlay_expand::bind_name(&mut row, dst_binding, &dst_name);
                 if let Some(ref edge_name) = triple.edge.name {
-                    row.insert(edge_name.clone(), path);
+                    row.insert(edge_name.clone(), nodedb_types::Value::String(path));
                 }
                 resumed_rows.push(row);
             }
@@ -458,7 +488,7 @@ pub fn execute_varlen_resume<'a>(
 mod tests {
     use super::super::core::MatchExecCtx;
     use super::super::core::execute;
-    use super::super::core::triple::tests::{make_csr, make_sparse, props_for};
+    use super::super::core::triple::tests::{make_csr, make_sparse, props_for, s};
     use super::super::expansion::{VarLenCaps, VarLenPattern, expand_variable_length};
     use super::super::types::{BindingRow, ContinuationSeed, VarLenResume};
     use super::{execute_continuation, execute_varlen_resume};
@@ -470,8 +500,8 @@ mod tests {
     #[test]
     fn varlen_resume_zerompk_round_trip() {
         let mut source_row = BindingRow::new();
-        source_row.insert("a".to_string(), "n0".to_string());
-        source_row.insert("x".to_string(), "anchor".to_string());
+        source_row.insert("a".to_string(), s("n0"));
+        source_row.insert("x".to_string(), s("anchor"));
         let resume = VarLenResume {
             triple_idx: 2,
             source_row,
@@ -532,7 +562,7 @@ mod tests {
         .unwrap()
         .rows
         .into_iter()
-        .map(|r| r["b"].clone())
+        .filter_map(|r| r["b"].as_str().map(str::to_string))
         .collect();
         assert_eq!(full_b.len(), 6, "uncapped MATCH reaches n1..n6 from n0");
 
@@ -555,7 +585,7 @@ mod tests {
         let cursor = first.cursor.clone().expect("low cap must truncate");
 
         let mut source_row = BindingRow::new();
-        source_row.insert("a".to_string(), "n0".to_string());
+        source_row.insert("a".to_string(), s("n0"));
 
         // First-pass rows' `b` bindings (what the originating shard emitted).
         let mut union_b: std::collections::HashSet<String> = first
@@ -588,8 +618,8 @@ mod tests {
             )
             .unwrap();
             for row in &outcome.rows {
-                assert_eq!(row["a"], "n0", "source binding carried through resume");
-                union_b.insert(row["b"].clone());
+                assert_eq!(row["a"], s("n0"), "source binding carried through resume");
+                union_b.extend(row["b"].as_str().map(str::to_string));
             }
             next = outcome.truncation.into_iter().next().map(|t| VarLenResume {
                 triple_idx: 0,
@@ -620,8 +650,8 @@ mod tests {
                 .unwrap();
 
         let mut seed = BindingRow::new();
-        seed.insert("x".to_string(), "root".to_string());
-        seed.insert("y".to_string(), "mid".to_string());
+        seed.insert("x".to_string(), s("root"));
+        seed.insert("y".to_string(), s("mid"));
 
         let outcome = execute_continuation(
             &query,
@@ -643,14 +673,16 @@ mod tests {
 
         assert_eq!(outcome.rows.len(), 1, "expected exactly one tail row");
         assert_eq!(
-            outcome.rows[0]["x"], "root",
+            outcome.rows[0]["x"],
+            s("root"),
             "seed binding x carried through"
         );
         assert_eq!(
-            outcome.rows[0]["y"], "mid",
+            outcome.rows[0]["y"],
+            s("mid"),
             "seed binding y carried through"
         );
-        assert_eq!(outcome.rows[0]["z"], "leaf", "tail resolved z=leaf");
+        assert_eq!(outcome.rows[0]["z"], s("leaf"), "tail resolved z=leaf");
         assert!(outcome.unresolved_frontier.is_empty());
     }
 
@@ -666,8 +698,8 @@ mod tests {
                 .unwrap();
 
         let mut seed = BindingRow::new();
-        seed.insert("x".to_string(), "root".to_string());
-        seed.insert("y".to_string(), "mid".to_string());
+        seed.insert("x".to_string(), s("root"));
+        seed.insert("y".to_string(), s("mid"));
 
         let outcome = execute_continuation(
             &query,
@@ -721,8 +753,8 @@ mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["x"], "root");
-        assert_eq!(rows[0]["y"], "mid");
-        assert_eq!(rows[0]["z"], "leaf");
+        assert_eq!(rows[0]["x"], s("root"));
+        assert_eq!(rows[0]["y"], s("mid"));
+        assert_eq!(rows[0]["z"], s("leaf"));
     }
 }

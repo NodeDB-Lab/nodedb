@@ -72,9 +72,11 @@ impl Visitor for InferenceContext {
             ..
         } = expr
             && let Some(index) = placeholder_index(inner)
-            && let Some(ty) = type_name_to_sql_data_type(&data_type.to_string())
         {
-            self.record(index, InferredParamType::from_sql_type(ty));
+            let type_name = data_type.to_string();
+            if let Some(ty) = type_name_to_sql_data_type(&type_name) {
+                self.record(index, InferredParamType::from_cast(ty, &type_name));
+            }
         }
         // Any other expression shape: not a form this pass infers. The walk
         // continues into it regardless — this hook only adds conclusions.

@@ -75,7 +75,7 @@ impl CoreLoop {
 
         if !vector_fields.is_empty() {
             // Decode from MessagePack (internal format) — not JSON.
-            if let Ok(ndb_val) = nodedb_types::value_from_msgpack(value)
+            if let Ok(ndb_val) = crate::data::executor::doc_format::decode_document_value(value)
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (field_name, dim) in &vector_fields {
@@ -164,7 +164,7 @@ impl CoreLoop {
                 .collect();
 
             if !schemaless_keys.is_empty()
-                && let Ok(ndb_val) = nodedb_types::value_from_msgpack(value)
+                && let Ok(ndb_val) = crate::data::executor::doc_format::decode_document_value(value)
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (params_key, field_name) in &schemaless_keys {
@@ -395,12 +395,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

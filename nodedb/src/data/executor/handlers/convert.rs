@@ -6,9 +6,9 @@
 //! earlier cut decodes its version in the new storage mode too.
 //! For `TO strict`: injects each row's client-visible `id`, validates the
 //! result against the schema, and encodes it as a Binary Tuple.
-//! For `TO document` or `TO kv`: a Binary Tuple source re-encodes to
-//! MessagePack. A schemaless source needs no re-encoding — the sparse
-//! engine already stores it as MessagePack.
+//! For `TO document` or `TO kv`: a Binary Tuple source re-encodes to a
+//! native tagged object, the form a schemaless write stores. A schemaless
+//! source needs no re-encoding.
 //! A row that fails to convert fails the whole statement: the handler
 //! returns an error response instead of a success payload, so the caller
 //! never flips the catalog's collection type over partially-converted data.
@@ -19,7 +19,6 @@
 use sonic_rs;
 
 use nodedb_physical::physical_plan::StorageMode;
-use nodedb_query::msgpack_scan;
 use nodedb_types::columnar::{ColumnDef, StrictSchema};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -210,25 +209,26 @@ pub(super) fn target_identity_column(declared_primary_key: Option<&str>) -> &str
     }
 }
 
-/// `normalized` with its identity under `identity_column`.
+/// Give `row` its identity under `identity_column`.
 ///
 /// A row that lacks the target's key column has no client-visible identity
 /// yet: the surrogate's decimal string fills it, so the target schema's NOT
 /// NULL key column has something to validate. A row that carries its system
 /// row id keeps it. One that lacks it takes the surrogate, as a write fills it.
 pub(super) fn with_target_identity(
-    normalized: &[u8],
+    row: &mut nodedb_types::Value,
     identity_column: &str,
     doc_id: &nodedb_types::StorageKey,
-) -> Vec<u8> {
-    if identity_column != nodedb_types::ROWID_COLUMN {
-        let synth_id = doc_id.to_identity();
-        return msgpack_scan::inject_str_field(normalized, identity_column, synth_id.as_str());
-    }
-    if msgpack_scan::extract_field(normalized, 0, nodedb_types::ROWID_COLUMN).is_some() {
-        return normalized.to_vec();
-    }
-    let mut cell = Vec::with_capacity(9);
-    msgpack_scan::writer::write_i64(&mut cell, i64::from(doc_id.surrogate().as_u32()));
-    msgpack_scan::merge_fields(normalized, &[(nodedb_types::ROWID_COLUMN, cell.as_slice())])
+) {
+    let nodedb_types::Value::Object(fields) = row else {
+        return;
+    };
+    let identity = if identity_column == nodedb_types::ROWID_COLUMN {
+        nodedb_types::Value::Integer(i64::from(doc_id.surrogate().as_u32()))
+    } else {
+        nodedb_types::Value::String(doc_id.to_identity().into_string())
+    };
+    fields
+        .entry(identity_column.to_string())
+        .or_insert(identity);
 }

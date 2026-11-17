@@ -5,7 +5,7 @@
 use super::index_path::IndexPath;
 
 /// Collection configuration for the Document Engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CollectionConfig {
     pub name: String,
     /// Declared secondary index paths.
@@ -55,6 +55,11 @@ pub struct CollectionConfig {
     /// rows key by the implicit `id` or `_rowid`. A sparse row's identity
     /// renders under this column, else under `id`.
     pub declared_key: Option<String>,
+    /// The top-level fields the full-text inverted index holds. A write
+    /// indexes the fields of every building or ready full-text index. A
+    /// read runs only against the fields of a ready one. Empty means a
+    /// write touches no inverted-index state.
+    pub text_fields: nodedb_physical::physical_plan::TextFieldSet,
     /// The typeguards of `enforcement.type_guards`, parsed once at
     /// registration. Every write applies them to the body it stores.
     pub type_guards: Vec<crate::data::executor::enforcement::typeguard::CompiledTypeGuard>,
@@ -78,6 +83,7 @@ impl CollectionConfig {
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
             type_guards: Vec::new(),
             incarnation: nodedb_types::Hlc::ZERO,
         }

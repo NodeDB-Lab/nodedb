@@ -2,6 +2,7 @@
 
 //! Protocol-neutral plan classification and shaped row-set types.
 
+mod col_type_name;
 pub mod dml_outcome;
 pub mod plan_kind;
 pub mod shaped;

@@ -9,7 +9,10 @@
 use nodedb_query::scan_filter::FilterOp;
 use nodedb_query::simd_filter;
 
+use nodedb_types::Value;
+
 use super::columnar_memtable::{ColumnData, ColumnType, NULL_SYMBOL_ID};
+use super::row_cells::{bool_value, decimal_value, uuid_value};
 use crate::bridge::scan_filter::ScanFilter;
 
 /// A predicate the grouped scan cannot lower onto typed column vectors.
@@ -165,6 +168,9 @@ pub fn eval_filters_to_bitmask<'a>(
                     }
                 }
             }
+            ColumnType::Decimal(_) | ColumnType::Uuid | ColumnType::Bool => {
+                typed_column_mask(f, col_data, row_count)?
+            }
         };
 
         mask = simd_filter::bitmask_and(&mask, &filter_mask);
@@ -240,7 +246,55 @@ fn null_bitmask(
         ColumnData::Int64(_) | ColumnData::Timestamp(_) => {
             vec![0u64; simd_filter::words_for(row_count)]
         }
+        ColumnData::Decimal(_) | ColumnData::Uuid(_) | ColumnData::Bool(_) => {
+            let mut nulls = vec![0u64; simd_filter::words_for(row_count)];
+            for row in 0..row_count.min(col_data.len()) {
+                if matches!(typed_cell(col_data, row), Value::Null) {
+                    nulls[row / 64] |= 1u64 << (row % 64);
+                }
+            }
+            nulls
+        }
     }
+}
+
+/// The typed value of row `row` of a decimal, UUID or boolean column.
+/// `Value::Null` for a NULL cell, a row past the column, or another column.
+fn typed_cell(col_data: &ColumnData, row: usize) -> Value {
+    match col_data {
+        ColumnData::Decimal(v) => decimal_value(v.get(row).copied().flatten()),
+        ColumnData::Uuid(v) => uuid_value(v.get(row).copied().flatten()),
+        ColumnData::Bool(v) => bool_value(v.get(row).copied().flatten()),
+        _ => Value::Null,
+    }
+}
+
+/// The bitmask of rows of a decimal, UUID or boolean column that satisfy
+/// `f`. Each cell is compared as the typed value a row read gives it, by
+/// the predicate matcher every row filter uses, so a grouped aggregate and a
+/// raw scan admit the same rows. A NULL cell matches no comparison.
+fn typed_column_mask(
+    f: &ScanFilter,
+    col_data: &ColumnData,
+    row_count: usize,
+) -> Result<Vec<u64>, UnsupportedPredicate> {
+    // A plain comparison reads no CRS: expression predicates were refused
+    // above.
+    let crs = nodedb_crs::CrsContext::builtin_only();
+    let mut mask = vec![0u64; simd_filter::words_for(row_count)];
+    for row in 0..row_count.min(col_data.len()) {
+        let doc = Value::Object(std::collections::HashMap::from([(
+            f.field.clone(),
+            typed_cell(col_data, row),
+        )]));
+        let matched = f
+            .matches_value(&doc, &crs)
+            .map_err(|_| UnsupportedPredicate::new(f, "comparison on a typed column"))?;
+        if matched {
+            mask[row / 64] |= 1u64 << (row % 64);
+        }
+    }
+    Ok(mask)
 }
 
 /// The bitmask of rows in an `i64` column (integer or time) that satisfy

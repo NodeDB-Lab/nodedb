@@ -66,8 +66,7 @@ pub fn sparse_tile_to_array_cells(schema: &ArraySchema, tile: &SparseTile) -> Ve
         let attr_row = live_idx;
         live_idx += 1;
         let mut coords = Vec::with_capacity(arity);
-        for dim in 0..arity {
-            let dict = &tile.dim_dicts[dim];
+        for dict in tile.dim_dicts.iter().take(arity) {
             let idx = dict.indices[row] as usize;
             coords.push(coord_value_to_value(&dict.values[idx]));
         }

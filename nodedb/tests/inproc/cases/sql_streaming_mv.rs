@@ -223,19 +223,20 @@ async fn streaming_mv_integer_aggregates_equal_ad_hoc() {
         .await;
         let cells: Vec<&Value> = view.iter().map(|(_, v)| v).collect();
         assert_eq!(cells.len(), 5, "{g}: view row {view:?}");
-        for (i, name) in ["COUNT", "SUM", "MIN", "MAX"].iter().enumerate() {
+        for (i, name) in ["COUNT", "SUM", "MIN", "MAX", "AVG"].iter().enumerate() {
             assert_eq!(
                 text(cells[i]),
                 ad_hoc[i],
                 "{g}: view {name} must equal the ad-hoc {name}"
             );
         }
-        let view_avg = cells[4].as_f64().expect("AVG is a float");
-        let ad_hoc_avg: f64 = ad_hoc[4].parse().expect("ad-hoc AVG is numeric");
-        assert_eq!(
-            view_avg, ad_hoc_avg,
-            "{g}: view AVG must equal the ad-hoc AVG"
-        );
+        // PostgreSQL: avg over these bigints is numeric, and each total's
+        // base-10000 weight leaves no fractional digit.
+        let want_avg = match g {
+            "big" => "3080462145121419264",
+            _ => "1700000000000000002",
+        };
+        assert_eq!(ad_hoc[4], want_avg, "{g}: AVG is PostgreSQL's numeric avg");
     }
 
     // The SUM past `i64::MAX` is exact, not rounded or wrapped.

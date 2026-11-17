@@ -59,8 +59,10 @@ pub(super) fn try_plan_in_subquery(
     Ok(Some(SubqueryJoin {
         on: vec![(outer_col, inner_col)],
         inner_plan,
+        // `NOT IN` is null-aware: a NULL on either side makes the predicate
+        // unknown, unlike `NOT EXISTS`.
         join_type: if negated {
-            JoinType::Anti
+            JoinType::AntiNullAware
         } else {
             JoinType::Semi
         },

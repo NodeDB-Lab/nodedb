@@ -19,11 +19,14 @@
 //! Tuple decodes back to MessagePack with the collection's schema, the same
 //! conversion a transaction commit applies to a staged strict row. Every
 //! replica re-derives the row's secondary index entries as it installs it.
+//!
+//! A vector-primary collection's rows are sidecars, not documents. They are
+//! set aside here and re-issue with their rows' nodes (`sidecars`).
 
 use std::collections::{BTreeMap, HashMap};
 
 use nodedb_types::columnar::StrictSchema;
-use nodedb_types::{CollectionType, DocumentMode, RowIdentity, StorageKey};
+use nodedb_types::{CollectionType, DocumentMode, PrimaryEngine, RowIdentity, StorageKey};
 
 use crate::control::state::SharedState;
 use crate::data::executor::strict_format::{binary_tuple_to_msgpack, undecodable_strict_row};
@@ -32,6 +35,7 @@ use crate::types::{DatabaseId, SurrogateBindEntry, TenantId};
 
 use super::super::target::DatabaseTarget;
 use super::prepared::{PendingRow, PreparedRows};
+use super::sidecars::RestoredSidecars;
 use super::sub_record::VersionStamp;
 
 /// A row as the backup stored it: every `(sys_from, versioned value)`, in
@@ -45,6 +49,15 @@ struct CollectionShape {
     /// The collection declares `HASH_CHAIN`: its rows re-issue in their
     /// install order, so the destination relinks the source chain.
     hash_chain: bool,
+    /// The collection is vector-primary: its rows are sidecars.
+    vector_primary: bool,
+}
+
+/// One database's restored rows: the document rows of each collection, and
+/// the sidecar rows of each vector-primary collection.
+pub(in crate::control::backup::restore) struct PreparedDocuments {
+    pub rows: Vec<PreparedRows>,
+    pub sidecars: RestoredSidecars,
 }
 
 fn malformed(key: &str) -> crate::Error {
@@ -128,6 +141,7 @@ fn collection_shape(
                  entry for it"
             ),
         })?;
+    let vector_primary = matches!(stored.primary, PrimaryEngine::Vector);
     // The storage mode the Data Plane registers for the collection, so a row
     // decodes with the schema it was encoded with.
     let strict = match stored.collection_type {
@@ -139,6 +153,7 @@ fn collection_shape(
         strict,
         declared_primary_key: stored.declared_primary_key,
         hash_chain: stored.hash_chain,
+        vector_primary,
     })
 }
 
@@ -158,7 +173,7 @@ fn chain_seq(
             break;
         }
     }
-    body.and_then(|body| nodedb_types::json_from_msgpack(&body).ok())
+    body.and_then(|body| crate::data::executor::response_codec::decode_body_plain_json(&body).ok())
         .and_then(|doc| {
             doc.get(crate::types::hash_chain::CHAIN_SEQ_FIELD)
                 .and_then(|seq| seq.as_u64())
@@ -260,16 +275,18 @@ impl RowBuilder<'_> {
 /// Every restored row of `tenant_id` in one database, decoded and identified,
 /// grouped by collection in install order. Nothing is bound yet. Every row key
 /// must name `target.source`. `binds` is the backup's primary-key section of
-/// that database.
+/// that database. The rows of a vector-primary collection are set aside as
+/// sidecars, in their stored encoding.
 pub(in crate::control::backup::restore) fn prepare_documents(
     state: &SharedState,
     tenant_id: u64,
     target: DatabaseTarget,
     documents_versioned: Vec<(String, Vec<u8>)>,
     binds: &[SurrogateBindEntry],
-) -> crate::Result<Vec<PreparedRows>> {
+) -> crate::Result<PreparedDocuments> {
     let grouped = group_rows(tenant_id, documents_versioned)?;
     let mut out = Vec::with_capacity(grouped.len());
+    let mut sidecars = RestoredSidecars::default();
     for ((db, stored), rows) in grouped {
         if db != target.source.as_u64() {
             return Err(crate::Error::Serialization {
@@ -282,9 +299,16 @@ pub(in crate::control::backup::restore) fn prepare_documents(
         }
         let name = target.resolve(&stored)?;
         let database_id = target.dest;
+        let shape = collection_shape(state, database_id, tenant_id, &name.bare)?;
+        if shape.vector_primary {
+            for (key, versions) in &rows {
+                sidecars.insert_row(&name, *key, versions)?;
+            }
+            continue;
+        }
         let builder = RowBuilder {
             collection: &name.bare,
-            shape: collection_shape(state, database_id, tenant_id, &name.bare)?,
+            shape,
             binds: binds
                 .iter()
                 .filter(|b| b.tenant_id == tenant_id && b.collection == name.bare)
@@ -315,7 +339,10 @@ pub(in crate::control::backup::restore) fn prepare_documents(
             rows: pending,
         });
     }
-    Ok(out)
+    Ok(PreparedDocuments {
+        rows: out,
+        sidecars,
+    })
 }
 
 #[cfg(test)]

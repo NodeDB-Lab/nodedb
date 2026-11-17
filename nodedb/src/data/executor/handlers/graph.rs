@@ -83,7 +83,9 @@ pub(in crate::data::executor) struct GraphNeighborsArgs<'a> {
 }
 
 /// One `NeighborsMulti` row: `(frontier node, label, neighbour, properties)`.
-type NeighborRow = (String, String, String, Option<nodedb_types::NativeCell>);
+/// `properties` is the crossed edge's stored property image when the hop
+/// returns properties.
+type NeighborRow = (String, String, String, Option<Vec<u8>>);
 
 /// The error for a `NeighborsMulti` hop whose rows outgrow its `max_results`.
 ///
@@ -168,7 +170,10 @@ impl CoreLoop {
         let refs: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
         // Read-your-own-writes: the staged delta joins a live walk at every
         // depth. A tenant with no CSR partition still walks its staged edges.
-        let delta = self.live_overlay_delta(task, tid, scope);
+        let delta = match self.live_overlay_delta(task, tid, scope) {
+            Ok(delta) => delta,
+            Err(e) => return self.response_error(task, e),
+        };
         let csr = match self.csr_view(database_id, tid, collection, scope) {
             Ok(csr) => csr,
             Err(e) => return self.response_error(task, e),
@@ -233,7 +238,7 @@ impl CoreLoop {
         let overlay = self.live_overlay(task, scope);
         let neighbors = match overlay {
             _ if !self.owns_graph_node(node_id) => Vec::new(),
-            Some(overlay) => merge_graph_txn_overlay_neighbors(
+            Some(overlay) => match merge_graph_txn_overlay_neighbors(
                 overlay,
                 &graph_txn_merge::StagedHopScope {
                     database_id: task.request.database_id,
@@ -244,7 +249,10 @@ impl CoreLoop {
                 node_id,
                 direction,
                 durable_of,
-            ),
+            ) {
+                Ok(neighbors) => neighbors,
+                Err(e) => return self.response_error(task, e),
+            },
             None => durable_of(direction),
         };
         let result: Vec<_> = neighbors
@@ -296,7 +304,7 @@ impl CoreLoop {
                     src: src.as_str(),
                     label: label.as_str(),
                     node: node.as_str(),
-                    properties: properties.as_ref(),
+                    properties: properties.as_deref(),
                 }
             })
             .collect();
@@ -397,14 +405,14 @@ impl CoreLoop {
         {
             for &pass in passes {
                 let durable_rows = durable(raw_src, pass.direction());
-                let neighbors: Vec<graph_txn_merge::StagedNeighbor<'_>> = match overlay {
+                let neighbors: Vec<graph_txn_merge::StagedNeighbor> = match overlay {
                     Some(overlay) => graph_txn_merge::merge_staged_hop_pass(
                         overlay,
                         &staged_scope,
                         raw_src,
                         pass,
                         durable_rows,
-                    ),
+                    )?,
                     None => durable_rows
                         .into_iter()
                         .map(|(label, node)| (label, node, None))
@@ -418,10 +426,10 @@ impl CoreLoop {
                         None => None,
                         Some(hop) => {
                             let (src, dst) = pass.endpoints(raw_src, &node);
-                            match hop.cross(src, &label, dst, staged)? {
+                            match hop.cross(src, &label, dst, staged.as_deref())? {
                                 graph_edge_predicate::EdgeCrossing::Rejected => continue,
                                 graph_edge_predicate::EdgeCrossing::Admitted(properties) => {
-                                    properties.map(nodedb_types::NativeCell)
+                                    properties
                                 }
                             }
                         }
@@ -464,12 +472,14 @@ mod tests {
         let (requests, request_rx) = RingBuffer::channel::<BridgeRequest>(8);
         let (response_tx, responses) = RingBuffer::channel::<BridgeResponse>(8);
         let core = CoreLoop::open(
-            0,
-            request_rx,
-            response_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                request_rx,
+                response_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         Harness {
@@ -516,8 +526,11 @@ mod tests {
     /// the property map `{"w": 1}`.
     fn two_edges() -> Harness {
         let mut h = harness();
-        let properties = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"w": 1}))
-            .expect("encode properties");
+        let properties = nodedb_graph::encode_edge_properties(std::collections::HashMap::from([(
+            "w".to_string(),
+            nodedb_types::Value::Integer(1),
+        )]))
+        .expect("encode properties");
         for (lsn, dst, surrogate) in [(10, "b", 2), (11, "c", 3)] {
             let put = h.core.execute_edge_put(
                 &task(lsn),

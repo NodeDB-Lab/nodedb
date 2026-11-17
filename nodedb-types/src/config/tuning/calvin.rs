@@ -102,9 +102,11 @@ pub struct CalvinTuning {
     #[serde(default = "default_max_redo_entry_bytes")]
     pub max_redo_entry_bytes: usize,
 
-    /// Most bytes of chunked redo streams a node holds open. A group leader
+    /// Most bytes of chunked redo streams a node keeps open in its WAL. An
+    /// open stream's chunks are WAL records that truncation keeps until the
+    /// stream closes, so this bounds WAL disk, not memory. A group leader
     /// refuses a new stream that would pass it on the leader's node. A node
-    /// holds at most this much per data group it hosts.
+    /// keeps at most this much per data group it hosts.
     #[serde(default = "default_max_open_redo_bytes")]
     pub max_open_redo_bytes: u64,
 

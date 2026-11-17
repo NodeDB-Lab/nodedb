@@ -18,6 +18,11 @@
 //!   transaction record is the exception: it always applies, so it stays,
 //!   its group closes with one part with no rows, and replay runs its
 //!   install.
+//! - A committed record that folds sums and has no stored write set and no
+//!   part gets the never-durable verdict (see `verdict`). Its group stays
+//!   open through replay. Replay folds the record and stores the fold rows
+//!   as a write set. [`close_replayed_groups`] then journals them as the
+//!   group's parts before the node serves.
 //!
 //! Restart replay, a point-in-time restore of the archived WAL, and the event
 //! stream rebuilt from it then agree with the stores. Boot makes the appended
@@ -26,6 +31,7 @@
 use nodedb_wal::WalRecord;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::marker_changes_of_plan;
 use crate::control::server::wal_dispatch::{
     GroupOrigin, WalAppendRequest, WriteSetTarget, append_group_origin, append_group_parts,
     append_planned_parts, plan_group_parts,
@@ -34,26 +40,37 @@ use crate::event::EventSource;
 use crate::event::cdc::position::{ChangePositionMarker, ReplicatedPosition};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::{WalAppender, WalManager};
-use crate::wal::{OriginAppend, WriteSetCapture};
+use crate::wal::{NeverDurableRedos, OriginAppend, WriteSetCapture};
 
 use super::scan::WalGroups;
 use super::stores::StoredWriteSets;
+use super::verdict::never_durable_redos;
+
+/// What the settle did.
+#[derive(Debug, Default)]
+pub struct SettleOutcome {
+    /// Whether it appended a record. The caller then reads the stream
+    /// again.
+    pub appended: bool,
+    /// The committed records replay folds. Their groups stay open until
+    /// [`close_replayed_groups`] runs.
+    pub never_durable: NeverDurableRedos,
+}
 
 /// Settle every broken group of `records`, the stream replay read from
-/// `wal`, against the write sets stored under `data_dir`. Returns whether it
-/// appended a record, in which case the caller reads the stream again.
+/// `wal`, against the write sets stored under `data_dir`.
 pub fn settle_write_groups(
     wal: &WalManager,
     data_dir: &std::path::Path,
     records: &[WalRecord],
-) -> crate::Result<bool> {
+) -> crate::Result<SettleOutcome> {
     let stored = StoredWriteSets::read(data_dir)?;
-    let appended = settle_against(wal, records, &stored.captures)?;
-    if appended {
+    let outcome = settle_against(wal, records, &stored.captures)?;
+    if outcome.appended {
         wal.sync()?;
     }
     stored.clear()?;
-    Ok(appended)
+    Ok(outcome)
 }
 
 /// The settle itself, over write sets already read.
@@ -61,7 +78,7 @@ pub(crate) fn settle_against(
     wal: &WalManager,
     records: &[WalRecord],
     captures: &[WriteSetCapture],
-) -> crate::Result<bool> {
+) -> crate::Result<SettleOutcome> {
     let scanned = WalGroups::scan(records)?;
     let wal_end = wal.next_lsn().as_u64();
     let mut appended = false;
@@ -74,8 +91,9 @@ pub(crate) fn settle_against(
             complete_group(wal, &scanned, capture)?
         };
     }
+    let never_durable = never_durable_redos(records, &scanned, &captured)?;
     for (&origin, scan) in &scanned.groups {
-        if scan.is_whole() || captured.contains(&origin) {
+        if scan.is_whole() || captured.contains(&origin) || never_durable.contains(origin) {
             continue;
         }
         if scanned.committed.contains(&origin) {
@@ -102,7 +120,37 @@ pub(crate) fn settle_against(
             appended = true;
         }
     }
-    Ok(appended)
+    Ok(SettleOutcome {
+        appended,
+        never_durable,
+    })
+}
+
+/// Journal the fold rows restart replay stored for each never-durable
+/// record as the parts of its group, then make them durable. The group of
+/// each record is open with no part, so every part is appended. Returns
+/// whether it appended a record.
+///
+/// A crash before the sync leaves each write set stored, and the next boot
+/// journals its parts from it. The cores drop the write sets once their
+/// parts are durable.
+pub fn close_replayed_groups(
+    wal: &WalManager,
+    captures: &[WriteSetCapture],
+) -> crate::Result<bool> {
+    for capture in captures {
+        let appender = part_appender(wal, &capture.origin_append)?;
+        append_group_parts(
+            appender,
+            target(capture, Lsn::new(capture.origin)),
+            &capture.write_set()?,
+        )?;
+    }
+    if captures.is_empty() {
+        return Ok(false);
+    }
+    wal.sync()?;
+    Ok(true)
 }
 
 /// Close the group of the committed transaction record at `origin` with one
@@ -139,6 +187,7 @@ fn close_committed_group(
             home.vshard_id,
             home.database_id,
             &crate::wal::WriteGroupRecord {
+                schemas: Vec::new(),
                 group: crate::wal::WriteGroup::part_of(origin, 1, 1),
                 ops: Vec::new(),
                 redo: None,
@@ -157,7 +206,7 @@ fn complete_group(
 ) -> crate::Result<bool> {
     let appender = part_appender(wal, &capture.origin_append)?;
     let target = target(capture, Lsn::new(capture.origin));
-    let write_set = capture.write_set();
+    let write_set = capture.write_set()?;
     let parts = plan_group_parts(&target, &write_set, wal.max_payload())?;
     let cancels_origin = parts.cancels_origin;
     let present = scanned.parts_present(capture.origin);
@@ -176,7 +225,8 @@ fn complete_group(
 }
 
 /// Journal a write whose origin the crash cut: its change position marker,
-/// its origin, then every part.
+/// its origin, then every part. The crash came before the write's response,
+/// so no change event of it staged.
 fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Result<bool> {
     let inputs = &capture.origin_append;
     let appender = part_appender(wal, inputs)?;
@@ -197,11 +247,15 @@ fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Resu
             Some(hlc) => marker_appender.with_commit_hlc(hlc),
             None => marker_appender,
         };
+        // The marker names the rows the write yields, as the funnel's does:
+        // the entry's delivery after this boot stages its change events
+        // from it.
+        let changes = marker_changes_of_plan(&plan, home.tenant_id);
         marker_appender.append_change_position(
             home.tenant_id,
             home.vshard_id,
             home.database_id,
-            &marker.to_bytes(),
+            &marker.with_changes(&changes)?,
         )?;
     }
     let origin = append_group_origin(WalAppendRequest {
@@ -215,7 +269,7 @@ fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Resu
         now_override: inputs.resolved_now_ms,
     })?
     .origin;
-    append_group_parts(appender, target(capture, origin.lsn), &capture.write_set())?;
+    append_group_parts(appender, target(capture, origin.lsn), &capture.write_set()?)?;
     Ok(true)
 }
 

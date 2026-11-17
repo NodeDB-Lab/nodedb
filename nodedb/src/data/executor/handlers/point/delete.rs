@@ -65,6 +65,7 @@ impl CoreLoop {
 
         let database_id = task.request.database_id.as_u64();
         let hook_ctx = HookCtx {
+            target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
             database_id,
             tid,
             collection,
@@ -481,6 +482,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &targets,
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
         .status
     }
@@ -543,6 +545,7 @@ mod tests {
             rls_filters: &[],
             resolved_sum_targets: &[],
             deferred_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
         .status
     }

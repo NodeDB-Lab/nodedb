@@ -33,9 +33,9 @@ impl SyncSession {
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some(reason.clone()),
+                reject_reason: Some(reason),
                 applied_seq: 0,
-                status: AckStatus::Rejected { reason },
+                status: AckStatus::Fenced,
             };
             return SyncFrame::try_encode(SyncMessageType::SpatialInsertAck, &ack);
         }
@@ -53,19 +53,7 @@ impl SyncSession {
                     error = %e,
                     "spatial sync: geometry deserialisation failed"
                 );
-                let ack = SpatialInsertAckMsg {
-                    collection: msg.collection.clone(),
-                    field: msg.field.clone(),
-                    doc_id: msg.doc_id.clone(),
-                    batch_id: msg.batch_id,
-                    accepted: false,
-                    reject_reason: Some(format!("geometry deserialise failed: {e}")),
-                    applied_seq: 0,
-                    status: AckStatus::Rejected {
-                        reason: format!("geometry deserialise failed: {e}"),
-                    },
-                };
-                return SyncFrame::try_encode(SyncMessageType::SpatialInsertAck, &ack);
+                return None;
             }
         };
 
@@ -88,17 +76,16 @@ impl SyncSession {
                     error = %e,
                     "spatial sync: surrogate assignment failed"
                 );
+                let wire = spatial_ack_from_error(&e)?;
                 let ack = SpatialInsertAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: Some(format!("surrogate assignment failed: {e}")),
-                    applied_seq: 0,
-                    status: AckStatus::Rejected {
-                        reason: format!("surrogate assignment failed: {e}"),
-                    },
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 return SyncFrame::try_encode(SyncMessageType::SpatialInsertAck, &ack);
             }
@@ -141,15 +128,8 @@ impl SyncSession {
             .await
         {
             Ok(payload_bytes) => {
+                let wire = super::ack_decode::decode_core_ack(&payload_bytes)?;
                 self.mutations_processed += 1;
-                let wire = super::ack_decode::decode_sync_ack(
-                    &payload_bytes,
-                    "spatial insert",
-                    &self.session_id,
-                    &msg.collection,
-                    msg.seq,
-                )
-                .into_wire();
                 let ack = SpatialInsertAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
@@ -172,16 +152,16 @@ impl SyncSession {
                     error = %e,
                     "spatial insert dispatch failed"
                 );
-                let status = super::refusal::ack_status_for_dispatch_error(&e, msg.seq);
+                let wire = spatial_ack_from_error(&e)?;
                 let ack = SpatialInsertAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: super::refusal::reject_reason_for(&status),
-                    applied_seq: msg.seq.saturating_sub(1),
-                    status,
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 SyncFrame::try_encode(SyncMessageType::SpatialInsertAck, &ack)
             }
@@ -204,9 +184,9 @@ impl SyncSession {
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some(reason.clone()),
+                reject_reason: Some(reason),
                 applied_seq: 0,
-                status: AckStatus::Rejected { reason },
+                status: AckStatus::Fenced,
             };
             return SyncFrame::try_encode(SyncMessageType::SpatialDeleteAck, &ack);
         }
@@ -234,17 +214,16 @@ impl SyncSession {
                     error = %e,
                     "spatial sync: surrogate lookup failed for delete"
                 );
+                let wire = spatial_ack_from_error(&e)?;
                 let ack = SpatialDeleteAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: Some(format!("surrogate lookup failed: {e}")),
-                    applied_seq: 0,
-                    status: AckStatus::Rejected {
-                        reason: format!("surrogate lookup failed: {e}"),
-                    },
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 return SyncFrame::try_encode(SyncMessageType::SpatialDeleteAck, &ack);
             }
@@ -284,15 +263,8 @@ impl SyncSession {
             .await
         {
             Ok(payload_bytes) => {
+                let wire = super::ack_decode::decode_core_ack(&payload_bytes)?;
                 self.mutations_processed += 1;
-                let wire = super::ack_decode::decode_sync_ack(
-                    &payload_bytes,
-                    "spatial delete",
-                    &self.session_id,
-                    &msg.collection,
-                    msg.seq,
-                )
-                .into_wire();
                 let ack = SpatialDeleteAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
@@ -315,19 +287,36 @@ impl SyncSession {
                     error = %e,
                     "spatial delete dispatch failed"
                 );
-                let status = super::refusal::ack_status_for_dispatch_error(&e, msg.seq);
+                let wire = spatial_ack_from_error(&e)?;
                 let ack = SpatialDeleteAckMsg {
                     collection: msg.collection.clone(),
                     field: msg.field.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: super::refusal::reject_reason_for(&status),
-                    applied_seq: msg.seq.saturating_sub(1),
-                    status,
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 SyncFrame::try_encode(SyncMessageType::SpatialDeleteAck, &ack)
             }
         }
     }
+}
+
+/// Authorization cannot consume a producer's sequence before core admission.
+fn spatial_ack_from_error(error: &crate::Error) -> Option<super::ack_decode::EngineAckWire> {
+    if matches!(
+        error,
+        crate::Error::RejectedAuthz { .. }
+            | crate::Error::DataPlane(crate::bridge::envelope::ErrorCode::RejectedAuthz { .. })
+    ) {
+        return Some(super::ack_decode::EngineAckWire {
+            accepted: false,
+            reject_reason: Some(error.to_string()),
+            applied_seq: 0,
+            status: AckStatus::Fenced,
+        });
+    }
+    super::ack_decode::decode_core_error(error)
 }

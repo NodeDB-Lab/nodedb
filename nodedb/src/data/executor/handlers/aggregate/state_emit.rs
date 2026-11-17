@@ -14,9 +14,9 @@
 //! downstream [`crate::data::executor::handlers::aggregate::shuffle_merge`]
 //! consumer merges these partial states from every producer and finalizes them.
 //!
-//! Rows are flat maps (NO `{id, data}` storage wrapper) so the consume side can
-//! re-derive the group key from the row's own GROUP BY columns
-//! byte-identically.
+//! Rows are flat native tagged objects (NO `{id, data}` storage wrapper), so
+//! the GROUP BY columns stay typed and the consume side re-derives the
+//! canonical group identity from the row's own GROUP BY columns.
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -115,59 +115,57 @@ impl CoreLoop {
             }
         };
 
-        match crate::data::executor::response_codec::encode_value_vec(&rows) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
+        let payload = crate::data::executor::response_codec::encode_binary_rows(&rows);
+        self.response_with_payload(task, payload)
     }
 
     /// Build the flat per-group rows `{<gb cols>, "__agg_state": <bytes>}` from
-    /// the consolidated group map.
+    /// the consolidated group map, each a native tagged `Value::Object`.
     ///
-    /// The GROUP BY column values are recovered from the JSON-array group key
-    /// (the same encoding `build_group_key` produces) so that the consume side,
-    /// which re-derives the key from these same row fields via `build_group_key`,
-    /// reconstructs a byte-identical key.
-    fn partial_state_rows(
+    /// The GROUP BY columns carry each group's representative: the typed key
+    /// values of its first row. The native encoding keeps them typed, so a
+    /// `Decimal` or `Uuid` key reaches the consumer as itself, and the
+    /// consumer's `build_group_key` over these fields yields the producer's
+    /// canonical identity.
+    pub(super) fn partial_state_rows(
         groups: std::collections::HashMap<String, GroupState>,
         group_by: &[GroupKeySpec],
-    ) -> crate::Result<Vec<Value>> {
-        let mut rows: Vec<Value> = Vec::with_capacity(groups.len());
-        for (group_key, state) in groups {
+    ) -> crate::Result<Vec<Vec<u8>>> {
+        let mut rows: Vec<Vec<u8>> = Vec::with_capacity(groups.len());
+        for (_, state) in groups {
             let mut map: std::collections::HashMap<String, Value> =
                 std::collections::HashMap::with_capacity(group_by.len() + 1);
 
             if !group_by.is_empty() {
-                let parts: Vec<serde_json::Value> =
-                    sonic_rs::from_str(&group_key).map_err(|e| crate::Error::Codec {
-                        detail: format!("partial-state group key decode: {e}"),
-                    })?;
-                // One positional slot per key that contributed to the key bytes
+                let parts = state.require_key_values("partial-state group")?;
+                // One positional slot per key that contributed to the key
                 // (a bare `field` or a computed `expr`); re-emit each under its
-                // `output_name` so the consume side can rebuild a byte-identical
-                // key from these flat row fields.
+                // `output_name` so the consume side can rebuild the identity
+                // from these flat row fields.
                 let mut part_idx = 0usize;
                 for spec in group_by {
                     if spec.field.is_none() && spec.expr.is_none() {
                         continue;
                     }
-                    let jv = parts
-                        .get(part_idx)
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    map.insert(spec.output_name.clone(), Value::from(jv));
+                    let value = parts.get(part_idx).cloned().unwrap_or(Value::Null);
+                    map.insert(spec.output_name.clone(), value);
                     part_idx += 1;
                 }
             }
 
             // GroupState encodes as MessagePack, the same encoding
-            // `GroupBySpiller` uses to persist it. NaN and ±Infinity stay exact.
+            // `GroupBySpiller` uses to persist it. NaN and ±Infinity stay exact,
+            // and the state carries its representative key values.
             let state_bytes = zerompk::to_msgpack_vec(&state).map_err(|e| crate::Error::Codec {
                 detail: format!("partial-state serialize: {e}"),
             })?;
             map.insert(AGG_STATE_FIELD.to_string(), Value::Bytes(state_bytes));
 
-            rows.push(Value::Object(map));
+            let row =
+                zerompk::to_msgpack_vec(&Value::Object(map)).map_err(|e| crate::Error::Codec {
+                    detail: format!("partial-state row encode: {e}"),
+                })?;
+            rows.push(row);
         }
         Ok(rows)
     }

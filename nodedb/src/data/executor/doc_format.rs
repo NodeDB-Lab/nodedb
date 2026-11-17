@@ -72,6 +72,20 @@ pub(super) fn decode_document(bytes: &[u8]) -> crate::Result<serde_json::Value> 
     sonic_rs::from_slice(bytes).map_err(|e| decode_err("json", e))
 }
 
+/// Render a document body as client JSON.
+///
+/// A native object (`[7, {...}]`) renders through
+/// `crate::util::wire_json::value_to_wire_json`, the renderer every typed
+/// value takes to a client: a Decimal is a JSON string of its exact digits and
+/// scale, an instant its ISO 8601 text. A plain map or JSON body renders as [`decode_document`]
+/// reads it. A native body that does not decode is an error.
+pub(super) fn render_document_json(bytes: &[u8]) -> crate::Result<serde_json::Value> {
+    match super::response_codec::render_native_body_json(bytes)? {
+        Some(json) => Ok(json),
+        None => decode_document(bytes),
+    }
+}
+
 /// Decode a stored row that may be schemaless (MessagePack/JSON) or a strict
 /// collection's Binary Tuple, dispatching on whether a schema was given.
 /// `context` names the caller in the error message.
@@ -92,6 +106,41 @@ pub(super) fn decode_document_or_binary_tuple(
             }),
         None => decode_document(bytes),
     }
+}
+
+/// [`decode_document_or_binary_tuple`] keeping every field's type: a
+/// schemaless body through [`decode_document_value`], a strict tuple through
+/// `strict_format::binary_tuple_to_row_value`.
+pub(super) fn decode_typed_document_or_binary_tuple(
+    bytes: &[u8],
+    strict_schema: Option<&nodedb_types::columnar::StrictSchema>,
+    context: &str,
+) -> crate::Result<nodedb_types::Value> {
+    match strict_schema {
+        Some(schema) => {
+            crate::data::executor::strict_format::binary_tuple_to_row_value(bytes, schema)
+                .ok_or_else(|| crate::Error::Serialization {
+                    format: "binary_tuple".to_string(),
+                    detail: format!(
+                        "{context} ({} bytes) is not a Binary Tuple readable under the \
+                 collection's strict schema",
+                        bytes.len()
+                    ),
+                })
+        }
+        None => decode_document_value(bytes),
+    }
+}
+
+/// Encode a resolved typed document (MERGE, `UPDATE ... FROM`) to its wire body: the plain map
+/// when it keeps every field's type, else the native object, so a UUID or a
+/// decimal a MERGE arm wrote stays typed. See
+/// `nodedb_types::value_to_document_body`.
+pub(super) fn encode_typed_resolved_body(doc: &nodedb_types::Value) -> crate::Result<Vec<u8>> {
+    nodedb_types::value_to_document_body(doc).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("resolved document body: {e}"),
+    })
 }
 
 /// Convert a document byte blob to `nodedb_types::Value`, preserving native
@@ -124,16 +173,6 @@ pub(super) fn encode_to_msgpack(value: &serde_json::Value) -> Vec<u8> {
     })
 }
 
-/// Encode a resolved document (MERGE / `UPDATE ... FROM`) to the standard
-/// schemaless wire body — the same `nodedb_types::Value` msgpack encoding
-/// plain `INSERT` produces. `json_to_msgpack` instead yields a JSON-flavoured
-/// map the vector-search flattener can't decode, so a resolved row's
-/// non-key fields would come back empty from a vector search.
-pub(super) fn encode_resolved_wire_body(doc: &serde_json::Value) -> Vec<u8> {
-    let value: nodedb_types::Value = doc.clone().into();
-    nodedb_types::value_to_msgpack(&value).unwrap_or_else(|_| encode_to_msgpack(doc))
-}
-
 /// Convert JSON bytes to MessagePack bytes, borrowing when nothing changes.
 /// A standard msgpack map or unknown bytes pass through borrowed; JSON is
 /// parsed and re-encoded (owned). Borrowing the common case is what keeps a
@@ -158,30 +197,35 @@ pub(super) fn json_to_msgpack_cow(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
-/// Owning form of [`json_to_msgpack_cow`], for callers that must keep the
-/// result past the input's lifetime or hand it on as a `Vec`.
-pub(super) fn json_to_msgpack(bytes: &[u8]) -> Vec<u8> {
-    json_to_msgpack_cow(bytes).into_owned()
-}
-
-/// Convert a vector-primary metadata sidecar body (tagged msgpack, each value
-/// a `[tag, payload]` array) to a standard MessagePack map. A document
-/// decoder would return the tag arrays verbatim since the outer container
-/// still passes every "is this already msgpack?" guard — the caller must
-/// route by collection kind, never by inspecting bytes. Non-tagged bytes
-/// pass through unchanged (borrowed); only the real transcode allocates.
-pub(super) fn vector_sidecar_to_msgpack_cow(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+/// Convert a vector-primary metadata sidecar body (a map whose every value
+/// is a `[tag, payload]` array) to the native object `[7, {...}]` a
+/// schemaless document body is stored as, so every field keeps its exact
+/// type. A document decoder would return the tag arrays verbatim since the
+/// outer container still passes every "is this already msgpack?" guard —
+/// the caller must route by collection kind, never by inspecting bytes.
+/// Bytes that are no tagged map pass through unchanged (borrowed); only the
+/// real transcode allocates.
+///
+/// # Errors
+///
+/// A decoded sidecar whose native object does not encode. The raw tagged
+/// sidecar never stands in for it: a reader would see the tag arrays as values.
+pub(super) fn vector_sidecar_to_msgpack_cow(
+    bytes: &[u8],
+) -> crate::Result<std::borrow::Cow<'_, [u8]>> {
     use std::borrow::Cow;
 
     if bytes.is_empty() {
-        return Cow::Borrowed(bytes);
+        return Ok(Cow::Borrowed(bytes));
     }
     match zerompk::from_msgpack::<std::collections::HashMap<String, nodedb_types::Value>>(bytes) {
-        Ok(map) => {
-            let json: serde_json::Value = nodedb_types::Value::Object(map).into();
-            Cow::Owned(encode_to_msgpack(&json))
-        }
-        Err(_) => Cow::Borrowed(bytes),
+        Ok(map) => zerompk::to_msgpack_vec(&nodedb_types::Value::Object(map))
+            .map(Cow::Owned)
+            .map_err(|error| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("vector sidecar cannot encode as a native object: {error}"),
+            }),
+        Err(_) => Ok(Cow::Borrowed(bytes)),
     }
 }
 
@@ -191,7 +235,8 @@ fn is_standard_msgpack_map(bytes: &[u8]) -> bool {
         && nodedb_query::msgpack_scan::map_header(bytes, 0).is_some()
 }
 
-/// Canonicalize a schemaless document for storage as a top-level standard msgpack map.
+/// Canonicalize a schemaless document for storage: a top-level standard
+/// msgpack map, or a native object, which keeps every field's exact type.
 ///
 /// This is the write-path invariant for schemaless collections. Scans should not
 /// rely on this helper for repair; new writes must already be canonical.
@@ -201,6 +246,15 @@ pub(super) fn canonicalize_document_for_storage(bytes: &[u8]) -> Vec<u8> {
     }
 
     if is_standard_msgpack_map(bytes) {
+        return bytes.to_vec();
+    }
+
+    // A native object is a canonical stored body: it keeps every field's
+    // exact type, as the durable put path stores it. Converting it to a
+    // plain map would turn a Decimal, a UUID or an instant into text.
+    if super::response_codec::is_native_row(bytes)
+        && nodedb_types::object_msgpack::decode_object(bytes).is_ok()
+    {
         return bytes.to_vec();
     }
 
@@ -236,7 +290,7 @@ mod tests {
         let json_bytes = serde_json::to_vec(&original).unwrap();
 
         // Convert JSON → MessagePack.
-        let msgpack_bytes = json_to_msgpack(&json_bytes);
+        let msgpack_bytes = json_to_msgpack_cow(&json_bytes).into_owned();
         assert_ne!(
             json_bytes, msgpack_bytes,
             "should convert to different format"
@@ -266,8 +320,12 @@ mod tests {
     fn already_msgpack_unchanged() {
         let value = serde_json::json!({"a": 1});
         let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
-        let result = json_to_msgpack(&msgpack);
-        assert_eq!(result, msgpack, "msgpack should pass through unchanged");
+        let result = json_to_msgpack_cow(&msgpack);
+        assert_eq!(
+            result.as_ref(),
+            msgpack.as_slice(),
+            "msgpack should pass through unchanged"
+        );
     }
 
     #[test]
@@ -279,29 +337,39 @@ mod tests {
         );
         let tagged = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap();
 
-        let result = json_to_msgpack(&tagged);
-        assert_eq!(result, tagged);
+        let result = json_to_msgpack_cow(&tagged);
+        assert_eq!(result.as_ref(), tagged.as_slice());
     }
 
+    /// A native object is already canonical: it is stored as it came, so a
+    /// Decimal keeps its scale and a UUID, an instant and bytes stay typed,
+    /// as the durable put path stores them.
     #[test]
-    fn tagged_object_msgpack_is_canonicalized_to_standard_map_for_storage() {
-        let mut obj = std::collections::HashMap::new();
-        obj.insert(
-            "user_id".to_string(),
-            nodedb_types::Value::String("u1".into()),
-        );
-        obj.insert(
-            "item".to_string(),
-            nodedb_types::Value::String("book".into()),
-        );
-        let tagged = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap();
+    fn a_native_object_is_stored_as_it_came() {
+        let obj: std::collections::HashMap<String, nodedb_types::Value> = [
+            (
+                "price".to_string(),
+                nodedb_types::Value::Decimal("12.50".parse().unwrap()),
+            ),
+            (
+                "uid".to_string(),
+                nodedb_types::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            (
+                "at".to_string(),
+                nodedb_types::Value::DateTime(nodedb_types::NdbDateTime::from_micros(1)),
+            ),
+            ("blob".to_string(), nodedb_types::Value::Bytes(vec![0, 255])),
+        ]
+        .into();
+        let tagged = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj.clone())).unwrap();
 
         let canonical = canonicalize_document_for_storage(&tagged);
-        assert!(
-            nodedb_query::msgpack_scan::map_header(&canonical, 0).is_some(),
-            "expected standard msgpack map"
+        assert_eq!(canonical, tagged);
+        assert_eq!(
+            nodedb_types::object_msgpack::decode_object(&canonical).unwrap(),
+            nodedb_types::Value::Object(obj)
         );
-        assert!(nodedb_query::msgpack_scan::extract_field(&canonical, 0, "user_id").is_some());
     }
 
     /// The sidecar normalizer must turn tagged values into real values;
@@ -317,30 +385,57 @@ mod tests {
         let tagged = zerompk::to_msgpack_vec(&obj).unwrap();
 
         assert_eq!(
-            json_to_msgpack(&tagged),
-            tagged,
+            json_to_msgpack_cow(&tagged).as_ref(),
+            tagged.as_slice(),
             "the document normalizer must NOT be the thing that fixes this"
         );
 
-        let normalized = vector_sidecar_to_msgpack_cow(&tagged);
+        let normalized = vector_sidecar_to_msgpack_cow(&tagged).expect("transcode");
         let doc = decode_document(&normalized).expect("sidecar must decode as msgpack");
         assert_eq!(doc.get("owner").and_then(|v| v.as_str()), Some("alice"));
         assert_eq!(doc.get("id").and_then(|v| v.as_str()), Some("r1"));
+    }
+
+    /// A sidecar field keeps its exact type through the normalizer.
+    #[test]
+    fn a_tagged_sidecar_keeps_typed_fields() {
+        let price = nodedb_types::Value::Decimal("12.50".parse().expect("decimal"));
+        let uid = nodedb_types::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let obj = std::collections::HashMap::from([
+            ("price".to_string(), price.clone()),
+            ("uid".to_string(), uid.clone()),
+        ]);
+        let tagged = zerompk::to_msgpack_vec(&obj).expect("sidecar");
+        let normalized = vector_sidecar_to_msgpack_cow(&tagged).expect("transcode");
+        let nodedb_types::Value::Object(fields) =
+            nodedb_types::object_msgpack::decode_object(&normalized).expect("native object")
+        else {
+            panic!("an object");
+        };
+        assert_eq!(fields.get("price"), Some(&price));
+        assert_eq!(fields.get("uid"), Some(&uid));
     }
 
     #[test]
     fn a_non_sidecar_body_is_returned_unchanged() {
         let value = serde_json::json!({"a": 1});
         let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
-        assert_eq!(vector_sidecar_to_msgpack_cow(&msgpack), msgpack);
-        assert!(vector_sidecar_to_msgpack_cow(b"").is_empty());
+        assert_eq!(
+            vector_sidecar_to_msgpack_cow(&msgpack).expect("pass through"),
+            msgpack
+        );
+        assert!(
+            vector_sidecar_to_msgpack_cow(b"")
+                .expect("empty")
+                .is_empty()
+        );
     }
 
     #[test]
     fn empty_bytes_handled() {
         assert!(decode_document(b"").is_err());
         assert!(decode_document_value(b"").is_err());
-        assert!(json_to_msgpack(b"").is_empty());
+        assert!(json_to_msgpack_cow(b"").is_empty());
     }
 
     /// A body holds exactly one top-level value. Anything after it means the

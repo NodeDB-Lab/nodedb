@@ -25,8 +25,8 @@ use super::edge_unit::{
 };
 use super::support::ddl_err;
 
-/// One edge to insert, its `PROPERTIES` already encoded as the plain
-/// MessagePack map the edge store holds. Empty bytes store no properties.
+/// One edge to insert, its `PROPERTIES` already encoded as the native tagged
+/// object the edge store holds. Empty bytes store no properties.
 pub struct EdgeInsert {
     pub src: String,
     pub dst: String,
@@ -53,20 +53,15 @@ pub fn edge_inserts_from_specs(specs: Vec<GraphEdgeSpec>) -> Result<Vec<EdgeInse
         .collect()
 }
 
-/// The edges of a native `EdgePutBatch`, their properties encoded. An empty
-/// property map stores no properties, as an absent `PROPERTIES` clause does.
+/// The edges of a native `EdgePutBatch`, their typed properties encoded as a
+/// native tagged object. An empty property map stores no properties, as an
+/// absent `PROPERTIES` clause does.
 pub fn edge_inserts_from_writes(writes: Vec<EdgeWrite>) -> Result<Vec<EdgeInsert>, DdlError> {
     writes
         .into_iter()
         .map(|write| {
-            let properties = if write.properties.is_empty() {
-                Vec::new()
-            } else {
-                nodedb_types::json_msgpack::value_to_msgpack(&nodedb_types::Value::Object(
-                    write.properties,
-                ))
-                .map_err(|e| DdlError::internal(format!("edge properties encode error: {e}")))?
-            };
+            let properties = nodedb_graph::encode_edge_properties(write.properties)
+                .map_err(|e| DdlError::internal(format!("edge properties encode error: {e}")))?;
             Ok(EdgeInsert {
                 src: write.src.as_str().to_owned(),
                 dst: write.dst.as_str().to_owned(),

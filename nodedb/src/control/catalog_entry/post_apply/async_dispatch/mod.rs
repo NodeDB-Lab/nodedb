@@ -30,6 +30,7 @@ pub mod materialized_view;
 pub mod move_tenant;
 pub mod spatial_ref_sys;
 pub mod synonym_group;
+pub mod text_index;
 pub mod vector;
 
 pub use dispatcher::run_post_apply_async_side_effects;

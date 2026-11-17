@@ -230,8 +230,10 @@ async fn a_node_delete_with_plans_over_one_mebibyte_commits() {
         .await
         .unwrap();
     insert_node(&server, "mp_big", "hub").await;
-    let pad = "k".repeat(600);
-    const NEIGHBOURS: usize = 2_000;
+    // 700 keys of 2 KB put 1.4 MB of keys in the plans before any other
+    // field. Few long keys keep the setup to seven insert statements.
+    let pad = "k".repeat(2_000);
+    const NEIGHBOURS: usize = 700;
     let edges: Vec<(String, String, String)> = (0..NEIGHBOURS)
         .map(|i| (format!("e_{i}"), format!("{pad}_{i}"), "hub".to_string()))
         .collect();

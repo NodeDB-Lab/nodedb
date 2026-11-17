@@ -176,6 +176,11 @@ pub struct TenantDataSnapshot {
     /// Every version keeps its system time, tombstones included.
     pub documents_versioned: Vec<(String, Vec<u8>)>,
 
+    /// Every stored sync-frame text version of every collection, tombstones
+    /// included. Each keeps its system-time ordinal. A restore re-indexes
+    /// the declared fields of the documents it carries no version of.
+    pub synced_text: Vec<super::SyncedTextEntry>,
+
     /// Every versioned secondary-index entry of every document collection:
     /// `[("{db}:{tid}:{collection}:{field}:{value}:{doc_id}\x00{system_from:020}", tag), ...]`.
     pub indexes_versioned: Vec<(String, Vec<u8>)>,

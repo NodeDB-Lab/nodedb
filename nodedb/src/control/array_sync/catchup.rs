@@ -32,7 +32,7 @@ use tracing::{debug, warn};
 
 use super::ack_registry::ArrayAckRegistry;
 use super::op_log::OriginOpLog;
-use super::outbound::delivery::ArrayDeliveryRegistry;
+use super::outbound::delivery::{ArrayDeliveryRegistry, ArrayFrame};
 use super::outbound::subscriber_state::SubscriberMap;
 use super::schema_registry::OriginSchemaRegistry;
 use super::snapshot_store::OriginSnapshotStore;
@@ -139,7 +139,12 @@ impl OriginCatchupServer {
                 header_payload,
             };
 
-            if !self.send_frame(session_id, SyncMessageType::ArraySnapshot, &snap_msg) {
+            if !self.send_frame(
+                session_id,
+                &req.array,
+                SyncMessageType::ArraySnapshot,
+                &snap_msg,
+            ) {
                 return Ok(());
             }
 
@@ -151,7 +156,12 @@ impl OriginCatchupServer {
                     payload: chunk.payload.clone(),
                     snapshot_hlc_bytes: chunk.snapshot_hlc.to_bytes(),
                 };
-                if !self.send_frame(session_id, SyncMessageType::ArraySnapshotChunk, &chunk_msg) {
+                if !self.send_frame(
+                    session_id,
+                    &req.array,
+                    SyncMessageType::ArraySnapshotChunk,
+                    &chunk_msg,
+                ) {
                     return Ok(());
                 }
             }
@@ -227,7 +237,7 @@ impl OriginCatchupServer {
                     array: array.to_owned(),
                     op_payloads: std::mem::take(&mut batch_payloads),
                 };
-                if !self.send_frame(session_id, SyncMessageType::ArrayDeltaBatch, &batch) {
+                if !self.send_frame(session_id, array, SyncMessageType::ArrayDeltaBatch, &batch) {
                     return Ok(false);
                 }
                 self.cursors.mark_sent_in_database(
@@ -252,7 +262,7 @@ impl OriginCatchupServer {
                 array: array.to_owned(),
                 op_payloads: batch_payloads,
             };
-            if !self.send_frame(session_id, SyncMessageType::ArrayDeltaBatch, &batch) {
+            if !self.send_frame(session_id, array, SyncMessageType::ArrayDeltaBatch, &batch) {
                 return Ok(false);
             }
             self.cursors.mark_sent_in_database(
@@ -275,11 +285,14 @@ impl OriginCatchupServer {
     fn send_frame<T: serde::Serialize + zerompk::ToMessagePack>(
         &self,
         session_id: &str,
+        array: &str,
         msg_type: SyncMessageType,
         msg: &T,
     ) -> bool {
         match nodedb_types::sync::wire::SyncFrame::try_encode(msg_type, msg) {
-            Some(frame) => self.delivery.enqueue(session_id, frame.to_bytes()),
+            Some(frame) => self
+                .delivery
+                .enqueue(session_id, ArrayFrame::new(array, frame.to_bytes())),
             None => {
                 warn!(
                     session = %session_id,

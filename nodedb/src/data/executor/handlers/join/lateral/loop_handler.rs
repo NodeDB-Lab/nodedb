@@ -4,14 +4,14 @@
 
 use tracing::debug;
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::JoinProjection;
 
 use super::inner::{OuterRowJoin, encode_inner_filters};
-use super::shared::{bind_outer_values, build_scan_plan, correlation_value, flatten_outer_row};
+use super::shared::{bind_outer_values, build_scan_plan, correlation_value, outer_rows};
 use crate::bridge::scan_filter::{FilterOp, ScanFilter, decode_scan_filters};
 
 /// Parameters for `LateralLoop` execution.
@@ -44,12 +44,15 @@ impl CoreLoop {
         );
 
         let outer_resp = self.execute_plan(p.task, p.outer_plan);
-        let outer_docs = match response_codec::decode_response_to_docs(&outer_resp) {
-            Some(docs) => docs,
-            None => return outer_resp,
+        if matches!(outer_resp.status, Status::Error) {
+            return outer_resp;
+        }
+        let outer_rows = match outer_rows(outer_resp.payload.as_ref(), p.outer_plan) {
+            Ok(rows) => rows,
+            Err(error) => return self.response_error(p.task, ErrorCode::from(error)),
         };
 
-        if outer_docs.len() > p.outer_row_cap {
+        if outer_rows.len() > p.outer_row_cap {
             return self.response_error(
                 p.task,
                 ErrorCode::Unsupported {
@@ -72,22 +75,18 @@ impl CoreLoop {
 
         let mut result: Vec<Vec<u8>> = Vec::new();
 
-        for (_outer_id, outer_bytes) in &outer_docs {
-            // Produce a flat outer map that includes wrapper-level fields (e.g.
-            // the primary-key `id`) alongside the document payload fields.
-            let flat_outer = flatten_outer_row(outer_bytes);
-
+        for outer in &outer_rows {
             // Bind any *Column filter ops (e.g. GtColumn for non-equi correlations)
             // that reference the outer row by substituting the actual runtime value.
             let mut corr_filters =
-                match bind_outer_values(base_inner_filters.clone(), outer_bytes, p.outer_alias) {
+                match bind_outer_values(base_inner_filters.clone(), outer, p.outer_alias) {
                     Ok(filters) => filters,
                     Err(e) => return self.response_error(p.task, e),
                 };
 
             let mut satisfiable = true;
             for (inner_col, outer_col) in p.correlation_predicates {
-                match correlation_value(outer_bytes, outer_col) {
+                match correlation_value(outer, outer_col) {
                     Ok(Some(value)) => corr_filters.push(ScanFilter {
                         field: inner_col.clone(),
                         op: FilterOp::Eq,
@@ -123,7 +122,7 @@ impl CoreLoop {
             };
 
             let row = OuterRowJoin {
-                flat_outer: &flat_outer,
+                flat_outer: &outer.body,
                 inner_plan,
                 outer_alias: p.outer_alias,
                 lateral_alias: p.lateral_alias,

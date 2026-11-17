@@ -91,7 +91,13 @@ impl CoreLoop {
         // the local path). The caller routes only equi-joins through this entry;
         // a keyless `on` is a routing bug, so surface it loudly rather than
         // hash-partitioning a cartesian product (which would be wrong).
-        if join.join_type == "cross" || build_keys.is_empty() || probe_keys.is_empty() {
+        // `NOT IN` needs whole-build-side facts no partition holds, so the
+        // planner never shuffles it: reaching here is a routing bug too.
+        if join.join_type == "cross"
+            || join.join_type == super::hash::NULL_AWARE_ANTI
+            || build_keys.is_empty()
+            || probe_keys.is_empty()
+        {
             return self.response_error(
                 join.task,
                 crate::bridge::envelope::ErrorCode::Internal {
@@ -174,12 +180,14 @@ mod tests {
         let (_req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         (core, dir)

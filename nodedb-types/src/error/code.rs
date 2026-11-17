@@ -96,6 +96,18 @@ error_codes! {
     /// A statement exceeded a server limit on its own size or depth: a
     /// recursion depth, a per-transaction staging budget.
     PROGRAM_LIMIT_EXCEEDED = 1209;
+    /// `ln` or `log` of zero or a negative number.
+    INVALID_ARGUMENT_FOR_LOGARITHM = 1210;
+    /// `sqrt` of a negative number, or `power` outside its domain.
+    INVALID_ARGUMENT_FOR_POWER_FUNCTION = 1211;
+    /// Text that spells no value of the target type.
+    INVALID_TEXT_REPRESENTATION = 1212;
+    /// Text that spells no value of a date or time type.
+    INVALID_DATETIME_FORMAT = 1213;
+    /// A date or time field outside its range.
+    DATETIME_FIELD_OVERFLOW = 1214;
+    /// A value whose type the target type cannot hold.
+    DATATYPE_MISMATCH = 1215;
 
     // Engine ops (1300–1399)
     ARRAY = 1300;

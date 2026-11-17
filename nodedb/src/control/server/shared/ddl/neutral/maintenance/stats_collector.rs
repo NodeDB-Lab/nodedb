@@ -8,20 +8,22 @@
 
 use std::collections::HashSet;
 
-use crate::control::security::catalog::column_stats::StoredColumnStats;
-use sonic_rs;
+use nodedb_types::Value;
 
-/// Collect column statistics from JSON scan results.
+use crate::control::security::catalog::column_stats::StoredColumnStats;
+use crate::control::server::response_shape::types::ShapedRow;
+
+/// Collect column statistics from typed scan rows.
 ///
-/// Parses each row as JSON, extracts field values, and computes
-/// aggregate statistics. For numeric columns, delegates to SIMD
-/// kernels for min/max/sum computation.
-pub fn collect_stats_from_json_rows(
+/// Each row is one row's column map, with any scan envelope already
+/// unwrapped. Field values keep their decoded type, plain or native. For
+/// numeric columns, delegates to SIMD kernels for min/max/sum computation.
+pub fn collect_stats_from_rows(
     database_id: u64,
     tenant_id: u64,
     collection: &str,
     columns: &[String],
-    rows: &[String],
+    rows: &[ShapedRow],
     analyzed_at: u64,
 ) -> Vec<StoredColumnStats> {
     let row_count = rows.len() as u64;
@@ -35,8 +37,8 @@ pub fn collect_stats_from_json_rows(
         let mut distinct_set: HashSet<String> = HashSet::new();
         let mut total_len: u64 = 0;
 
-        for row_json in rows {
-            let value = extract_field_from_json(row_json, col_name);
+        for row in rows {
+            let value = field_value(row.get(col_name.as_str()));
             match value {
                 FieldValue::Null => null_count += 1,
                 FieldValue::Int(v) => {
@@ -106,51 +108,25 @@ enum FieldValue {
     Text(String),
 }
 
-/// The map holding one scan row's user columns.
+/// Classify one typed cell for statistics.
 ///
-/// A document scan row is the two-key map `{"id": …, "data": {…}}`, and its
-/// `data` member holds the columns. Every other row is the column map itself.
-fn row_columns(row: &serde_json::Value) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    let map = row.as_object()?;
-    let wrapped = map.len() == 2 && map.contains_key("id");
-    if wrapped && let Some(serde_json::Value::Object(data)) = map.get("data") {
-        return Some(data);
-    }
-    Some(map)
-}
-
-/// Extract a field value from a JSON row string.
-///
-/// A scan row arrives in one of two shapes. A document scan wraps each row as
-/// `{"id": "<doc_id>", "data": {…}}`, and the user's columns live under `data`.
-/// A columnar, KV, spatial, or aggregate scan emits the column map directly.
-/// Reading the wrapper as the column map finds no column and scores every
-/// row null. The wrapper is unwrapped first.
-fn extract_field_from_json(json_str: &str, field_name: &str) -> FieldValue {
-    let parsed: Result<serde_json::Value, _> = sonic_rs::from_str(json_str);
-    let Ok(obj) = parsed else {
-        return FieldValue::Null;
-    };
-
-    let val = match row_columns(&obj) {
-        Some(map) => map.get(field_name),
-        None => None,
-    };
-
-    match val {
-        None | Some(serde_json::Value::Null) => FieldValue::Null,
-        Some(serde_json::Value::Number(n)) => {
-            if let Some(i) = n.as_i64() {
-                FieldValue::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                FieldValue::Float(f)
-            } else {
-                FieldValue::Text(n.to_string())
-            }
+/// A number is numeric. Every other value is its text: a string, UUID or
+/// ULID itself, a Decimal, duration or instant its text, as a plain row
+/// stores it, and an array or object its JSON text. So a plain and a native
+/// row of the same values give the same statistics.
+fn field_value(value: Option<&Value>) -> FieldValue {
+    match value {
+        None | Some(Value::Null) => FieldValue::Null,
+        Some(Value::Integer(i)) => FieldValue::Int(*i),
+        Some(Value::Float(f)) => FieldValue::Float(*f),
+        Some(Value::String(s) | Value::Uuid(s) | Value::Ulid(s)) => FieldValue::Text(s.clone()),
+        Some(Value::Bool(b)) => FieldValue::Text(b.to_string()),
+        Some(Value::Decimal(d)) => FieldValue::Text(d.to_string()),
+        Some(Value::Duration(d)) => FieldValue::Text(d.to_string()),
+        Some(Value::DateTime(dt) | Value::NaiveDateTime(dt)) => FieldValue::Text(dt.to_string()),
+        Some(other) => {
+            FieldValue::Text(crate::util::wire_json::value_to_wire_json(other).to_string())
         }
-        Some(serde_json::Value::String(s)) => FieldValue::Text(s.clone()),
-        Some(serde_json::Value::Bool(b)) => FieldValue::Text(b.to_string()),
-        Some(other) => FieldValue::Text(other.to_string()),
     }
 }
 
@@ -158,12 +134,21 @@ fn extract_field_from_json(json_str: &str, field_name: &str) -> FieldValue {
 mod tests {
     use super::*;
 
+    fn row(pairs: Vec<(&str, Value)>) -> ShapedRow {
+        pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
+    }
+
     #[test]
     fn collect_numeric_stats() {
-        let rows: Vec<String> = (0..100)
-            .map(|i| format!("{{\"id\": {i}, \"value\": {:.2}}}", i as f64 * 1.5))
+        let rows: Vec<ShapedRow> = (0..100)
+            .map(|i| {
+                row(vec![
+                    ("id", Value::Integer(i)),
+                    ("value", Value::Float(i as f64 * 1.5)),
+                ])
+            })
             .collect();
-        let stats = collect_stats_from_json_rows(9, 1, "test", &["id".into()], &rows, 0);
+        let stats = collect_stats_from_rows(9, 1, "test", &["id".into()], &rows, 0);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].row_count, 100);
         assert_eq!(stats[0].null_count, 0);
@@ -175,53 +160,44 @@ mod tests {
     #[test]
     fn collect_with_nulls() {
         let rows = vec![
-            r#"{"name": "alice"}"#.to_string(),
-            r#"{"name": null}"#.to_string(),
-            r#"{"other": 1}"#.to_string(),
+            row(vec![("name", Value::String("alice".into()))]),
+            row(vec![("name", Value::Null)]),
+            row(vec![("other", Value::Integer(1))]),
         ];
-        let stats = collect_stats_from_json_rows(9, 1, "t", &["name".into()], &rows, 0);
+        let stats = collect_stats_from_rows(9, 1, "t", &["name".into()], &rows, 0);
         assert_eq!(stats[0].null_count, 2); // null + missing field
         assert_eq!(stats[0].distinct_count, 1);
     }
 
+    /// A native row's Decimal, UUID and instant cells give the statistics
+    /// their plain-stored text gives.
     #[test]
-    fn collect_reads_columns_under_the_document_scan_wrapper() {
-        let rows: Vec<String> = (0..12)
-            .map(|i| format!(r#"{{"id":"{i:08}","data":{{"k":"k{i}","v":{}}}}}"#, i * 10))
-            .collect();
-
-        let stats = collect_stats_from_json_rows(9, 1, "t", &["k".into(), "v".into()], &rows, 0);
-
-        let k = stats.iter().find(|s| s.column == "k").expect("column k");
-        assert_eq!(k.null_count, 0, "every wrapped row carries a k value");
-        assert_eq!(k.distinct_count, 12);
-        assert_eq!(k.min_value, Some("k0".to_string()));
-
-        let v = stats.iter().find(|s| s.column == "v").expect("column v");
-        assert_eq!(v.min_value, Some("0".to_string()));
-        assert_eq!(v.max_value, Some("110".to_string()));
-    }
-
-    #[test]
-    fn the_wrapper_id_never_masks_the_user_column() {
-        let rows = vec![r#"{"id":"00000001","data":{"id":"r0","v":1}}"#.to_string()];
-
-        let stats = collect_stats_from_json_rows(9, 1, "t", &["id".into()], &rows, 0);
-
-        assert_eq!(
-            stats[0].min_value,
-            Some("r0".to_string()),
-            "the column named id is the row's own id, not the surrogate doc id",
-        );
-    }
-
-    #[test]
-    fn a_two_key_row_without_a_data_object_stays_the_column_map() {
-        let rows = vec![r#"{"id":7,"data":"not-an-object"}"#.to_string()];
-
-        let stats = collect_stats_from_json_rows(9, 1, "t", &["data".into()], &rows, 0);
-
-        assert_eq!(stats[0].null_count, 0);
-        assert_eq!(stats[0].min_value, Some("not-an-object".to_string()));
+    fn native_cells_count_as_their_plain_text() {
+        let at = nodedb_types::NdbDateTime::from_micros(1_583_402_400_000_000);
+        let native = vec![row(vec![
+            ("price", Value::Decimal("12.50".parse().unwrap())),
+            (
+                "uid",
+                Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            ("seen", Value::DateTime(at)),
+        ])];
+        let plain = vec![row(vec![
+            ("price", Value::String("12.50".into())),
+            (
+                "uid",
+                Value::String("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            ("seen", Value::String(at.to_string())),
+        ])];
+        let columns = ["price".into(), "uid".into(), "seen".into()];
+        let from_native = collect_stats_from_rows(9, 1, "t", &columns, &native, 0);
+        let from_plain = collect_stats_from_rows(9, 1, "t", &columns, &plain, 0);
+        for (n, p) in from_native.iter().zip(&from_plain) {
+            assert_eq!(n.column, p.column);
+            assert_eq!(n.min_value, p.min_value);
+            assert_eq!(n.max_value, p.max_value);
+            assert_eq!(n.distinct_count, p.distinct_count);
+        }
     }
 }

@@ -25,24 +25,31 @@ mod document;
 mod errors;
 mod history;
 mod indexing;
+mod rebuild_frames;
 mod rebuild_install;
 mod rebuild_journal;
+mod rebuild_round;
 mod rebuild_snapshot;
 mod removal;
 mod search;
 mod staged_search;
+mod synced_text;
 mod synonyms;
 #[cfg(test)]
 pub(crate) mod test_support;
 
 pub use core::InvertedIndex;
 pub use doc_image::FtsDocImage;
-pub use history::{TextCutView, UNVERSIONED};
 pub use indexing::IndexDocScope;
+pub use nodedb_fts::history::{TextCutView, UNVERSIONED};
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 pub use nodedb_fts::{DocumentText, FtsSearchParams, IndexScope};
-pub use rebuild_install::{FtsInstallOutcome, FtsRebuildRefusal};
-pub use rebuild_journal::FTS_REBUILD_JOURNAL_MAX_DOCS;
-pub use rebuild_snapshot::{FtsRebuildTicket, FtsRebuilt, FtsSnapshot};
+pub use rebuild_frames::{
+    collection_has_frames, for_each_doc_frame_in_snapshot, for_each_doc_frame_in_txn,
+};
+pub use rebuild_install::{FtsInstallOutcome, FtsRebuildRefusal, JournalReplay};
+pub use rebuild_journal::{FTS_REBUILD_JOURNAL_MAX_DOCS, FTS_REBUILD_MAX_ROUNDS, FtsRebuildBounds};
+pub use rebuild_snapshot::{FtsCatchUp, FtsRebuildTicket, FtsRebuilt};
 pub use search::PhraseSearchParams;
 pub use staged_search::TextDocScorer;
+pub use synced_text::{SyncedDocText, SyncedTextHead, SyncedTextMark};

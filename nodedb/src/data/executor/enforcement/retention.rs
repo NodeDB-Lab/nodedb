@@ -3,8 +3,6 @@
 //! Retention and legal hold enforcement: reject DELETE operations that
 //! violate data retention policies or active legal holds.
 
-use sonic_rs;
-
 use crate::bridge::envelope::ErrorCode;
 use nodedb_physical::physical_plan::EnforcementOptions;
 
@@ -14,12 +12,14 @@ use nodedb_physical::physical_plan::EnforcementOptions;
 /// regardless of retention period.
 ///
 /// For retention, the row's creation timestamp (`created_at` field) is compared
-/// against the current time. If the row is younger than the retention period,
-/// DELETE is rejected.
+/// against `judged_at_ms`, in ms since the Unix epoch. If the row is younger
+/// than the retention period, DELETE is rejected. A caller that must reach the
+/// same verdict on every replica passes an instant every replica shares.
 pub fn check_delete_allowed(
     collection: &str,
     opts: &EnforcementOptions,
     row_created_at_secs: Option<u64>,
+    judged_at_ms: i64,
 ) -> Result<(), ErrorCode> {
     // Legal hold: absolute block on DELETE.
     if opts.has_legal_hold {
@@ -31,7 +31,7 @@ pub fn check_delete_allowed(
     // Retention period: reject if row is younger than the retention duration.
     if let Some(ref retention) = opts.retention {
         if let Some(created_at) = row_created_at_secs {
-            if !retention_expired(created_at, retention) {
+            if !retention_expired(created_at, retention, judged_at_ms) {
                 return Err(ErrorCode::RetentionViolation {
                     collection: collection.to_string(),
                 });
@@ -86,11 +86,16 @@ pub fn parse_retention_period(s: &str) -> crate::Result<RetentionDuration> {
 }
 
 /// Check whether `created_at` (seconds since epoch) has exceeded the retention
-/// duration relative to the current time, using calendar-accurate arithmetic.
+/// duration at `judged_at_ms` (ms since epoch), using calendar-accurate
+/// arithmetic.
 ///
 /// For months/years, uses actual calendar offsets (not fixed 30/365 day approximations).
-pub fn retention_expired(created_at_secs: u64, duration: &RetentionDuration) -> bool {
-    let now = nodedb_types::NdbDateTime::now();
+pub fn retention_expired(
+    created_at_secs: u64,
+    duration: &RetentionDuration,
+    judged_at_ms: i64,
+) -> bool {
+    let now = nodedb_types::NdbDateTime::from_micros(judged_at_ms.saturating_mul(1000));
     let Ok(created) = nodedb_types::NdbDateTime::from_secs(created_at_secs as i64) else {
         return false;
     };
@@ -144,6 +149,22 @@ pub fn retention_expired(created_at_secs: u64, duration: &RetentionDuration) -> 
     }
 }
 
+/// The wall-clock instant a rule judged by one node alone reads, in ms since
+/// the Unix epoch.
+pub fn wall_clock_ms() -> i64 {
+    nodedb_types::NdbDateTime::now().unix_millis()
+}
+
+/// The instant retention is judged at, in ms since the Unix epoch: a Calvin
+/// epoch instant, else the system-time ordinal the entry's leader assigned,
+/// else the wall clock. Every replica that holds either carried value
+/// reaches the same verdict.
+pub fn judged_instant_ms(calvin_epoch_ms: Option<i64>, system_ordinal: Option<i64>) -> i64 {
+    calvin_epoch_ms
+        .or_else(|| system_ordinal.map(nodedb_types::ordinal_to_ms))
+        .unwrap_or_else(wall_clock_ms)
+}
+
 /// Split "7 years" into ("7", "years") or "365d" into ("365", "d").
 fn split_number_unit(s: &str) -> (&str, &str) {
     let idx = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
@@ -157,26 +178,25 @@ fn split_number_unit(s: &str) -> (&str, &str) {
 /// Tries: `created_at` (integer seconds or millis), `_created_at`,
 /// `timestamp` fields. Returns `None` if no timestamp field is found.
 pub fn extract_created_at_secs(doc_bytes: &[u8]) -> Option<u64> {
-    if doc_bytes.is_empty() {
-        return None;
-    }
-    let first = doc_bytes[0];
-    let is_msgpack = (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF;
-    let val: serde_json::Value = if is_msgpack {
-        nodedb_types::json_from_msgpack(doc_bytes)
-            .ok()
-            .or_else(|| sonic_rs::from_slice(doc_bytes).ok())?
-    } else {
-        sonic_rs::from_slice(doc_bytes).ok()?
-    };
+    let val = crate::data::executor::doc_format::decode_document_value(doc_bytes).ok()?;
+    created_at_secs_of(&val)
+}
 
+/// [`extract_created_at_secs`] over an already-decoded row.
+pub fn created_at_secs_of(val: &nodedb_types::Value) -> Option<u64> {
     let obj = val.as_object()?;
 
     for field in &["created_at", "_created_at", "timestamp"] {
         if let Some(v) = obj.get(*field) {
-            if let Some(n) = v.as_u64() {
-                // Heuristic: if > 1e12, it's milliseconds; otherwise seconds.
-                return Some(if n > 1_000_000_000_000 { n / 1000 } else { n });
+            if let nodedb_types::Value::Decimal(decimal) = v
+                && let Some(n) = nodedb_types::Value::decimal_as_wide_u64(decimal)
+            {
+                return Some(n / 1000);
+            }
+            if let nodedb_types::Value::DateTime(timestamp)
+            | nodedb_types::Value::NaiveDateTime(timestamp) = v
+            {
+                return Some((timestamp.micros / 1_000_000) as u64);
             }
             if let Some(n) = v.as_i64() {
                 let n = n as u64;
@@ -198,6 +218,16 @@ pub fn extract_created_at_secs(doc_bytes: &[u8]) -> Option<u64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tagged_timestamps_keep_retention_age() {
+        let fields = std::collections::HashMap::from([(
+            "created_at".into(),
+            nodedb_types::Value::Integer(1_700_000_000),
+        )]);
+        let bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(fields)).unwrap();
+        assert_eq!(extract_created_at_secs(&bytes), Some(1_700_000_000));
+    }
+
     fn dur(count: u32, unit: RetentionUnit) -> RetentionDuration {
         RetentionDuration { count, unit }
     }
@@ -212,19 +242,21 @@ mod tests {
 
     #[test]
     fn no_restrictions_allows_delete() {
-        assert!(check_delete_allowed("coll", &opts(None, false), None).is_ok());
+        assert!(check_delete_allowed("coll", &opts(None, false), None, wall_clock_ms()).is_ok());
     }
 
     #[test]
     fn legal_hold_blocks_delete() {
-        assert!(check_delete_allowed("coll", &opts(None, true), None).is_err());
+        assert!(check_delete_allowed("coll", &opts(None, true), None, wall_clock_ms()).is_err());
     }
 
     #[test]
     fn legal_hold_overrides_expired_retention() {
         // Retention expired (row is old) but hold is active → still rejected.
         let r = dur(1, RetentionUnit::Hours);
-        assert!(check_delete_allowed("coll", &opts(Some(r), true), Some(0)).is_err());
+        assert!(
+            check_delete_allowed("coll", &opts(Some(r), true), Some(0), wall_clock_ms()).is_err()
+        );
     }
 
     #[test]
@@ -235,21 +267,33 @@ mod tests {
             .as_secs();
         // Row created 10 seconds ago, retention is 1 hour.
         let r = dur(1, RetentionUnit::Hours);
-        assert!(check_delete_allowed("coll", &opts(Some(r), false), Some(now - 10)).is_err());
+        assert!(
+            check_delete_allowed(
+                "coll",
+                &opts(Some(r), false),
+                Some(now - 10),
+                wall_clock_ms()
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn retention_allows_old_row() {
         // Row created long ago (epoch 0), retention is 1 hour.
         let r = dur(1, RetentionUnit::Hours);
-        assert!(check_delete_allowed("coll", &opts(Some(r), false), Some(0)).is_ok());
+        assert!(
+            check_delete_allowed("coll", &opts(Some(r), false), Some(0), wall_clock_ms()).is_ok()
+        );
     }
 
     #[test]
     fn retention_no_timestamp_rejects() {
         // Retention set but no created_at → reject defensively.
         let r = dur(7, RetentionUnit::Years);
-        assert!(check_delete_allowed("coll", &opts(Some(r), false), None).is_err());
+        assert!(
+            check_delete_allowed("coll", &opts(Some(r), false), None, wall_clock_ms()).is_err()
+        );
     }
 
     #[test]
@@ -288,11 +332,11 @@ mod tests {
         let seven_years_ago = nodedb_types::NdbDateTime::from_secs(0).expect("0 secs in range"); // approximation for test
         // Instead: use a row from epoch 0 with 1-year retention — definitely expired.
         let r = dur(1, RetentionUnit::Years);
-        assert!(retention_expired(0, &r)); // epoch 0 is > 1 year ago
+        assert!(retention_expired(0, &r, wall_clock_ms())); // epoch 0 is > 1 year ago
 
         // Row created 6 months ago with 1-year retention — NOT expired.
         let six_months_ago_secs = (now.micros / 1_000_000 - 180 * 86400) as u64;
-        assert!(!retention_expired(six_months_ago_secs, &r));
+        assert!(!retention_expired(six_months_ago_secs, &r, wall_clock_ms()));
 
         // Suppress unused variable warnings.
         let _ = (c, seven_years_ago);
@@ -304,10 +348,10 @@ mod tests {
         // Row created 2 days ago, retention = 1 month → NOT expired.
         let two_days_ago = (now.micros / 1_000_000 - 2 * 86400) as u64;
         let r = dur(1, RetentionUnit::Months);
-        assert!(!retention_expired(two_days_ago, &r));
+        assert!(!retention_expired(two_days_ago, &r, wall_clock_ms()));
 
         // Row from epoch 0, retention = 1 month → expired (decades ago).
-        assert!(retention_expired(0, &r));
+        assert!(retention_expired(0, &r, wall_clock_ms()));
     }
 
     #[test]

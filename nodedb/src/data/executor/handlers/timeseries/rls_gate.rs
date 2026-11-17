@@ -50,6 +50,12 @@ pub(in crate::data::executor) struct MsgpackBatch<'a> {
     pub time_key: Option<&'a str>,
     /// The timestamp of every untimed row, in milliseconds.
     pub default_timestamp_ms: i64,
+    /// The declared DECIMAL, UUID and BOOLEAN columns, normalized as the
+    /// ingest normalizes them.
+    pub exact: &'a [(
+        String,
+        crate::engine::timeseries::columnar_memtable::ColumnType,
+    )],
 }
 
 /// Decide a structured MessagePack row batch against the compiled write
@@ -68,6 +74,7 @@ pub(in crate::data::executor) fn admit_msgpack_rows(
         measurement,
         time_key,
         default_timestamp_ms,
+        exact,
     } = batch;
     if matches!(rls_write_check.decision(), WriteGateDecision::AdmitAll) {
         return Ok(());
@@ -80,8 +87,8 @@ pub(in crate::data::executor) fn admit_msgpack_rows(
         ),
     };
     let rows = msgpack_decode::decode_msgpack_rows(payload).map_err(|_| undecodable())?;
-    let batch =
-        normalize::msgpack_rows_to_ilp(&rows, measurement, time_key).map_err(|_| undecodable())?;
+    let batch = normalize::msgpack_rows_to_ilp(&rows, measurement, time_key, exact)
+        .map_err(|_| undecodable())?;
     let parsed = ilp::parse_batch(&batch).map_err(|_| undecodable())?;
     admit_ilp_lines(
         rls_write_check,
@@ -290,6 +297,7 @@ mod tests {
                     measurement: "cpu",
                     time_key: Some("ts"),
                     default_timestamp_ms: 0,
+                    exact: &[],
                 },
                 1,
                 "cpu",
@@ -316,6 +324,7 @@ mod tests {
                     measurement: "cpu",
                     time_key: Some("ts"),
                     default_timestamp_ms: 0,
+                    exact: &[],
                 },
                 1,
                 "cpu",
@@ -338,6 +347,7 @@ mod tests {
                     measurement: "cpu",
                     time_key: Some("ts"),
                     default_timestamp_ms: 0,
+                    exact: &[],
                 },
                 1,
                 "cpu",

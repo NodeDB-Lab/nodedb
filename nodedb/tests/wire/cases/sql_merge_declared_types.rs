@@ -147,9 +147,10 @@ async fn merge_update_literals_take_the_declared_column_types_document_schemales
     merge_update_literals_take_the_declared_column_types_on("document_schemaless").await;
 }
 
-/// A literal the declared column type cannot hold is refused, naming the
-/// column, on both a MERGE INSERT arm and a MERGE UPDATE arm — exactly as an
-/// ordinary `INSERT VALUES` / `UPDATE SET` refuses it.
+/// A literal the declared column type cannot hold is refused on a MERGE
+/// INSERT arm and a MERGE UPDATE arm, as an ordinary `INSERT VALUES` /
+/// `UPDATE SET` refuses it. Text that spells no integer fails with
+/// PostgreSQL's `22P02` text. A value of the wrong type names its column.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn merge_refuses_a_literal_the_column_cannot_hold() {
     let server = TestServer::start().await;
@@ -171,8 +172,9 @@ async fn merge_refuses_a_literal_the_column_cannot_hold() {
         .await
         .expect_err("MERGE INSERT of 'abc' into an INT column must be refused");
     assert!(
-        insert_err.contains("'n'"),
-        "error must name column 'n': {insert_err}"
+        insert_err.contains("SQLSTATE 22P02")
+            && insert_err.contains("invalid input syntax for type integer: \"abc\""),
+        "MERGE INSERT of 'abc' must fail as PostgreSQL does: {insert_err}"
     );
 
     server

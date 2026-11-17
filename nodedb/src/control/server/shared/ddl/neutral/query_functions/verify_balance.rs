@@ -6,7 +6,6 @@
 //! compares to the stored balance, and reports discrepancies.
 
 use nodedb_sql::parser::query_function::VerifyBalanceArgs;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -16,7 +15,7 @@ use crate::types::{DatabaseId, TraceId};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
-use super::helpers::{err, json_to_decimal, single_result, unwrap_scan_docs};
+use super::helpers::{err, scan_rows, single_result, value_text, value_to_decimal};
 
 /// `SELECT VERIFY_BALANCE('collection', 'column')`
 ///
@@ -91,13 +90,9 @@ pub async fn verify_balance(
     )
     .await
     .map_err(|e| DdlError::from_error_in_context("target scan failed", &e))?;
-    let target_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&target_resp.payload);
-    let target_docs: Vec<serde_json::Value> = sonic_rs::from_str(&target_json)
-        .map_err(|e| err("22P02", &format!("invalid JSON in target scan: {e}")))?;
-    // Unwrap the `{"id", "data"}` scan envelope so matching reads the stored
-    // fields, not the wire wrapper.
-    let target_docs = unwrap_scan_docs(target_docs)?;
+    // `scan_rows` unwraps the `{"id", "data"}` scan envelope so matching
+    // reads the stored fields, typed, not the wire wrapper.
+    let target_docs = scan_rows(&target_resp.payload)?;
 
     // Scan all source rows.
     let source_vshard =
@@ -131,13 +126,9 @@ pub async fn verify_balance(
     )
     .await
     .map_err(|e| DdlError::from_error_in_context("source scan failed", &e))?;
-    let source_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&source_resp.payload);
-    let source_docs: Vec<serde_json::Value> = sonic_rs::from_str(&source_json)
-        .map_err(|e| err("22P02", &format!("invalid JSON in source scan: {e}")))?;
-    // Unwrap the `{"id", "data"}` scan envelope so matching and `value_expr`
-    // evaluation read the stored fields, not the wire wrapper.
-    let source_docs = unwrap_scan_docs(source_docs)?;
+    // `scan_rows` unwraps the `{"id", "data"}` scan envelope so matching and
+    // `value_expr` evaluation read the stored fields, typed.
+    let source_docs = scan_rows(&source_resp.payload)?;
 
     // For each target row, recompute balance from source rows.
     let mut discrepancies = 0u64;
@@ -147,40 +138,38 @@ pub async fn verify_balance(
         let doc_id = target_doc
             .get("id")
             .or_else(|| target_doc.get("_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .and_then(value_text)
+            .unwrap_or_default();
         if doc_id.is_empty() {
             continue;
         }
 
         let stored_balance = target_doc
             .get(&column)
-            .and_then(json_to_decimal)
+            .and_then(value_to_decimal)
             .unwrap_or(rust_decimal::Decimal::ZERO);
 
         // Sum value_expr for all source rows where join_column == doc_id.
         let mut computed = rust_decimal::Decimal::ZERO;
         for src_doc in &source_docs {
-            let join_val = src_doc.get(&mat_def.join_column).and_then(|v| v.as_str());
-            if join_val != Some(doc_id) {
+            let join_val = src_doc.get(&mat_def.join_column).and_then(value_text);
+            if join_val.as_deref() != Some(doc_id.as_str()) {
                 continue;
             }
-            let src_val = nodedb_types::Value::from(serde_json::Value::Object(src_doc.clone()));
-            let delta = serde_json::Value::from(
-                mat_def
-                    .value_expr
-                    .eval(
-                        &src_val,
-                        &crate::control::crs_context::crs_context_for(state),
+            let src_val = nodedb_types::Value::Object(src_doc.clone().into_iter().collect());
+            let delta = mat_def
+                .value_expr
+                .eval(
+                    &src_val,
+                    &crate::control::crs_context::crs_context_for(state),
+                )
+                .map_err(|e| {
+                    err(
+                        crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
+                        &format!("VERIFY_BALANCE: value_expr failed to evaluate: {e}"),
                     )
-                    .map_err(|e| {
-                        err(
-                            crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
-                            &format!("VERIFY_BALANCE: value_expr failed to evaluate: {e}"),
-                        )
-                    })?,
-            );
-            if let Some(d) = json_to_decimal(&delta) {
+                })?;
+            if let Some(d) = value_to_decimal(&delta) {
                 computed += d;
             }
         }

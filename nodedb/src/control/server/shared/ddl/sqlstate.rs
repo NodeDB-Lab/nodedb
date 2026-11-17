@@ -227,7 +227,7 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
         } => (
             "ERROR",
             fault.sqlstate(),
-            format!("column \"{column}\" of collection \"{collection}\" {fault}"),
+            fault.describe(collection, column),
         ),
         ErrorCode::Internal { detail } => ("ERROR", sqlstate::INTERNAL_ERROR, detail.clone()),
         // Division/modulo by zero.
@@ -242,6 +242,16 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             format!("function {name}() does not exist"),
         ),
         ErrorCode::DataException { detail } => ("ERROR", sqlstate::DATA_EXCEPTION, detail.clone()),
+        ErrorCode::InvalidArgumentForLogarithm { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM,
+            detail.clone(),
+        ),
+        ErrorCode::InvalidArgumentForPowerFunction { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+            detail.clone(),
+        ),
         ErrorCode::NumericValueOutOfRange { detail } => (
             "ERROR",
             sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
@@ -323,17 +333,19 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::SERIALIZATION_FAILURE,
             "CRDT state changed after preview; retry the write".into(),
         ),
-        ErrorCode::TxnOverlayMemoryExceeded { limit } => (
-            "ERROR",
-            sqlstate::PROGRAM_LIMIT_EXCEEDED,
-            format!(
-                "transaction staging overlay exceeded its {limit}-byte per-core budget; \
-                 split the transaction into smaller batches"
-            ),
-        ),
         ErrorCode::ProgramLimitExceeded { detail } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, detail.clone())
         }
+        // The SQLSTATE and message the Control Plane gives
+        // `crate::Error::ExecutionLimitExceeded`.
+        ErrorCode::ExecutionLimitExceeded { detail } => (
+            "ERROR",
+            sqlstate::PROGRAM_LIMIT_EXCEEDED,
+            crate::Error::ExecutionLimitExceeded {
+                detail: detail.clone(),
+            }
+            .to_string(),
+        ),
         ErrorCode::NodeLabelLimit { node, label, limit } => (
             "ERROR",
             sqlstate::PROGRAM_LIMIT_EXCEEDED,

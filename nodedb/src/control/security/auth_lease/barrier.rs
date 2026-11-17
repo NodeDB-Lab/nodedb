@@ -16,6 +16,16 @@ use crate::control::state::SharedState;
 
 use super::leadership::{metadata_leader, send_to_leader};
 
+/// When an authorization barrier gives up, and the statement budget its
+/// error reports.
+#[derive(Debug, Clone, Copy)]
+pub struct BarrierDeadline {
+    /// The instant the barrier stops waiting.
+    pub at: std::time::Instant,
+    /// The whole budget of the statement the barrier runs in.
+    pub budget: std::time::Duration,
+}
+
 /// Hold the acknowledgement of a change until it binds every node.
 ///
 /// `targets` name the change: per group, the index it committed at. The
@@ -33,21 +43,23 @@ use super::leadership::{metadata_leader, send_to_leader};
 pub async fn authorization_barrier(
     state: &SharedState,
     targets: Vec<GroupCoverage>,
-    deadline: std::time::Instant,
+    deadline: BarrierDeadline,
 ) -> crate::Result<()> {
-    let remaining_until = || deadline.saturating_duration_since(std::time::Instant::now());
-    let budget_ms = remaining_until().as_millis();
+    let remaining_until = || {
+        deadline
+            .at
+            .saturating_duration_since(std::time::Instant::now())
+    };
+    let budget_ms = deadline.budget.as_millis();
     let timing = lease_timing(state)?;
+    // A statement whose deadline passed before the barrier starts still asks
+    // the leader once: the change may already bind every node.
+    let late = remaining_until().is_zero();
     loop {
-        let remaining = remaining_until();
-        if remaining.is_zero() {
-            return Err(committed_but_pending(format!(
-                "the barrier did not release within the statement deadline ({budget_ms} ms)"
-            )));
-        }
+        let wait = barrier_wait(remaining_until(), &timing);
         let request = AuthBarrierRequest {
             targets: targets.clone(),
-            timeout_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+            timeout_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
         };
         let outcome = match metadata_leader(state).filter(|(leader, _)| *leader != 0) {
             None => None,
@@ -61,7 +73,7 @@ pub async fn authorization_barrier(
                 state,
                 leader_id,
                 RaftRpc::AuthBarrierRequest(request),
-                timing.rpc_read_timeout(remaining),
+                timing.rpc_read_timeout(wait),
             )
             .await
             {
@@ -79,15 +91,36 @@ pub async fn authorization_barrier(
                 }
             },
         };
-        match outcome {
-            Some(AuthBarrierOutcome::Released) => return Ok(()),
-            // No leader known, a leader change, or a lost message: ask the
-            // leader again. A new leader holds the barrier to its own floors.
-            Some(AuthBarrierOutcome::NotLeader { .. })
-            | Some(AuthBarrierOutcome::Timeout { .. })
-            | None => tokio::time::sleep(timing.renew_every.min(remaining_until())).await,
+        if let Some(AuthBarrierOutcome::Released) = outcome {
+            return Ok(());
         }
+        if late {
+            return Err(committed_but_pending(format!(
+                "the statement deadline passed before the barrier started (statement budget \
+                 {budget_ms} ms), and one leader attempt did not release it"
+            )));
+        }
+        let remaining = remaining_until();
+        if remaining.is_zero() {
+            return Err(committed_but_pending(format!(
+                "the barrier did not release within the statement deadline (statement budget \
+                 {budget_ms} ms)"
+            )));
+        }
+        // No leader known, a leader change, a timeout, or a lost message: ask
+        // the leader again. A new leader holds the barrier to its own floors.
+        tokio::time::sleep(timing.renew_every.min(remaining)).await;
     }
+}
+
+/// How long one leader attempt holds the barrier: the time left, and at
+/// least one renewal interval. Coverage arrives only with a renewal, so a
+/// shorter hold cannot release, and the leader never receives a zero wait.
+fn barrier_wait(
+    remaining: std::time::Duration,
+    timing: &super::LeaseTiming,
+) -> std::time::Duration {
+    remaining.max(timing.renew_every)
 }
 
 /// Hold the acknowledgement of a Calvin transaction that wrote a
@@ -99,18 +132,12 @@ pub async fn authorization_barrier(
 /// at `deadline`, the caller's statement deadline.
 pub async fn calvin_write_barrier(
     state: &SharedState,
-    deadline: std::time::Instant,
+    deadline: BarrierDeadline,
 ) -> crate::Result<()> {
     lease_timing(state)?;
     let commit_index = state
-        .raft_status_fn
-        .get()
-        .and_then(|status| {
-            status()
-                .into_iter()
-                .find(|group| group.group_id == SEQUENCER_GROUP_ID)
-                .map(|group| group.commit_index)
-        })
+        .raft_group_status(SEQUENCER_GROUP_ID)
+        .map(|group| group.commit_index)
         .ok_or_else(|| committed_but_pending("this node does not replicate the sequencer group"))?;
     authorization_barrier(
         state,
@@ -140,4 +167,61 @@ fn committed_but_pending(detail: impl std::fmt::Display) -> crate::Error {
         "the authorization change is committed, but {detail}; nodes still planning against \
          the previous state refuse until they catch up"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::wal::WalManager;
+
+    fn timing() -> super::super::LeaseTiming {
+        super::super::LeaseTiming::from_raft(Duration::from_millis(150), Duration::from_millis(50))
+            .expect("timing")
+    }
+
+    #[test]
+    fn a_leader_attempt_waits_at_least_one_renewal() {
+        let timing = timing();
+        assert_eq!(barrier_wait(Duration::ZERO, &timing), timing.renew_every);
+        assert_eq!(
+            barrier_wait(Duration::from_millis(1), &timing),
+            timing.renew_every
+        );
+        assert_eq!(
+            barrier_wait(Duration::from_secs(3), &timing),
+            Duration::from_secs(3)
+        );
+    }
+
+    /// A barrier entered after its deadline makes one attempt, then names
+    /// the late start and the statement's whole budget.
+    #[tokio::test]
+    async fn a_barrier_entered_late_reports_the_statement_budget() {
+        let directory = tempfile::tempdir().expect("barrier test directory");
+        let wal = std::sync::Arc::new(
+            WalManager::open_for_testing(&directory.path().join("barrier.wal"))
+                .expect("open barrier test WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(2, 64);
+        let state = SharedState::new(dispatcher, wal).expect("construct barrier state");
+        assert!(state.authorization_fence.install_timing(timing()));
+        let budget = state.tuning.network.default_deadline_secs * 1000;
+        let deadline = BarrierDeadline {
+            at: std::time::Instant::now(),
+            budget: std::time::Duration::from_millis(budget),
+        };
+
+        let error = authorization_barrier(&state, Vec::new(), deadline)
+            .await
+            .expect_err("no leader releases the barrier");
+        let message = error.to_string();
+        assert!(
+            message.contains("before the barrier started")
+                && message.contains(&format!("statement budget {budget} ms")),
+            "{message}"
+        );
+    }
 }

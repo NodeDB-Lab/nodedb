@@ -140,19 +140,25 @@ impl CoreLoop {
         // its key and gains no `id`.
         let identity_column =
             self.identity_column(task.request.database_id.as_u64(), tid, collection);
-        let rows: Vec<RecursiveRow> = all_docs
+        let rows = all_docs
             .iter()
-            .map(|(doc_id, value)| RecursiveRow {
-                id: doc_id.to_string(),
-                body: crate::data::executor::scan_normalize::sparse_row_to_doc(
+            .map(|(doc_id, value)| {
+                let (_, body) = crate::data::executor::scan_normalize::sparse_row_to_native_doc(
                     doc_id,
                     value,
                     body_format.as_format_ref(),
                     &identity_column,
-                )
-                .1,
+                )?;
+                Ok(RecursiveRow {
+                    id: doc_id.to_string(),
+                    body,
+                })
             })
-            .collect();
+            .collect::<crate::Result<Vec<_>>>();
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => return self.response_error(task, ErrorCode::from(error)),
+        };
         let scanned_bytes = rows.iter().fold(0usize, |total, row| {
             total
                 .saturating_add(row.body.len())

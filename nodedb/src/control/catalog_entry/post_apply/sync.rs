@@ -16,12 +16,12 @@
 use std::sync::Arc;
 
 use super::gateway_invalidation::invalidate_gateway_cache_for_entry;
+use super::sync_security::{SecurityEntry as S, apply_security_sync as security};
 use super::{
-    alert_rule, api_key, array, auth_user, change_stream, collection, consumer_group,
-    continuous_aggregate, custom_type, database, function, materialized_view, oidc_provider, owner,
-    permission, procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant,
-    scope_quota, sequence, streaming_materialized_view, synonym_group, tenant, topic, trigger,
-    user,
+    alert_rule, array, change_stream, collection, consumer_group, continuous_aggregate,
+    custom_type, database, function, materialized_view, procedure, quota, retention_policy,
+    schedule, scope_quota, sequence, streaming_materialized_view, synonym_group, tenant, topic,
+    trigger,
 };
 use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::state::SharedState;
@@ -148,30 +148,88 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         } => {
             change_stream::delete(*database_id, *tenant_id, name.clone(), Arc::clone(shared));
         }
-        CatalogEntry::PutUser(stored) => {
-            user::put(
-                (**stored).clone(),
-                Arc::clone(shared),
-                Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
-            );
+        CatalogEntry::PutUser(stored) => security(S::PutUser(stored), shared),
+        CatalogEntry::DropUser { username } => security(S::DropUser { username }, shared),
+        CatalogEntry::PutRole(stored) => security(S::PutRole(stored), shared),
+        CatalogEntry::DeleteRole { name } => security(S::DeleteRole { name }, shared),
+        CatalogEntry::PutApiKey(stored) => security(S::PutApiKey(stored), shared),
+        CatalogEntry::RevokeApiKey { key_id } => security(S::RevokeApiKey { key_id }, shared),
+        CatalogEntry::PutAuthUser(stored) => security(S::PutAuthUser(stored), shared),
+        CatalogEntry::PutRlsPolicy(stored) => security(S::PutRlsPolicy(stored), shared),
+        CatalogEntry::DeleteRlsPolicy {
+            tenant_id,
+            collection,
+            name,
+        } => security(
+            S::DeleteRlsPolicy {
+                tenant_id: *tenant_id,
+                collection,
+                name,
+            },
+            shared,
+        ),
+        CatalogEntry::PutRedactionPolicy(stored) => {
+            security(S::PutRedactionPolicy(stored), shared);
         }
-        CatalogEntry::DropUser { username } => {
-            user::drop_user(username.clone(), Arc::clone(shared));
+        CatalogEntry::DeleteRedactionPolicy {
+            tenant_id,
+            collection,
+            for_role,
+        } => security(
+            S::DeleteRedactionPolicy {
+                tenant_id: *tenant_id,
+                collection,
+                for_role,
+            },
+            shared,
+        ),
+        CatalogEntry::PutPermission(stored) => security(S::PutPermission(stored), shared),
+        CatalogEntry::DeletePermission {
+            target,
+            grantee,
+            permission,
+        } => security(
+            S::DeletePermission {
+                target,
+                grantee,
+                permission,
+            },
+            shared,
+        ),
+        CatalogEntry::PutScopeGrant(stored) => security(S::PutScopeGrant(stored), shared),
+        CatalogEntry::DeleteScopeGrant {
+            scope_name,
+            grantee_type,
+            grantee_id,
+        } => security(
+            S::DeleteScopeGrant {
+                scope_name,
+                grantee_type,
+                grantee_id,
+            },
+            shared,
+        ),
+        CatalogEntry::PutOwner(stored) => security(S::PutOwner(stored), shared),
+        CatalogEntry::DeleteOwner {
+            object_type,
+            database_id,
+            tenant_id,
+            object_name,
+        } => security(
+            S::DeleteOwner {
+                object_type,
+                database_id: *database_id,
+                tenant_id: *tenant_id,
+                object_name,
+            },
+            shared,
+        ),
+        CatalogEntry::PutOidcProvider(provider) => security(S::PutOidcProvider(provider), shared),
+        CatalogEntry::DeleteOidcProvider { name } => {
+            security(S::DeleteOidcProvider { name }, shared);
         }
-        CatalogEntry::PutRole(stored) => {
-            role::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeleteRole { name } => {
-            role::delete(name.clone(), Arc::clone(shared));
-        }
-        CatalogEntry::PutApiKey(stored) => {
-            api_key::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::RevokeApiKey { key_id } => {
-            api_key::revoke(key_id.clone(), Arc::clone(shared));
-        }
-        CatalogEntry::PutAuthUser(stored) => {
-            auth_user::put((**stored).clone(), Arc::clone(shared));
+        CatalogEntry::PutCredential(_) | CatalogEntry::DropCredential { .. } => {
+            security(S::Credential, shared);
         }
         CatalogEntry::PutMaterializedView(stored) => {
             materialized_view::put((**stored).clone(), Arc::clone(shared));
@@ -224,87 +282,12 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::DeleteTenant { tenant_id } => {
             tenant::delete(*tenant_id, Arc::clone(shared));
         }
-        CatalogEntry::PutRlsPolicy(stored) => {
-            rls::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeleteRlsPolicy {
-            tenant_id,
-            collection,
-            name,
-        } => {
-            rls::delete(
-                *tenant_id,
-                collection.clone(),
-                name.clone(),
-                Arc::clone(shared),
-            );
-        }
-        CatalogEntry::PutRedactionPolicy(stored) => {
-            redaction::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeleteRedactionPolicy {
-            tenant_id,
-            collection,
-            for_role,
-        } => {
-            redaction::delete(
-                *tenant_id,
-                collection.clone(),
-                for_role.clone(),
-                Arc::clone(shared),
-            );
-        }
-        CatalogEntry::PutPermission(stored) => {
-            permission::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeletePermission {
-            target,
-            grantee,
-            permission: perm,
-        } => {
-            permission::delete(
-                target.clone(),
-                grantee.clone(),
-                perm.clone(),
-                Arc::clone(shared),
-            );
-        }
-        CatalogEntry::PutScopeGrant(stored) => {
-            scope_grant::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeleteScopeGrant {
-            scope_name,
-            grantee_type,
-            grantee_id,
-        } => {
-            scope_grant::delete(
-                scope_name.clone(),
-                grantee_type.clone(),
-                grantee_id.clone(),
-                Arc::clone(shared),
-            );
-        }
         CatalogEntry::PutIndexRecord(_) | CatalogEntry::DeleteIndexRecord { .. } => {
             // no-op: the index registry has no in-memory mirror — every
             // reader (SHOW INDEXES, DROP INDEX, collection teardown) goes
-            // to the catalog, which `apply` already wrote on this node.
-        }
-        CatalogEntry::PutOwner(stored) => {
-            owner::put((**stored).clone(), Arc::clone(shared));
-        }
-        CatalogEntry::DeleteOwner {
-            object_type,
-            database_id,
-            tenant_id,
-            object_name,
-        } => {
-            owner::delete(
-                object_type.clone(),
-                *database_id,
-                *tenant_id,
-                object_name.clone(),
-                Arc::clone(shared),
-            );
+            // to the catalog, which `apply` already wrote on this node. A
+            // full-text record re-registers its collection in the async
+            // dispatcher, which awaits the Data Plane.
         }
         CatalogEntry::PutSynonymGroup(stored) => {
             synonym_group::put((**stored).clone(), Arc::clone(shared));
@@ -347,8 +330,6 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         } => {
             database::delete_grant(*db_id, *user_id, privilege.clone(), Arc::clone(shared));
         }
-        CatalogEntry::PutOidcProvider(provider) => oidc_provider::put(provider, shared),
-        CatalogEntry::DeleteOidcProvider { name } => oidc_provider::delete(name, shared),
         CatalogEntry::CloneDatabase {
             target_descriptor, ..
         } => {
@@ -360,6 +341,9 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         }
         CatalogEntry::RecordWalTombstone { .. } => {
             // WAL replay barrier only; no in-memory cache to refresh.
+        }
+        CatalogEntry::PruneCollectionPurgeLog { .. } => {
+            // Sync purge records only; no in-memory cache to refresh.
         }
         CatalogEntry::PutDatabaseQuota { db_id, record } => {
             quota::put_database(DatabaseId::new(*db_id), record, shared);
@@ -492,7 +476,5 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         // Apply swapped the catalog's in-memory set. The cores receive it in
         // the async post-apply.
         CatalogEntry::PutSpatialRefSys(_) | CatalogEntry::DropSpatialRefSys { .. } => {}
-        // A credential is read from the catalog row on each use.
-        CatalogEntry::PutCredential(_) | CatalogEntry::DropCredential { .. } => {}
     }
 }

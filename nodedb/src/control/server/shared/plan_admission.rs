@@ -7,7 +7,7 @@
 //! Planning reads the catalog and records a descriptor version; the lease that
 //! pins that version is only acquired afterwards. A descriptor drain that starts
 //! between those two steps fails the acquisition, so both must live inside the
-//! same retry budget or the drain surfaces to the client as a hard error. The
+//! same retried unit or the drain surfaces to the client as a hard error. The
 //! acquisition fails closed before any lease is granted, so a retried attempt
 //! never re-reads data it was not entitled to.
 //!
@@ -26,8 +26,7 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
-use crate::control::server::shared::retry::retry_on_schema_change;
-use crate::control::server::shared::returning;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -96,7 +95,7 @@ pub async fn plan_authorize_and_admit_in_txn(
     read_txn: Option<crate::types::TxnId>,
 ) -> crate::Result<PlanAdmission> {
     let request = &request;
-    retry_on_schema_change(&request.state.lease_drain, move || {
+    retry_on_schema_change(DrainWait::of_statement(request.state), move || {
         plan_authorize_and_admit_once(request, read_txn)
     })
     .await
@@ -112,12 +111,7 @@ async fn plan_authorize_and_admit_once(
     let query_ctx = request.query_ctx;
     let identity = request.scope.identity();
     let auth_ctx = request.scope.auth();
-    // The planner does not parse a DML `RETURNING` clause, so it is split off
-    // here. The item text resolves inside the planner against the planned
-    // target, which announces the projection and attaches the Data-Plane spec
-    // to every task. Planned with the clause still in the text, the statement
-    // drops it and answers a count with no rows.
-    let (sql, returning_items) = returning::strip_returning(request.sql)?;
+    let sql = request.sql;
     let tenant_id = request.scope.tenant_id();
     let database_id = request.scope.database_id();
     let trace_id = request.trace_id;
@@ -138,13 +132,7 @@ async fn plan_authorize_and_admit_once(
             ),
         };
         let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
-            .plan_sql_with_rls_and_versions(
-                &sql,
-                tenant_id,
-                database_id,
-                &security,
-                returning_items.as_deref(),
-            )
+            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security)
             .await?;
         (tasks, output_schema, versions)
     };

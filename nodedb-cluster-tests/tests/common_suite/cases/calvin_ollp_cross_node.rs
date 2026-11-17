@@ -256,13 +256,13 @@ async fn ollp_implicit_edge_delete_cleans_reverse_cross_node() {
 
     // PRE-DELETE: a 1-hop reverse traversal from `hub` must reach all sources on
     // every node — proves the cross-shard implicit edges dual-homed onto `hub`.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                cluster.nodes[idx]
+                node
                     .traversed_node_ids("GRAPH TRAVERSE IN 'ollp_impl_edge_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in")
                     .len()
                     > SOURCES
@@ -327,13 +327,13 @@ async fn ollp_implicit_edge_delete_cleans_reverse_cross_node() {
     // `hub`'s shard — so a cross-shard reverse edge would survive. Therefore
     // edges-gone (no source reverse-reachable from `hub`) ⟹ the OLLP edge-delete
     // bundle ran, which is exactly what the edge-bearing routing gate enables.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse traversal from hub finds no sources after delete"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                let ids = cluster.nodes[idx]
+                let ids = node
                     .traversed_node_ids("GRAPH TRAVERSE IN 'ollp_impl_edge_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in");
                 // Only the start node `hub` should remain reachable.
                 ids.iter().all(|id| id == "hub")

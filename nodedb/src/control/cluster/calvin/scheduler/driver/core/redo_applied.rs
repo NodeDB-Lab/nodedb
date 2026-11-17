@@ -145,6 +145,7 @@ impl Scheduler {
             AckSlice {
                 primary_write: applied.primary_write,
                 returning: applied.returning,
+                vshard: self.vshard_id,
             },
         );
         self.propose_sequencer_entry(txn_id, SchedulerProposal::CompletionAck { result });

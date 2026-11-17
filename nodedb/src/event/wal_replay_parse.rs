@@ -37,7 +37,7 @@ pub(super) fn parse_put_record(
     payload: &[u8],
     scope: &ReplayScope,
     sequence: &mut u64,
-) -> Option<WriteEvent> {
+) -> crate::Result<Option<WriteEvent>> {
     let ReplayScope {
         database_id,
         tenant_id,
@@ -49,7 +49,7 @@ pub(super) fn parse_put_record(
     // Try the KV put family first: its payloads open with a discriminator no
     // document or edge shape carries.
     if let Some(event) = parse_kv_put_family(payload, scope, sequence) {
-        return Some(event);
+        return Ok(Some(event));
     }
 
     // Try document put with surrogate, plain or bitemporal. The surrogate is
@@ -59,19 +59,23 @@ pub(super) fn parse_put_record(
     if let Some(DocPut {
         collection,
         document_id,
-        value,
+        event,
         stamps,
-    }) = decode_doc_put(payload)
+    }) = decode_doc_put(payload)?
     {
         *sequence += 1;
         let (system_time_ms, valid_time_ms) = match stamps {
             Some((system, valid)) => (Some(system), valid),
-            None => crate::event::bitemporal_extract::extract_stamps(Some(&value)),
+            None => crate::event::bitemporal_extract::extract_stamps(Some(&event.new_value)),
         };
-        return Some(WriteEvent {
+        return Ok(Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
-            op: WriteOp::Insert,
+            op: if event.old_value.is_some() {
+                WriteOp::Update
+            } else {
+                WriteOp::Insert
+            },
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             record: Some(RecordPosition::first(lsn)),
@@ -79,15 +83,15 @@ pub(super) fn parse_put_record(
             tenant_id,
             vshard_id,
             source: sources.document,
-            new_value: Some(Arc::from(value.as_slice())),
-            old_value: None,
+            new_value: Some(Arc::from(event.new_value)),
+            old_value: event.old_value.map(Arc::from),
             system_time_ms,
             valid_time_ms,
             user_id: None,
             statement_digest: None,
             commit_hlc,
             image_fault: None,
-        });
+        }));
     }
 
     // Try graph edge put: a map-encoded `EdgePutRedo`, the payload of both the
@@ -99,7 +103,7 @@ pub(super) fn parse_put_record(
     if let Ok(edge) = zerompk::from_msgpack::<crate::wal::EdgePutRedo>(payload) {
         let Some((src_surrogate, dst_surrogate)) = edge.endpoints() else {
             refuse_unbound_edge(lsn, &edge.collection);
-            return None;
+            return Ok(None);
         };
         let crate::wal::EdgePutRedo {
             collection,
@@ -112,7 +116,7 @@ pub(super) fn parse_put_record(
         *sequence += 1;
         let (system_time_ms, valid_time_ms) =
             crate::event::bitemporal_extract::extract_stamps(Some(&properties));
-        return Some(WriteEvent {
+        return Ok(Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
@@ -139,7 +143,7 @@ pub(super) fn parse_put_record(
             statement_digest: None,
             commit_hlc,
             image_fault: None,
-        });
+        }));
     }
 
     // Unrecognized Put payload (e.g., KV expire) — skip.
@@ -148,7 +152,7 @@ pub(super) fn parse_put_record(
         payload_len = payload.len(),
         "WAL replay: unrecognized Put payload format, skipping"
     );
-    None
+    Ok(None)
 }
 
 /// Parse a `RecordType::GraphNodeLabelSet` / `GraphNodeLabelRemove` payload into

@@ -109,6 +109,9 @@ mod tests {
             collection: "docs".to_owned(),
             fields: vec!["embedding".to_owned()],
             is_active: true,
+            state: crate::control::security::catalog::IndexRecordState::Ready,
+            analyzer: None,
+            fuzzy_default: None,
         }
     }
 
@@ -122,6 +125,7 @@ mod tests {
             tenant_id: 1,
             name: name.to_owned(),
             collection: "docs".to_owned(),
+            kind: IndexKind::Vector,
         }
     }
 

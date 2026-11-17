@@ -14,10 +14,14 @@
 //! - `0x14` CollectionPurged (server → client)
 //! - `0x15` RowPush (server → client)
 //! - `0x16` RowPushReject (client → server)
+//! - `0x17` CollectionSchemaReject (server → client)
 //! - `0x20` ShapeSubscribe (client → server)
 //! - `0x21` ShapeSnapshot (server → client)
 //! - `0x22` ShapeDelta (server → client)
 //! - `0x23` ShapeUnsubscribe (client → server)
+//! - `0x24` ShapeSnapshotReject (server → client)
+//! - `0x25` CollectionResync (server → client)
+//! - `0x26` DatabaseResync (server → client)
 //! - `0x30` VectorClockSync (bidirectional)
 //! - `0x40` TimeseriesPush (client → server)
 //! - `0x41` TimeseriesAck (server → client)
@@ -62,7 +66,9 @@ pub mod ack_result;
 pub mod ack_status;
 pub mod array;
 pub mod collection_schema;
+pub mod collection_schema_reject;
 pub mod columnar;
+pub mod database_resync;
 pub mod delta;
 pub mod frame;
 pub mod fts;
@@ -72,6 +78,7 @@ pub mod provenance;
 pub mod resync;
 pub mod session;
 pub mod shape;
+pub mod shape_snapshot_reject;
 pub mod spatial;
 pub mod stream_id;
 pub mod timeseries;
@@ -86,7 +93,9 @@ pub use array::{
     ArraySnapshotMsg,
 };
 pub use collection_schema::{CollectionDescriptor, CollectionSchemaSyncMsg};
+pub use collection_schema_reject::{CollectionSchemaRefusal, CollectionSchemaRejectMsg};
 pub use columnar::{ColumnarInsertAckMsg, ColumnarInsertMsg};
+pub use database_resync::{DatabaseResyncMsg, DatabaseResyncReason};
 pub use delta::{
     CollectionPurgedMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, RowOp, RowPushMsg,
 };
@@ -101,8 +110,10 @@ pub use session::{
     TokenRefreshAckMsg, TokenRefreshMsg, TokenRefreshRequiredMsg,
 };
 pub use shape::{
-    ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, VectorClockSyncMsg,
+    CollectionResyncMsg, ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg,
+    VectorClockSyncMsg,
 };
+pub use shape_snapshot_reject::{ShapeSnapshotRefusal, ShapeSnapshotRejectMsg};
 pub use spatial::{SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg, SpatialInsertMsg};
 pub use stream_id::{EngineKind, stream_id_for};
 pub use timeseries::{DefinitionSyncMsg, TimeseriesAckMsg, TimeseriesPushMsg};

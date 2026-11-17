@@ -18,6 +18,8 @@
 //!   applies.
 //! - [`pipeline`]: every group's lane and the applies that run.
 //! - [`lane`]: one group's queued and started entries, settled in log order.
+//! - [`marker_changes`]: the change events of an installed chunked redo,
+//!   and of an entry a restart delivers again.
 //! - [`settle`]: settles every group's concluded entries and saves the
 //!   floors that moved.
 //! - [`panicked`]: an entry whose enqueue or apply panicked holds its group.
@@ -28,9 +30,13 @@
 //!   collects.
 //! - [`barrier_prefold`]: folds the barrier entries of a waiting lane ahead
 //!   of their turn.
-//! - [`calvin_read_result`]: folds a committed `CalvinReadResult` or
-//!   `CalvinReadTimeout` entry into its txn's stored barrier row and its
-//!   vShard's read-result buffer.
+//! - [`calvin_read_result`]: folds a committed `CalvinReadResult`,
+//!   `CalvinSequenceEffects` or `CalvinReadTimeout` entry into its txn's
+//!   stored barrier row and its vShard's read-result buffer.
+//! - [`calvin_answer`]: the answer an installed slice of a `RETURNING`
+//!   contract gives its coordinator.
+//! - [`calvin_frozen_reply`]: stores a committed `CalvinFrozenReply` entry as
+//!   its txn's frozen `RETURNING` reply and wakes the vShard's scheduler.
 //! - [`calvin_redo`]: claims a stamped Calvin redo's position in the applied
 //!   ledger and reports its install to the vShard's scheduler.
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
@@ -53,6 +59,7 @@
 //!   one its proposer planned it against.
 //! - [`mirror_hold`]: holds a mirror's entry until the metadata log decides
 //!   its cut, and applies a mirror's seal.
+//! - [`array_op_prepare`]: prepares an array op entry for its apply.
 //! - [`array_cell_route`]: routes an array cell write to the incarnation its
 //!   proposer wrote against.
 //! - [`collection_route`]: applies a collection write only while each
@@ -60,8 +67,11 @@
 
 mod aggregate_image;
 mod array_cell_route;
+mod array_op_prepare;
 mod barrier_prefold;
 mod bookkeeping;
+mod calvin_answer;
+mod calvin_frozen_reply;
 mod calvin_read_result;
 mod calvin_redo;
 mod collection_convert;
@@ -73,6 +83,7 @@ mod group_watch;
 mod held_entry;
 mod helpers;
 mod lane;
+mod marker_changes;
 mod metadata_floor;
 mod mirror_hold;
 mod panicked;

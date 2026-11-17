@@ -19,7 +19,7 @@ use crate::control::security::audit::AuditEvent;
 use crate::control::security::catalog::{IndexBuildState, IndexKind, StoredIndex};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
-    IndexRegistration, propose_index_record,
+    IndexRegistration, index_name_holder, propose_index_record,
 };
 use crate::control::server::shared::session::ddl_buffer;
 use crate::control::server::shared::session::ddl_effect::{DeferredDdlEffect, SecondaryIndexBuild};
@@ -147,9 +147,8 @@ pub async fn create_index(
     // the registry is keyed by name, so two kinds sharing one name will make
     // exactly one of them droppable. The registry read itself must still fail
     // loudly — only a genuine name collision is absorbed by `IF NOT EXISTS`.
-    if let Some(existing) = catalog
-        .get_index_record(database_id.as_u64(), tenant_id.as_u64(), &index_name)
-        .map_err(|e| DdlError::from_error(&e))?
+    if let Some(existing) =
+        index_name_holder(state, database_id, tenant_id, &index_name, "CREATE INDEX")?
     {
         if if_not_exists {
             return Ok(create_index_ok());
@@ -234,6 +233,9 @@ pub async fn create_index(
             kind: IndexKind::Secondary,
             collection,
             fields: vec![canonical_field.clone()],
+            // A secondary index tracks its build state on the collection's
+            // `StoredIndex` entry.
+            state: crate::control::security::catalog::IndexRecordState::Ready,
         },
     )
     .await?;

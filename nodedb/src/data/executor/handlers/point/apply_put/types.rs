@@ -10,7 +10,7 @@ use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::engine::document::store::StorageKey;
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 
-/// Parameters for [`CoreLoop::apply_point_put`](crate::data::executor::core_loop::CoreLoop::apply_point_put).
+/// Consumed input for point-put preparation and the combined apply wrapper.
 pub(in crate::data::executor) struct PointPutParams<'a> {
     pub database_id: u64,
     pub tid: u64,
@@ -64,23 +64,35 @@ pub(in crate::data::executor) struct PointPutParams<'a> {
     pub guards: crate::data::executor::enforcement::typeguard::GuardScope<'a>,
 }
 
+/// Row identity and durable ordering for an exact installed image.
+pub(in crate::data::executor) struct InstalledDocumentRow<'a> {
+    pub database_id: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub storage_key: StorageKey,
+    pub surrogate: Surrogate,
+    pub wal_lsn: Option<crate::types::Lsn>,
+}
+
+/// A head decision published only after its transaction commits.
+#[derive(Debug, Clone)]
+pub(in crate::data::executor) struct InstalledHeadReceipt {
+    pub collection: String,
+    pub prior: Option<crate::types::hash_chain::ChainHead>,
+    pub installed: crate::types::hash_chain::ChainHead,
+    pub changed: bool,
+}
+
 /// Capture of the mutations an [`CoreLoop::apply_point_put`](crate::data::executor::core_loop::CoreLoop::apply_point_put)
 /// performed, so a transactional caller can build an undo entry that fully
 /// reverses it.
 pub(in crate::data::executor) struct PointPutOutcome {
     /// Prior stored bytes when this put replaced an existing row, else `None`.
     pub prior_value: Option<Vec<u8>>,
-    /// The exact bytes this put handed to storage — a Binary Tuple on a strict
-    /// collection, MessagePack otherwise, with generated columns evaluated and
-    /// `_rowid` injected. A `RETURNING` projection reads THIS, never the
-    /// caller's submitted body, so it reports the row that landed rather than
-    /// the row that was asked for.
-    pub stored_value: Vec<u8>,
-    /// System-time ordinal the row version (and its index entries) were
-    /// appended at.
-    pub version_sys_from: i64,
+    /// Exact canonical and stored forms, layout witness, and selected version.
+    pub installed: crate::types::SharedInstalledDocument,
     /// `(field, value)` pairs whose index entries this op wrote at
-    /// `version_sys_from`: a live entry for every value the row gained, a
+    /// `installed.version.sys_from`: a live entry for every value the row gained, a
     /// tombstone for every value it dropped. A transactional caller removes
     /// them on rollback. Autocommit callers ignore it.
     pub index_tuples: Vec<(String, String)>,
@@ -175,7 +187,6 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
         | ErrorCode::OllpRetryRequired
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
@@ -183,6 +194,8 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedObject { .. }
         | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -194,7 +207,8 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
-        | ErrorCode::ProgramLimitExceeded { .. }) => crate::Error::DataPlane(other),
+        | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. }) => crate::Error::DataPlane(other),
     }
 }
 

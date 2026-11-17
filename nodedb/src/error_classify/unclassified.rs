@@ -26,7 +26,6 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::Internal { .. }
         | Error::DescriptorVersionAnomaly { .. }
         | Error::CatalogIntegrityViolation { .. }
-        | Error::CollectionPurgeRowMissing { .. }
         | Error::CollectionUnstamped { .. }
         | Error::MaterializedSumResolutionMissing { .. }
         | Error::CascadeCycle { .. } => true,
@@ -39,7 +38,6 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         // A client-matchable class or a retry contract a caller matches by
         // variant.
         Error::RejectedConstraint { .. }
-        | Error::TxnOverlayMemoryExceeded { .. }
         | Error::RejectedAuthz { .. }
         | Error::OffsetRegression { .. }
         | Error::DeadlineExceeded { .. }
@@ -100,6 +98,8 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::InvalidTextRepresentation { .. }
         | Error::DatatypeMismatch { .. }
         | Error::InvalidDatetimeFormat { .. }
+        | Error::InvalidArgumentForLogarithm { .. }
+        | Error::InvalidArgumentForPowerFunction { .. }
         | Error::DatetimeFieldOverflow { .. }
         | Error::InvalidLimitValue { .. }
         | Error::RetryableSchemaChanged { .. }

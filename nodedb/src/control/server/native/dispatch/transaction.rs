@@ -34,7 +34,7 @@ use super::DispatchCtx;
 /// Always dispatches through the direct SPSC write path using the task's
 /// pre-classified `vshard_id`, mirroring pgwire's `dispatch_task_no_wal`.
 /// The gateway must NOT be used here: commit-time tasks carry `MetaOp` plans
-/// (`ResolveTxn`, `ApplyTransactionRedo`) with no named collection, so the
+/// (`ResolveTxnPart`, `ApplyTransactionRedo`) with no named collection, so the
 /// gateway's router cannot derive a route for them and falls back to
 /// vShard 0 — durably applying the commit on the wrong core.
 pub(crate) struct NativeTxnDp<'a> {

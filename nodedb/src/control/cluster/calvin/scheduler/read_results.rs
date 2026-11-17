@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Dependent-read barrier events that reached a vShard before its scheduler
-//! took them.
+//! Barrier events that reached a vShard before its scheduler took them.
 //!
-//! The data-group apply loop folds every `CalvinReadResult` and
-//! `CalvinReadTimeout` entry into the txn's stored barrier row (see
-//! [`super::barrier_store`]), then into the vShard's [`VShardReadResults`].
-//! The entry can apply before this node's scheduler granted the txn, or
+//! The data-group apply loop folds every `CalvinReadResult`,
+//! `CalvinSequenceEffects` and `CalvinReadTimeout` entry into the txn's
+//! stored barrier row (see [`super::barrier_store`]), then into the
+//! vShard's [`VShardReadResults`]. The entry can apply before this node's scheduler granted the txn, or
 //! before a scheduler for the vShard runs here at all. The events then wait
 //! here. The scheduler takes a txn's events once it holds the txn: at the
 //! grant, and on each push for a txn it holds.

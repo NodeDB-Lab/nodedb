@@ -57,6 +57,13 @@ impl Scheduler {
             );
             return;
         }
+        // An abort verdict ends a `RETURNING` evaluation that waits for
+        // another participant's sequence changes: they never come. The
+        // slice votes abort, and the vote's probe drops it.
+        if !committed && self.waits_for_sequences(txn_id) {
+            self.advance_returning(txn_id);
+            return;
+        }
         let Some((state, writes)) = self
             .pending
             .get(&txn_id)
@@ -266,7 +273,6 @@ mod tests {
     };
     use crate::control::state::SharedState;
     use crate::types::RequestId;
-    use crate::wal::RedoRecord;
 
     /// A scheduler with one txn parked in a commit state while its tenant sits
     /// at the dispatcher's in-flight cap.
@@ -298,20 +304,21 @@ mod tests {
 
     /// An Ok resolve response whose redo record carries no ops.
     fn empty_redo_response() -> crate::bridge::envelope::Response {
-        let redo = RedoRecord {
-            version: 1,
-            ops: Vec::new(),
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: Vec::new(),
-        };
         let mut response = staged_response(Status::Ok, None);
-        let resolved = nodedb_physical::physical_plan::CalvinResolved {
-            redo: redo.to_bytes().expect("encode empty redo record"),
-            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+        let resolved = nodedb_physical::physical_plan::CalvinResolvedPart {
+            part: nodedb_physical::physical_plan::ResolvedTxnPart {
+                index: 0,
+                bytes: Vec::new(),
+                done: true,
+                opened: Some(nodedb_physical::physical_plan::ResolvedTxnOpen {
+                    len: 0,
+                    op_count: 0,
+                    ts_rejected: Vec::new(),
+                }),
+            },
+            reply: Some(nodedb_physical::physical_plan::CalvinReplySpec::Count(
+                Vec::new(),
+            )),
         };
         response.payload =
             Payload::from_vec(zerompk::to_msgpack_vec(&resolved).expect("encode resolved answer"));
@@ -404,7 +411,8 @@ mod tests {
                 plan,
                 PhysicalPlan::Meta(MetaOp::CalvinResolve {
                     epoch: 14,
-                    position: 2
+                    position: 2,
+                    ..
                 })
             )
         })

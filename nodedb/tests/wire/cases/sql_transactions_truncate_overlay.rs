@@ -244,6 +244,10 @@ async fn truncate_in_transaction_fts_search_excludes_base_rows() {
         .exec("CREATE COLLECTION trunc_txn_fts WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    server
+        .exec("CREATE SEARCH INDEX ON trunc_txn_fts (body)")
+        .await
+        .unwrap();
     for (id, body) in [("a1", "the quick brown fox"), ("a2", "a quick lazy dog")] {
         server
             .exec(&format!(

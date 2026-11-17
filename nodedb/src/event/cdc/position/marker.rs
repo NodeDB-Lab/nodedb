@@ -2,6 +2,12 @@
 
 //! Replicated positions of applied writes, and the WAL payload that keeps a
 //! Raft entry's position durable on each replica.
+//!
+//! A `ChangePosition` payload is a fixed head ([`ChangePositionMarker`]),
+//! then a tail ([`MarkerChanges`]) that says which change events the entry
+//! publishes. A marker with no tail records no change events.
+
+use crate::wal::RedoRowChange;
 
 /// Where a committed data-group entry sits in its group's Raft log. Every
 /// replica that applies the entry sees the same value.
@@ -13,7 +19,7 @@ pub struct ReplicatedPosition {
     pub log_index: u64,
 }
 
-/// Byte length of an encoded [`ChangePositionMarker`].
+/// Byte length of an encoded [`ChangePositionMarker`]: the payload's head.
 pub const MARKER_LEN: usize = 32;
 
 /// Payload of a `ChangePosition` WAL record: the entry's proposal key, and
@@ -35,10 +41,12 @@ impl ChangePositionMarker {
         out
     }
 
+    /// The head of a `ChangePosition` payload. A tail after it is not read.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MarkerDecodeError> {
         let bytes: &[u8; MARKER_LEN] = bytes
-            .try_into()
-            .map_err(|_| MarkerDecodeError { len: bytes.len() })?;
+            .get(..MARKER_LEN)
+            .and_then(|head| head.try_into().ok())
+            .ok_or(MarkerDecodeError { len: bytes.len() })?;
         let word = |at: usize| {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&bytes[at..at + 8]);
@@ -53,11 +61,57 @@ impl ChangePositionMarker {
             },
         })
     }
+
+    /// The payload of a marker with `changes` as its tail.
+    pub fn with_changes(&self, changes: &MarkerChanges) -> crate::Result<Vec<u8>> {
+        let mut out = self.to_bytes().to_vec();
+        zerompk::write_msgpack(&mut out, changes).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("change position marker tail encode: {e}"),
+        })?;
+        Ok(out)
+    }
 }
 
-/// A `ChangePosition` payload of the wrong length.
+/// What a `ChangePosition` payload's tail says of its entry's change events.
+///
+/// The write funnel appends the marker before the entry's first record, so
+/// the tail is durable no later than any record of the entry. A restart that
+/// delivers the entry again stages its events from the tail, at the marker's
+/// LSN.
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub enum MarkerChanges {
+    /// The row changes the entry's write yields, as the write funnel derived
+    /// them from its plan. They publish once the write applied.
+    Rows(Vec<RedoRowChange>),
+    /// The row changes the entry's `TransactionRedo` record names. The
+    /// record holds them whole, so the marker does not repeat them.
+    OfRedo,
+    /// The write's records stay in the WAL, and it yields no change event:
+    /// its apply answered a refusal. A later marker of the same entry
+    /// carries this tail.
+    Withheld,
+}
+
+impl MarkerChanges {
+    /// The tail of the `ChangePosition` payload `bytes`. `None` when the
+    /// payload has no tail.
+    pub fn of_payload(bytes: &[u8]) -> crate::Result<Option<Self>> {
+        let Some(tail) = bytes.get(MARKER_LEN..).filter(|tail| !tail.is_empty()) else {
+            return Ok(None);
+        };
+        zerompk::from_msgpack(tail)
+            .map(Some)
+            .map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("change position marker tail decode: {e}"),
+            })
+    }
+}
+
+/// A `ChangePosition` payload shorter than its head.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("ChangePosition payload is {len} bytes, expected {MARKER_LEN}")]
+#[error("ChangePosition payload is {len} bytes, expected at least {MARKER_LEN}")]
 pub struct MarkerDecodeError {
     pub len: usize,
 }
@@ -87,6 +141,42 @@ mod tests {
         assert_eq!(
             ChangePositionMarker::from_bytes(&[0u8; 24]),
             Err(MarkerDecodeError { len: 24 })
+        );
+    }
+
+    /// A tail rides after the head: the head reads as before, and the tail
+    /// reads back whole. A payload with no tail has none.
+    #[test]
+    fn a_tail_round_trips_after_the_head() {
+        let marker = ChangePositionMarker {
+            apply_key: 9,
+            position: ReplicatedPosition {
+                epoch: 1,
+                group_id: 2,
+                log_index: 3,
+            },
+        };
+        let rows = MarkerChanges::Rows(vec![RedoRowChange {
+            collection: "orders".into(),
+            row: "o1".into(),
+            kind: crate::wal::RedoRowKind::Update,
+        }]);
+        let payload = marker.with_changes(&rows).expect("encode");
+        assert_eq!(ChangePositionMarker::from_bytes(&payload), Ok(marker));
+        assert_eq!(
+            MarkerChanges::of_payload(&payload).expect("decode"),
+            Some(rows)
+        );
+        let withheld = marker
+            .with_changes(&MarkerChanges::Withheld)
+            .expect("encode");
+        assert_eq!(
+            MarkerChanges::of_payload(&withheld).expect("decode"),
+            Some(MarkerChanges::Withheld)
+        );
+        assert_eq!(
+            MarkerChanges::of_payload(&marker.to_bytes()).expect("decode"),
+            None
         );
     }
 }

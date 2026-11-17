@@ -78,11 +78,16 @@ impl CoreLoop {
                         args.surrogates.len()
                     ),
                 })?;
-            let body = nodedb_types::value_to_msgpack(&rmpv_to_value(image)).map_err(|e| {
-                ErrorCode::Internal {
-                    detail: format!("timeseries insert: row encode failed: {e}"),
-                }
-            })?;
+            // The image renders a decimal and a UUID as text; the staged
+            // body carries them typed, as a committed row reads them.
+            let body = self
+                .staged_ts_body(
+                    args.task.request.database_id,
+                    TenantId::new(args.tid),
+                    args.collection,
+                    rmpv_to_value(image),
+                )
+                .map_err(ErrorCode::from)?;
             let ctx = StageCtx::new(
                 args.task,
                 args.tid,
@@ -91,7 +96,7 @@ impl CoreLoop {
                 RowIdentity::for_surrogate(surrogate),
                 surrogate,
             );
-            self.stage_put_capped(&ctx, body)?;
+            self.stage_put(&ctx, body)?;
         }
         Ok((batch.rows.len(), rejected))
     }
@@ -153,18 +158,21 @@ impl CoreLoop {
         &mut self,
         txn_id: TxnId,
         prior_marker: Option<usize>,
-    ) {
+    ) -> crate::Result<()> {
         match prior_marker {
             Some(marker) => {
                 if let Some(overlay) = self.txn_overlays.get_mut(&txn_id) {
-                    overlay.rollback_to(marker);
+                    overlay.rollback_to(marker)?;
                 }
             }
             None => {
-                let remove_empty = self.txn_overlays.get_mut(&txn_id).is_some_and(|overlay| {
-                    overlay.rollback_to(0);
-                    overlay.is_empty()
-                });
+                let remove_empty = match self.txn_overlays.get_mut(&txn_id) {
+                    Some(overlay) => {
+                        overlay.rollback_to(0)?;
+                        overlay.is_empty()
+                    }
+                    None => false,
+                };
                 if remove_empty
                     && self.txn_overlays.remove(&txn_id).is_some()
                     && let Some(metrics) = &self.metrics
@@ -175,6 +183,7 @@ impl CoreLoop {
                 }
             }
         }
+        Ok(())
     }
 
     /// Preview `payload` in `format` against the schema in force, through

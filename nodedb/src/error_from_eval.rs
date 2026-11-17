@@ -22,9 +22,36 @@ impl From<nodedb_query::EvalError> for Error {
             | nodedb_query::EvalError::ArgumentValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
-            e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
-                detail: e.to_string(),
+            nodedb_query::EvalError::MathDomain(fault) => match fault.class() {
+                nodedb_query::expr::MathDomainClass::Logarithm => {
+                    Self::InvalidArgumentForLogarithm {
+                        detail: fault.to_string(),
+                    }
+                }
+                nodedb_query::expr::MathDomainClass::PowerFunction => {
+                    Self::InvalidArgumentForPowerFunction {
+                        detail: fault.to_string(),
+                    }
+                }
             },
+            e @ (nodedb_query::EvalError::NumericOverflow { .. }
+            | nodedb_query::EvalError::NumericFieldOverflow { .. }
+            | nodedb_query::EvalError::OutOfRange(_)
+            | nodedb_query::EvalError::NumericSpecialValue { .. }) => {
+                Self::NumericValueOutOfRange {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidTextRepresentation { .. } => {
+                Self::InvalidTextRepresentation {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidDatetimeFormat { .. } => {
+                Self::InvalidDatetimeFormat {
+                    detail: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -61,6 +88,44 @@ mod tests {
                 Error::DataException { detail } => assert_eq!(detail, text),
                 other => panic!("expected Error::DataException, got {other:?}"),
             }
+        }
+    }
+
+    /// A logarithm fault keeps `2201E`, and the others `2201F`.
+    #[test]
+    fn math_domain_faults_keep_their_subclass() {
+        use nodedb_query::expr::MathDomain;
+        match Error::from(nodedb_query::EvalError::MathDomain(MathDomain::LogOfZero)) {
+            Error::InvalidArgumentForLogarithm { detail } => {
+                assert_eq!(detail, "cannot take logarithm of zero")
+            }
+            other => panic!("expected Error::InvalidArgumentForLogarithm, got {other:?}"),
+        }
+        match Error::from(nodedb_query::EvalError::MathDomain(
+            MathDomain::SqrtOfNegative,
+        )) {
+            Error::InvalidArgumentForPowerFunction { detail } => {
+                assert_eq!(detail, "cannot take square root of a negative number")
+            }
+            other => panic!("expected Error::InvalidArgumentForPowerFunction, got {other:?}"),
+        }
+    }
+
+    /// An out-of-range result, and NaN or an infinity cast to numeric, are
+    /// `22003`.
+    #[test]
+    fn range_faults_keep_their_class() {
+        let e = nodedb_query::EvalError::OutOfRange(nodedb_query::expr::OutOfRange::Bigint);
+        match Error::from(e) {
+            Error::NumericValueOutOfRange { detail } => assert_eq!(detail, "bigint out of range"),
+            other => panic!("expected Error::NumericValueOutOfRange, got {other:?}"),
+        }
+        let e = nodedb_query::EvalError::NumericSpecialValue { value: "NaN" };
+        match Error::from(e) {
+            Error::NumericValueOutOfRange { detail } => {
+                assert_eq!(detail, "cannot convert NaN to numeric")
+            }
+            other => panic!("expected Error::NumericValueOutOfRange, got {other:?}"),
         }
     }
 }

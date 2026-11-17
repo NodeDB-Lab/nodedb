@@ -10,6 +10,8 @@
 //!   `with_rate_limit`, `uptime_secs`, `idle_secs`).
 //! - `handshake.rs` — `handle_handshake` + handshake rejection frames.
 //! - `fencing.rs` — `durable_fencing_decision` (Lite producer/epoch fencing).
+//! - `purge_catch_up.rs` — the purge replay or database resync a handshake
+//!   owes a reconnecting client.
 //! - `delta.rs` — `handle_delta_push` (rate limit, CRC32C, RLS, dedup).
 //! - `clock_ping.rs` — `handle_vector_clock_sync` + `handle_ping`.
 //! - `token.rs` — `handle_token_refresh`.
@@ -22,6 +24,7 @@ pub mod delta;
 pub mod dispatch;
 pub mod fencing;
 pub mod handshake;
+pub mod purge_catch_up;
 pub mod row_push_reject;
 pub mod state;
 pub mod token;

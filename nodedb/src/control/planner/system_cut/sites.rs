@@ -127,7 +127,8 @@ macro_rules! cut_site_walk {
                     | TextOp::HybridSearchTriple { system_time, .. } => visit(system_time),
                     TextOp::FtsIndexDoc { .. }
                     | TextOp::FtsDeleteDoc { .. }
-                    | TextOp::SetTextConfig { .. } => {}
+                    | TextOp::SetTextConfig { .. }
+                    | TextOp::RebuildIndex { .. } => {}
                 },
                 PhysicalPlan::Spatial(op) => match op {
                     SpatialOp::Scan { system_time, .. } => visit(system_time),

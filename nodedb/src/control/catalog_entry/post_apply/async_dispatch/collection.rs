@@ -19,6 +19,55 @@ pub async fn put_async(stored: &StoredCollection, shared: &SharedState) -> crate
     collection::put_async(stored, shared).await
 }
 
+/// Register the collection a `PutCollectionIfAbsent` entry names, from the
+/// row the catalog holds.
+///
+/// The carried `stored` can hold a divergent config when the collection
+/// already existed. The catalog row is the authoritative one.
+///
+/// The post-apply runs only when the row is in the catalog: the entry
+/// inserted it, or validation found it and a re-delivery runs the post-apply
+/// an earlier delivery owes. The applier applies nothing else in between, so
+/// a missing row is an impossible state. It and a read error stop the batch
+/// at this entry, and the re-delivery registers again.
+pub async fn put_if_absent_async(
+    stored: &StoredCollection,
+    shared: &SharedState,
+) -> crate::Result<()> {
+    let Some(canonical) = shared.credentials.catalog().get_committed_collection(
+        stored.database_id,
+        stored.tenant_id,
+        &stored.name,
+    )?
+    else {
+        return Err(crate::Error::Internal {
+            detail: format!(
+                "PutCollectionIfAbsent post-apply: collection '{}' (database {}, tenant {}) is \
+                 not in the catalog after its apply; no entry between the apply and the \
+                 post-apply removes it",
+                stored.name,
+                stored.database_id.as_u64(),
+                stored.tenant_id
+            ),
+        });
+    };
+    // The canonical row carries the entry's clock only when this entry
+    // created it: a new incarnation, cleared first.
+    if canonical.modification_hlc == stored.modification_hlc {
+        clear_before_recreate(
+            shared,
+            canonical.database_id.as_u64(),
+            canonical.tenant_id,
+            &canonical.name,
+        )
+        .await?;
+    }
+    // AWAITED: Register completes before the applied-index watcher bumps, so
+    // any later scan on this node finds the collection in doc_configs.
+    let registered = put_async(&canonical, shared).await;
+    super::apply_outcome::register_outcome(registered, &canonical.name)
+}
+
 /// Register every shadow collection a `CloneDatabase` entry stamped into
 /// `target` on every local Data Plane core.
 ///
@@ -77,12 +126,18 @@ impl std::fmt::Display for ReclaimFailure {
 }
 
 /// Reclaim every engine's storage for `(tenant_id, name)` on this node — WAL
-/// tombstone, redb tombstone, optional L2 cleanup enqueue, quiesce drain,
-/// `MetaOp::UnregisterCollection` dispatch to the local Data Plane, and Lite
-/// `CollectionPurged` broadcast.
+/// tombstone, redb tombstone, optional L2 cleanup enqueue, quiesce drain, and
+/// `MetaOp::UnregisterCollection` dispatch to the local Data Plane.
 ///
-/// Shared by the synchronous replicated post-apply barrier, materialized-view
-/// target deletion, and the interactive re-CREATE hard-purge. All callers use
+/// The Lite `CollectionPurged` notice is not sent here. The metadata applier
+/// sends it for each purge-log row the entry recorded, with the row's
+/// position, once this reclaim ran. A notice that a full session queue drops
+/// reaches the client from the purge log at its next handshake.
+///
+/// Shared by the replicated purge post-apply barrier (`DROP ... PURGE`, the
+/// retention sweep, and the re-CREATE over a soft-deleted name), the
+/// materialized-view target deletion, the MOVE TENANT source reclaim, and the
+/// metadata snapshot reconcile. All callers use
 /// this one result-checked implementation rather than duplicating lifecycle
 /// cleanup.
 pub(crate) async fn reclaim_collection_storage(
@@ -248,16 +303,6 @@ pub(crate) async fn reclaim_collection_storage(
             }
         }
         Ok(()) => {
-            // Broadcast only after every core reclaimed the old incarnation.
-            // Saturated per-session channels can drop the notification; offline
-            // replay remains the fallback.
-            shared.crdt_sync_delivery.broadcast_collection_purged(
-                tenant_id,
-                DatabaseId::new(database_id),
-                name,
-                purge_lsn,
-            );
-
             // A prior failed attempt can leave a durable entry; a
             // succeeding purge clears it and the hold that entry owned.
             // This call's own hold drops on return.

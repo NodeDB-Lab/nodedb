@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use super::manifest::{read_vector_manifest_at, storage_err};
 use super::paths::{vector_ckpt_dir, vector_ckpt_gen_dir};
 use super::publish::publish_vector_generation;
+use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
 use crate::data::executor::checkpoint_outcome::CheckpointOutcome;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
@@ -135,12 +136,9 @@ impl CoreLoop {
                         collection.len()
                     ),
                 })?;
-            let filename = format!(
-                "{}.ckpt",
-                super::paths::vector_ckpt_stem(key.0.as_u64(), key.1.as_u64(), &key.2)
-            );
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &filename, &bytes)
-                .map_err(|e| storage_err(&gen_dir.join(&filename), "publish checkpoint", &e))?;
+            let ckpt_key = super::paths::vector_ckpt_key(key.0.as_u64(), key.1.as_u64(), &key.2);
+            write_keyed_checkpoint(gen_dir, &ckpt_key, &bytes)
+                .map_err(|e| storage_err(gen_dir, "publish checkpoint", &e))?;
             files_written += 1;
         }
         Ok(files_written)
@@ -345,6 +343,36 @@ mod tests {
             live(&restored),
             Some(1),
             "the delete removes both vectors and keeps the single-vector row"
+        );
+    }
+
+    /// A 255-byte collection with a 200-byte field index checkpoints under a
+    /// short file name and restores under its full key.
+    #[test]
+    fn long_collection_and_field_names_checkpoint_and_restore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(7),
+            format!("{}:{}", "c".repeat(255), "f".repeat(200)),
+        );
+
+        let mut core = open_core_at(dir.path());
+        core.vector_collections
+            .insert(key.clone(), collection_with_one_vector());
+        let outcome = core
+            .checkpoint_vector_indexes()
+            .expect("a long-named index must publish");
+        assert_eq!(outcome.files_written, 1);
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        restored
+            .load_vector_checkpoints()
+            .expect("load must succeed");
+        assert_eq!(
+            restored.vector_collections.get(&key).map(|c| c.len()),
+            Some(1)
         );
     }
 }

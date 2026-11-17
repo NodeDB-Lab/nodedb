@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
-use crate::data::executor::doc_format::encode_resolved_wire_body as encode_doc_body;
+use crate::data::executor::doc_format::encode_typed_resolved_body as encode_doc_body;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind as MergeClauseKindOp,
@@ -16,7 +16,9 @@ use nodedb_physical::physical_plan::document::merge_types::{
 
 use super::super::identity_guard::IdentitySnapshot;
 use super::super::merge::MergeParams;
-use super::super::merge_helpers::{build_insert_doc, build_merged, build_update_doc, find_arm};
+use super::super::merge_helpers::{
+    MergeTarget, build_insert_doc, build_merged, build_update_doc, find_arm,
+};
 
 /// A matched / not-matched-by-source UPDATE arm resolved to a rewrite.
 pub(super) struct MergeUpdate {
@@ -31,6 +33,8 @@ pub(super) struct MergeUpdate {
     /// The fields the arm assigns. Typeguards judge them and the fields a
     /// guard injects.
     pub(super) assigned: Vec<String>,
+    /// The row's place in the join's output order (see [`MergePlanActions`]).
+    pub(super) ordinal: u64,
 }
 
 /// A matched / not-matched-by-source DELETE arm resolved to a removal.
@@ -40,6 +44,8 @@ pub(super) struct MergeDelete {
     /// extract its primary key when rewriting the delete into a concrete
     /// `PointDelete` for an in-transaction MERGE at COMMIT.
     pub(super) body: Vec<u8>,
+    /// The row's place in the join's output order (see [`MergePlanActions`]).
+    pub(super) ordinal: u64,
 }
 
 /// A NOT-MATCHED INSERT arm resolved to a new row.
@@ -50,16 +56,31 @@ pub(super) struct MergeInsert {
     pub(super) join_key: String,
     /// New document as MessagePack (pre-strict-encoding).
     pub(super) body: Vec<u8>,
+    /// The row's place in the join's output order (see [`MergePlanActions`]).
+    pub(super) ordinal: u64,
 }
 
 /// The full resolved action set of a MERGE against a consistent read snapshot.
+///
+/// Each arm carries its row's ordinal in the join's output order, the order
+/// PostgreSQL answers `RETURNING` rows in: a row a source row joined, or a
+/// source row no target row joined, takes the source row's position. A
+/// target row no source row joined follows every source row, in target
+/// order.
 pub(super) struct MergePlanActions {
     pub(super) updates: Vec<MergeUpdate>,
     pub(super) deletes: Vec<MergeDelete>,
     pub(super) inserts: Vec<MergeInsert>,
 }
 
-/// Decode a stored target row into JSON, with its identity injected under
+/// A stored target row: its typed value, which an arm's body is built
+/// from, and its JSON, which arm selection and expressions read.
+struct DecodedTarget {
+    typed: nodedb_types::Value,
+    doc: serde_json::Value,
+}
+
+/// Decode a stored target row, with its identity injected under
 /// `identity_column` for a schemaless row whose body lacks that column. Fails
 /// rather than skipping — a row the classifier can't read is not "absent",
 /// and treating it as absent inserts a duplicate of a row that already exists.
@@ -75,22 +96,23 @@ fn decode_target(
     bytes: &[u8],
     strict_schema: &Option<nodedb_types::columnar::StrictSchema>,
     identity_column: &str,
-) -> crate::Result<serde_json::Value> {
-    let mut doc = doc_format::decode_document_or_binary_tuple(
+) -> crate::Result<DecodedTarget> {
+    let mut typed = doc_format::decode_typed_document_or_binary_tuple(
         bytes,
         strict_schema.as_ref(),
         "MERGE target row",
     )?;
     if strict_schema.is_none()
-        && let Some(obj) = doc.as_object_mut()
+        && let nodedb_types::Value::Object(obj) = &mut typed
         && !obj.contains_key(identity_column)
     {
         obj.insert(
             identity_column.to_string(),
-            serde_json::Value::String(identity.as_str().to_string()),
+            nodedb_types::Value::String(identity.as_str().to_string()),
         );
     }
-    Ok(doc)
+    let doc = serde_json::Value::from(typed.clone());
+    Ok(DecodedTarget { typed, doc })
 }
 
 impl CoreLoop {
@@ -129,23 +151,34 @@ impl CoreLoop {
         let null_source = serde_json::Value::Null;
         let crs = self.crs_context();
 
-        for (key, bytes) in &target_docs {
+        let source_rows = source.rows().len();
+        for (position, (key, bytes)) in target_docs.iter().enumerate() {
             let key = *key;
             let identity = key.to_identity();
-            let target_doc = decode_target(&identity, bytes, &strict_schema, &identity_column)?;
+            let target = decode_target(&identity, bytes, &strict_schema, &identity_column)?;
+            let target_doc = &target.doc;
             // The source row whose join key a WHERE `=` would match.
-            let (arm_kind, source_doc): (MergeClauseKindOp, &serde_json::Value) =
+            let (arm_kind, source_doc, ordinal): (MergeClauseKindOp, &serde_json::Value, usize) =
                 if let Some(source_row) = source.probe(target_doc.get(params.target_join_col)) {
                     matched_source_rows.insert(source_row.id.as_str());
-                    (MergeClauseKindOp::Matched, &source_row.doc)
+                    (
+                        MergeClauseKindOp::Matched,
+                        &source_row.doc,
+                        source_row.index,
+                    )
                 } else {
-                    (MergeClauseKindOp::NotMatchedBySource, &null_source)
+                    (
+                        MergeClauseKindOp::NotMatchedBySource,
+                        &null_source,
+                        source_rows.saturating_add(position),
+                    )
                 };
+            let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
 
             // MATCHED selects against the merged doc; NOT-MATCHED-BY-SOURCE
             // selects against the target alone (no source row).
             let context = if arm_kind == MergeClauseKindOp::Matched {
-                build_merged(&target_doc, source_doc, params.source_alias)
+                build_merged(target_doc, source_doc, params.source_alias)
             } else {
                 target_doc.clone()
             };
@@ -163,7 +196,10 @@ impl CoreLoop {
                         };
                         let updated = build_update_doc(
                             params.target_collection,
-                            &target_doc,
+                            MergeTarget {
+                                typed: &target.typed,
+                                doc: target_doc,
+                            },
                             source_doc,
                             params.source_alias,
                             upd,
@@ -174,21 +210,26 @@ impl CoreLoop {
                             strict_schema.as_ref(),
                             params.declared_primary_key,
                             upd,
-                            &target_doc,
+                            target_doc,
                         )
-                        .check_unchanged(params.target_collection, &updated)?;
+                        .check_unchanged(
+                            params.target_collection,
+                            &serde_json::Value::from(updated.clone()),
+                        )?;
                         updates.push(MergeUpdate {
                             key,
-                            body: encode_doc_body(&updated),
-                            old_body: encode_doc_body(&target_doc),
+                            body: encode_doc_body(&updated)?,
+                            old_body: encode_doc_body(&target.typed)?,
                             assigned: crate::data::executor::handlers::write_body::assigned_names(
                                 upd,
                             ),
+                            ordinal,
                         });
                     }
                     MergeActionOp::Delete => deletes.push(MergeDelete {
                         key,
-                        body: encode_doc_body(&target_doc),
+                        body: encode_doc_body(&target.typed)?,
+                        ordinal,
                     }),
                     // INSERT is not a target-row arm; DoNothing is a no-op.
                     MergeActionOp::Insert { .. } | MergeActionOp::DoNothing => {}
@@ -216,10 +257,11 @@ impl CoreLoop {
                     &source_row.doc,
                     params.source_alias,
                     &crs,
-                )?);
+                )?)?;
                 inserts.push(MergeInsert {
                     join_key: source_row.id.clone(),
                     body,
+                    ordinal: u64::try_from(source_row.index).unwrap_or(u64::MAX),
                 });
             }
         }

@@ -299,12 +299,10 @@ pub(crate) fn ddl_result_to_native(
 ///
 /// `apply_result` is the applied Data-Plane response drained from the sidecar
 /// and `plans` is the completed batch's plans, in dispatch order. `fold_ctx`
-/// carries the requester, the statement's output schema and session sequence
-/// access. The schema evaluates a RETURNING list's computed columns. A native
-/// direct operation has no RETURNING list, so its projection is `None`. The
-/// fold is the protocol-neutral `response_shape::calvin_fold` pgwire renders too, so
-/// a three-row implicit-edge insert answers `(3, INSERT)` here and
-/// `INSERT 0 3` there.
+/// carries the session that takes the sequence values the frozen RETURNING
+/// rows drew. The fold is the protocol-neutral `response_shape::calvin_fold`
+/// pgwire renders too, so a three-row implicit-edge insert answers
+/// `(3, INSERT)` here and `INSERT 0 3` there.
 ///
 /// There is deliberately no per-statement fallback count. The number of
 /// dispatched tasks is not the number of affected rows — a single-row delete
@@ -330,11 +328,21 @@ pub(crate) fn calvin_native_response(
     if let Some(resp) = &apply_result {
         r.watermark_lsn = resp.watermark_lsn.as_u64();
     }
-    if let Some(shaped) = fold.rows {
-        let (cols, rows) = to_native_columns_rows(&shaped);
-        if !cols.is_empty() {
-            r.columns = Some(cols);
+    // One result set per RETURNING plan, read as the per-task answer reads
+    // its tasks' sets: the columns of the first set that names any, and
+    // every set's rows in order.
+    if !fold.rows.is_empty() {
+        let mut columns = None;
+        let mut rows = Vec::new();
+        for shaped in fold.rows {
+            let (set_columns, set_rows) = to_native_columns_rows(&shaped);
+            if !set_columns.is_empty() && columns.is_none() {
+                columns = Some(set_columns);
+            }
+            rows.extend(set_rows);
+            r.warnings.extend(shaped.notice);
         }
+        r.columns = columns;
         r.rows = Some(rows);
     }
     // A batch with no count-bearing plan (vector / DDL work) has no row count

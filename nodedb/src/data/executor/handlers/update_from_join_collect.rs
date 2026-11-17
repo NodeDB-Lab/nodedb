@@ -104,23 +104,37 @@ impl CoreLoop {
             // A row the statement matched but cannot decode fails the
             // statement. Skipping it leaves the row untouched under a smaller
             // affected count that reports success.
-            let mut target_doc = if let Some(schema) = strict_schema {
-                super::super::strict_format::binary_tuple_to_json(&current_bytes, schema)
-                    .ok_or_else(|| {
-                        crate::diag::strict_row_undecodable(
-                            target_collection,
-                            &key.to_string(),
-                            "update_from_join_collect",
-                        );
-                        let identity = key.to_identity();
-                        super::super::strict_format::undecodable_strict_row(
-                            target_collection,
-                            identity.as_str(),
-                        )
-                    })?
-            } else {
-                doc_format::decode_document(&current_bytes)?
+            // The typed row is the post-image's base, so a field the statement
+            // does not touch keeps its stored type. Its JSON copy drives the
+            // join probe, expressions, typeguards and generated columns.
+            let undecodable = || {
+                crate::diag::strict_row_undecodable(
+                    target_collection,
+                    &key.to_string(),
+                    "update_from_join_collect",
+                );
+                let identity = key.to_identity();
+                super::super::strict_format::undecodable_strict_row(
+                    target_collection,
+                    identity.as_str(),
+                )
             };
+            let (mut post, mut target_doc) = if let Some(schema) = strict_schema {
+                (
+                    super::super::strict_format::binary_tuple_to_row_value(&current_bytes, schema)
+                        .ok_or_else(undecodable)?,
+                    super::super::strict_format::binary_tuple_to_json(&current_bytes, schema)
+                        .ok_or_else(undecodable)?,
+                )
+            } else {
+                (
+                    doc_format::decode_document_value(&current_bytes)?,
+                    doc_format::decode_document(&current_bytes)?,
+                )
+            };
+            // The JSON each field holds before the JSON-only passes below,
+            // so the reconcile step can tell which fields those passes changed.
+            let mut baseline = target_doc.clone();
 
             // Extract the join key from the target document.
             // The source row whose join key a WHERE `=` would match. A
@@ -148,25 +162,33 @@ impl CoreLoop {
                 &target_doc,
             );
 
-            // Apply SET assignments evaluated against the merged document.
-            if let Some(target_obj) = target_doc.as_object_mut() {
-                for (field, update_val) in updates {
-                    let val: serde_json::Value = match update_val {
-                        UpdateValue::Literal(bytes) => nodedb_types::json_from_msgpack(bytes)
-                            .map_err(|e| crate::Error::Serialization {
-                                format: "msgpack".into(),
-                                detail: format!(
-                                    "literal assigned to \"{field}\" for document \"{key}\" \
-                                     of collection \"{target_collection}\" does not decode: {e}"
-                                ),
-                            })?,
-                        // Division or modulo by zero fails the statement.
-                        UpdateValue::Expr(expr) => expr
-                            .eval(&merged_ndb, &crs)
-                            .map_err(crate::Error::from)?
-                            .into(),
-                    };
-                    target_obj.insert(field.clone(), val);
+            // Apply SET assignments evaluated against the merged document. A
+            // literal decodes to its typed value, which keeps a UUID, an
+            // instant, a decimal and bytes typed; the JSON copy takes its JSON.
+            for (field, update_val) in updates {
+                let val: nodedb_types::Value = match update_val {
+                    UpdateValue::Literal(bytes) => nodedb_types::value_from_msgpack(bytes)
+                        .map_err(|e| crate::Error::Serialization {
+                            format: "msgpack".into(),
+                            detail: format!(
+                                "literal assigned to \"{field}\" for document \"{key}\" \
+                                 of collection \"{target_collection}\" does not decode: {e}"
+                            ),
+                        })?,
+                    // Division or modulo by zero fails the statement.
+                    UpdateValue::Expr(expr) => {
+                        expr.eval(&merged_ndb, &crs).map_err(crate::Error::from)?
+                    }
+                };
+                let json = serde_json::Value::from(val.clone());
+                if let Some(baseline_obj) = baseline.as_object_mut() {
+                    baseline_obj.insert(field.clone(), json.clone());
+                }
+                if let Some(target_obj) = target_doc.as_object_mut() {
+                    target_obj.insert(field.clone(), json);
+                }
+                if let nodedb_types::Value::Object(post_obj) = &mut post {
+                    post_obj.insert(field.clone(), val);
                 }
             }
 
@@ -221,16 +243,21 @@ impl CoreLoop {
                 self.declared_columns(config_key),
             )?;
 
+            // Every field the JSON passes above changed (an injected default, a
+            // generated column, a coerced declared number) takes its new value;
+            // every other field keeps its typed value.
+            reconcile_post_image(&mut post, &baseline, &target_doc);
+
             // Re-encode the post-image (strict Binary Tuple or MessagePack).
             // An encode error carries its own typed cause, such as a field the
             // strict schema does not declare.
             let updated_bytes = if let Some(schema) = strict_schema {
-                let ndb_val: nodedb_types::Value = target_doc.clone().into();
+                let ndb_val = &post;
                 if schema.bitemporal {
                     // The version's system time lives in a bitemporal tuple,
                     // valid for all time, as a point update encodes it.
                     super::super::strict_format::value_to_binary_tuple_bitemporal(
-                        &ndb_val,
+                        ndb_val,
                         schema,
                         sys_from,
                         i64::MIN,
@@ -239,13 +266,13 @@ impl CoreLoop {
                     )?
                 } else {
                     super::super::strict_format::value_to_binary_tuple(
-                        &ndb_val,
+                        ndb_val,
                         schema,
                         target_collection,
                     )?
                 }
             } else {
-                doc_format::encode_to_msgpack(&target_doc)
+                doc_format::encode_typed_resolved_body(&post)?
             };
 
             // The storage key came typed off the target scan; the write-set
@@ -259,5 +286,61 @@ impl CoreLoop {
             });
         }
         Ok(rows)
+    }
+}
+
+/// Bring the typed post-image in line with its JSON copy after the JSON-only
+/// passes. `baseline` is the JSON each field held before those passes. A
+/// field whose JSON the passes changed, or added, takes the JSON's value; a
+/// field the JSON dropped is dropped. A field the passes left alone keeps
+/// its typed value.
+fn reconcile_post_image(
+    post: &mut nodedb_types::Value,
+    baseline: &serde_json::Value,
+    json: &serde_json::Value,
+) {
+    let (nodedb_types::Value::Object(typed), Some(json)) = (post, json.as_object()) else {
+        return;
+    };
+    typed.retain(|field, _| json.contains_key(field));
+    for (field, value) in json {
+        let unchanged =
+            typed.contains_key(field) && baseline.get(field).is_some_and(|before| before == value);
+        if !unchanged {
+            typed.insert(field.clone(), nodedb_types::Value::from(value.clone()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_untouched_typed_field_keeps_its_type_and_a_changed_one_follows_json() {
+        let uuid = nodedb_types::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let mut post = nodedb_types::Value::Object(
+            [
+                ("u".to_string(), uuid.clone()),
+                ("n".to_string(), nodedb_types::Value::Integer(1)),
+                ("gone".to_string(), nodedb_types::Value::Integer(2)),
+            ]
+            .into(),
+        );
+        let baseline = serde_json::json!({
+            "u": "550e8400-e29b-41d4-a716-446655440000",
+            "n": 1,
+            "gone": 2,
+        });
+        let json = serde_json::json!({
+            "u": "550e8400-e29b-41d4-a716-446655440000",
+            "n": 5,
+            "added": true,
+        });
+        reconcile_post_image(&mut post, &baseline, &json);
+        assert_eq!(post.get("u"), Some(&uuid));
+        assert_eq!(post.get("n"), Some(&nodedb_types::Value::Integer(5)));
+        assert_eq!(post.get("added"), Some(&nodedb_types::Value::Bool(true)));
+        assert_eq!(post.get("gone"), None);
     }
 }

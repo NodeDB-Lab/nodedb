@@ -171,7 +171,9 @@ pub enum CrdtOp {
 
     // ─── Block Document (LoroList) Operations ───────────────────────
     /// Insert a block (LoroMap) into a document's block list.
-    /// `fields_json` contains the block's fields as a JSON object.
+    /// `fields` is the block's fields as a native object body: see
+    /// [`super::fields_body`]. Each field enters Loro through
+    /// `nodedb_crdt::loro_value`, so it keeps its exact type.
     ///
     /// The inserted list element is a sub-document of the existing CRDT
     /// document — it does not allocate a new top-level surrogate. The
@@ -181,7 +183,7 @@ pub enum CrdtOp {
         document_id: String,
         list_path: String,
         index: usize,
-        fields_json: String,
+        fields: Vec<u8>,
         /// Surrogate of the parent document hosting this block list.
         surrogate: Surrogate,
     },
@@ -209,12 +211,13 @@ pub enum CrdtOp {
 
     // ─── Document row (top-level LoroMap) field-carrying ops ─────────
     /// Insert-or-replace / partial-update a document row's scalar fields,
-    /// server-built from `fields_json` (a JSON object). Mirrors the
+    /// server-built from `fields`, a native object body (see
+    /// [`super::fields_body`]), so every field keeps its exact type. Mirrors the
     /// `ListInsert` intent-carrying contract: the Control Plane has no
     /// `LoroDoc`, so the Data Plane handler builds the Loro mutation.
     ///
     /// `partial = false`: INSERT / full replace — scalar keys absent from
-    /// `fields_json` are pruned (LWW full-projection replace).
+    /// `fields` are pruned (LWW full-projection replace).
     /// `partial = true`: UPDATE SET — only the provided fields are written
     /// (LWW-per-field), untouched keys survive.
     ///
@@ -222,7 +225,7 @@ pub enum CrdtOp {
     DocUpsert {
         collection: QualifiedCollection,
         document_id: String,
-        fields_json: String,
+        fields: Vec<u8>,
         surrogate: Surrogate,
         partial: bool,
         /// The SQL statement that produced this write; decides the command tag.

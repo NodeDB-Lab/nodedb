@@ -35,5 +35,5 @@ pub use segment_codec::{
     check_graph_codec_shape,
 };
 pub use tier::StorageTier;
-pub use versioned_export::EndedNodeExport;
+pub use versioned_export::{EndedNodeExport, RowNodesExport};
 pub use versions::{NodeSpan, VectorVersions};

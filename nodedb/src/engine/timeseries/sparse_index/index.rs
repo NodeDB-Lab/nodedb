@@ -96,8 +96,7 @@ impl SparseIndex {
         let first = self.blocks.partition_point(|b| b.max_ts < start_ms);
 
         let mut result = Vec::new();
-        for i in first..self.blocks.len() {
-            let block = &self.blocks[i];
+        for (i, block) in self.blocks.iter().enumerate().skip(first) {
             if block.min_ts > end_ms {
                 break;
             }

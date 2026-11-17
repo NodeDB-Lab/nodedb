@@ -228,7 +228,8 @@ async fn extended_query_array_engine_smoke_and_const_stmt() {
         .await
         .expect("constant execute after Array DDL");
     assert_eq!(const_rows.len(), 1, "constant projection must return 1 row");
-    let x: i64 = const_rows[0].get(0);
+    // `1` fits `integer`, so it is int4, as in PostgreSQL.
+    let x: i32 = const_rows[0].get(0);
     assert_eq!(x, 1);
 }
 

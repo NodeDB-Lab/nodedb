@@ -307,6 +307,7 @@ mod tests {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -352,6 +353,7 @@ mod tests {
                 returning: None,
                 rls_filters: &[],
                 resolved_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -396,6 +398,7 @@ mod tests {
                 returning: None,
                 rls_filters: &[],
                 resolved_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -450,6 +453,7 @@ mod tests {
                     returning: None,
                     rls_filters: &[],
                     resolved_sum_targets: &[],
+                    rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 },
             );
             assert_eq!(resp.status, Status::Ok, "put of '{document_id}' refused");
@@ -503,6 +507,7 @@ mod tests {
                     returning: None,
                     rls_filters: &[],
                     resolved_sum_targets: &[],
+                    rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 },
             )
         };
@@ -594,6 +599,7 @@ mod tests {
                 returning: None,
                 rls_filters: &[],
                 resolved_sum_targets: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -692,6 +698,7 @@ mod tests {
                     returning: None,
                     rls_filters: &[],
                     resolved_sum_targets: &[],
+                    rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 },
             );
             assert_eq!(resp.status, Status::Ok);

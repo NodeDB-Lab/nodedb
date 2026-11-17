@@ -42,12 +42,18 @@ use crate::control::state::SharedState;
 /// The sink is monotonic per group at the raft node, so an out-of-order call
 /// can never move a floor backwards. A no-op when no sink is installed
 /// (single-node mode without raft wiring).
-pub fn save_applied_index(state: &Arc<SharedState>, group_id: u64, applied_index: u64) {
+///
+/// Returns whether the next boot resumes above `applied_index`: the floor
+/// saved, or no sink holds one.
+pub fn save_applied_index(state: &Arc<SharedState>, group_id: u64, applied_index: u64) -> bool {
     let Some(sink) = state.raft_applied_index_sink.get() else {
-        return;
+        return true;
     };
     match sink(group_id, applied_index) {
-        Ok(()) => state.pitr.note_durable_applied(group_id, applied_index),
+        Ok(()) => {
+            state.pitr.note_durable_applied(group_id, applied_index);
+            true
+        }
         Err(e) => {
             // A failed save costs correctness only in the safe direction: the
             // floor stays behind, so the next boot re-delivers entries WAL
@@ -60,6 +66,7 @@ pub fn save_applied_index(state: &Arc<SharedState>, group_id: u64, applied_index
                 error = %e,
                 "failed to persist durable raft applied index"
             );
+            false
         }
     }
 }

@@ -10,8 +10,8 @@ use nodedb_types::value::Value;
 use crate::row_decode::parse_dropped_collection_rows;
 use crate::sql_escape::quote_identifier;
 
-use super::super::sql::translate_params;
 use super::core::NodeDbRemote;
+use super::sql_params::{param_types, typed_params};
 
 impl NodeDbRemote {
     pub(super) async fn execute_sql_impl(
@@ -19,27 +19,27 @@ impl NodeDbRemote {
         query: &str,
         params: &[Value],
     ) -> NodeDbResult<QueryResult> {
-        // Empty params: route through `simple_query` so DDL works
-        // alongside SELECT/DML in the same trait method. The
-        // extended-query path (`Client::query`) requires a row
-        // description for DDL that the server does not provide,
-        // surfacing as a generic `db error`. The simple-query path
-        // sends a single Query message and returns CommandComplete
-        // for DDL or rows for SELECT in one round-trip.
+        // Empty params: a statement whose result columns the server
+        // describes at Parse runs extended, so its cells are typed by
+        // column. DDL and every other statement with no result shape at
+        // Parse runs through `simple_query`, which returns CommandComplete
+        // for DDL or text rows in one round-trip. See
+        // `query_typed_or_simple`.
         let (columns, rows) = if params.is_empty() {
-            self.simple_query_raw(query).await?
+            self.query_typed_or_simple(query).await?
         } else {
-            let translated = translate_params(params)?;
-            // Upcast `&(dyn ToSql + Send + Sync)` → `&(dyn ToSql + Sync)`
-            // so the slice matches what `Client::query` expects.
-            let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = translated
+            // Each value binds under the OID of its exact type, so the
+            // server decodes it typed.
+            let typed = typed_params(params)?;
+            let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = typed
                 .iter()
-                .map(|b| {
-                    let upcast: &(dyn tokio_postgres::types::ToSql + Sync) = b.as_ref();
+                .map(|(value, _)| {
+                    let upcast: &(dyn tokio_postgres::types::ToSql + Sync) = value.as_ref();
                     upcast
                 })
                 .collect();
-            self.query_raw(query, &refs).await?
+            self.query_typed_params(query, &param_types(&typed), &refs)
+                .await?
         };
 
         Ok(QueryResult {

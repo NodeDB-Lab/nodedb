@@ -186,6 +186,7 @@ fn put(collection: &str, id: &str, surrogate: u32, value: Vec<u8>) -> PhysicalPl
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -200,6 +201,7 @@ fn insert(id: &str, surrogate: u32, value: Vec<u8>, if_absent: bool) -> Physical
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 

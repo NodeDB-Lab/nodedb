@@ -88,33 +88,57 @@ impl MultiRaft {
     /// interleave between groups.
     pub fn group_statuses(&self) -> Vec<GroupStatus> {
         let routing = self.routing.read().unwrap_or_else(|p| p.into_inner());
-        let mut statuses = Vec::with_capacity(self.groups.len());
-        for (&group_id, node) in &self.groups {
-            let vshard_count = routing.vshards_for_group(group_id).len();
-            let self_is_voter = !matches!(
-                node.role(),
-                nodedb_raft::NodeRole::Learner | nodedb_raft::NodeRole::Observer
-            );
-
-            statuses.push(GroupStatus {
-                group_id,
-                role: format!("{:?}", node.role()),
-                leader_id: node.leader_id(),
-                term: node.current_term(),
-                commit_index: node.commit_index(),
-                last_applied: node.last_applied(),
-                last_log_index: node.last_log_index(),
-                snapshot_index: node.log_snapshot_index(),
-                retained_bytes: node.log_retained_bytes(),
-                replica_state: node.replica_state(),
-                member_count: node.voters().len() + usize::from(self_is_voter),
-                learner_count: node.learners().len()
-                    + usize::from(node.role() == nodedb_raft::NodeRole::Learner),
-                vshard_count,
-            });
-        }
+        let vshard_counts = routing.group_vshard_counts();
+        let mut statuses: Vec<GroupStatus> = self
+            .groups
+            .iter()
+            .map(|(&group_id, node)| {
+                let vshard_count = vshard_counts.get(&group_id).copied().unwrap_or(0);
+                status_of(group_id, node, vshard_count)
+            })
+            .collect();
         statuses.sort_by_key(|s| s.group_id);
         statuses
+    }
+
+    /// Snapshot of the one hosted group `group_id`, `None` when this node
+    /// does not host it. Same lock order as [`Self::group_statuses`].
+    pub fn group_status(&self, group_id: u64) -> Option<GroupStatus> {
+        let node = self.groups.get(&group_id)?;
+        let vshard_count = self
+            .routing
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .group_vshard_count(group_id);
+        Some(status_of(group_id, node, vshard_count))
+    }
+}
+
+/// The status of `node`, the replica of `group_id` this node hosts.
+fn status_of(
+    group_id: u64,
+    node: &nodedb_raft::RaftNode<crate::group_disk::StagedLogStorage>,
+    vshard_count: usize,
+) -> GroupStatus {
+    let self_is_voter = !matches!(
+        node.role(),
+        nodedb_raft::NodeRole::Learner | nodedb_raft::NodeRole::Observer
+    );
+    GroupStatus {
+        group_id,
+        role: format!("{:?}", node.role()),
+        leader_id: node.leader_id(),
+        term: node.current_term(),
+        commit_index: node.commit_index(),
+        last_applied: node.last_applied(),
+        last_log_index: node.last_log_index(),
+        snapshot_index: node.log_snapshot_index(),
+        retained_bytes: node.log_retained_bytes(),
+        replica_state: node.replica_state(),
+        member_count: node.voters().len() + usize::from(self_is_voter),
+        learner_count: node.learners().len()
+            + usize::from(node.role() == nodedb_raft::NodeRole::Learner),
+        vshard_count,
     }
 }
 

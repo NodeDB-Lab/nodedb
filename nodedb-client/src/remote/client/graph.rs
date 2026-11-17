@@ -8,9 +8,9 @@ use nodedb_types::filter::EdgeFilter;
 use nodedb_types::graph::GraphStats;
 use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::SubGraph;
-use nodedb_types::value::Value;
 
 use super::core::NodeDbRemote;
+use super::props_bind::properties_literal;
 use crate::sql_escape::quote_string_literal;
 
 impl NodeDbRemote {
@@ -42,20 +42,17 @@ impl NodeDbRemote {
         properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
         // `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>'
-        // TYPE '<label>' [PROPERTIES '<json>']`. The DSL handler lives
-        // in `pgwire/ddl/graph_ops/edge.rs` and registers the edge in
-        // the collection's graph overlay. simple_query is required
-        // because the DSL doesn't fit the extended-query row-description
-        // shape (it returns CommandComplete only).
-        // The property object is the document's fields, as the native client
-        // sends them. The document id is not an edge property.
+        // TYPE '<label>' [PROPERTIES { key: $n, ... }]`. The property object
+        // is the document's fields, as the native client sends them, each
+        // bound as a typed parameter, so a Decimal, a UUID, an instant and
+        // bytes keep their exact type. The document id is not an edge
+        // property.
+        let mut params = Vec::new();
         let props_clause = match properties {
-            Some(d) => {
-                let object = serde_json::Value::from(Value::Object(d.fields));
-                let json = sonic_rs::to_string(&object)
-                    .map_err(|e| NodeDbError::storage(format!("properties serialization: {e}")))?;
-                format!(" PROPERTIES {}", quote_string_literal(&json))
-            }
+            Some(d) => format!(
+                " PROPERTIES {}",
+                properties_literal("graph_insert_edge", &d.fields, &mut params)?
+            ),
             None => String::new(),
         };
         let coll = quote_string_literal(collection);
@@ -66,7 +63,11 @@ impl NodeDbRemote {
             "GRAPH INSERT EDGE IN {coll} FROM {from_s} TO {to_s} TYPE {label_s}{props_clause}"
         );
 
-        self.simple_query_raw(&sql).await?;
+        if params.is_empty() {
+            self.simple_query_raw(&sql).await?;
+        } else {
+            self.execute_typed(&sql, &params).await?;
+        }
 
         EdgeId::try_first(from.clone(), to.clone(), edge_type)
             .map_err(|e| NodeDbError::storage(format!("invalid edge label: {e}")))

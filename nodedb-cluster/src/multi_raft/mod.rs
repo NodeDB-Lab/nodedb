@@ -28,6 +28,8 @@
 //!   the floor exchange.
 //! - [`sequencer_cut_floor`]: the cut floors of the markers this node
 //!   appends to its sequencer log, which every epoch it mints stays above.
+//! - [`sole_voter`]: immediate election of each group this node alone
+//!   votes in.
 
 pub mod committed_read;
 pub mod conf_change;
@@ -43,6 +45,7 @@ pub mod proposals;
 pub mod read_index;
 pub mod rpc_dispatch;
 pub mod sequencer_cut_floor;
+pub mod sole_voter;
 pub mod status;
 
 pub use committed_read::{CommittedRead, LogProbeView};

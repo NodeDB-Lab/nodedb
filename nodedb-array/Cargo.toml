@@ -17,7 +17,6 @@ categories = ["science", "database-implementations"]
 nodedb-types = { workspace = true }
 nodedb-crs = { workspace = true }
 nodedb-codec = { workspace = true }
-nodedb-spatial = { workspace = true }
 serde = { workspace = true }
 zerompk = { workspace = true }
 thiserror = { workspace = true }
@@ -31,3 +30,5 @@ web-time = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

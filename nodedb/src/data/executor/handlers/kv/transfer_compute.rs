@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use nodedb_physical::physical_plan::{DeclaredColumn, TransferAmount};
-use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_to_row, row_to_kv_body};
+use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape, kv_body_to_row, row_to_kv_body};
 use nodedb_types::Value;
 use nodedb_types::columnar::ColumnType;
 use rust_decimal::Decimal;
@@ -101,6 +101,12 @@ pub(in crate::data::executor) fn compute_transfer(
     declared: &[DeclaredColumn],
 ) -> Result<TransferComputation, TransferError> {
     let mut source = map_row(source_bytes, "source")?;
+    // Each side re-encodes in the shape it was read in, so a native row keeps
+    // its typed columns. A fresh destination takes the source's shape.
+    let source_shape = kv_body_shape(source_bytes);
+    let dest_shape = dest_bytes
+        .filter(|bytes| !bytes.is_empty())
+        .map_or(source_shape, kv_body_shape);
     let Moved {
         mut dest,
         amount,
@@ -117,8 +123,8 @@ pub(in crate::data::executor) fn compute_transfer(
     Ok(TransferComputation {
         source_balance_after: fitted(&source, field, source_after),
         dest_balance_after: fitted(&dest, field, dest_after),
-        new_source: encode_map(source, "source")?,
-        new_dest: encode_map(dest, "destination")?,
+        new_source: encode_map(source, source_shape, "source")?,
+        new_dest: encode_map(dest, dest_shape, "destination")?,
         amount,
     })
 }
@@ -312,8 +318,12 @@ fn numeric_value(v: f64) -> Value {
     }
 }
 
-fn encode_map(map: HashMap<String, Value>, side: &str) -> Result<Vec<u8>, TransferError> {
-    row_to_kv_body(&Value::Object(map), KvBodyShape::Map)
+fn encode_map(
+    map: HashMap<String, Value>,
+    shape: KvBodyShape,
+    side: &str,
+) -> Result<Vec<u8>, TransferError> {
+    row_to_kv_body(&Value::Object(map), shape)
         .map_err(|e| TransferError::TypeMismatch(format!("serialize {side}: {e}")))
 }
 

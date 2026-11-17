@@ -12,7 +12,6 @@ use pgwire::error::{ErrorInfo, PgWireError};
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
-use crate::control::server::shared::returning;
 use crate::control::server::shared::session::SessionId;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -162,11 +161,7 @@ impl NodeDbPgHandler {
         let (statement_sql, scope) =
             crate::control::server::session_auth::apply_per_query_on_deny(sql, scope);
 
-        // Strip the RETURNING clause before planning. The item text resolves
-        // inside the planner against the planned target, which announces the
-        // projection and attaches the Data-Plane spec to every task.
-        let (clean_sql, returning_items) =
-            returning::strip_returning(&statement_sql).map_err(StatementSetupError::from)?;
+        let clean_sql = statement_sql.clone();
 
         // Forwards per-session planning GUCs into the shared query context, protocol-neutral
         // so pgwire and native honor them identically; flags drive the cache bypass below.
@@ -277,7 +272,6 @@ impl NodeDbPgHandler {
                     tenant_id,
                     database_id,
                     &sec,
-                    returning_items.as_deref(),
                 )
                 .await
                 .map_err(StatementSetupError::from)?;
@@ -306,13 +300,7 @@ impl NodeDbPgHandler {
                     ),
                 };
                 self.query_ctx
-                    .plan_sql_with_rls_and_versions(
-                        &clean_sql,
-                        tenant_id,
-                        database_id,
-                        &sec,
-                        returning_items.as_deref(),
-                    )
+                    .plan_sql_with_rls_and_versions(&clean_sql, tenant_id, database_id, &sec)
                     .await
                     .map_err(StatementSetupError::from)?
             };

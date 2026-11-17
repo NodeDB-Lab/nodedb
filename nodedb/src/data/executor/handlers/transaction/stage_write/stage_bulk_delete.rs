@@ -132,8 +132,12 @@ impl CoreLoop {
         let mut affected = 0u64;
         for (row_key, identity, _body) in &identified {
             let surrogate = row_key.surrogate().as_u32();
-            self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, identity);
+            if let Err(e) =
+                self.txn_overlay_mut(txn_id)
+                    .insert_tombstone(coll_key.clone(), surrogate, identity)
+            {
+                return self.response_error(task, e);
+            }
             affected += 1;
         }
 
@@ -239,7 +243,8 @@ mod tests {
         let staged = doc_format::encode_to_msgpack(&serde_json::json!({"a": "2"}));
         let identity = nodedb_types::StorageKey::for_surrogate(Surrogate::new(3)).to_identity();
         core.txn_overlay_mut(txn_id)
-            .insert_put(coll_key.clone(), 3, &identity, staged);
+            .insert_put(coll_key.clone(), 3, &identity, staged)
+            .unwrap();
 
         let snapshot = nodedb_types::SystemTimeScope::TxnSnapshot {
             ordinal: 150,
@@ -253,10 +258,16 @@ mod tests {
             staged_delete.error_code
         );
         let overlay = core.txn_overlays.get(&txn_id).expect("overlay");
-        assert_eq!(overlay.get(&coll_key, 1), Some(&Staged::Tombstone));
-        assert_eq!(overlay.get(&coll_key, 3), Some(&Staged::Tombstone));
         assert_eq!(
-            overlay.get(&coll_key, 2),
+            overlay.get(&coll_key, 1).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
+        assert_eq!(
+            overlay.get(&coll_key, 3).unwrap().as_deref(),
+            Some(&Staged::Tombstone)
+        );
+        assert_eq!(
+            overlay.get(&coll_key, 2).unwrap().as_deref(),
             None,
             "a row committed after the snapshot is not matched"
         );

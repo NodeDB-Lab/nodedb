@@ -46,6 +46,11 @@ impl ColumnarMemtable {
         self.row_count
     }
 
+    /// Set the row count that triggers a flush.
+    pub fn set_flush_threshold(&mut self, threshold: usize) {
+        self.flush_threshold = threshold.max(1);
+    }
+
     /// Whether the memtable has reached its flush threshold.
     pub fn should_flush(&self) -> bool {
         self.row_count >= self.flush_threshold

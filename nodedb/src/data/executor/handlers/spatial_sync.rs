@@ -23,7 +23,7 @@
 //! minimal geometry document (`{field: <geometry>, "id": surrogate_hex}`)
 //! to the sparse engine in addition to the R-tree entry. Any failure to
 //! materialise that body is a hard error (no silent partial-success); the
-//! whole op fails and the Control Plane converts it to a rejection ACK.
+//! handler returns an error. Unknown sync outcomes reconnect without an ACK.
 
 use tracing::{debug, error};
 
@@ -54,6 +54,44 @@ pub(in crate::data::executor) struct SpatialInsertExec<'a> {
 }
 
 impl CoreLoop {
+    /// Only explicit checks before spatial writes use this consuming refusal path.
+    fn spatial_prevalidation_refusal(
+        &mut self,
+        task: &ExecutionTask,
+        field: &str,
+        error: crate::bridge::envelope::ErrorCode,
+        provenance: Option<&SyncProvenance>,
+    ) -> Response {
+        if let Some(prov) = provenance.filter(|prov| prov.producer_id != 0) {
+            return self.sync_reject_response(
+                task,
+                nodedb_types::sync::violation::ViolationType::SchemaViolation {
+                    field: field.to_owned(),
+                    reason: crate::error_from_data_plane::data_plane_code_to_public(error)
+                        .to_string(),
+                },
+                prov,
+            );
+        }
+        self.response_error(task, error)
+    }
+
+    /// CRS resolution exposes only deterministic `UnknownSrid` variants.
+    fn spatial_crs_refusal(
+        &mut self,
+        task: &ExecutionTask,
+        field: &str,
+        error: nodedb_crs::UnknownSrid,
+        provenance: Option<&SyncProvenance>,
+    ) -> Response {
+        self.spatial_prevalidation_refusal(
+            task,
+            field,
+            crate::Error::from(error).into(),
+            provenance,
+        )
+    }
+
     /// Insert a geometry into the per-field R-tree and the sparse document store
     /// on behalf of a Lite client.
     ///
@@ -79,11 +117,6 @@ impl CoreLoop {
             geometry,
             provenance,
         } = args;
-        if let Some(refusal) =
-            super::unbound_surrogate::refuse_unbound("spatial", collection, surrogate)
-        {
-            return self.response_error(task, refusal);
-        }
         let doc_id = StorageKey::for_surrogate(surrogate).to_string();
 
         debug!(
@@ -112,6 +145,12 @@ impl CoreLoop {
             }
         }
 
+        if let Some(refusal) =
+            super::unbound_surrogate::refuse_unbound("spatial", collection, surrogate)
+        {
+            return self.spatial_prevalidation_refusal(task, "doc_id", refusal, provenance);
+        }
+
         // ── SRID check, before any write ────────────────────────────────────
         let db_id = task.request.database_id;
         let tenant_id = TenantId::new(tid);
@@ -123,9 +162,11 @@ impl CoreLoop {
                 index: rtree.srid(),
                 entry: geometry.srid,
             };
-            return self.response_error(
+            return self.spatial_prevalidation_refusal(
                 task,
-                super::spatial_refine::mixed_srid_error(collection, field, mismatch),
+                field,
+                super::spatial_refine::mixed_srid_error(collection, field, mismatch).into(),
+                provenance,
             );
         }
 
@@ -136,7 +177,7 @@ impl CoreLoop {
             .and_then(|tree_srid| geometry.bbox(&crs).map(|bbox| (tree_srid, bbox)));
         let (tree_srid, bbox) = match resolved {
             Ok(resolved) => resolved,
-            Err(e) => return self.response_error(task, crate::Error::from(e)),
+            Err(error) => return self.spatial_crs_refusal(task, field, error, provenance),
         };
 
         // ── 1. Serialise + write minimal geometry document to sparse store ──
@@ -388,101 +429,5 @@ pub(in crate::data::executor) fn geometry_to_value(geometry: &SridGeometry) -> n
 }
 
 #[cfg(test)]
-mod tests {
-    use nodedb_types::sync::wire::{SyncAckResult, SyncOutcome};
-
-    use super::*;
-    use crate::bridge::envelope::Status;
-    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
-    use nodedb_types::geometry::Geometry;
-
-    const TID: u64 = 1;
-
-    fn prov(seq: u64) -> SyncProvenance {
-        SyncProvenance {
-            producer_id: 7,
-            epoch: 1,
-            stream_id: 42,
-            seq,
-        }
-    }
-
-    fn assert_applied(response: &Response, seq: u64) {
-        assert_eq!(response.status, Status::Ok);
-        let ack: SyncAckResult = zerompk::from_msgpack(&response.payload).expect("sync ack");
-        assert_eq!(ack.outcome, SyncOutcome::Ack(AckStatus::Applied));
-        assert_eq!(ack.applied_seq, seq);
-    }
-
-    fn insert(core: &mut CoreLoop, task: &ExecutionTask, surrogate: Surrogate) -> Response {
-        core.execute_spatial_insert(SpatialInsertExec {
-            task,
-            tid: TID,
-            collection: "places",
-            field: "loc",
-            surrogate,
-            geometry: &SridGeometry::wgs84(Geometry::point(10.0, 20.0)),
-            provenance: None,
-        })
-    }
-
-    /// One geometry under a bound surrogate.
-    fn insert_geometries(core: &mut CoreLoop, task: &ExecutionTask) {
-        assert_eq!(insert(core, task, Surrogate::new(5)).status, Status::Ok);
-    }
-
-    /// The indexed entry count and the doc-map size of `places.loc`.
-    fn spatial_state(core: &CoreLoop) -> (usize, usize) {
-        let key = (
-            nodedb_types::DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            "places".to_string(),
-            "loc".to_string(),
-        );
-        let indexed = core.spatial_indexes.get(&key).map_or(0, RTree::len);
-        (indexed, core.spatial_doc_map.len())
-    }
-
-    #[test]
-    fn an_insert_without_a_surrogate_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-
-        let response = insert(&mut core, &task, Surrogate::ZERO);
-        assert!(matches!(
-            response.error_code.as_deref(),
-            Some(crate::bridge::envelope::ErrorCode::RejectedPrevalidation { .. })
-        ));
-        assert_eq!(spatial_state(&core), (0, 0), "nothing is stored");
-    }
-
-    #[test]
-    fn unbound_delete_with_provenance_commits_the_sequence_and_removes_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-        insert_geometries(&mut core, &task);
-        let before = spatial_state(&core);
-
-        let response =
-            core.execute_spatial_delete(&task, TID, "places", "loc", None, Some(&prov(1)));
-        assert_applied(&response, 1);
-        assert_eq!(core.sync_hwm_value(7, 42), 1, "the sequence commits");
-        assert_eq!(spatial_state(&core), before, "no geometry is removed");
-    }
-
-    #[test]
-    fn unbound_delete_without_provenance_is_ok_and_removes_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-        insert_geometries(&mut core, &task);
-        let before = spatial_state(&core);
-
-        let response = core.execute_spatial_delete(&task, TID, "places", "loc", None, None);
-        assert_eq!(response.status, Status::Ok);
-        assert!(response.payload.is_empty());
-        assert_eq!(spatial_state(&core), before);
-    }
-}
+#[path = "spatial_sync_tests.rs"]
+mod tests;

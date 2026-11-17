@@ -64,8 +64,14 @@ pub(in crate::data::executor) fn from_stored(
     let mut doc = match strict_schema {
         Some(schema) => strict_format::binary_tuple_to_row_value(body, schema)
             .ok_or_else(|| undecodable(identity, body.len()))?,
-        None => doc_format::decode_document_value(&with_identity(body, identity, identity_column))?,
+        None => doc_format::decode_document_value(body)?,
     };
+    if !matches!(doc, Value::Object(_)) {
+        return Err(crate::Error::Serialization {
+            format: "document".into(),
+            detail: format!("RETURNING row {identity}: stored body is not a document object"),
+        });
+    }
     attach_row_id(&mut doc, identity, identity_column);
     Ok(doc)
 }
@@ -83,27 +89,7 @@ pub(in crate::data::executor) fn from_stored_json(
     strict_schema: Option<&StrictSchema>,
     identity_column: &str,
 ) -> crate::Result<serde_json::Value> {
-    let mut doc = match strict_schema {
-        Some(schema) => strict_format::binary_tuple_to_json(body, schema)
-            .ok_or_else(|| undecodable(identity, body.len()))?,
-        None => doc_format::decode_document(&with_identity(body, identity, identity_column))?,
-    };
-    if let serde_json::Value::Object(obj) = &mut doc
-        && !obj.contains_key(identity_column)
-    {
-        obj.insert(
-            identity_column.to_string(),
-            serde_json::Value::String(identity.as_str().to_string()),
-        );
-    }
-    Ok(doc)
-}
-
-/// The schemaless body with the row identity injected under
-/// `identity_column`. `inject_str_field` honours an existing value and wraps
-/// a non-map body as `{<identity_column>, value}`.
-fn with_identity(body: &[u8], identity: &RowIdentity, identity_column: &str) -> Vec<u8> {
-    nodedb_query::msgpack_scan::inject_str_field(body, identity_column, identity.as_str())
+    from_stored(body, identity, strict_schema, identity_column).map(serde_json::Value::from)
 }
 
 fn undecodable(identity: &RowIdentity, body_len: usize) -> crate::Error {
@@ -113,5 +99,59 @@ fn undecodable(identity: &RowIdentity, body_len: usize) -> crate::Error {
             "RETURNING row {identity}: stored body ({body_len} bytes) is not a Binary Tuple \
              readable under the collection's strict schema"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_returning_attaches_identity_without_losing_source_fields() {
+        let decimal = Value::Decimal("123456789.123456789".parse().expect("decimal"));
+        let uuid = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let value = Value::Object(
+            [
+                ("decimal".into(), decimal.clone()),
+                ("uuid".into(), uuid.clone()),
+                (
+                    "nested".into(),
+                    Value::Array(vec![Value::Bytes(vec![0, 255])]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let bytes = zerompk::to_msgpack_vec(&value).expect("native body");
+        let identity = RowIdentity::from_user_key("declared-key");
+        let row = from_stored(&bytes, &identity, None, "sku").expect("returning native");
+        let fields = row.as_object().expect("object");
+        assert_eq!(
+            fields.get("sku"),
+            Some(&Value::String("declared-key".into()))
+        );
+        assert!(!fields.contains_key("id"));
+        for (name, value) in value.as_object().expect("source") {
+            assert_eq!(fields.get(name), Some(value));
+        }
+        let json = from_stored_json(&bytes, &identity, None, "sku").expect("returning public");
+        assert!(json.is_object());
+        assert_eq!(json["sku"], "declared-key");
+        assert_eq!(json["uuid"], "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn native_returning_preserves_the_stored_declared_key() {
+        let value = Value::Object(
+            [("sku".into(), Value::String("stored-key".into()))]
+                .into_iter()
+                .collect(),
+        );
+        let bytes = zerompk::to_msgpack_vec(&value).expect("native body");
+        let identity = RowIdentity::from_user_key("surrogate");
+        assert_eq!(
+            from_stored(&bytes, &identity, None, "sku").expect("native returning"),
+            value
+        );
     }
 }

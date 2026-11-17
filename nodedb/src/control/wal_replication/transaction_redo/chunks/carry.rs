@@ -5,11 +5,12 @@
 //! A follower that installs a snapshot cut between a stream's chunks and its
 //! final entry never applies those chunks. The snapshot carries every open
 //! stream of the group, so the final entry finds the same stream on every
-//! replica.
+//! replica. The store holds only where each chunk sits, so the capture reads
+//! the chunks' bytes back from this node's WAL on a blocking thread.
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::{NO_APPLY_KEY, RedoChunkPlacement};
-use crate::wal::{CarriedRedoStream, RedoChunkHeader};
+use crate::wal::{CarriedRedoStream, RedoChunkHeader, RedoChunkRef, RedoStreamRef, chunk_crc};
 
 use super::error::RedoChunkError;
 use super::store::RedoChunkStore;
@@ -17,19 +18,49 @@ use super::stream::OpenStream;
 
 impl RedoChunkStore {
     /// Every open stream of `group_id`, for the group's snapshot. The caller
-    /// holds the group's apply fence.
-    pub fn capture_group(&self, group_id: u64) -> Vec<CarriedRedoStream> {
-        self.lock()
+    /// holds the group's apply fence, so the references read here are the
+    /// streams at the cut. Each stream's floor hold keeps its records while
+    /// the bytes are read back.
+    pub async fn capture_group(
+        &self,
+        group_id: u64,
+    ) -> Result<Vec<CarriedRedoStream>, RedoChunkError> {
+        let open: Vec<(u64, RedoStreamRef)> = self
+            .lock()
             .streams
             .values()
             .filter(|open| open.group_id == group_id)
-            .map(|open| CarriedRedoStream {
-                stream: open.stream,
-                term: open.term,
-                len: open.len,
-                chunks: open.chunks.clone(),
-            })
-            .collect()
+            .map(|open| (open.term, open.reference()))
+            .collect();
+        // The stream the read's own failure names: the group's first.
+        let Some(first) = open.first().map(|(_, reference)| reference.stream) else {
+            return Ok(Vec::new());
+        };
+        let source = self.wal.read_source();
+        tokio::task::spawn_blocking(move || {
+            open.into_iter()
+                .map(|(term, reference)| {
+                    let chunks =
+                        crate::wal::manager::stream_read::read_redo_stream(&source, &reference)
+                            .map_err(|e| RedoChunkError::storage(reference.stream, e))?;
+                    Ok(CarriedRedoStream {
+                        stream: reference.stream,
+                        term,
+                        len: reference.len,
+                        chunks,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| {
+            RedoChunkError::storage(
+                first,
+                crate::Error::Internal {
+                    detail: format!("the redo stream capture thread stopped: {e}"),
+                },
+            )
+        })?
     }
 
     /// Replace the open and parked streams of `group_id` with `carried`,
@@ -71,6 +102,7 @@ impl RedoChunkStore {
                 database_id: DatabaseId::DEFAULT,
             };
             let mut first: Option<Lsn> = None;
+            let mut refs = Vec::with_capacity(stream.chunks.len());
             for (index, bytes) in (0u32..).zip(&stream.chunks) {
                 let header = RedoChunkHeader {
                     stream: stream.stream,
@@ -85,9 +117,16 @@ impl RedoChunkStore {
                     .map_err(|e| RedoChunkError::storage(stream.stream, e))?;
                 first.get_or_insert(lsns.first);
                 last = Some((stream.stream, lsns.last));
+                refs.push(RedoChunkRef {
+                    index,
+                    first_lsn: lsns.first.as_u64(),
+                    last_lsn: lsns.last.as_u64(),
+                    len: bytes.len() as u64,
+                    crc: chunk_crc(bytes),
+                });
             }
             if let Some(first) = first {
-                installed.push((stream, first));
+                installed.push((stream, refs, first));
             }
         }
         if let Some((stream, lsn)) = last {
@@ -97,8 +136,8 @@ impl RedoChunkStore {
                 .map_err(|e| RedoChunkError::storage(stream, e))?;
         }
         let mut state = self.lock();
-        for (carried, first) in installed {
-            let held = carried.chunks.iter().map(|chunk| chunk.len() as u64).sum();
+        for (carried, refs, first) in installed {
+            let held = refs.iter().map(|chunk| chunk.len).sum();
             let hold = self.wal.floor_holds().hold(first);
             state.streams.insert(
                 carried.stream,
@@ -107,7 +146,7 @@ impl RedoChunkStore {
                     group_id,
                     term: carried.term,
                     len: carried.len,
-                    chunks: carried.chunks,
+                    chunks: refs,
                     held,
                     hold,
                 },
@@ -120,7 +159,7 @@ impl RedoChunkStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::tests::{chunk, session, wal};
+    use super::super::store::tests::{chunk, read_back, session, wal};
     use super::super::store::{RedoChunkLimits, RedoChunkStore};
 
     fn limits() -> RedoChunkLimits {
@@ -142,7 +181,7 @@ mod tests {
             .apply_chunk(chunk(session(1), 1, 5, b"de"))
             .await
             .expect("chunk");
-        let carried = leader.capture_group(1);
+        let carried = leader.capture_group(1).await.expect("capture");
         assert_eq!(carried.len(), 1);
 
         let follower_dir = tempfile::tempdir().expect("tempdir");
@@ -165,10 +204,16 @@ mod tests {
             .expect("rebuild");
         assert!(rebuilt.take_for_final(&session(9)).is_none());
         let open = rebuilt.take_for_final(&session(1)).expect("carried stream");
-        assert_eq!(open.assemble(2, 5).expect("assembles"), b"abcde".to_vec());
+        assert_eq!(
+            read_back(&follower_wal, &open, 2, 5).expect("whole"),
+            b"abcde".to_vec()
+        );
         let live = follower
             .take_for_final(&session(1))
             .expect("installed stream");
-        assert_eq!(live.assemble(2, 5).expect("assembles"), b"abcde".to_vec());
+        assert_eq!(
+            read_back(&follower_wal, &live, 2, 5).expect("whole"),
+            b"abcde".to_vec()
+        );
     }
 }

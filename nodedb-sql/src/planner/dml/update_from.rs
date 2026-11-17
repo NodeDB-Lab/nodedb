@@ -184,7 +184,7 @@ pub(super) fn plan_update_from(
         source_join_col: split.source_col,
         assignments: assigns,
         target_filters: split.target_filters,
-        returning: update.returning.is_some(),
+        returning: None,
     })
 }
 
@@ -483,6 +483,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: false,
+            text_indexes: None,
         }
     }
 

@@ -14,9 +14,7 @@ use crate::control::planner::context::security::PlanSecurityContext;
 use crate::control::planner::plan_error_map::map_plan_error;
 use crate::control::planner::sql_plan_convert::PlanningPurpose;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::control::server::shared::returning::{
-    ReturningClause, attach_returning_spec, resolve_returning_for_plans,
-};
+use crate::control::server::shared::returning::{ReturningClause, resolve_returning_for_plans};
 
 /// Resolve a DML `RETURNING` clause against `plans` and build the announced
 /// output schema from it in one step.
@@ -27,12 +25,11 @@ use crate::control::server::shared::returning::{
 /// from it, so the pairing lives here once.
 pub(super) fn resolve_returning_and_output_schema<C: nodedb_sql::catalog::SqlCatalog>(
     plans: &[nodedb_sql::types::SqlPlan],
-    returning_items: Option<&str>,
     catalog: &C,
     database_id: crate::types::DatabaseId,
     tenant_id: crate::types::TenantId,
 ) -> crate::Result<(OutputSchema, Option<ReturningClause>)> {
-    let returning = resolve_returning_for_plans(plans, returning_items, catalog, tenant_id)?;
+    let returning = resolve_returning_for_plans(plans);
     let output_schema =
         crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
             plans,
@@ -75,16 +72,13 @@ impl QueryContext {
     /// `SharedState::acquire_plan_lease_scope` so cache hits
     /// and fresh plans share the same lease-acquisition path.
     ///
-    /// `returning_items` is the raw text after a DML `RETURNING` keyword. It
-    /// resolves here against the planned target: the announced output schema
-    /// carries the projection, and every task carries the Data-Plane spec.
+    /// Each resolved write plan owns its complete response projection.
     async fn plan_with_nodedb_sql_for_purpose(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         purpose: PlanningPurpose,
-        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -139,23 +133,15 @@ impl QueryContext {
             .collect::<nodedb_sql::Result<_>>()
             .map_err(|error| map_plan_error(error, tenant_id))?;
         let version_set = catalog.take_recorded_versions();
-        let (output_schema, returning) = resolve_returning_and_output_schema(
-            &plans,
-            returning_items,
-            catalog.as_ref(),
-            database_id,
-            tenant_id,
-        )?;
+        let (output_schema, _returning) =
+            resolve_returning_and_output_schema(&plans, catalog.as_ref(), database_id, tenant_id)?;
         let cache_eligibility =
             crate::control::planner::sql_plan_convert::batch_cache_eligibility(&plans);
-        let mut tasks = self
+        let tasks = self
             .convert_prefetched(&plans, purpose, database_id, tenant_id)
             .await?;
         // Attached before the tasks leave: RLS injection, caching, expansion,
         // and dispatch all read the plan after this point.
-        if let Some(clause) = &returning {
-            attach_returning_spec(&mut tasks, &clause.spec)?;
-        }
         Ok((tasks, output_schema, version_set, cache_eligibility))
     }
 
@@ -175,27 +161,23 @@ impl QueryContext {
             database_id,
             sec,
         } = params;
-        self.plan_sql_with_rls_returning(sql, tenant_id, database_id, sec, None)
+        self.plan_sql_with_rls_returning(sql, tenant_id, database_id, sec)
             .await
     }
 
     /// Plan SQL with RLS injection, announcing a DML `RETURNING` clause.
     ///
-    /// `returning_items` is the item text `strip_returning` split off the
-    /// statement, so the write announces the columns it projects. `None` for
-    /// a statement that carries no clause.
     pub async fn plan_sql_with_rls_returning(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
     )> {
-        self.plan_sql_with_rls_and_versions(sql, tenant_id, database_id, sec, returning_items)
+        self.plan_sql_with_rls_and_versions(sql, tenant_id, database_id, sec)
             .await
             .map(|(tasks, schema, _, _)| (tasks, schema))
     }
@@ -212,7 +194,6 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -224,7 +205,6 @@ impl QueryContext {
             tenant_id,
             database_id,
             sec,
-            returning_items,
             PlanningPurpose::Execute,
         )
         .await
@@ -251,7 +231,6 @@ impl QueryContext {
             tenant_id,
             database_id,
             sec,
-            None,
             PlanningPurpose::Metadata,
         )
         .await
@@ -264,7 +243,6 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning_items: Option<&str>,
         purpose: PlanningPurpose,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
@@ -273,7 +251,7 @@ impl QueryContext {
         nodedb_sql::types::PlanCacheEligibility,
     )> {
         let (mut tasks, output_schema, mut version_set, cache_eligibility) = self
-            .plan_with_nodedb_sql_for_purpose(sql, tenant_id, database_id, purpose, returning_items)
+            .plan_with_nodedb_sql_for_purpose(sql, tenant_id, database_id, purpose)
             .await?;
         self.apply_task_policy(&mut tasks, sec, tenant_id, &mut version_set)
             .await?;
@@ -294,21 +272,13 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
     )> {
-        self.plan_sql_with_params_and_rls_and_versions(
-            sql,
-            params,
-            tenant_id,
-            database_id,
-            sec,
-            returning_items,
-        )
-        .await
-        .map(|(tasks, schema, _)| (tasks, schema))
+        self.plan_sql_with_params_and_rls_and_versions(sql, params, tenant_id, database_id, sec)
+            .await
+            .map(|(tasks, schema, _)| (tasks, schema))
     }
 
     /// Parameterized RLS planning plus the descriptor versions observed by its
@@ -321,7 +291,6 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -354,19 +323,11 @@ impl QueryContext {
             })
             .collect::<nodedb_sql::Result<_>>()
             .map_err(|error| map_plan_error(error, tenant_id))?;
-        let (output_schema, returning) = resolve_returning_and_output_schema(
-            &plans,
-            returning_items,
-            catalog.as_ref(),
-            database_id,
-            tenant_id,
-        )?;
+        let (output_schema, _returning) =
+            resolve_returning_and_output_schema(&plans, catalog.as_ref(), database_id, tenant_id)?;
         let mut tasks = self
             .convert_prefetched(&plans, PlanningPurpose::Execute, database_id, tenant_id)
             .await?;
-        if let Some(clause) = &returning {
-            attach_returning_spec(&mut tasks, &clause.spec)?;
-        }
         let mut version_set = catalog.take_recorded_versions();
         self.apply_task_policy(&mut tasks, sec, tenant_id, &mut version_set)
             .await?;

@@ -10,7 +10,9 @@ use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM, TS_VALID_FROM};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
 use crate::data::executor::handlers::columnar_read::{emit_column_value, rmpv_time_cell};
-use crate::data::executor::handlers::timeseries::cell_read::{TsCell, read_ts_cell};
+use crate::data::executor::handlers::timeseries::cell_read::{
+    TsCell, exact_cell_value, read_ts_cell,
+};
 use crate::data::executor::handlers::timeseries::partition_read::partition_corrupt;
 
 /// The read path the corruption report names.
@@ -39,15 +41,6 @@ pub(super) fn row_admitted(
     let doc = rmpv_to_value(row);
     Ok(value_matches_filters(&doc, where_predicates, crs)?
         && value_matches_filters(&doc, rls_predicates, crs)?)
-}
-
-/// [`row_admitted`] for a row whose WHERE clause was already applied.
-pub(super) fn row_admitted_by_policy(
-    row: &rmpv::Value,
-    rls_predicates: &[ScanFilter],
-    crs: &nodedb_crs::CrsContext<'_>,
-) -> crate::Result<bool> {
-    row_admitted(row, &[], rls_predicates, crs)
 }
 
 /// Extract the `_ts_system` value from an rmpv-encoded row for audit-log
@@ -195,6 +188,9 @@ pub(super) fn emit_partition_row(
             TsCell::Int(n) => rmpv::Value::Integer(n.into()),
             TsCell::Symbol(s) => rmpv::Value::String(s.into()),
             TsCell::Null => rmpv::Value::Nil,
+            cell @ (TsCell::Decimal(_) | TsCell::Uuid(_) | TsCell::Bool(_)) => {
+                exact_cell_value(cell).map_or(rmpv::Value::Nil, |v| value_to_rmpv(&v))
+            }
         };
         fields.push((rmpv::Value::String(col_name.as_str().into()), val));
     }

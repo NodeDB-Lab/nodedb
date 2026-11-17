@@ -99,12 +99,7 @@ pub fn apply_mappings(
 
 /// Create a NULL-equivalent column of the given type and length.
 fn null_column(ty: ColumnType, rows: usize) -> ColumnData {
-    match ty {
-        ColumnType::Timestamp(_) => ColumnData::Timestamp(vec![0; rows]),
-        ColumnType::Float64 => ColumnData::Float64(vec![f64::NAN; rows]),
-        ColumnType::Int64 => ColumnData::Int64(vec![0; rows]),
-        ColumnType::Symbol | ColumnType::Text => ColumnData::Symbol(vec![u32::MAX; rows]), // sentinel
-    }
+    ColumnData::nulls(ty, rows)
 }
 
 /// Widen a column from one type to another.

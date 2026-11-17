@@ -73,6 +73,14 @@ impl ScanFilter {
     ///
     /// Geo functions in an expression filter resolve SRIDs through `crs`.
     pub fn matches_binary(&self, doc: &[u8], crs: &CrsContext<'_>) -> Result<bool, EvalError> {
+        let view =
+            nodedb_types::ObjectView::new(doc).map_err(super::aggregate_helpers::decode_error)?;
+        if view.format() == nodedb_types::ObjectFormat::Native {
+            let value = view
+                .decode()
+                .map_err(super::aggregate_helpers::decode_error)?;
+            return self.matches_value(&value, crs);
+        }
         match self.op {
             FilterOp::MatchAll | FilterOp::Exists | FilterOp::NotExists => return Ok(true),
             FilterOp::Or => {
@@ -84,11 +92,13 @@ impl ScanFilter {
                 return Ok(false);
             }
             FilterOp::Expr => {
-                return match (self.expr.as_ref(), nodedb_types::value_from_msgpack(doc)) {
-                    (Some(expr), Ok(value)) => {
+                return match self.expr.as_ref() {
+                    Some(expr) => {
+                        let value = nodedb_types::decode_object(doc)
+                            .map_err(super::aggregate_helpers::decode_error)?;
                         Ok(crate::value_ops::is_truthy(&expr.eval(&value, crs)?))
                     }
-                    _ => Ok(false),
+                    None => Ok(false),
                 };
             }
             FilterOp::Eq
@@ -141,6 +151,14 @@ impl ScanFilter {
         idx: &FieldIndex,
         crs: &CrsContext<'_>,
     ) -> Result<bool, EvalError> {
+        let view =
+            nodedb_types::ObjectView::new(doc).map_err(super::aggregate_helpers::decode_error)?;
+        if view.format() == nodedb_types::ObjectFormat::Native {
+            let value = view
+                .decode()
+                .map_err(super::aggregate_helpers::decode_error)?;
+            return self.matches_value(&value, crs);
+        }
         match self.op {
             FilterOp::MatchAll | FilterOp::Exists | FilterOp::NotExists => return Ok(true),
             FilterOp::Or => {
@@ -152,11 +170,13 @@ impl ScanFilter {
                 return Ok(false);
             }
             FilterOp::Expr => {
-                return match (self.expr.as_ref(), nodedb_types::value_from_msgpack(doc)) {
-                    (Some(expr), Ok(value)) => {
+                return match self.expr.as_ref() {
+                    Some(expr) => {
+                        let value = nodedb_types::decode_object(doc)
+                            .map_err(super::aggregate_helpers::decode_error)?;
                         Ok(crate::value_ops::is_truthy(&expr.eval(&value, crs)?))
                     }
-                    _ => Ok(false),
+                    None => Ok(false),
                 };
             }
             FilterOp::Eq
@@ -880,3 +900,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "filter_native_tests.rs"]
+mod native_tests;

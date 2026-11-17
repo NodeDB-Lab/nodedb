@@ -30,6 +30,12 @@ fn default_storage_sample_interval_ms() -> u64 {
     30_000
 }
 
+fn default_collection_purge_log_retention_secs() -> u64 {
+    // 30 days: a sync device offline longer than this reconnects to a full
+    // database resync instead of a per-collection purge replay.
+    30 * 86_400
+}
+
 /// Tuning knobs for background maintenance triggered by user writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceTuning {
@@ -75,6 +81,19 @@ pub struct MaintenanceTuning {
     /// of more core reads and peer requests.
     #[serde(default = "default_storage_sample_interval_ms")]
     pub storage_sample_interval_ms: u64,
+
+    /// How long a collection purge stays on record for offline sync clients,
+    /// in seconds.
+    ///
+    /// A reconnecting client gets a `CollectionPurged` for each purge on
+    /// record that it missed. One offline past this window gets a database
+    /// resync, which drops its local state of the database and its unsent
+    /// writes. Raising it keeps more purge rows in the catalog. A node whose
+    /// value marks a row as expired proposes a replicated prune that carries
+    /// the cutoff, and every node prunes at that cutoff. The node with the
+    /// shortest value therefore sets the cluster's retention.
+    #[serde(default = "default_collection_purge_log_retention_secs")]
+    pub collection_purge_log_retention_secs: u64,
 }
 
 impl Default for MaintenanceTuning {
@@ -85,6 +104,7 @@ impl Default for MaintenanceTuning {
             constraint_reconcile_interval_ms: default_constraint_reconcile_interval_ms(),
             scope_expiry_interval_secs: default_scope_expiry_interval_secs(),
             storage_sample_interval_ms: default_storage_sample_interval_ms(),
+            collection_purge_log_retention_secs: default_collection_purge_log_retention_secs(),
         }
     }
 }
@@ -108,6 +128,7 @@ mod tests {
         assert_eq!(tuning.constraint_reconcile_interval_ms, 1_000);
         assert_eq!(tuning.scope_expiry_interval_secs, 60);
         assert_eq!(tuning.storage_sample_interval_ms, 30_000);
+        assert_eq!(tuning.collection_purge_log_retention_secs, 2_592_000);
     }
 
     #[test]

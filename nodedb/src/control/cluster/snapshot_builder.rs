@@ -35,14 +35,14 @@ use crate::control::backup::snapshot_keys::{
 };
 use crate::control::cluster::calvin_snapshot::{await_calvin_cut, capture_calvin_cut};
 use crate::control::cluster::snapshot_builder_filter::{
-    bind_in_group, push_group_edges, push_group_index_sections, push_group_node_labels,
+    push_group_edges, push_group_index_sections, push_group_node_labels, push_group_surrogates,
     stored_row_in_group,
 };
 use crate::control::cluster::snapshot_cut::settled_cut;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::state::SharedState;
 use crate::event::trigger::lane::snapshot as lane_snapshot;
-use crate::types::{SurrogateBindEntry, TenantDataSnapshot, TenantId};
+use crate::types::{TenantDataSnapshot, TenantId};
 
 /// Per-tenant snapshot dispatch timeout (mirrors the backup orchestrator).
 const TENANT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -102,48 +102,6 @@ impl DataPlaneSnapshotBuilder {
         Ok(tenants)
     }
 
-    /// Capture the PK→surrogate binds with a home in the target group, for
-    /// every active collection of each enumerated tenant, in every database.
-    ///
-    /// A bind homes on its collection's vShard and, in an edge-bearing
-    /// collection, on the key vShard of its key, where a live edge write binds
-    /// an endpoint. A group whose vShards hold an endpoint therefore ships
-    /// that endpoint's bind even when the collection homes elsewhere.
-    fn capture_surrogates(
-        catalog: &SystemCatalog,
-        tenants: &BTreeMap<u64, BTreeSet<u64>>,
-        group_vshards: &HashSet<u32>,
-        merged: &mut TenantDataSnapshot,
-    ) -> Result<(), Error> {
-        let collections = catalog.load_all_collections_across_databases()?;
-        for coll in collections
-            .iter()
-            .filter(|c| c.is_active && tenants.contains_key(&c.tenant_id))
-        {
-            let key = nodedb_types::CollectionKey::from_bare(coll.database_id, &coll.name);
-            let holds_edges = coll.has_implicit_edges;
-            // Without edges every bind homes on the collection's vShard.
-            if !holds_edges && !group_vshards.contains(&key.vshard().as_u32()) {
-                continue;
-            }
-            let bindings =
-                catalog.scan_surrogates_for_collection(key, TenantId::new(coll.tenant_id))?;
-            for (pk, surrogate) in bindings {
-                if !bind_in_group(key, &pk, holds_edges, group_vshards) {
-                    continue;
-                }
-                merged.surrogate_pk.push(SurrogateBindEntry {
-                    database_id: coll.database_id.as_u64(),
-                    tenant_id: coll.tenant_id,
-                    collection: coll.name.clone(),
-                    pk,
-                    surrogate: surrogate.as_u32(),
-                });
-            }
-        }
-        Ok(())
-    }
-
     /// Build the group-filtered snapshot of `tenant_id` in `database_id` and
     /// merge it into `merged`.
     async fn build_tenant_filtered(
@@ -197,6 +155,13 @@ impl DataPlaneSnapshotBuilder {
                 merged.indexes_versioned.push((k, v));
             }
         }
+        // A sync frame's text homes on its collection's vShard, as the
+        // collection's rows do.
+        merged.synced_text.extend(
+            snap.synced_text
+                .into_iter()
+                .filter(|frame| in_group(frame.collection.as_str())),
+        );
         for (k, v) in snap.vectors {
             if in_group_db_tenant_scoped(&k) {
                 merged.vectors.push((k, v));
@@ -413,7 +378,7 @@ impl nodedb_cluster::SnapshotBuilder for DataPlaneSnapshotBuilder {
         // see it), so it is captured here and rebound on the apply side.
         {
             let catalog = self.shared.credentials.catalog();
-            Self::capture_surrogates(catalog, &tenants, &group_vshards, &mut merged)
+            push_group_surrogates(catalog, &tenants, &group_vshards, &mut merged)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
 
@@ -449,7 +414,12 @@ impl nodedb_cluster::SnapshotBuilder for DataPlaneSnapshotBuilder {
         merged.group_calvin = Some(calvin_cut);
         // Read under the fence, so the streams hold the chunks of the entries
         // at or below the cut.
-        merged.group_redo_streams = self.shared.redo_chunks.capture_group(group_id);
+        merged.group_redo_streams = self
+            .shared
+            .redo_chunks
+            .capture_group(group_id)
+            .await
+            .map_err(|e| Box::new(Error::from(e)) as Box<dyn std::error::Error + Send + Sync>)?;
         merged.group_event_lane = lane_snapshot::capture(&self.shared, &group_vshards)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;

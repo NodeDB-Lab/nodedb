@@ -25,9 +25,12 @@ impl<'a> CrdtDocumentEngine<'a> {
     ///
     /// Returns the current converged state by reading the row's deep value
     /// from the Loro document and converting it to `serde_json::Value`.
-    pub fn get(&self, collection: &str, doc_id: &str) -> Option<serde_json::Value> {
-        let loro_val = self.crdt.read_row(collection, doc_id)?;
-        Some(loro_value_to_json(&loro_val))
+    /// `Ok(None)` when the row is absent.
+    pub fn get(&self, collection: &str, doc_id: &str) -> crate::Result<Option<serde_json::Value>> {
+        self.crdt
+            .read_row(collection, doc_id)
+            .map(|loro_val| loro_value_to_json(&loro_val))
+            .transpose()
     }
 
     /// Check if a document exists in the CRDT store.
@@ -37,28 +40,15 @@ impl<'a> CrdtDocumentEngine<'a> {
 }
 
 /// Convert a `LoroValue` to `serde_json::Value`.
-pub fn loro_value_to_json(val: &LoroValue) -> serde_json::Value {
-    match val {
-        LoroValue::Null => serde_json::Value::Null,
-        LoroValue::Bool(b) => serde_json::Value::Bool(*b),
-        LoroValue::I64(n) => serde_json::json!(*n),
-        LoroValue::Double(f) => serde_json::json!(*f),
-        LoroValue::String(s) => serde_json::Value::String(s.to_string()),
-        LoroValue::Binary(b) => {
-            serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
-        }
-        LoroValue::List(list) => {
-            serde_json::Value::Array(list.iter().map(loro_value_to_json).collect())
-        }
-        LoroValue::Map(map) => {
-            let obj: serde_json::Map<String, serde_json::Value> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), loro_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        LoroValue::Container(_) => serde_json::Value::Null,
-    }
+///
+/// Each value decodes through `nodedb_crdt::loro_value` first, so a typed
+/// value renders as its JSON form (a Decimal as its exact text), never as
+/// the bytes Loro stores it in. A binary that is not a tagged value is an
+/// error.
+pub fn loro_value_to_json(val: &LoroValue) -> crate::Result<serde_json::Value> {
+    nodedb_crdt::loro_value::loro_to_value(val)
+        .map(serde_json::Value::from)
+        .map_err(crate::Error::Crdt)
 }
 
 #[cfg(test)]
@@ -77,7 +67,7 @@ mod tests {
     fn empty_get_returns_none() {
         let mut crdt = make_crdt_engine();
         let doc_engine = CrdtDocumentEngine::new(&mut crdt);
-        assert!(doc_engine.get("col", "missing").is_none());
+        assert!(doc_engine.get("col", "missing").expect("read").is_none());
     }
 
     #[test]
@@ -110,7 +100,10 @@ mod tests {
         .unwrap();
 
         let doc_engine = CrdtDocumentEngine::new(&mut crdt);
-        let doc = doc_engine.get("users", "u1").expect("should exist");
+        let doc = doc_engine
+            .get("users", "u1")
+            .expect("read")
+            .expect("should exist");
 
         assert_eq!(doc["name"], "Alice");
         assert_eq!(doc["age"], 30);
@@ -151,7 +144,10 @@ mod tests {
         .unwrap();
 
         let doc_engine = CrdtDocumentEngine::new(&mut crdt);
-        let doc = doc_engine.get("users", "u1").expect("should exist");
+        let doc = doc_engine
+            .get("users", "u1")
+            .expect("read")
+            .expect("should exist");
         assert_eq!(doc["name"], "Bob");
     }
 }

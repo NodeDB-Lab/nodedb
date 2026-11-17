@@ -63,6 +63,13 @@ pub enum ColumnSnapshot {
         dictionary: Vec<String>,
         valid: Vec<bool>,
     },
+    /// Exact decimals as `rust_decimal::Decimal::serialize` writes them.
+    /// `None` is a NULL cell.
+    Decimal(Vec<Option<[u8; 16]>>),
+    /// UUIDs as their 16 bytes. `None` is a NULL cell.
+    Uuid(Vec<Option<[u8; 16]>>),
+    /// Booleans. `None` is a NULL cell.
+    Bool(Vec<Option<bool>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +97,11 @@ pub(super) fn column_to_snapshot(col: &ColumnData) -> ColumnSnapshot {
             dictionary: dictionary.clone(),
             valid: valid.clone(),
         },
+        ColumnData::Decimal(v) => {
+            ColumnSnapshot::Decimal(v.iter().map(|d| d.map(|d| d.serialize())).collect())
+        }
+        ColumnData::Uuid(v) => ColumnSnapshot::Uuid(v.clone()),
+        ColumnData::Bool(v) => ColumnSnapshot::Bool(v.clone()),
     }
 }
 
@@ -127,6 +139,9 @@ pub(super) fn rebuild_columns(
             ColumnSnapshot::Int64(v) => v.len(),
             ColumnSnapshot::Symbol(v) => v.len(),
             ColumnSnapshot::DictEncoded { ids, .. } => ids.len(),
+            ColumnSnapshot::Decimal(v) => v.len(),
+            ColumnSnapshot::Uuid(v) => v.len(),
+            ColumnSnapshot::Bool(v) => v.len(),
         };
 
         if col_len as u64 != row_count {
@@ -161,6 +176,13 @@ pub(super) fn rebuild_columns(
                     valid,
                 }
             }
+            ColumnSnapshot::Decimal(v) => ColumnData::Decimal(
+                v.into_iter()
+                    .map(|d| d.map(rust_decimal::Decimal::deserialize))
+                    .collect(),
+            ),
+            ColumnSnapshot::Uuid(v) => ColumnData::Uuid(v),
+            ColumnSnapshot::Bool(v) => ColumnData::Bool(v),
         };
 
         result.push(col_data);

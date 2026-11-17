@@ -269,9 +269,15 @@ impl<'a> CollectionReadGate<'a> {
         )
     }
 
-    /// Apply column redaction to a decoded result value in place.
-    pub fn redact(&self, redaction: &QueryRedaction, value: &mut serde_json::Value) {
-        redact_decoded_value(Some(redaction), &self.state.redaction, value);
+    /// Apply column redaction to a decoded result value in place. `context`
+    /// is the row shape of the payload `value` decoded from.
+    pub fn redact(
+        &self,
+        redaction: &QueryRedaction,
+        context: crate::data::executor::response_codec::RowContext,
+        value: &mut serde_json::Value,
+    ) {
+        redact_decoded_value(Some(redaction), &self.state.redaction, context, value);
     }
 
     /// Fail closed when a redaction rule covers `field` on `collection`.

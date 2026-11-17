@@ -17,19 +17,19 @@ use nodedb_wal::writer::WalWriter;
 /// Single-threaded WAL append + fsync — 1000 x 128-byte records per iteration.
 #[bench(id = "wal_append_fsync_1k_128b", group = "wal_write", tags = "core")]
 fn wal_append_fsync_1k(b: &mut Bencher) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create the temp directory");
     let path = dir.path().join("bench.wal");
     let payload = vec![0xCDu8; 128];
 
     b.iter(|| {
         let _ = std::fs::remove_file(&path);
-        let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
+        let mut writer = WalWriter::open_without_direct_io(&path).expect("open the WAL writer");
         for _ in 0..1000 {
             writer
                 .append(RecordType::Put as u32, 1, 0, 0, &payload)
-                .unwrap();
+                .expect("append the record");
         }
-        writer.sync().unwrap();
+        writer.sync().expect("sync the WAL");
         black_box(writer.next_lsn())
     });
 }
@@ -37,17 +37,17 @@ fn wal_append_fsync_1k(b: &mut Bencher) {
 /// WAL append-only (no fsync) — measures raw serialization + buffer speed.
 #[bench(id = "wal_append_only_10k_128b", group = "wal_write")]
 fn wal_append_only_10k(b: &mut Bencher) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create the temp directory");
     let path = dir.path().join("bench_nofs.wal");
     let payload = vec![0xCDu8; 128];
 
     b.iter(|| {
         let _ = std::fs::remove_file(&path);
-        let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
+        let mut writer = WalWriter::open_without_direct_io(&path).expect("open the WAL writer");
         for _ in 0..10_000 {
             writer
                 .append(RecordType::Put as u32, 1, 0, 0, &payload)
-                .unwrap();
+                .expect("append the record");
         }
         black_box(writer.next_lsn())
     });
@@ -72,14 +72,14 @@ fn wal_group_commit(b: &mut Bencher) {
     /// makes this measure batching rather than raw buffer speed.
     const SYNC_EVERY: usize = 100;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create the temp directory");
     let path = dir.path().join("bench_gc.wal");
     let payload = vec![0xCDu8; 128];
 
     b.iter(|| {
         let _ = std::fs::remove_file(&path);
         let writer = Arc::new(Mutex::new(
-            WalWriter::open_without_direct_io(&path).unwrap(),
+            WalWriter::open_without_direct_io(&path).expect("open the WAL writer"),
         ));
 
         let handles: Vec<_> = (0..THREADS)
@@ -88,15 +88,15 @@ fn wal_group_commit(b: &mut Bencher) {
                 let p = payload.clone();
                 std::thread::spawn(move || {
                     for i in 0..RECORDS_PER_THREAD {
-                        let mut guard = w.lock().unwrap();
+                        let mut guard = w.lock().expect("lock the WAL writer");
                         guard
                             .append(RecordType::Put as u32, t as u64, 0, 0, &p)
-                            .unwrap();
+                            .expect("append the record");
                         // One fsync covers everything every appender buffered
                         // since the last barrier, including other threads'
                         // records — that batching is what is being measured.
                         if i % SYNC_EVERY == SYNC_EVERY - 1 {
-                            guard.sync().unwrap();
+                            guard.sync().expect("sync the WAL");
                         }
                     }
                 })
@@ -104,11 +104,11 @@ fn wal_group_commit(b: &mut Bencher) {
             .collect();
 
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("join the writer thread");
         }
 
-        let mut w = writer.lock().unwrap();
-        w.sync().unwrap();
+        let mut w = writer.lock().expect("lock the WAL writer");
+        w.sync().expect("sync the WAL");
         black_box(w.next_lsn())
     });
 }

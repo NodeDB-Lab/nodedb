@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, WriteTransaction};
+use redb::WriteTransaction;
 use tracing::info;
 
 use super::chain_head::CHAIN_HEADS;
@@ -35,7 +35,7 @@ impl SparseEngine {
             std::fs::create_dir_all(parent)?;
         }
 
-        let db = Database::create(path).map_err(|e| redb_err("open", e))?;
+        let db = GatedDatabase::create(path).map_err(|e| redb_err("open", e))?;
 
         let write_txn = db.begin_write().map_err(|e| redb_err("write txn", e))?;
         {
@@ -64,9 +64,7 @@ impl SparseEngine {
 
         info!(path = %path.display(), "sparse engine opened");
 
-        let engine = Self {
-            db: Arc::new(GatedDatabase::new(db)),
-        };
+        let engine = Self { db: Arc::new(db) };
         engine.ensure_documents_versioned_table()?;
         engine.ensure_indexes_versioned_table()?;
         Ok(engine)

@@ -18,6 +18,7 @@ pub mod encryption;
 pub mod floor_holds;
 pub mod ops;
 pub mod replay;
+pub mod stream_read;
 
 pub use append_redo_chunk::{ChunkLsns, RedoChunkPlacement};
 pub use appender::{AppendSink, NO_APPLY_KEY, RecordedAppend, WalAppender};

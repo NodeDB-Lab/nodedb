@@ -167,14 +167,18 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
             NodeDbError::numeric_value_out_of_range(detail)
         }
         ErrorCode::BadRequest { detail } => NodeDbError::bad_request(detail),
-        // The public class `code_for_sqlstate` gives `22P02`, `22007`,
-        // `22008` and `42804`.
-        ErrorCode::InvalidTextRepresentation { detail }
-        | ErrorCode::InvalidDatetimeFormat { detail }
-        | ErrorCode::DatetimeFieldOverflow { detail } => NodeDbError::data_exception(detail),
-        ErrorCode::DatatypeMismatch { detail } => {
-            NodeDbError::from_wire(PublicCode::BAD_REQUEST, detail)
+        ErrorCode::InvalidArgumentForLogarithm { detail } => {
+            NodeDbError::invalid_argument_for_logarithm(detail)
         }
+        ErrorCode::InvalidArgumentForPowerFunction { detail } => {
+            NodeDbError::invalid_argument_for_power_function(detail)
+        }
+        ErrorCode::InvalidTextRepresentation { detail } => {
+            NodeDbError::invalid_text_representation(detail)
+        }
+        ErrorCode::InvalidDatetimeFormat { detail } => NodeDbError::invalid_datetime_format(detail),
+        ErrorCode::DatetimeFieldOverflow { detail } => NodeDbError::datetime_field_overflow(detail),
+        ErrorCode::DatatypeMismatch { detail } => NodeDbError::datatype_mismatch(detail),
         ErrorCode::TransactionRollback { detail } => NodeDbError::transaction_rollback(detail),
         // A first-committer-wins refusal: the retriable class the SQL
         // surfaces send as `40001`.
@@ -192,16 +196,15 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         // Nothing was enqueued, and the same request succeeds once capacity
         // frees: the retryable overload class.
         ErrorCode::DispatchCapacity { reason } => NodeDbError::server_overload(reason),
-        ErrorCode::TxnOverlayMemoryExceeded { limit } => {
-            NodeDbError::program_limit_exceeded(format!(
-                "transaction staging overlay exceeded its {limit}-byte per-core budget; \
-                 split the transaction into smaller batches"
-            ))
-        }
         ErrorCode::NodeLabelLimit { node, label, limit } => {
             NodeDbError::program_limit_exceeded(node_label_limit_message(&node, &label, limit))
         }
-        ErrorCode::ProgramLimitExceeded { detail } => NodeDbError::program_limit_exceeded(detail),
+        // `ExecutionLimitExceeded` carries the public code
+        // `crate::Error::ExecutionLimitExceeded` takes.
+        ErrorCode::ProgramLimitExceeded { detail }
+        | ErrorCode::ExecutionLimitExceeded { detail } => {
+            NodeDbError::program_limit_exceeded(detail)
+        }
         // Genuinely internal: the shard is in an unknown or faulted state.
         // These are the only codes for which NDB-9000 is the truth.
         ErrorCode::Internal { detail } => NodeDbError::internal(detail),
@@ -258,7 +261,8 @@ pub(crate) fn rejected_constraint_to_public(
 
 /// The public error of a full-text column fault. A field that does not exist
 /// as text is an undefined column (`42703`). An argument that is not a text
-/// column is a type mismatch (class `42`). Shared by the Data-Plane code and
+/// column is a type mismatch (class `42`). An index still building is an
+/// object not ready (class `55`). Shared by the Data-Plane code and
 /// the Control-Plane variant, so both render one message.
 pub(crate) fn text_column_to_public(
     collection: &str,
@@ -269,11 +273,9 @@ pub(crate) fn text_column_to_public(
     let code = match fault {
         TextColumnFault::Undeclared | TextColumnFault::NotIndexed => PublicCode::UNDEFINED_COLUMN,
         TextColumnFault::NotText { .. } | TextColumnFault::NotAColumn => PublicCode::TYPE_MISMATCH,
+        TextColumnFault::IndexBuilding => PublicCode::OBJECT_NOT_READY,
     };
-    NodeDbError::from_wire(
-        code,
-        format!("column \"{column}\" of collection \"{collection}\" {fault}"),
-    )
+    NodeDbError::from_wire(code, fault.describe(collection, column))
 }
 
 /// The message of a refused node-label write. Shared by the public error and
@@ -320,6 +322,33 @@ mod tests {
             })
             .is_rate_exceeded()
         );
+    }
+
+    #[test]
+    fn math_domain_codes_keep_their_public_code() {
+        let log = data_plane_code_to_public(ErrorCode::InvalidArgumentForLogarithm {
+            detail: "cannot take logarithm of zero".into(),
+        });
+        assert_eq!(log.code(), PublicCode::INVALID_ARGUMENT_FOR_LOGARITHM);
+        let power = data_plane_code_to_public(ErrorCode::InvalidArgumentForPowerFunction {
+            detail: "cannot take square root of a negative number".into(),
+        });
+        assert_eq!(
+            power.code(),
+            PublicCode::INVALID_ARGUMENT_FOR_POWER_FUNCTION
+        );
+        let text =
+            data_plane_code_to_public(ErrorCode::InvalidTextRepresentation { detail: "x".into() });
+        assert_eq!(text.code(), PublicCode::INVALID_TEXT_REPRESENTATION);
+        let format =
+            data_plane_code_to_public(ErrorCode::InvalidDatetimeFormat { detail: "x".into() });
+        assert_eq!(format.code(), PublicCode::INVALID_DATETIME_FORMAT);
+        let overflow =
+            data_plane_code_to_public(ErrorCode::DatetimeFieldOverflow { detail: "x".into() });
+        assert_eq!(overflow.code(), PublicCode::DATETIME_FIELD_OVERFLOW);
+        let mismatch =
+            data_plane_code_to_public(ErrorCode::DatatypeMismatch { detail: "x".into() });
+        assert_eq!(mismatch.code(), PublicCode::DATATYPE_MISMATCH);
     }
 
     #[test]

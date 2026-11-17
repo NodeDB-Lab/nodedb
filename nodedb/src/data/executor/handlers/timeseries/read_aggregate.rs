@@ -316,6 +316,9 @@ fn group_cell_value(cell: &GroupCell) -> rmpv::Value {
         GroupCell::Int(i) => rmpv::Value::Integer((*i).into()),
         GroupCell::Float(bits) => rmpv::Value::F64(f64::from_bits(*bits)),
         GroupCell::Text(s) => rmpv::Value::String(s.as_str().into()),
+        GroupCell::Decimal(_) | GroupCell::Uuid(_) | GroupCell::Bool(_) => {
+            crate::util::rmpv_value::value_to_rmpv(&cell.to_value())
+        }
     }
 }
 

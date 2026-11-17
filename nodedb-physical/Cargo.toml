@@ -16,9 +16,12 @@ nodedb-array = { workspace = true }
 nodedb-crs = { workspace = true }
 nodedb-graph = { workspace = true }
 nodedb-query = { workspace = true }
-nodedb-sql = { workspace = true }
 nodedb-types = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 zerompk = { workspace = true }
+
+[dev-dependencies]
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

@@ -37,6 +37,10 @@ pub struct GroupCalvinCut {
     /// group vShard. It holds every barrier entry of the group's log at or
     /// below the snapshot's index, which the receiver never applies.
     pub barrier_logs: Vec<CutBarrierLog>,
+    /// The stored frozen `RETURNING` reply of each unfinished txn of a group
+    /// vShard. It holds every frozen entry of the group's log at or below
+    /// the snapshot's index, which the receiver never applies.
+    pub frozen_replies: Vec<CutFrozenReply>,
     /// Every backup cut barrier the builder applied in the group at or below
     /// the snapshot's index whose cut window is open, in cut key order. The
     /// receiver never applies them, and a cut waiting there needs them.
@@ -135,4 +139,25 @@ pub struct CutBarrierLog {
     pub position: u32,
     /// The encoded barrier log.
     pub log: Vec<u8>,
+}
+
+/// One txn's stored frozen `RETURNING` reply in a [`GroupCalvinCut`].
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct CutFrozenReply {
+    pub vshard_id: u32,
+    pub epoch: u64,
+    pub position: u32,
+    /// The encoded frozen reply.
+    pub reply: Vec<u8>,
 }

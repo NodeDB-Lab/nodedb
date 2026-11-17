@@ -164,7 +164,7 @@ pub(crate) fn resolved_ingest_plan(
 /// its rows on this node's core for `vshard_id`, before the record exists.
 /// Every install then stores exactly those rows, by column name, whatever
 /// its node's tag cardinality, memory budget or governor pressure.
-pub(crate) async fn resolve_for_log(
+pub(super) async fn resolve_ingest_for_log(
     state: &SharedState,
     ctx: WriteResolveContext,
     vshard_id: crate::types::VShardId,
@@ -182,7 +182,7 @@ pub(crate) async fn resolve_for_log(
 /// core for its task's vShard, or `None` when no task needs a resolve. Every
 /// replica resolves a sequenced transaction on its own, so the submitting
 /// node resolves each ingest before the transaction is sequenced.
-pub(crate) async fn resolve_tasks_for_log(
+pub(super) async fn resolve_ingest_tasks_for_log(
     state: &SharedState,
     tasks: &[nodedb_physical::physical_task::PhysicalTask],
 ) -> crate::Result<Option<Vec<nodedb_physical::physical_task::PhysicalTask>>> {

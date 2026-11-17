@@ -36,6 +36,7 @@ use super::{DocFetchParams, DocScanMode};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::{HeldEvalError, matches_with_resolved_schema};
+use crate::data::executor::row_shape::sparse_row_to_native_doc;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
@@ -115,14 +116,15 @@ impl CoreLoop {
                     StoredBody::Document(schema) => raw
                         .into_iter()
                         .map(|(doc_id, body)| {
-                            let mp = sparse_body_to_msgpack(
+                            let (_, native) = sparse_row_to_native_doc(
+                                &doc_id,
                                 &body,
                                 SparseBodyFormatRef::from_schema(schema),
-                            )
-                            .into_owned();
-                            (doc_id, mp)
+                                &identity_column,
+                            )?;
+                            Ok((doc_id, native))
                         })
-                        .collect(),
+                        .collect::<crate::Result<Vec<_>>>()?,
                 };
                 Ok(FetchedRows {
                     rows,
@@ -167,7 +169,7 @@ impl CoreLoop {
                             let values = sparse_body_to_msgpack(
                                 &row.body,
                                 SparseBodyFormatRef::VectorSidecar,
-                            )
+                            )?
                             .into_owned();
                             match self.version_primary_vector(
                                 database_id,
@@ -333,10 +335,10 @@ impl CoreLoop {
                     &body,
                     SparseBodyFormatRef::VectorSidecar,
                     identity_column,
-                );
-                (key, mp)
+                )?;
+                Ok((key, mp))
             })
-            .collect();
+            .collect::<crate::Result<_>>()?;
         if let Some(field) = self.vector_primary_field(database_id, tid, collection) {
             self.attach_primary_vectors(database_id, tid, collection, &field, &mut rows, at)?;
         }
@@ -375,7 +377,13 @@ impl StoredBody<'_> {
         }
         match self {
             StoredBody::VectorSidecar => {
-                let rendered = sparse_body_to_msgpack(body, SparseBodyFormatRef::VectorSidecar);
+                // A sidecar that does not render passes the filter. Every
+                // fetch renders the sidecar rows it keeps, and that render
+                // answers the error for the statement.
+                let Ok(rendered) = sparse_body_to_msgpack(body, SparseBodyFormatRef::VectorSidecar)
+                else {
+                    return Ok(true);
+                };
                 matches_with_resolved_schema(None, filters, key, &rendered, identity_column, crs)
             }
             StoredBody::Document(schema) => {
@@ -424,6 +432,7 @@ mod tests {
                 vector_fields: &[],
                 declared_columns: &[],
                 declared_key: None,
+                text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::ZERO,
             },
         );
@@ -460,7 +469,7 @@ mod tests {
     }
 
     fn fields(body: &[u8]) -> HashMap<String, Value> {
-        match nodedb_types::value_from_msgpack(body).expect("decode row") {
+        match nodedb_types::decode_object(body).expect("decode row") {
             Value::Object(map) => map,
             other => panic!("a row is a map: {other:?}"),
         }

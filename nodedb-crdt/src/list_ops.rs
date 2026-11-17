@@ -81,6 +81,8 @@ pub fn list_move(
     to_index: usize,
 ) -> Result<()> {
     if from_index == to_index {
+        // A move onto its own index changes nothing, but the row must exist.
+        block_list_row(doc, collection, row_id)?;
         return Ok(());
     }
     let list = get_movable_list(doc, collection, row_id, list_path)?;
@@ -131,7 +133,7 @@ pub fn list_get(
 
 /// The row map `list_path` is resolved in. A block list lives inside an
 /// existing row map, so an absent or non-map row is refused.
-fn block_list_row(doc: &LoroDoc, collection: &str, row_id: &str) -> Result<LoroMap> {
+pub(crate) fn block_list_row(doc: &LoroDoc, collection: &str, row_id: &str) -> Result<LoroMap> {
     match doc.get_map(collection).get(row_id) {
         Some(ValueOrContainer::Container(loro::Container::Map(m))) => Ok(m),
         _ => Err(CrdtError::BlockListRowAbsent {
@@ -142,7 +144,7 @@ fn block_list_row(doc: &LoroDoc, collection: &str, row_id: &str) -> Result<LoroM
 }
 
 /// Split `list_path` into its parent map segments and the list segment.
-fn split_list_path(list_path: &str) -> (Vec<&str>, &str) {
+pub(crate) fn split_list_path(list_path: &str) -> (Vec<&str>, &str) {
     match list_path.rsplit_once('.') {
         Some((parents, last)) => (parents.split('.').collect(), last),
         None => (Vec::new(), list_path),
@@ -150,7 +152,7 @@ fn split_list_path(list_path: &str) -> (Vec<&str>, &str) {
 }
 
 /// The movable list held by `value` at the last segment of `list_path`.
-fn movable_list_at(
+pub(crate) fn movable_list_at(
     value: Option<ValueOrContainer>,
     list_path: &str,
     segment: &str,
@@ -167,7 +169,7 @@ fn movable_list_at(
     }
 }
 
-fn path_unresolved(list_path: &str, segment: &str) -> CrdtError {
+pub(crate) fn path_unresolved(list_path: &str, segment: &str) -> CrdtError {
     CrdtError::BlockListPathUnresolved {
         list_path: list_path.to_string(),
         segment: segment.to_string(),

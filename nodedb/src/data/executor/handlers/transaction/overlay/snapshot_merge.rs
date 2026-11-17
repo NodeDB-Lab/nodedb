@@ -25,7 +25,8 @@ impl CoreLoop {
     /// rows of a scan at the transaction's snapshot. `strict_schema` is the
     /// collection's schema, `None` for a schemaless collection. `matches` is
     /// the predicate the snapshot scan applied, evaluated on a normalized
-    /// body. No-op when the transaction has no overlay.
+    /// body. No-op when the transaction has no overlay. A staged body that
+    /// does not normalize is an error.
     pub(in crate::data::executor) fn merge_overlay_into_snapshot_scan(
         &self,
         txn_id: TxnId,
@@ -33,13 +34,13 @@ impl CoreLoop {
         strict_schema: Option<&StrictSchema>,
         rows: &mut Vec<(StorageKey, Vec<u8>)>,
         matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
-    ) {
+    ) -> crate::Result<()> {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
-            return;
+            return Ok(());
         };
-        merge_snapshot_rows(overlay, coll_key, strict_schema, rows, matches);
+        merge_snapshot_rows(overlay, coll_key, strict_schema, rows, matches)
     }
 }
 
@@ -51,15 +52,11 @@ fn merge_snapshot_rows(
     strict_schema: Option<&StrictSchema>,
     rows: &mut Vec<(StorageKey, Vec<u8>)>,
     matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
-) {
+) -> crate::Result<()> {
     let format = SparseBodyFormatRef::from_schema(strict_schema);
-    let Ok(()) = merge_staged_rows::<std::convert::Infallible>(
-        overlay,
-        coll_key,
-        rows,
-        matches,
-        &|_, body| Ok(sparse_body_to_msgpack(body, format).into_owned()),
-    );
+    merge_staged_rows(overlay, coll_key, rows, matches, &|_, body| {
+        sparse_body_to_msgpack(body, format).map(std::borrow::Cow::into_owned)
+    })
 }
 
 #[cfg(test)]
@@ -89,11 +86,17 @@ mod tests {
     #[test]
     fn staged_writes_merge_over_the_snapshot_rows() {
         let mut overlay = super::super::TxnOverlay::new();
-        overlay.insert_put(key(), 1, &RowIdentity::from_user_key("a"), map(1));
-        overlay.insert_tombstone(key(), 2, &RowIdentity::from_user_key("b"));
-        overlay.insert_put(key(), 3, &RowIdentity::from_user_key("c"), map(3));
+        overlay
+            .insert_put(key(), 1, &RowIdentity::from_user_key("a"), map(1))
+            .expect("stage");
+        overlay
+            .insert_tombstone(key(), 2, &RowIdentity::from_user_key("b"))
+            .expect("stage");
+        overlay
+            .insert_put(key(), 3, &RowIdentity::from_user_key("c"), map(3))
+            .expect("stage");
         let mut rows = vec![row(1, &map(0)), row(2, &map(0))];
-        merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| true);
+        merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| true).expect("merge");
         rows.sort_by_key(|(key, _)| key.surrogate().as_u32());
         assert_eq!(rows, vec![row(1, &map(1)), row(3, &map(3))]);
     }
@@ -102,9 +105,11 @@ mod tests {
     #[test]
     fn a_staged_row_meets_the_scan_predicate() {
         let mut overlay = super::super::TxnOverlay::new();
-        overlay.insert_put(key(), 5, &RowIdentity::from_user_key("e"), map(5));
+        overlay
+            .insert_put(key(), 5, &RowIdentity::from_user_key("e"), map(5))
+            .expect("stage");
         let mut rows = Vec::new();
-        merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| false);
+        merge_snapshot_rows(&overlay, &key(), None, &mut rows, &|_, _| false).expect("merge");
         assert!(rows.is_empty());
     }
 }

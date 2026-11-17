@@ -22,6 +22,8 @@ pub(in crate::data::executor) struct SourceRow {
     /// The row's position in the shipped source, as text. Both MERGE passes
     /// build from the same shipped rows, so it names the same row in each.
     pub id: String,
+    /// The row's position in the shipped source: its place in source order.
+    pub index: usize,
     pub doc: serde_json::Value,
     /// The join column's value. `None` when absent or NULL: the row joins
     /// no target row.
@@ -77,6 +79,7 @@ impl JoinSource {
             }
             rows.push(SourceRow {
                 id: index.to_string(),
+                index,
                 doc,
                 key,
             });

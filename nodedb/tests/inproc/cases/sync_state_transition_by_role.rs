@@ -120,6 +120,7 @@ impl Harness {
             lite_id: String::new(),
             epoch: 0,
             wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
+            last_server_watermark: 0,
         };
         send(&mut ws, SyncMessageType::Handshake, &msg).await;
         let frame = next_frame(&mut ws)

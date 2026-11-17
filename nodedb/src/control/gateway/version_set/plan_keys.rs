@@ -206,7 +206,8 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
                 | PhraseSearch { collection, .. }
                 | FtsIndexDoc { collection, .. }
                 | FtsDeleteDoc { collection, .. }
-                | SetTextConfig { collection, .. } => out.push(collection.as_str().to_owned()),
+                | SetTextConfig { collection, .. }
+                | RebuildIndex { collection, .. } => out.push(collection.as_str().to_owned()),
             }
         }
 

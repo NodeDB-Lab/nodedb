@@ -80,7 +80,7 @@ async fn wcc_fails_when_one_core_fails() {
     }
     let chain: HashSet<String> = (0..CHAIN_LEN).map(|i| format!("c_{i}")).collect();
 
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {CHAIN_LEN} wcc nodes"),
             Duration::from_secs(30),
@@ -88,7 +88,7 @@ async fn wcc_fails_when_one_core_fails() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        wcc_nodes(&cluster.nodes[idx].client).await.ok() == Some(chain.clone())
+                        wcc_nodes(&node.client).await.ok() == Some(chain.clone())
                     })
                 })
             },
@@ -98,8 +98,8 @@ async fn wcc_fails_when_one_core_fails() {
 
     {
         let _fault = FailGuard::fail(CORE1_FAULT, FAULT_DETAIL);
-        for idx in 0..cluster.nodes.len() {
-            match wcc_nodes(&cluster.nodes[idx].client).await {
+        for (idx, node) in cluster.nodes.iter().enumerate() {
+            match wcc_nodes(&node.client).await {
                 Ok(nodes) => panic!(
                     "node {idx}: WCC returned {} of {CHAIN_LEN} nodes while core 1 failed; \
                      a failed core must fail the query",
@@ -114,9 +114,9 @@ async fn wcc_fails_when_one_core_fails() {
     }
 
     // With the fault cleared, every node returns the full component again.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         assert_eq!(
-            wcc_nodes(&cluster.nodes[idx].client).await,
+            wcc_nodes(&node.client).await,
             Ok(chain.clone()),
             "node {idx}: WCC after the fault clears"
         );

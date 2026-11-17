@@ -73,7 +73,25 @@ impl Validator {
         // expression evaluator can resolve column references by name.
         let mut row = std::collections::HashMap::with_capacity(change.fields.len());
         for (name, val) in &change.fields {
-            row.insert(name.clone(), crate::loro_value::loro_to_value(val));
+            match crate::loro_value::loro_to_value(val) {
+                Ok(value) => {
+                    row.insert(name.clone(), value);
+                }
+                // A field that does not decode cannot be checked. The change
+                // fails closed rather than evaluating without the field.
+                Err(e) => {
+                    return Ok(Some(Violation {
+                        constraint_name: constraint.name.clone(),
+                        reason: format!("field `{name}` does not decode: {e}"),
+                        hint: CompensationHint::ManualIntervention {
+                            reason: format!(
+                                "CHECK constraint `{}` cannot read field `{name}`",
+                                constraint.name
+                            ),
+                        },
+                    }));
+                }
+            }
         }
         let row_value = nodedb_types::Value::Object(row);
 

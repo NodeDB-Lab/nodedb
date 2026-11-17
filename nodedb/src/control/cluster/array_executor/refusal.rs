@@ -59,7 +59,6 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         // Every other error crosses in its typed wire form, so the
         // coordinator rebuilds it and renders its own SQLSTATE.
         other @ (crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::ConflictRetry { .. }
@@ -118,6 +117,8 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableSchemaChanged { .. }
@@ -156,7 +157,6 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::Ddl(_)
         | crate::Error::RemoteTyped { .. }
         | crate::Error::DescriptorVersionAnomaly { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)

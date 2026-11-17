@@ -12,7 +12,7 @@
 
 use crate::control::state::SharedState;
 use crate::control::wal_replication::encode::{
-    RedoEntryTarget, RedoProposal, session_redo_proposal,
+    RedoEntryTarget, RedoProposal, session_redo_proposal, transaction_redo_entry,
 };
 use crate::control::wal_replication::propose_replicated_entry;
 use crate::wal::RedoStreamId;
@@ -64,10 +64,28 @@ pub(crate) async fn propose_transaction_redo(
     installed
 }
 
+/// Propose `payload` as one inline entry to `target`'s data group and wait
+/// until it applied on this node. The caller checked that it fits one entry.
+pub(crate) async fn propose_inline_redo(
+    state: &SharedState,
+    target: RedoTarget,
+    payload: &TransactionRedoPayload,
+    deadline: tokio::time::Instant,
+) -> crate::Result<crate::control::wal_replication::AppliedOutput> {
+    let proposer = state.async_raft_proposer()?;
+    let entry = transaction_redo_entry(
+        target.tenant_id,
+        target.database_id,
+        target.vshard_id,
+        payload,
+    );
+    propose_replicated_entry(state, proposer, entry, deadline).await
+}
+
 /// Propose the abandon of `stream` once. A stream the final entry already
 /// took is gone, so the abandon then drops nothing. A failed proposal queues
 /// the abandon for the abandoner, so the session's error returns now.
-async fn abandon(state: &SharedState, target: RedoEntryTarget, stream: RedoStreamId) {
+pub(super) async fn abandon(state: &SharedState, target: RedoEntryTarget, stream: RedoStreamId) {
     if let Err(error) = propose_abandon(state, target, stream).await {
         tracing::warn!(
             ?stream,

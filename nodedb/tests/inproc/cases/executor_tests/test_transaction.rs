@@ -9,7 +9,9 @@
 use nodedb::bridge::envelope::ErrorCode;
 use nodedb::bridge::envelope::Status;
 use nodedb_physical::physical_plan::{DocumentOp, MetaOp, PhysicalPlan};
-use nodedb_test_support::tx_batch_helpers::{commit_plans, with_unique_refusal};
+use nodedb_test_support::tx_batch_helpers::{
+    commit_plans, doc_body, doc_text, with_unique_refusal,
+};
 
 use super::helpers::*;
 
@@ -34,6 +36,7 @@ fn a_transaction_commits_atomically() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: nodedb_types::QualifiedCollection::new(
@@ -47,6 +50,7 @@ fn a_transaction_commits_atomically() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         ],
         10,
@@ -116,6 +120,7 @@ fn a_transaction_batch_is_refused_on_an_origin_core() {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 })],
             }),
         ),
@@ -147,12 +152,13 @@ fn a_refused_transaction_commits_nothing() {
                 "docs",
             ),
             document_id: "d1".into(),
-            value: b"original".to_vec(),
+            value: doc_body("original"),
             surrogate: doc_surrogate("d1"),
             pk_bytes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -167,12 +173,13 @@ fn a_refused_transaction_commits_nothing() {
                 "docs",
             ),
             document_id: "d1".into(),
-            value: b"{\"name\":\"modified\"}".to_vec(),
+            value: doc_body("modified"),
             surrogate: doc_surrogate("d1"),
             pk_bytes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })]),
         20,
     );
@@ -197,5 +204,5 @@ fn a_refused_transaction_commits_nothing() {
         }),
     );
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original"));
 }

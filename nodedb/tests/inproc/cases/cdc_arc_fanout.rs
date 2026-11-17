@@ -55,7 +55,8 @@ fn write_event(seq: u64) -> WriteEvent {
     });
     WriteEvent {
         sequence: seq,
-        collection: Arc::from("orders"),
+        // A write event names its collection qualified by its database.
+        collection: Arc::from("7/orders"),
         op: WriteOp::Insert,
         row_id: RowId::row(nodedb_types::RowIdentity::from_user_key(format!("r-{seq}"))),
         lsn: Lsn::new(seq * 10),

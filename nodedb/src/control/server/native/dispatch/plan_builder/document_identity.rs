@@ -22,12 +22,17 @@ pub(super) fn identity_column(declared_primary_key: Option<String>) -> String {
     declared_primary_key.unwrap_or_else(|| DEFAULT_IDENTITY_COLUMN.to_string())
 }
 
-/// `body` as a MessagePack map that carries `doc_id` under `column`.
+/// `body` as a MessagePack body that carries `doc_id` under `column`.
 ///
-/// `body` is a MessagePack map or JSON object text. A body `column` field
-/// that is not the string `doc_id` is refused: the row is keyed by `doc_id`,
-/// so SQL and key reads would disagree on which document the row is.
+/// `body` is a native object `[7, {field: <tagged value>}]`, a plain
+/// MessagePack map or JSON object text. A native body keeps every field's
+/// exact type and stays native. A body `column` field that is not the string
+/// `doc_id` is refused: the row is keyed by `doc_id`, so SQL and key reads
+/// would disagree on which document the row is.
 pub(super) fn identified_body(body: &[u8], doc_id: &str, column: &str) -> crate::Result<Vec<u8>> {
+    if crate::data::executor::response_codec::is_native_row(body) {
+        return identified_native_body(body, doc_id, column);
+    }
     if nodedb_query::msgpack_scan::map_header(body, 0).is_some() {
         if let Some((start, end)) = nodedb_query::msgpack_scan::extract_field(body, 0, column) {
             let cell = body
@@ -55,6 +60,31 @@ pub(super) fn identified_body(body: &[u8], doc_id: &str, column: &str) -> crate:
             ),
         })?;
     identified_json_body(json, doc_id, column)
+}
+
+/// A native object body that carries `doc_id` under `column`, still native.
+fn identified_native_body(body: &[u8], doc_id: &str, column: &str) -> crate::Result<Vec<u8>> {
+    let Value::Object(mut fields) =
+        nodedb_types::object_msgpack::decode_object(body).map_err(|e| {
+            crate::Error::BadRequest {
+                detail: format!("document '{doc_id}': native body does not decode: {e}"),
+            }
+        })?
+    else {
+        return Err(crate::Error::BadRequest {
+            detail: format!("document '{doc_id}': native body is not an object"),
+        });
+    };
+    match fields.get(column) {
+        Some(value) => check_body_id(value, doc_id, column)?,
+        None => {
+            fields.insert(column.to_string(), Value::String(doc_id.to_string()));
+        }
+    }
+    zerompk::to_msgpack_vec(&Value::Object(fields)).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("document '{doc_id}': native body encode failed: {e}"),
+    })
 }
 
 /// A JSON object as a MessagePack map that carries `doc_id` under `column`.
@@ -91,7 +121,7 @@ pub(super) fn identified_json_body(
 }
 
 /// Refuse a decoded body identity that is not the string `doc_id`.
-fn check_body_id(value: &Value, doc_id: &str, column: &str) -> crate::Result<()> {
+pub(super) fn check_body_id(value: &Value, doc_id: &str, column: &str) -> crate::Result<()> {
     match value {
         Value::String(s) if s == doc_id => Ok(()),
         other => Err(id_mismatch(doc_id, column, &format!("{other:?}"))),
@@ -139,6 +169,46 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    /// A native body keeps every field's exact type: a Decimal keeps its
+    /// scale, and a UUID, an instant and bytes stay typed. It gains the
+    /// document id and stays native. A native body naming another id is
+    /// refused.
+    #[test]
+    fn a_native_body_keeps_its_types_and_gains_the_document_id() {
+        let at = nodedb_types::NdbDateTime::from_micros(1_700_000_000_000_000);
+        let fields: std::collections::HashMap<String, Value> = [
+            (
+                "price".to_string(),
+                Value::Decimal("12.50".parse().unwrap()),
+            ),
+            (
+                "uid".to_string(),
+                Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            ("at".to_string(), Value::DateTime(at)),
+            ("blob".to_string(), Value::Bytes(vec![0, 255])),
+        ]
+        .into();
+        let body = zerompk::to_msgpack_vec(&Value::Object(fields.clone())).unwrap();
+        let stored = identified_body(&body, "d1", "id").expect("native body");
+        assert!(crate::data::executor::response_codec::is_native_row(
+            &stored
+        ));
+        let Value::Object(read) = nodedb_types::object_msgpack::decode_object(&stored).unwrap()
+        else {
+            panic!("object");
+        };
+        assert_eq!(read.get("id"), Some(&Value::String("d1".into())));
+        for (name, value) in &fields {
+            assert_eq!(read.get(name), Some(value), "field {name}");
+        }
+
+        let mut other = fields;
+        other.insert("id".into(), Value::String("mine".into()));
+        let body = zerompk::to_msgpack_vec(&Value::Object(other)).unwrap();
+        assert_refused_naming_both(identified_body(&body, "d1", "id"), "mine");
     }
 
     #[test]

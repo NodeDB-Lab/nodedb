@@ -49,7 +49,7 @@ pub(super) fn iterate(
     crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<Vec<u8>>, RecursionError> {
     let mut results: Vec<Vec<u8>> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
 
     // A filter-only recursion admits each row once, so a base row is
     // recorded under the key the steps test: its storage id without
@@ -79,7 +79,7 @@ pub(super) fn iterate(
             let mut reachable = LinkIndex::default();
             for (index, row) in rows.iter().enumerate() {
                 if matches(spec.recursive_preds, &row.body, crs)?
-                    && let Some(key) = field_value(&row.body, collection_field)
+                    && let Some(key) = field_value(&row.body, collection_field)?
                 {
                     reachable.insert(key, index);
                 }
@@ -88,7 +88,10 @@ pub(super) fn iterate(
             for _ in 0..spec.max_iterations {
                 let working: Vec<Value> = frontier
                     .iter()
-                    .filter_map(|row| field_value(row, working_field))
+                    .map(|row| field_value(row, working_field))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
                     .collect();
                 if working.is_empty() {
                     return Ok(finish(results, spec.limit));
@@ -165,7 +168,7 @@ fn matches(
 /// the key: the storage id (`"id"`), else the row's whole content.
 fn admit(
     distinct: bool,
-    seen: &mut HashSet<String>,
+    seen: &mut HashSet<Vec<u8>>,
     row: &RecursiveRow,
     by: &str,
 ) -> Result<bool, RecursionError> {
@@ -173,21 +176,22 @@ fn admit(
         return Ok(true);
     }
     let key = if by == "id" {
-        format!("id:{}", row.id)
+        format!("id:{}", row.id).into_bytes()
     } else {
-        let content = nodedb_types::msgpack_to_json_string(&row.body)
+        let value = nodedb_types::object_msgpack::decode_object(&row.body)
             .map_err(|e| RecursionError::Decode(e.to_string()))?;
-        format!("row:{content}")
+        zerompk::to_msgpack_vec(&value).map_err(|e| RecursionError::Decode(e.to_string()))?
     };
     Ok(seen.insert(key))
 }
 
 /// The value of `field` in a msgpack map row. `None` when absent or NULL.
-fn field_value(body: &[u8], field: &str) -> Option<Value> {
-    match nodedb_types::value_from_msgpack(body).ok()? {
-        Value::Object(mut map) => map.remove(field).filter(|value| !value.is_null()),
-        _ => None,
-    }
+fn field_value(body: &[u8], field: &str) -> Result<Option<Value>, RecursionError> {
+    let view = nodedb_types::object_msgpack::ObjectView::new(body)
+        .map_err(|e| RecursionError::Decode(e.to_string()))?;
+    view.get(field)
+        .map(|value| value.filter(|value| !value.is_null()))
+        .map_err(|e| RecursionError::Decode(e.to_string()))
 }
 
 /// Collection rows by link value, matched by the equality a WHERE `=` uses.
@@ -225,8 +229,40 @@ mod tests {
             .collect();
         RecursiveRow {
             id: id.to_string(),
-            body: nodedb_types::value_to_msgpack(&Value::Object(map)).expect("encode row"),
+            body: zerompk::to_msgpack_vec(&Value::Object(map)).expect("encode row"),
         }
+    }
+
+    #[test]
+    fn native_link_and_distinct_preserve_rich_values() {
+        let id = Value::Decimal("123456789.123456789".parse().expect("decimal"));
+        let child_id = Value::Decimal("123456789.123456790".parse().expect("decimal"));
+        let rows = vec![
+            row(
+                "root",
+                &[("id", id.clone()), ("bytes", Value::Bytes(vec![0, 255]))],
+            ),
+            row("child", &[("id", child_id.clone()), ("parent", id.clone())]),
+        ];
+        let base = [eq_filter("id", id)];
+        let link = ("parent".into(), "id".into());
+        let spec = RecursionSpec {
+            base_preds: &base,
+            recursive_preds: &[],
+            join_link: Some(&link),
+            max_iterations: 5,
+            distinct: true,
+            limit: usize::MAX,
+        };
+        let result =
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only()).expect("iterate");
+        assert_eq!(result.len(), 2);
+        assert_eq!(field_value(&result[1], "id").expect("id"), Some(child_id));
+        assert_eq!(
+            field_value(&result[0], "bytes").expect("bytes"),
+            Some(Value::Bytes(vec![0, 255]))
+        );
+        assert!(field_value(&[0x92, 7, 0x81], "id").is_err());
     }
 
     fn eq_filter(field: &str, value: Value) -> ScanFilter {
@@ -352,7 +388,7 @@ mod tests {
             iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only()).expect("iterate");
         let roots = results
             .iter()
-            .filter(|body| field_value(body, "id") == Some(Value::String("root".into())))
+            .filter(|body| field_value(body, "id").unwrap() == Some(Value::String("root".into())))
             .count();
         assert_eq!((results.len(), roots), (4, 1));
     }

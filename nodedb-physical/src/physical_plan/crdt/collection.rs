@@ -155,7 +155,7 @@ mod tests {
                 document_id: "d".to_string(),
                 list_path: "blocks".to_string(),
                 index: 0,
-                fields_json: "{}".to_string(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
             },
             CrdtOp::ListDelete {
@@ -176,7 +176,7 @@ mod tests {
             CrdtOp::DocUpsert {
                 collection: coll("doc_upsert"),
                 document_id: "d".to_string(),
-                fields_json: "{}".to_string(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
                 partial: false,
                 verb: crate::physical_plan::CrdtWriteVerb::Insert,

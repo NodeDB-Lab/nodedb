@@ -5,10 +5,16 @@
 //!
 //! - [`entry`]: the `MetaOp::ApplyTransactionRedo` handler.
 //! - [`calvin_install`]: the install of a committed Calvin slice.
-//! - [`validate`]: commit-boundary checks that run before any write.
+//! - [`validate`]: commit-boundary checks that run before any write. The
+//!   Calvin stage runs the same checks on its staged images.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
-//! - [`document`]: document rows written while the apply scope is open.
+//! - [`streamed`]: the content of a stream marker, read back from the WAL.
+//! - [`stream_validate`]: the validate of a stream marker's content, run
+//!   batch by batch over the stream.
+//! - [`document`]: document rows written while the apply scope is open, or
+//!   while restart replay folds a record whose install never became durable.
+//! - [`replay_fold`]: restart replay's fold of such a record.
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
@@ -22,6 +28,7 @@
 //! - [`cross_shard_fold_tests`]: a record never folds a cross-shard sum
 //!   target on the source's core.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
+//! - [`retention_instant_tests`]: retention judged at the entry's instant.
 
 #[cfg(test)]
 pub(in crate::data::executor) mod calvin_fold_tests;
@@ -34,13 +41,23 @@ mod cross_shard_fold_tests;
 mod document;
 mod entry;
 mod events;
+mod folded_store;
 #[cfg(test)]
 mod install_refusal_tests;
+mod installed_document;
 mod passes;
+mod replay_fold;
+#[cfg(test)]
+mod retention_instant_tests;
 mod settle;
 mod snapshot_check;
 mod state;
+mod stream_validate;
+mod streamed;
 mod sub_ops;
+mod sum_fold_check;
+#[cfg(test)]
+mod sync_refusal_tests;
 #[cfg(test)]
 pub(in crate::data::executor) mod test_commit;
 #[cfg(test)]
@@ -51,3 +68,5 @@ mod write_keys;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
 pub(in crate::data::executor) use state::{RedoApplyPass, RedoApplyState, TsInstalled};
+pub(in crate::data::executor) use sub_ops::{RedoDocOp, RedoKvOp, document_ops, kv_ops};
+pub(in crate::data::executor) use validate::CommitBoundary;

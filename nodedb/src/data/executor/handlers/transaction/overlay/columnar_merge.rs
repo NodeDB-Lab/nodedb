@@ -133,7 +133,14 @@ impl CoreLoop {
             let Some(s) = surrogate else {
                 return base_visible;
             };
-            match overlay.get(coll_key, s.0) {
+            let staged = match overlay.get(coll_key, s.0) {
+                Ok(staged) => staged,
+                Err(e) => {
+                    first_err = Some(e);
+                    return true;
+                }
+            };
+            match staged.as_deref() {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(body)) => match decode_staged_row(body) {
                     Some(new_row) => {
@@ -176,11 +183,12 @@ impl CoreLoop {
         // Overlay additions: staged puts for surrogates the base scan did
         // not return, appended when the decoded row satisfies the scan's
         // WHERE predicate — this is what makes a staged INSERT visible.
-        for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
+        for item in overlay.iter_for_collection(coll_key) {
+            let (surrogate, staged) = item?;
             if seen.contains(&surrogate) {
                 continue;
             }
-            let Staged::Put(body) = staged else {
+            let Staged::Put(body) = &*staged else {
                 continue;
             };
             let Some(new_row) = decode_staged_row(body) else {

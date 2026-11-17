@@ -64,11 +64,13 @@ impl CoreLoop {
     /// Rewind `txn_id`'s overlays to the positions recorded under
     /// `savepoint`, or to empty when this core holds no record. Records of
     /// later savepoints are dropped: the rewind destroys those savepoints.
+    /// A spill-file error leaves the overlay unusable and is returned: the
+    /// transaction can then only roll back.
     pub(in crate::data::executor) fn rollback_to_savepoint(
         &mut self,
         txn_id: TxnId,
         savepoint: u64,
-    ) {
+    ) -> crate::Result<()> {
         self.touch_overlay(txn_id);
         let marks = match self.txn_savepoints.get_mut(&txn_id) {
             Some(records) => {
@@ -78,13 +80,14 @@ impl CoreLoop {
             None => SavepointMarks::default(),
         };
         if let Some(overlay) = self.txn_overlays.get_mut(&txn_id) {
-            overlay.rollback_to(marks.value);
+            overlay.rollback_to(marks.value)?;
         }
         if let Some(overlay) = self.graph_txn_overlays.get_mut(&txn_id) {
-            overlay.rollback_to(marks.graph);
+            overlay.rollback_to(marks.graph)?;
         }
         if let Some(overlay) = self.array_txn_overlays.get_mut(&txn_id) {
-            overlay.rollback_to(marks.array);
+            overlay.rollback_to(marks.array)?;
         }
+        Ok(())
     }
 }

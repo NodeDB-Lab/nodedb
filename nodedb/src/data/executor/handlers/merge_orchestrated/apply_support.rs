@@ -1,21 +1,85 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Row-level helpers for the MERGE APPLY pass: undo capture for the in-memory
-//! indexes, row-level-security admission of the resolved arms, and post/pre-image
-//! projection for a `RETURNING` clause.
+//! indexes, actual stored-row policy admission, prepared events, and RETURNING rows.
 
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 
-use super::plan::MergePlanActions;
+/// A public row event prepared while the MERGE can still roll back.
+pub(super) enum MergeEvent {
+    Put {
+        collection: String,
+        identity: RowIdentity,
+        event: crate::types::DocumentPutEvent,
+    },
+    Delete {
+        collection: String,
+        identity: RowIdentity,
+        old_value: Vec<u8>,
+    },
+}
 
-/// One committed Phase-A put captured for post-commit event emission:
-/// `(row identity, new stored body borrowed from the plan, prior stored value)`.
-/// The identity is the one INSERT minted for the row. The body borrows from
-/// the merge plan (owned for the whole apply) rather than being cloned.
-pub(super) type MergePutEvent<'a> = (RowIdentity, &'a [u8], Option<Vec<u8>>);
+impl MergeEvent {
+    pub(super) fn publish(
+        self,
+        core: &mut crate::data::executor::core_loop::CoreLoop,
+        task: &crate::data::executor::task::ExecutionTask,
+    ) {
+        match self {
+            Self::Put {
+                collection,
+                identity,
+                event,
+            } => core.emit_prepared_put_event(task, &collection, identity, &event),
+            Self::Delete {
+                collection,
+                identity,
+                old_value,
+            } => core.emit_event_with_row_id(
+                task,
+                &collection,
+                crate::event::WriteOp::Delete,
+                crate::event::types::RowId::row(identity),
+                None,
+                Some(&old_value),
+            ),
+        }
+    }
+}
+
+/// Retain target effects in the order the source hook applied them.
+pub(super) fn retain_target_writes(
+    targets: Vec<crate::data::executor::enforcement::materialized_sum::apply::TargetWrite>,
+    undo_log: &mut Vec<UndoEntry>,
+    applied_keys: &mut Vec<(String, StorageKey)>,
+    events: &mut Vec<MergeEvent>,
+    write_set: &mut Vec<crate::bridge::envelope::WriteSetEntry>,
+) {
+    for mut target in targets {
+        applied_keys.push((
+            target.collection.clone(),
+            StorageKey::for_surrogate(target.surrogate),
+        ));
+        record_put_index_undo(undo_log, &mut target.outcome);
+        write_set.push(
+            crate::bridge::envelope::WriteSetEntry::installed_put(
+                target.surrogate.as_u32(),
+                target.identity.clone(),
+                target.outcome.installed,
+                target.event.clone(),
+            )
+            .in_collection(target.collection.clone()),
+        );
+        events.push(MergeEvent::Put {
+            collection: target.collection,
+            identity: target.identity,
+            event: target.event,
+        });
+    }
+}
 
 /// Record the in-memory index mutations a successful
 /// [`crate::data::executor::core_loop::CoreLoop::apply_point_put`] performed as
@@ -27,72 +91,27 @@ pub(super) fn record_put_index_undo(undo_log: &mut Vec<UndoEntry>, outcome: &mut
     undo_log.append(&mut outcome.memory_undo);
 }
 
-/// Decide every resolved arm of a MERGE against the target's compiled write
-/// policy, BEFORE the apply pass writes anything.
-///
-/// Each arm is judged on the image it stores: the post-image for an UPDATE or
-/// INSERT arm, the pre-image for a DELETE arm. Deciding the whole set up front
-/// is what makes a rejection leave no partial merge behind — the apply pass
-/// shares one transaction for its puts but cascades its deletes outside it, so
-/// a mid-apply denial would not be fully reversible.
-///
-/// Every captured body is MessagePack for BOTH storage modes —
-/// `collect_merge_plan` decodes a strict target's Binary Tuple and re-encodes
-/// the resolved row before the apply pass sees it — so the decode takes no
-/// strict schema.
-pub(super) fn gate_merge_arms(
-    plan: &MergePlanActions,
-    rls_write_check: &nodedb_types::RlsWriteCheck,
-    identity_column: &str,
-    tid: u64,
-    collection: &str,
-    crs: &nodedb_crs::CrsContext<'_>,
+/// Judge the actual row image using its known storage schema.
+pub(super) fn gate_merge_row(
+    core: &crate::data::executor::core_loop::CoreLoop,
+    row: &crate::data::executor::core_loop::redo_image::WriteSetRow<'_>,
+    check: &nodedb_types::RlsWriteCheck,
+    stored: &[u8],
+    schema: Option<&nodedb_types::columnar::StrictSchema>,
 ) -> crate::Result<()> {
-    if matches!(
-        rls_write_check.decision(),
-        nodedb_types::WriteGateDecision::AdmitAll
-    ) {
-        return Ok(());
-    }
-    // Updates and deletes name their row by its storage key; inserts name
-    // theirs by the source row's id, which is never a document storage key.
-    let doc_arms = plan
-        .updates
-        .iter()
-        .map(|u| (u.body.as_slice(), u.key))
-        .chain(plan.deletes.iter().map(|d| (d.body.as_slice(), d.key)));
-    for (body, key) in doc_arms {
-        let identity = key.to_identity();
-        rls_write_gate::admit_stored_row(
-            rls_write_check,
-            rls_write_gate::GatedRow {
-                body,
-                identity: &identity,
-                strict_schema: None,
-                identity_column,
-            },
-            tid,
-            collection,
-            crs,
-        )?;
-    }
-    for insert in &plan.inserts {
-        let identity =
-            crate::engine::document::store::RowIdentity::from_user_key(insert.join_key.as_str());
-        rls_write_gate::admit_stored_row(
-            rls_write_check,
-            rls_write_gate::GatedRow {
-                body: &insert.body,
-                identity: &identity,
-                strict_schema: None,
-                identity_column,
-            },
-            tid,
-            collection,
-            crs,
-        )?;
-    }
-    Ok(())
+    let identity_column = core.identity_column(row.database_id, row.tid, row.collection);
+    rls_write_gate::admit_stored_row(
+        check,
+        rls_write_gate::GatedRow {
+            body: stored,
+            identity: &row.identity,
+            strict_schema: schema,
+            identity_column: &identity_column,
+        },
+        row.tid,
+        row.collection,
+        &core.crs_context(),
+    )
 }
 
 /// Decode one merge row body into the `Value` document a RETURNING
@@ -103,11 +122,8 @@ pub(super) fn gate_merge_arms(
 /// `MergeDelete::key`, or a freshly minted insert key. This function converts
 /// it to the client-visible identity before decoding.
 ///
-/// The schema argument is `None` unconditionally: a merge plan's captured
-/// bodies are MessagePack for BOTH storage modes (`collect_merge_plan` decodes
-/// a strict target's Binary Tuple and re-encodes the resolved row before the
-/// apply pass ever sees it), so the strict decoder would have nothing to read.
-/// `identity_column` is the column the identity renders under.
+/// Put callers pass their installed canonical document, already decoded from
+/// any strict tuple. The helper retains native values and projects the row identity.
 pub(super) fn returning_doc(
     body: &[u8],
     key: &StorageKey,

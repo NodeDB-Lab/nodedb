@@ -2,52 +2,97 @@
 
 //! Transparent statement retry for `RetryableSchemaChanged`.
 //!
-//! A descriptor lease drain is a short barrier the DDL path runs before
-//! committing the next `descriptor_version`. Statement setup can observe it in
-//! two places: the planner's catalog read (`SqlCatalogError::RetryableSchemaChanged`)
-//! and the post-planning lease acquisition (`SharedState::acquire_plan_lease_scope`).
-//! Both surface `crate::Error::RetryableSchemaChanged`, and both must sit inside
-//! the SAME retried unit — a drain that starts between them is exactly the race
-//! this loop exists to absorb.
+//! A descriptor lease drain is a barrier the DDL path runs before committing
+//! the next `descriptor_version`. Statement setup can observe it in two places:
+//! the planner's catalog read (`SqlCatalogError::RetryableSchemaChanged`) and
+//! the post-planning lease acquisition (`SharedState::acquire_plan_lease_scope`).
+//! Both surface `crate::Error::RetryableSchemaChanged`, and both sit inside the
+//! SAME retried unit. A drain that starts between them is the race this loop
+//! absorbs.
 //!
-//! The retry is intentionally **dumb**: it re-runs the whole setup unit,
-//! including parsing. A smarter implementation will hold onto the parsed AST
-//! and only re-resolve. That's a future optimisation — for the common drain
-//! case (sub-second drains on clusters with short query lifetimes) the extra
-//! parse cost is negligible.
+//! The retry re-runs the whole setup unit, parsing included.
 //!
-//! ## Retry budget
+//! ## Waiting
 //!
-//! Five attempts total with 50/100/200/400 ms backoff between them — roughly
-//! 750ms of tolerance for a drain to complete. A backoff is a ceiling, not a
-//! fixed sleep: the next attempt starts as soon as a drain ends on this node,
-//! so a statement waits out a drain for the drain's own length and no more.
-//! The `DEFAULT_DRAIN_TIMEOUT` from
-//! `metadata_proposer` is 35s, so in practice either drain completes within our
-//! retry budget (the proposer is actively draining and is probably close to done
-//! by the time we observe it) or drain is stuck and our error helps the operator
-//! diagnose.
+//! A drain lasts as long as its DDL needs: the drain start commits, every
+//! statement holding the prior version finishes, this node's idle lease
+//! release commits, and the DDL's own entry commits and applies. Each step is
+//! a metadata Raft round trip, so a loaded node can take seconds. The loop
+//! therefore waits until the statement deadline, never a fixed budget. It
+//! ends with the last retryable error only once that deadline passes.
 //!
-//! The budget is per statement. Nesting one retried unit inside another will
-//! multiply it, so a caller wraps its setup unit exactly once.
+//! Between attempts the loop waits for a drain on this node to end. A drain
+//! end fires once the entry that ended it applied all its effects, so the next
+//! attempt plans against the new descriptor version. A bounded pause covers a
+//! retryable cause no drain end marks, such as a full lease holder table.
+//!
+//! ## Holds the connection keeps
+//!
+//! A failed attempt keeps no hold: a planner refusal takes none, and a refused
+//! admission gives its reservations back before it returns. A hold the same
+//! connection keeps outside the attempt is different. An open transaction's
+//! buffered writes and an open cursor are examples. The drain waits for that
+//! hold, and the hold cannot end while the connection waits for the drain.
+//! The loop returns the error at once in that case, so the client can end the
+//! transaction or cursor that holds the drain open.
+//!
+//! The wait is per statement. A caller wraps its setup unit exactly once.
 
 use std::time::Duration;
 
-use crate::control::lease::DescriptorDrainTracker;
+use crate::control::lease::{DescriptorDrainTracker, LeaseHolders};
+use crate::control::server::shared::session::StatementDeadline;
+use crate::control::state::SharedState;
 use crate::error::Error;
 
-/// Maximum number of attempts (including the initial call).
-const MAX_ATTEMPTS: usize = 5;
+/// The first pause between attempts. Each later pause doubles it.
+const FIRST_PAUSE: Duration = Duration::from_millis(50);
 
-/// Backoff durations BETWEEN attempts. `BACKOFFS[i]` is the sleep
-/// duration before attempt `i + 1`. Length must be
-/// `MAX_ATTEMPTS - 1`.
-const BACKOFFS: [Duration; MAX_ATTEMPTS - 1] = [
-    Duration::from_millis(50),
-    Duration::from_millis(100),
-    Duration::from_millis(200),
-    Duration::from_millis(400),
-];
+/// The longest pause between attempts. A drain end on this node ends a pause
+/// early.
+const MAX_PAUSE: Duration = Duration::from_millis(400);
+
+/// What a retried unit waits on between attempts, and until when.
+pub struct DrainWait<'a> {
+    drains: &'a DescriptorDrainTracker,
+    holders: &'a LeaseHolders,
+    deadline: StatementDeadline,
+    /// The connection running the statement, `None` outside a connection.
+    owner: Option<u64>,
+}
+
+impl<'a> DrainWait<'a> {
+    /// Wait on `state`'s drains until the running statement's deadline.
+    pub fn of_statement(state: &'a SharedState) -> Self {
+        Self::until(state, StatementDeadline::of_statement(state))
+    }
+
+    /// Wait on `state`'s drains until `deadline`.
+    pub fn until(state: &'a SharedState, deadline: StatementDeadline) -> Self {
+        Self::new(&state.lease_drain, &state.lease_runtime.holders, deadline)
+    }
+
+    /// Wait on `drains` until `deadline`. `holders` names the holds the
+    /// connection running on this task keeps.
+    pub fn new(
+        drains: &'a DescriptorDrainTracker,
+        holders: &'a LeaseHolders,
+        deadline: StatementDeadline,
+    ) -> Self {
+        Self {
+            drains,
+            holders,
+            deadline,
+            owner: crate::control::server::shared::session::hold_owner::current(),
+        }
+    }
+
+    /// Whether this connection keeps a hold that an active drain waits for.
+    fn connection_holds_a_drain_open(&self) -> bool {
+        self.owner
+            .is_some_and(|owner| self.holders.owner_blocks_drain(owner, self.drains))
+    }
+}
 
 /// Classification hook for the retry loop.
 ///
@@ -68,7 +113,6 @@ impl RetryableSchemaChange for Error {
         match self {
             Error::RetryableSchemaChanged { descriptor } => Some(descriptor.as_str()),
             Error::RejectedConstraint { .. }
-            | Error::TxnOverlayMemoryExceeded { .. }
             | Error::RejectedAuthz { .. }
             | Error::OffsetRegression { .. }
             | Error::DeadlineExceeded { .. }
@@ -130,6 +174,8 @@ impl RetryableSchemaChange for Error {
             | Error::InvalidTextRepresentation { .. }
             | Error::DatatypeMismatch { .. }
             | Error::InvalidDatetimeFormat { .. }
+            | Error::InvalidArgumentForLogarithm { .. }
+            | Error::InvalidArgumentForPowerFunction { .. }
             | Error::DatetimeFieldOverflow { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }
@@ -168,7 +214,6 @@ impl RetryableSchemaChange for Error {
             | Error::Ddl(_)
             | Error::RemoteTyped { .. }
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::DataPlane(_)
@@ -199,85 +244,29 @@ impl RetryableSchemaChange for Error {
     }
 }
 
-/// Run `op` up to `MAX_ATTEMPTS` times. Retries only while the error classifies
-/// as a retryable schema change. Any other error is returned immediately on the
-/// first attempt. Returns the last error observed if every attempt was
-/// retryable.
+/// Run `op` until it succeeds, fails terminally, or the deadline of `wait`
+/// passes. Retries only while the error classifies as a retryable schema
+/// change. Any other error is returned at once.
 ///
-/// The closure takes no arguments — callers capture whatever context (sql text,
-/// tenant_id, security context) they need via move semantics. The closure is
-/// `async` so it can `.await` the planner.
+/// A retryable error is returned without a wait when the deadline has passed,
+/// or when the connection keeps a hold an active drain waits for.
 ///
-/// `drains` is this node's drain tracker. A drain that ends on this node ends
-/// the wait before the next attempt early.
-pub async fn retry_on_schema_change<F, Fut, T, E>(
-    drains: &DescriptorDrainTracker,
-    mut op: F,
-) -> Result<T, E>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-    E: RetryableSchemaChange + From<Error>,
-{
-    let mut last_err: Option<E> = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        // Enabled before the attempt, so a drain that ends while the attempt
-        // runs still wakes the wait after it.
-        let drain_ended = drains.drain_ended();
-        tokio::pin!(drain_ended);
-        drain_ended.as_mut().enable();
-        match op().await {
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                let Some(descriptor) = error.retryable_descriptor() else {
-                    return Err(error);
-                };
-                tracing::debug!(
-                    attempt,
-                    descriptor,
-                    "retrying statement setup after schema change"
-                );
-                last_err = Some(error);
-                if let Some(backoff) = BACKOFFS.get(attempt) {
-                    tokio::select! {
-                        _ = drain_ended.as_mut() => {}
-                        _ = tokio::time::sleep(*backoff) => {}
-                    }
-                }
-            }
-        }
-    }
-    // Exhausted retries — surface the last retryable error.
-    Err(last_err.unwrap_or_else(|| {
-        E::from(Error::PlanError {
-            detail: "retry_on_schema_change: no attempts recorded".into(),
-        })
-    }))
-}
-
-/// Run `op` until it succeeds or fails terminally, or until `budget` elapses.
-///
-/// This is for a caller whose client cannot retry, such as an ILP stream that
-/// sends no acks. Such a caller waits out a drain for as long as the drain
-/// itself can last. Each wait ends early when a drain ends on this node. The
-/// last retryable error is returned once `budget` elapses.
-pub async fn retry_through_drain<F, Fut, T, E>(
-    drains: &DescriptorDrainTracker,
-    budget: Duration,
-    mut op: F,
-) -> Result<T, E>
+/// The closure takes no arguments. Callers capture whatever context they need
+/// (sql text, tenant_id, security context). The closure is `async` so it can
+/// `.await` the planner.
+pub async fn retry_on_schema_change<F, Fut, T, E>(wait: DrainWait<'_>, mut op: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
     E: RetryableSchemaChange,
 {
-    let deadline = tokio::time::Instant::now() + budget;
-    let ceiling = BACKOFFS[BACKOFFS.len() - 1];
+    let deadline = wait.deadline.tokio_instant();
+    let mut pause = FIRST_PAUSE;
     let mut attempt = 0usize;
     loop {
         // Enabled before the attempt, so a drain that ends while the attempt
         // runs still wakes the wait after it.
-        let drain_ended = drains.drain_ended();
+        let drain_ended = wait.drains.drain_ended();
         tokio::pin!(drain_ended);
         drain_ended.as_mut().enable();
         let error = match op().await {
@@ -291,14 +280,21 @@ where
         if now >= deadline {
             return Err(error);
         }
-        tracing::debug!(attempt, descriptor, "waiting out a descriptor drain");
-        let backoff = BACKOFFS.get(attempt).copied().unwrap_or(ceiling);
-        let wake = (now + backoff).min(deadline);
+        if wait.connection_holds_a_drain_open() {
+            tracing::debug!(
+                attempt,
+                descriptor,
+                "not waiting out a drain this connection holds open"
+            );
+            return Err(error);
+        }
+        tracing::debug!(attempt, descriptor, "waiting out a schema change");
         tokio::select! {
             _ = drain_ended.as_mut() => {}
-            _ = tokio::time::sleep_until(wake) => {}
+            _ = tokio::time::sleep_until((now + pause).min(deadline)) => {}
         }
-        attempt += 1;
+        pause = pause.saturating_mul(2).min(MAX_PAUSE);
+        attempt = attempt.saturating_add(1);
     }
 }
 
@@ -342,11 +338,38 @@ mod tests {
         );
     }
 
+    fn orders() -> nodedb_cluster::DescriptorId {
+        nodedb_cluster::DescriptorId::new(
+            0,
+            1,
+            nodedb_cluster::DescriptorKind::Collection,
+            "orders",
+        )
+    }
+
+    fn drain_error() -> Error {
+        Error::RetryableSchemaChanged {
+            descriptor: "orders".into(),
+        }
+    }
+
+    /// A deadline `budget` after the Tokio clock, which a paused test
+    /// advances.
+    fn after(budget: Duration) -> StatementDeadline {
+        StatementDeadline::at((tokio::time::Instant::now() + budget).into_std())
+    }
+
+    /// The default statement budget, so a test that must not reach its
+    /// deadline never does.
+    const STATEMENT_BUDGET: Duration = Duration::from_secs(30);
+
     #[tokio::test]
     async fn first_attempt_success() {
         let calls = AtomicUsize::new(0);
         let drains = DescriptorDrainTracker::new();
-        let result: Result<i32, Error> = retry_on_schema_change(&drains, || {
+        let holders = LeaseHolders::new();
+        let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+        let result: Result<i32, Error> = retry_on_schema_change(wait, || {
             let c = calls.fetch_add(1, Ordering::SeqCst);
             async move { Ok(c as i32) }
         })
@@ -355,17 +378,17 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_on_schema_change_then_succeeds() {
         let calls = AtomicUsize::new(0);
         let drains = DescriptorDrainTracker::new();
-        let result: Result<&str, Error> = retry_on_schema_change(&drains, || {
+        let holders = LeaseHolders::new();
+        let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+        let result: Result<&str, Error> = retry_on_schema_change(wait, || {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 if n < 2 {
-                    Err(Error::RetryableSchemaChanged {
-                        descriptor: format!("attempt {n}"),
-                    })
+                    Err(drain_error())
                 } else {
                     Ok("done")
                 }
@@ -377,71 +400,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn surfaces_error_after_budget_exhausted() {
-        let calls = AtomicUsize::new(0);
-        let drains = DescriptorDrainTracker::new();
-        let result: Result<(), Error> = retry_on_schema_change(&drains, || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async move {
-                Err(Error::RetryableSchemaChanged {
-                    descriptor: "orders".into(),
-                })
-            }
-        })
-        .await;
-        assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
-        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS);
-    }
-
-    /// A drain that ends while an attempt runs starts the next attempt at
-    /// once, with no backoff slept.
-    #[tokio::test(start_paused = true)]
-    async fn a_drain_end_starts_the_next_attempt_without_the_backoff() {
-        use nodedb_cluster::{DescriptorId, DescriptorKind, DrainOwner};
-
-        let drains = DescriptorDrainTracker::new();
-        let descriptor = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders");
-        drains.install_start(
-            descriptor.clone(),
-            DrainOwner::Ddl,
-            1,
-            nodedb_types::Hlc::ZERO,
-            1,
-        );
-        let calls = AtomicUsize::new(0);
-        let started = tokio::time::Instant::now();
-        let result: Result<(), Error> = retry_on_schema_change(&drains, || {
-            let n = calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                // The DDL's entry applies while the first attempt runs.
-                drains.install_end(&descriptor, &DrainOwner::Ddl);
-                drains.settle();
-            }
-            async move {
-                if n == 0 {
-                    Err(Error::RetryableSchemaChanged {
-                        descriptor: "orders".into(),
-                    })
-                } else {
-                    Ok(())
-                }
-            }
-        })
-        .await;
-        result.expect("the attempt after the drain end succeeds");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert!(
-            started.elapsed() < BACKOFFS[0],
-            "the retry slept its backoff after the drain ended: {:?}",
-            started.elapsed()
-        );
-    }
-
-    #[tokio::test]
     async fn non_retryable_error_surfaces_immediately() {
         let calls = AtomicUsize::new(0);
         let drains = DescriptorDrainTracker::new();
-        let result: Result<(), Error> = retry_on_schema_change(&drains, || {
+        let holders = LeaseHolders::new();
+        let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+        let result: Result<(), Error> = retry_on_schema_change(wait, || {
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 Err(Error::PlanError {
@@ -454,63 +418,345 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A drain that outlasts the statement budget is still waited out when
-    /// the caller's budget covers it.
+    /// A drain that ends while an attempt runs starts the next attempt at
+    /// once, with no pause slept.
     #[tokio::test(start_paused = true)]
-    async fn a_drain_longer_than_the_statement_budget_is_waited_out() {
-        let calls = AtomicUsize::new(0);
-        let drains = DescriptorDrainTracker::new();
-        let refusals = MAX_ATTEMPTS * 3;
-        let result: Result<(), Error> =
-            retry_through_drain(&drains, Duration::from_secs(35), || {
-                let n = calls.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    if n < refusals {
-                        Err(Error::RetryableSchemaChanged {
-                            descriptor: "orders".into(),
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
-            })
-            .await;
-        result.expect("the attempt after the drain succeeds");
-        assert_eq!(calls.load(Ordering::SeqCst), refusals + 1);
-    }
+    async fn a_drain_end_starts_the_next_attempt_without_a_pause() {
+        use nodedb_cluster::DrainOwner;
 
-    /// A drain that never ends returns its error once the budget elapses.
-    #[tokio::test(start_paused = true)]
-    async fn a_drain_past_the_budget_surfaces_its_error_at_the_deadline() {
         let drains = DescriptorDrainTracker::new();
-        let budget = Duration::from_secs(2);
+        let holders = LeaseHolders::new();
+        let descriptor = orders();
+        drains.install_start(
+            descriptor.clone(),
+            DrainOwner::Ddl,
+            1,
+            nodedb_types::Hlc::ZERO,
+            1,
+        );
+        let calls = AtomicUsize::new(0);
         let started = tokio::time::Instant::now();
-        let result: Result<(), Error> = retry_through_drain(&drains, budget, || async {
-            Err(Error::RetryableSchemaChanged {
-                descriptor: "orders".into(),
-            })
+        let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+        let result: Result<(), Error> = retry_on_schema_change(wait, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // The DDL's entry applies while the first attempt runs.
+                drains.install_end(&descriptor, &DrainOwner::Ddl);
+                drains.settle();
+            }
+            async move { if n == 0 { Err(drain_error()) } else { Ok(()) } }
         })
         .await;
-        assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
-        assert!(started.elapsed() >= budget);
-        assert!(started.elapsed() < budget + BACKOFFS[BACKOFFS.len() - 1]);
+        result.expect("the attempt after the drain end succeeds");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < FIRST_PAUSE,
+            "the retry slept a pause after the drain ended: {:?}",
+            started.elapsed()
+        );
     }
 
-    #[tokio::test]
-    async fn retry_through_drain_surfaces_a_terminal_error_at_once() {
+    /// A drain held open for 2 s, far past any fixed retry budget, is waited
+    /// out. The attempt after the drain end starts at once, and the attempts
+    /// before it are paced by the bounded pause.
+    #[tokio::test(start_paused = true)]
+    async fn a_drain_held_past_the_old_budget_is_waited_out() {
+        use nodedb_cluster::DrainOwner;
+
+        const HELD: Duration = Duration::from_secs(2);
+        let drains = std::sync::Arc::new(DescriptorDrainTracker::new());
+        let holders = LeaseHolders::new();
+        let descriptor = orders();
+        drains.install_start(
+            descriptor.clone(),
+            DrainOwner::Ddl,
+            1,
+            nodedb_types::Hlc::ZERO,
+            1,
+        );
+        let ender = {
+            let drains = std::sync::Arc::clone(&drains);
+            let descriptor = descriptor.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(HELD).await;
+                drains.install_end(&descriptor, &DrainOwner::Ddl);
+                drains.settle();
+            })
+        };
         let calls = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+        let result: Result<(), Error> = retry_on_schema_change(wait, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let draining = drains.is_draining(&descriptor, 1);
+            async move { if draining { Err(drain_error()) } else { Ok(()) } }
+        })
+        .await;
+        ender.await.expect("join the drain ender");
+        result.expect("the write succeeds once the drain ends");
+        let waited = started.elapsed();
+        assert!(
+            waited >= HELD,
+            "the write ran before the drain ended: {waited:?}"
+        );
+        assert!(
+            waited < HELD + FIRST_PAUSE,
+            "the write did not start at the drain end: {waited:?}"
+        );
+        let attempts = calls.load(Ordering::SeqCst);
+        assert!(
+            attempts <= 10,
+            "the wait polled instead of pausing: {attempts} attempts"
+        );
+    }
+
+    /// A drain that never ends returns its retryable error once the
+    /// statement deadline passes, and not before.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_whose_deadline_passes_during_a_drain_gets_its_error() {
         let drains = DescriptorDrainTracker::new();
+        let holders = LeaseHolders::new();
+        let budget = Duration::from_secs(2);
+        let started = tokio::time::Instant::now();
+        let wait = DrainWait::new(&drains, &holders, after(budget));
         let result: Result<(), Error> =
-            retry_through_drain(&drains, Duration::from_secs(35), || {
+            retry_on_schema_change(wait, || async { Err(drain_error()) }).await;
+        assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
+        assert!(started.elapsed() >= budget);
+        assert!(started.elapsed() < budget + MAX_PAUSE);
+    }
+
+    /// A connection that keeps a hold the drain waits for gets its error at
+    /// once. Waiting would hold the drain open until one side timed out.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_holding_the_drained_version_does_not_wait() {
+        use crate::control::server::shared::session::{conn_scope, hold_owner};
+        use nodedb_cluster::DrainOwner;
+
+        conn_scope::scoped(async {
+            let drains = DescriptorDrainTracker::new();
+            let holders = LeaseHolders::new();
+            let descriptor = orders();
+            let kept = holders
+                .register(&[(descriptor.clone(), 1)], hold_owner::current())
+                .expect("register the transaction's hold");
+            drains.install_start(descriptor, DrainOwner::Ddl, 1, nodedb_types::Hlc::ZERO, 1);
+            let calls = AtomicUsize::new(0);
+            let started = tokio::time::Instant::now();
+            let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+            let result: Result<(), Error> = retry_on_schema_change(wait, || {
                 calls.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    Err(Error::PlanError {
-                        detail: "syntax error".into(),
-                    })
-                }
+                async { Err(drain_error()) }
             })
             .await;
-        assert!(matches!(result, Err(Error::PlanError { .. })));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(started.elapsed() < FIRST_PAUSE, "the write paused");
+            holders.deregister(&kept);
+        })
+        .await;
+    }
+
+    /// A hold another connection keeps is one the drain waits out, so this
+    /// connection waits too.
+    #[tokio::test(start_paused = true)]
+    async fn another_connections_hold_is_waited_out() {
+        use crate::control::server::shared::session::conn_scope;
+        use nodedb_cluster::DrainOwner;
+
+        let drains = std::sync::Arc::new(DescriptorDrainTracker::new());
+        let holders = std::sync::Arc::new(LeaseHolders::new());
+        let descriptor = orders();
+        let other = conn_scope::scoped(async {
+            crate::control::server::shared::session::hold_owner::current()
+        })
+        .await;
+        let kept = holders
+            .register(&[(descriptor.clone(), 1)], other)
+            .expect("register the other connection's hold");
+        drains.install_start(
+            descriptor.clone(),
+            DrainOwner::Ddl,
+            1,
+            nodedb_types::Hlc::ZERO,
+            1,
+        );
+        let ender = {
+            let drains = std::sync::Arc::clone(&drains);
+            let holders = std::sync::Arc::clone(&holders);
+            let descriptor = descriptor.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                holders.deregister(&kept);
+                drains.install_end(&descriptor, &DrainOwner::Ddl);
+                drains.settle();
+            })
+        };
+        conn_scope::scoped(async {
+            let wait = DrainWait::new(&drains, &holders, after(STATEMENT_BUDGET));
+            let result: Result<(), Error> = retry_on_schema_change(wait, || {
+                let draining = drains.is_draining(&descriptor, 1);
+                async move { if draining { Err(drain_error()) } else { Ok(()) } }
+            })
+            .await;
+            result.expect("the write succeeds once the other hold ends");
+        })
+        .await;
+        ender.await.expect("join the drain ender");
+    }
+
+    /// One metadata-group admission at version 1 of `descriptor`.
+    fn version_one(
+        descriptor: &nodedb_cluster::DescriptorId,
+    ) -> crate::control::planner::descriptor_set::DescriptorVersionSet {
+        let mut versions = crate::control::planner::descriptor_set::DescriptorVersionSet::new();
+        versions.record(descriptor.clone(), 1);
+        versions
+    }
+
+    /// A real drain, started and ended through the metadata group, held open
+    /// for 1.5 s by the test. A concurrent write admission waits it out and
+    /// succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_write_admission_waits_out_a_held_drain() {
+        use nodedb_cluster::DrainOwner;
+
+        const HELD: Duration = Duration::from_millis(1500);
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = std::sync::Arc::clone(&cluster.state);
+        let descriptor = orders();
+        crate::control::lease::drain_for_ddl_async(
+            &state,
+            descriptor.clone(),
+            1,
+            crate::control::metadata_proposer::DEFAULT_DRAIN_TIMEOUT,
+            0,
+        )
+        .await
+        .expect("an unleased descriptor drains at once");
+        assert!(state.lease_drain.is_draining(&descriptor, 1));
+        let ender = {
+            let state = std::sync::Arc::clone(&state);
+            let descriptor = descriptor.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(HELD).await;
+                crate::control::lease::end_drain_async(&state, descriptor, DrainOwner::Ddl)
+                    .await
+                    .expect("end the held drain");
+            })
+        };
+        let versions = version_one(&descriptor);
+        let started = std::time::Instant::now();
+        let scope = retry_on_schema_change(DrainWait::of_statement(&state), || {
+            state.acquire_plan_lease_scope(&versions)
+        })
+        .await
+        .expect("the admission succeeds once the drain ends");
+        assert!(started.elapsed() >= HELD, "admitted under the drain");
+        ender.await.expect("join the drain ender");
+        drop(scope);
+        cluster.shutdown().await;
+    }
+
+    /// A real drain that outlasts the write's deadline returns the retryable
+    /// error at that deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_write_admission_past_its_deadline_gets_its_error() {
+        use nodedb_cluster::DrainOwner;
+
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = std::sync::Arc::clone(&cluster.state);
+        let descriptor = orders();
+        crate::control::lease::drain_for_ddl_async(
+            &state,
+            descriptor.clone(),
+            1,
+            crate::control::metadata_proposer::DEFAULT_DRAIN_TIMEOUT,
+            0,
+        )
+        .await
+        .expect("an unleased descriptor drains at once");
+        let versions = version_one(&descriptor);
+        let budget = Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let result = retry_on_schema_change(
+            DrainWait::until(&state, StatementDeadline::after(budget)),
+            || state.acquire_plan_lease_scope(&versions),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Error::RetryableSchemaChanged { .. })),
+            "{:?}",
+            result.as_ref().err()
+        );
+        assert!(started.elapsed() >= budget);
+        crate::control::lease::end_drain_async(&state, descriptor, DrainOwner::Ddl)
+            .await
+            .expect("end the drain");
+        cluster.shutdown().await;
+    }
+
+    /// A connection whose own hold keeps a real drain open gets its error at
+    /// once. The drain completes as soon as that hold ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_connection_hold_never_wedges_a_real_drain() {
+        use crate::control::server::shared::session::conn_scope;
+        use nodedb_cluster::DrainOwner;
+
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = std::sync::Arc::clone(&cluster.state);
+        let descriptor = orders();
+        let versions = version_one(&descriptor);
+        conn_scope::scoped(async {
+            let kept = state
+                .acquire_plan_lease_scope(&versions)
+                .await
+                .expect("admit the transaction's first write");
+            let drain = {
+                let state = std::sync::Arc::clone(&state);
+                let descriptor = descriptor.clone();
+                tokio::spawn(async move {
+                    crate::control::lease::drain_for_ddl_async(
+                        &state,
+                        descriptor,
+                        1,
+                        crate::control::metadata_proposer::DEFAULT_DRAIN_TIMEOUT,
+                        0,
+                    )
+                    .await
+                })
+            };
+            let installed = std::time::Instant::now() + Duration::from_secs(10);
+            while !state.lease_drain.is_draining(&descriptor, 1) {
+                assert!(
+                    std::time::Instant::now() < installed,
+                    "the drain never started"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let started = std::time::Instant::now();
+            let result = retry_on_schema_change(DrainWait::of_statement(&state), || {
+                state.acquire_plan_lease_scope(&versions)
+            })
+            .await;
+            assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the write waited on a drain its own connection holds open: {:?}",
+                started.elapsed()
+            );
+
+            drop(kept);
+            drain
+                .await
+                .expect("join the drain")
+                .expect("the drain completes once the hold ends");
+        })
+        .await;
+        crate::control::lease::end_drain_async(&state, descriptor, DrainOwner::Ddl)
+            .await
+            .expect("end the drain");
+        cluster.shutdown().await;
     }
 }

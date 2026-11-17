@@ -52,12 +52,14 @@ fn startup_replay_recovers_all_wal_data() {
     let (mut req_tx, req_rx) = RingBuffer::channel(64);
     let (resp_tx, mut resp_rx) = RingBuffer::channel(64);
     let mut core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        &data_dir,
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            &data_dir,
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
 

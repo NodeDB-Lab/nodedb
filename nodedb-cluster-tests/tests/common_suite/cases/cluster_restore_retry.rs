@@ -126,8 +126,8 @@ async fn a_restore_failed_part_way_retries_without_force() {
         .wait_for_full_apply_convergence(Duration::from_secs(10))
         .await;
 
-    for idx in 0..target.nodes.len() {
-        let client = &target.nodes[idx].client;
+    for (idx, node) in target.nodes.iter().enumerate() {
+        let client = &node.client;
         wait_for_async(
             &format!("node {idx} holds every restored row and edge"),
             Duration::from_secs(30),

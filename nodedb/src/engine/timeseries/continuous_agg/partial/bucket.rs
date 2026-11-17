@@ -6,7 +6,8 @@
 //! source column in the aggregate's [`ColumnLayout`]. Finalizing an
 //! expression gives the value the ad-hoc aggregate gives over the same rows:
 //! `COUNT` is an `Integer`, SUM is exact (`Integer`, `Decimal`, or `Float`),
-//! AVG is a `Float` from the exact total, and MIN / MAX / FIRST / LAST are
+//! AVG is [`nodedb_query::ExactSum::avg_value`] (a `Float` over float input,
+//! else a `Decimal` at PostgreSQL's division scale), and MIN / MAX / FIRST / LAST are
 //! the original cells.
 
 use nodedb_query::EvalError;
@@ -91,7 +92,7 @@ impl PartialAggregate {
         let cell = |v: Option<&Value>| v.cloned().unwrap_or(Value::Null);
         Ok(match &expr.function {
             AggFunction::Sum => column.sum.sum()?,
-            AggFunction::Avg => column.sum.avg()?,
+            AggFunction::Avg => column.sum.avg_value()?,
             AggFunction::Min => cell(column.min.as_ref()),
             AggFunction::Max => cell(column.max.as_ref()),
             AggFunction::First => cell(column.first.as_ref().map(|f| &f.value)),
@@ -181,7 +182,12 @@ mod tests {
         );
         assert_eq!(out[2], Value::Integer(i64::MAX));
         assert_eq!(out[3], Value::Integer(i64::MAX));
-        assert_eq!(out[4], Value::Float(i64::MAX as f64));
+        // PostgreSQL: avg(i64::MAX, i64::MAX) over bigint is numeric
+        // 9223372036854775807, with no fraction at the total's weight.
+        assert_eq!(
+            out[4],
+            Value::Decimal(rust_decimal::Decimal::from(i64::MAX))
+        );
     }
 
     #[test]

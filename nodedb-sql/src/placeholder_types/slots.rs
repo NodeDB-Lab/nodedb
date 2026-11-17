@@ -32,17 +32,25 @@ pub struct InferredParamType {
 }
 
 impl InferredParamType {
-    /// A type the SQL text names outright — a cast target, or a row count.
-    ///
-    /// No catalog column stands behind such a position, so there is no
-    /// declared width to carry. That is not a loss for the forms that use it:
-    /// `LIMIT` / `OFFSET` are genuinely `bigint`, and a cast target names the
-    /// type it names.
+    /// A type the SQL text names outright with no width: a row count.
+    /// `LIMIT` / `OFFSET` are genuinely `bigint`.
     pub(super) fn from_sql_type(data_type: SqlDataType) -> Self {
         Self {
             data_type,
             int_width: None,
             float_width: None,
+        }
+    }
+
+    /// The type a cast to `type_name` names, its width included:
+    /// `$1::SMALLINT` is `int2`, `$1::INTEGER` and `$1::INT` are `int4`,
+    /// `$1::REAL` is `float4`, as the cast evaluates and as PostgreSQL
+    /// describes them.
+    pub(super) fn from_cast(data_type: SqlDataType, type_name: &str) -> Self {
+        Self {
+            data_type,
+            int_width: IntWidth::from_declared_type(type_name),
+            float_width: FloatWidth::from_declared_type(type_name),
         }
     }
 

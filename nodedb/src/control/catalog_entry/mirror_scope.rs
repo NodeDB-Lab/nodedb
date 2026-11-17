@@ -133,7 +133,9 @@ impl CatalogEntry {
             | Self::PutSpatialRefSys(_)
             | Self::DropSpatialRefSys { .. }
             | Self::PutCredential(_)
-            | Self::DropCredential { .. } => UNSCOPED,
+            | Self::DropCredential { .. }
+            // Every scope's purge log, at one cutoff.
+            | Self::PruneCollectionPurgeLog { .. } => UNSCOPED,
 
             // The database's own lifecycle. CLONE DATABASE refuses a mirror
             // source on its own path, and its target is a new database.

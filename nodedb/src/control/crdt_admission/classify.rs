@@ -81,7 +81,7 @@ mod tests {
             document_id: "id".into(),
             list_path: "blocks".into(),
             index: 0,
-            fields_json: "{}".into(),
+            fields: Vec::new(),
             surrogate,
         });
         assert_frontier_mutation(CrdtOp::ListDelete {
@@ -102,7 +102,7 @@ mod tests {
         assert_frontier_mutation(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, &collection()),
             document_id: "id".into(),
-            fields_json: "{}".into(),
+            fields: Vec::new(),
             surrogate,
             partial: false,
             verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,

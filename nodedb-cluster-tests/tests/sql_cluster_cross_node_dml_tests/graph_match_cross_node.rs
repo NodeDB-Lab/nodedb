@@ -124,7 +124,7 @@ async fn match_two_hop_returns_full_paths_cross_node() {
     // Wait until EVERY node sees all CHAINS full paths — edges applied +
     // replicated AND each node's routing view converged so a non-owning
     // coordinator scatters round 0 and dispatches continuations to the owners.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {CHAINS} 2-hop paths"),
             Duration::from_secs(25),
@@ -132,7 +132,7 @@ async fn match_two_hop_returns_full_paths_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = match_2hop_rows(&cluster.nodes[idx].client, MATCH_2HOP).await;
+                        let rows = match_2hop_rows(&node.client, MATCH_2HOP).await;
                         let set: HashSet<_> = rows.into_iter().collect();
                         set == expected
                     })
@@ -143,8 +143,8 @@ async fn match_two_hop_returns_full_paths_cross_node() {
     }
 
     // From every node: complete + distinct (no dup, no drop).
-    for idx in 0..cluster.nodes.len() {
-        let rows = match_2hop_rows(&cluster.nodes[idx].client, MATCH_2HOP).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = match_2hop_rows(&node.client, MATCH_2HOP).await;
         let set: HashSet<_> = rows.iter().cloned().collect();
         assert_eq!(
             rows.len(),
@@ -170,7 +170,7 @@ async fn match_two_hop_returns_full_paths_cross_node() {
     const MATCH_LABELED: &str = "MATCH (b:Hot)-[:K]->(c) RETURN b, c";
     let expected_labeled = ("mid_7".to_string(), "dst_7".to_string());
 
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees labeled cross-shard match"),
             Duration::from_secs(20),
@@ -178,8 +178,7 @@ async fn match_two_hop_returns_full_paths_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows =
-                            match_labeled_rows(&cluster.nodes[idx].client, MATCH_LABELED).await;
+                        let rows = match_labeled_rows(&node.client, MATCH_LABELED).await;
                         rows.contains(&expected_labeled)
                     })
                 })
@@ -188,8 +187,8 @@ async fn match_two_hop_returns_full_paths_cross_node() {
         .await;
     }
 
-    for idx in 0..cluster.nodes.len() {
-        let rows = match_labeled_rows(&cluster.nodes[idx].client, MATCH_LABELED).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = match_labeled_rows(&node.client, MATCH_LABELED).await;
         let set: HashSet<_> = rows.iter().cloned().collect();
         assert!(
             set.contains(&expected_labeled),

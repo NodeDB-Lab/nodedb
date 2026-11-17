@@ -99,6 +99,25 @@ impl CoreLoop {
         Ok(())
     }
 
+    /// Input-only refusals precede schema changes and source mutation.
+    fn timeseries_input_refusal(
+        &mut self,
+        task: &crate::data::executor::task::ExecutionTask,
+        provenance: Option<&nodedb_types::sync::wire::SyncProvenance>,
+        reason: String,
+    ) -> Response {
+        match provenance {
+            Some(prov) => self.sync_reject_response(
+                task,
+                nodedb_types::sync::violation::ViolationType::ConstraintViolation {
+                    detail: reason,
+                },
+                prov,
+            ),
+            None => self.response_error(task, ErrorCode::RejectedPrevalidation { reason }),
+        }
+    }
+
     pub(super) fn execute_ilp_ingest(&mut self, params: TimeseriesIngestParams<'_>) -> Response {
         let TimeseriesIngestParams {
             task,
@@ -106,6 +125,7 @@ impl CoreLoop {
             collection,
             payload,
             wal_lsn,
+            provenance,
             now_ms,
             mode,
             rls_write_check,
@@ -114,46 +134,36 @@ impl CoreLoop {
         } = params;
         let key = (task.request.database_id, tid, collection.to_string());
         let input = match std::str::from_utf8(payload) {
-            Ok(s) => s,
+            Ok(input) => input,
             Err(_) => {
-                return self.response_error(
+                return self.timeseries_input_refusal(
                     task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: "ILP payload is not valid UTF-8".into(),
-                    },
+                    provenance,
+                    "ILP payload is not valid UTF-8".into(),
                 );
             }
         };
-
         let lines = match ilp::parse_batch(input) {
             Ok(batch) => batch.into_lines(),
             Err(error) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: error.to_string(),
-                    },
-                );
+                return self.timeseries_input_refusal(task, provenance, error.to_string());
             }
         };
-
         if lines.is_empty() {
-            return self.response_error(
+            return self.timeseries_input_refusal(
                 task,
-                ErrorCode::RejectedPrevalidation {
-                    reason: "no ILP data lines in payload".into(),
-                },
+                provenance,
+                "no ILP data lines in payload".into(),
             );
         }
         if lines
             .iter()
             .any(|line| line.measurement.as_ref() != collection)
         {
-            return self.response_error(
+            return self.timeseries_input_refusal(
                 task,
-                ErrorCode::RejectedPrevalidation {
-                    reason: "ILP measurements must match the routed collection".into(),
-                },
+                provenance,
+                "ILP measurements must match the routed collection".into(),
             );
         }
 
@@ -174,6 +184,13 @@ impl CoreLoop {
             collection,
             &self.crs_context(),
         ) {
+            return self.response_error(task, error);
+        }
+        // A value a declared DECIMAL, UUID or BOOLEAN column does not take
+        // refuses the batch here, before the first row is stored.
+        if let Err(error) =
+            self.admit_declared_ts_values(task.request.database_id, tid, collection, &lines)
+        {
             return self.response_error(task, error);
         }
 

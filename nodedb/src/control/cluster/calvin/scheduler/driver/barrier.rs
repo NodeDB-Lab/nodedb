@@ -15,6 +15,8 @@
 //! - Every result came first: the barrier completes. The leader compares the
 //!   values with the ones the coordinator read, and dispatches
 //!   `MetaOp::CalvinExecuteActive` or votes `PredictionDrift`.
+//! - A passive vShard's refusal came first: its read failed, and the leader
+//!   votes abort at once.
 //! - A `ReplicatedWrite::CalvinReadTimeout` came first: the barrier times
 //!   out, and the leader votes abort.
 //!

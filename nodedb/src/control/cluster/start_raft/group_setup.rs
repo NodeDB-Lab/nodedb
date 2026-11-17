@@ -153,6 +153,9 @@ fn take_multi_raft(handle: &ClusterHandle) -> crate::Result<nodedb_cluster::mult
             .map_err(|e| crate::Error::Config {
                 detail: format!("sequencer raft group add: {e}"),
             })?;
+        // On a single node, Calvin then serves at once instead of after a
+        // full election timeout.
+        multi_raft.elect_sole_voter_groups_now();
     }
     Ok(multi_raft)
 }

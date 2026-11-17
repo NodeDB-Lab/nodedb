@@ -19,6 +19,9 @@ use crate::control::security::identity::{AuthenticatedIdentity, Permission, requ
 use crate::control::server::exchange::resolve::{Resolved, resolve_and_materialize};
 use crate::control::server::exchange::{DistributedReadCapture, ReadScope};
 use crate::control::server::shared::authorization::{AuthorizedTask, authorize_task_set};
+use crate::control::server::shared::clone_read::{
+    CloneReadInterceptParams, CloneReadOutcome, maybe_intercept_clone_read,
+};
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
@@ -168,6 +171,30 @@ pub(crate) async fn dispatch_statement_task(
     // dispatch. Every leg of a read at a leader-confirming level confirms its
     // group where it is served.
     let linearizable = read_scope::linearizable();
+
+    // A clone read runs first: resolving Exchange nodes below dispatches
+    // straight to the Data Plane, past the clone gate.
+    let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
+    if required_permission(&task.plan) == Permission::Read
+        && let CloneReadOutcome::Handled(answer) =
+            maybe_intercept_clone_read(CloneReadInterceptParams {
+                state,
+                task: &task,
+                identity,
+                tenant_id: task.tenant_id,
+                permissions: &state.permissions,
+                roles: &state.roles,
+                emitter: &emitter,
+                linearizable,
+            })
+            .await?
+    {
+        return Ok(DispatchedTask {
+            response: answer.response,
+            distributed_reads: answer.distributed_reads,
+        });
+    }
+
     let scope = ReadScope {
         database_id: task.database_id,
         tenant_id: task.tenant_id,

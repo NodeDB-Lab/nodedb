@@ -8,7 +8,7 @@ use crate::types::TenantId;
 use nodedb_physical::physical_plan::*;
 
 use super::super::super::convert::ConvertContext;
-use super::super::super::value::{row_to_msgpack, rows_to_msgpack_array};
+use super::super::super::value::{document_row_body, rows_to_msgpack_array};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::identity::{
@@ -117,7 +117,8 @@ pub(in super::super::super) fn convert_insert(
                 columnar_rows.push(row);
             }
             WriteRoute::Document => {
-                let value_bytes = row_to_msgpack(row)?;
+                let value_bytes =
+                    document_row_body(row, declared_pk.as_deref().unwrap_or(primary_key))?;
                 let (doc_id, surrogate) = resolve_doc_identity_with_declared(
                     ctx,
                     key,
@@ -137,7 +138,7 @@ pub(in super::super::super) fn convert_insert(
                     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                         collection: qualified_collection.clone(),
                         document_id: doc_id,
-                        fields_json: super::super::crdt_gate::row_to_fields_json(row)?,
+                        fields: super::super::crdt_gate::row_to_fields_body(row)?,
                         surrogate,
                         partial: false,
                         verb: CrdtWriteVerb::Insert,
@@ -161,6 +162,7 @@ pub(in super::super::super) fn convert_insert(
                         // and, in cluster mode, a routed lookup).
                         resolved_sum_targets: Vec::new(),
                         deferred_sum_targets: Vec::new(),
+                        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                     })
                 };
                 tasks.push(PhysicalTask {
@@ -331,13 +333,18 @@ mod tests {
         match &tasks[0].plan {
             PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                 document_id,
-                fields_json,
+                fields,
                 partial,
                 ..
             }) => {
                 assert_eq!(document_id, "k1");
                 assert!(!partial, "INSERT must be a full-replace DocUpsert");
-                assert!(fields_json.contains("alice"));
+                let fields = nodedb_physical::physical_plan::decode_fields_body(fields)
+                    .expect("typed fields body");
+                assert_eq!(
+                    fields.get("name"),
+                    Some(&nodedb_types::Value::String("alice".into()))
+                );
             }
             other => panic!("expected CrdtOp::DocUpsert, got {other:?}"),
         }

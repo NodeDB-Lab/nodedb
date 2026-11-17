@@ -3,8 +3,8 @@
 //! Query shapes a shadowed clone refuses instead of answering wrongly. A
 //! read over a shadowed clone either reads through to the source or refuses
 //! with a typed error — never target-only rows, never two partial answers
-//! silently concatenated. Every shape below has no source-side rewrite, so
-//! it refuses until materialized.
+//! silently concatenated. A shape with no source-side rewrite refuses until
+//! materialized. A set operation reads each branch through the clone.
 
 use crate::harness::TestServer;
 
@@ -261,11 +261,11 @@ async fn spatial_predicate_over_shadowed_clone_is_refused() {
     );
 }
 
-/// `UNION DISTINCT` / `INTERSECT` / `EXCEPT`. The clone read path bypasses the
-/// dispatch loop that applies `post_set_op`, so the branches would come back
-/// concatenated — `EXCEPT` would return the rows it must subtract.
+/// `UNION DISTINCT` / `INTERSECT` / `EXCEPT` read each branch through the
+/// clone on its own, then merge the complete branch rows: `EXCEPT` subtracts
+/// source-only rows, and `UNION` dedups them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn set_operation_over_shadowed_clone_is_refused() {
+async fn set_operation_over_shadowed_clone_merges_complete_branches() {
     let server = TestServer::start().await;
     exec_all(
         &server,
@@ -283,32 +283,49 @@ async fn set_operation_over_shadowed_clone_is_refused() {
     )
     .await;
 
-    let query = "SELECT id FROM so_items UNION SELECT id FROM so_items";
-    server.expect_error(query, REFUSAL).await;
+    let union = "SELECT id FROM so_items UNION SELECT id FROM so_items";
+    let except = "SELECT id FROM so_items EXCEPT SELECT id FROM so_items WHERE v = 'a'";
+    let sorted_ids = |rows: Vec<Vec<String>>| {
+        let mut ids: Vec<String> = rows.into_iter().map(|row| row[0].clone()).collect();
+        ids.sort_unstable();
+        ids
+    };
 
-    exec_all(
-        &server,
-        &[
-            "USE DATABASE default",
-            "ALTER DATABASE crs_set_clone MATERIALIZE",
-            "USE DATABASE crs_set_clone",
-        ],
-    )
-    .await;
-    let rows = server
-        .query_rows(query)
-        .await
-        .expect("UNION on a materialized clone");
-    assert_eq!(
-        rows.len(),
-        2,
-        "UNION of a collection with itself is its distinct rows: {rows:?}"
-    );
+    for stage in ["shadowed", "materialized"] {
+        let rows = server
+            .query_rows(union)
+            .await
+            .unwrap_or_else(|e| panic!("UNION on a {stage} clone: {e}"));
+        assert_eq!(
+            sorted_ids(rows),
+            vec!["s1", "s2"],
+            "UNION of a collection with itself is its distinct rows on a {stage} clone"
+        );
+        let rows = server
+            .query_rows(except)
+            .await
+            .unwrap_or_else(|e| panic!("EXCEPT on a {stage} clone: {e}"));
+        assert_eq!(
+            sorted_ids(rows),
+            vec!["s2"],
+            "EXCEPT subtracts the source-only row on a {stage} clone"
+        );
+        if stage == "shadowed" {
+            exec_all(
+                &server,
+                &[
+                    "USE DATABASE default",
+                    "ALTER DATABASE crs_set_clone MATERIALIZE",
+                    "USE DATABASE crs_set_clone",
+                ],
+            )
+            .await;
+        }
+    }
 }
 
-/// `UNION ALL` gives each collection its own `PhysicalTask`, so the
-/// per-task gate resolves each branch's clone origin independently — unlike
-/// the old batch resolver, which answered every branch but the first target-only.
+/// Each `UNION ALL` branch reads its own collection through the clone, so no
+/// branch answers target-only rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_collection_read_over_shadowed_clone_resolves_each_branch() {
     let server = TestServer::start().await;

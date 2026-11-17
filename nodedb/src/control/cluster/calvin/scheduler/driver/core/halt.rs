@@ -50,6 +50,12 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// The executor response channel closed before a response arrived.
     ResponseDisconnected,
     /// The resolve of a committed txn failed or returned an undecodable record.
+    ///
+    /// No client input reaches it. A plan the resolve refuses is refused
+    /// before it is sequenced (`add_plan_write_keys`), or at its stage, which
+    /// votes abort (`check_calvin_resolvable`). The class's carried messages
+    /// and applied key are decoded before it is sequenced (`prepare_submit`).
+    /// What remains is a staged overlay that breaks its own invariant.
     ResolveFailed,
     /// This leader cannot stage a txn whose verdict is COMMIT: its
     /// restages ran out, or a collection it names was superseded.
@@ -59,13 +65,26 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// The metadata group left this node before its apply reached a held
     /// txn's floor.
     MetadataGroupGone,
-    /// A stage response carries no vote the scheduler can read.
+    /// A stage response carries no vote, or `RETURNING` images, the
+    /// scheduler can read.
     StageVoteInvalid,
     /// A committed slice's redo entry cannot be built. The verdict is
     /// COMMIT, so the txn cannot drop.
     RedoProposeFailed,
     /// The vShard's data group applied a committed slice's redo and refused
     /// it for good. Every replica refuses the same entry.
+    ///
+    /// No client input reaches it. The stage judges the slice's commit
+    /// boundary with the check the install runs (`check_commit_boundary`):
+    /// row image limits, the stateless PUT and DELETE rules, BALANCED,
+    /// UNIQUE and the materialized-sum folds. A refusal there votes abort.
+    /// The stage reads the writes the redo record carries, from the overlay
+    /// through the resolve's own helpers. It holds every key the checks
+    /// read, granted in sequence order: the rows, the UNIQUE values, the fold
+    /// target rows and the period-lock reference rows. It judges retention
+    /// at the epoch instant the install judges at. So a slice that staged
+    /// cleanly passes the install. What remains is a resolve or a replay arm
+    /// that breaks its own invariant.
     RedoInstallRefused,
     /// A committed slice's redo did not become durable on this replica.
     RedoApplyFailed,

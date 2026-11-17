@@ -64,6 +64,7 @@ macro_rules! impl_set_ops_arms_for_convert_visitor {
             source: &nodedb_sql::types::SqlPlan,
             column_map: &[(String, nodedb_sql::types::SqlExpr)],
             source_columns: &[(String, String)],
+            _returning: Option<&nodedb_sql::types::ResolvedReturning>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::row_source::convert_insert_select(
                 target,

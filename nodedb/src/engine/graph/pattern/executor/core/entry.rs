@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::engine::graph::pattern::ast::MatchQuery;
+use crate::engine::graph::pattern::executor::edge_props::EdgeCapture;
 use crate::engine::graph::pattern::executor::types::{BindingRow, ExecutionState, MatchOutcome};
 use crate::engine::graph::pattern::executor::{continuation, expansion};
 use crate::engine::graph::pattern::optimizer;
@@ -66,7 +67,9 @@ fn execute_query<'a>(
         overlay,
     } = ctx;
     let mut rows: Vec<BindingRow> = vec![HashMap::new()];
+    let capture_vars = query.edge_property_vars();
     let mut state = ExecutionState::new(is_remote_node, varlen_caps);
+    state.edge_capture = EdgeCapture::for_query(&capture_vars, edge_store, props);
     // Resolve the `IN '<collection>'` scoping once against this partition's
     // collection interning; every edge expansion in this execution is filtered
     // by it so a collection-scoped MATCH never traverses another collection's

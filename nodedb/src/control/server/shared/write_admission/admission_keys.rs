@@ -12,6 +12,8 @@
 //!   an array write, a KV predicate write, and a CRDT snapshot import.
 //! - A document write that claims a UNIQUE value locks that value
 //!   `Exclusive`.
+//! - A document write locks each materialized-sum target row it folds on
+//!   its own vShard `Exclusive`.
 //!
 //! An append differs from its Calvin keys: a timeseries ingest or a columnar
 //! insert locks the rows it names `Exclusive` and its collection `Intent`.
@@ -20,12 +22,18 @@
 //!   alike on every replica.
 //! - Every Calvin writer of a columnar or timeseries collection locks it
 //!   `Exclusive`. So an append still orders against each Calvin writer.
+//!
+//! Every Calvin writer of a `HASH_CHAIN` collection locks it `Exclusive`
+//! (`planner::calvin::submit::chain_heads`). A gated insert announces the
+//! collection `Intent`, so it never moves the chain head between a Calvin
+//! slice's stage and its install.
 //! - A contended append waits and never routes. The data-group log already
 //!   orders appends, so routing one to Calvin gains nothing.
 //!
 //! A write no Calvin transaction sequences still takes keys:
 //!
 //! - A resolved write locks the rows it names, as a row write does.
+//! - A CRDT sync delta locks its document's id key, as a CRDT row write does.
 //! - A text or spatial index write locks its collection `Intent`.
 //! - A transaction batch takes the keys of every plan it carries.
 //! - Any other write locks every collection it writes `Exclusive`.
@@ -40,13 +48,14 @@ use std::collections::BTreeMap;
 
 use nodedb_cluster::calvin::types::EngineKeySet;
 use nodedb_physical::physical_plan::{
-    ColumnarOp, DocumentOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp, VectorOp,
+    ColumnarOp, CrdtOp, DocumentOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp, VectorOp,
 };
 
 use crate::control::cluster::calvin::scheduler::driver::helpers::{
     expand_write_key_sets, vshard_key,
 };
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockMode};
+use crate::control::planner::calvin::submit::sum_target_rows::catalog_sum_target_sets;
 use crate::control::planner::calvin::submit::unique_claims::catalog_unique_claim_sets;
 use crate::control::planner::calvin::tx_class::write_keys::{WriteKeys, add_plan_write_keys};
 use crate::control::planner::calvin::write_class::is_write_plan;
@@ -83,6 +92,15 @@ pub(crate) fn plan_admission_keys(
             std::slice::from_ref(plan),
         )?);
     }
+    // The target rows its install folds on this vShard, which a Calvin
+    // transaction of the same plan locks too. A Calvin slice judges its folds
+    // at its stage, so no fold lands on those rows before its install.
+    sets.extend(catalog_sum_target_sets(
+        shared,
+        database_id,
+        tenant_id.as_u64(),
+        std::slice::from_ref(plan),
+    )?);
     Ok(AdmissionKeys {
         keys: with_vshard_intent(expand_write_key_sets(&sets)),
         sequenced,
@@ -217,6 +235,20 @@ fn unsequenced_keys(keys: &mut WriteKeys, plan: &PhysicalPlan) {
                 .iter()
                 .map(|mutation| mutation.surrogate().as_u32()),
         ),
+        // A sync delta locks its document's id key, the key every Calvin
+        // writer of the document holds from its grant to its install.
+        PhysicalPlan::Crdt(
+            CrdtOp::Apply {
+                collection,
+                document_id,
+                ..
+            }
+            | CrdtOp::ApplyAuthenticated {
+                collection,
+                document_id,
+                ..
+            },
+        ) => keys.row_id(collection.as_str(), document_id),
         PhysicalPlan::Document(_)
         | PhysicalPlan::Kv(_)
         | PhysicalPlan::Vector(_)
@@ -291,6 +323,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -322,6 +355,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let (keys, sequenced) = keys_of(&plan);
         assert!(sequenced);
@@ -443,6 +477,53 @@ mod tests {
         assert!(!sequenced);
         assert_eq!(keys.get(&kv_key("kv", b"k")), Some(&LockMode::Exclusive));
         assert_eq!(keys.get(&coll("kv")), Some(&LockMode::Intent));
+    }
+
+    /// A sync delta never routes to the scheduler, whose resolve refuses it.
+    /// It locks its document's id key, which a Calvin CRDT write of the same
+    /// document holds, so a contended delta waits for that write's install.
+    #[test]
+    fn a_sync_delta_waits_for_a_calvin_write_of_its_row() {
+        let upsert = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+            collection: qualified("docs"),
+            document_id: "t1".into(),
+            fields: Vec::new(),
+            surrogate: Surrogate::new(7),
+            partial: true,
+            verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let delta = PhysicalPlan::Crdt(CrdtOp::Apply {
+            collection: qualified("docs"),
+            document_id: "t1".into(),
+            delta: Vec::new(),
+            peer_id: 1,
+            mutation_id: 1,
+            surrogate: Surrogate::new(7),
+            provenance: None,
+            constraint_version_required: 0,
+            expected_frontier_digest: None,
+        });
+        let (held, upsert_sequenced) = keys_of(&upsert);
+        let (requested, delta_sequenced) = keys_of(&delta);
+        assert!(upsert_sequenced);
+        assert!(!delta_sequenced, "a sync delta must wait, never route");
+        let row = kv_key("docs", b"t1");
+        assert_eq!(held.get(&row), Some(&LockMode::Exclusive));
+        assert_eq!(requested.get(&row), Some(&LockMode::Exclusive));
+        assert_ne!(
+            requested.get(&coll("docs")),
+            Some(&LockMode::Exclusive),
+            "a sync delta must not lock its whole collection"
+        );
+
+        let mut table = LockManager::new();
+        assert!(table.try_acquire(TxnId::new(1, 0), held));
+        assert!(
+            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
+            "the delta must not merge into the row while the upsert holds it"
+        );
     }
 
     /// A transaction batch takes the keys of every write it carries.
@@ -609,6 +690,35 @@ mod tests {
             !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
             "the UPDATE must not take the row while the balance write holds it"
         );
+    }
+
+    /// A Calvin ingest and a Calvin writer of a chained collection hold the
+    /// collection `Exclusive`. A gated append and a gated point insert
+    /// announce the collection `Intent`, so neither lands while the Calvin
+    /// writer holds its keys.
+    #[test]
+    fn a_calvin_ingest_or_chain_write_fences_gated_writes() {
+        let mut calvin_ingest = WriteKeys::default();
+        add_plan_write_keys(&mut calvin_ingest, &ts_ingest()).expect("an ingest has keys");
+        let mut chain = WriteKeys::default();
+        chain.whole_collection(qualified("docs").as_str());
+        let cases = [
+            (calvin_ingest, ts_ingest(), "metrics"),
+            (chain, doc_insert("x", 17), "docs"),
+        ];
+        for (calvin, gated, collection) in cases {
+            let held = expand_write_key_sets(&calvin.into_key_sets());
+            assert_eq!(held.get(&coll(collection)), Some(&LockMode::Exclusive));
+            let (requested, _) = keys_of(&gated);
+            assert_eq!(requested.get(&coll(collection)), Some(&LockMode::Intent));
+
+            let mut table = LockManager::new();
+            assert!(table.try_acquire(TxnId::new(1, 0), held));
+            assert!(
+                !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
+                "the gated write to '{collection}' must wait for the Calvin writer"
+            );
+        }
     }
 
     /// A committed redo locks every collection it writes `Exclusive`.

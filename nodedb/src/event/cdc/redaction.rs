@@ -137,12 +137,16 @@ impl CdcSubscriberScope {
         store: &RedactionStore,
         event: &Arc<CdcEvent>,
     ) -> Option<Arc<CdcEvent>> {
-        if self.entitlement_is_unprovable(store, &event.collection) {
+        // A CDC event names its collection bare. Policies are stored under the
+        // database-qualified name, so the lookup qualifies it.
+        let qualified =
+            nodedb_types::QualifiedCollection::new(event.database_id, &event.collection);
+        if self.entitlement_is_unprovable(store, qualified.as_str()) {
             warn_unprovable_entitlement(event);
             return None;
         }
 
-        let redaction = self.resolved_for(&event.collection);
+        let redaction = self.resolved_for(qualified.as_str());
         if !redaction.has_any_rule(store) {
             return Some(Arc::clone(event));
         }
@@ -421,6 +425,27 @@ mod tests {
         let new_value = delivered.new_value.as_ref().expect("new value");
         assert_eq!(new_value["email"], "***");
         assert_eq!(new_value["name"], "Alice");
+    }
+
+    /// A CDC event names its collection bare, and a policy created in a
+    /// non-default database is stored under the qualified name. The lookup
+    /// qualifies by the event's database, so the mask applies there too.
+    #[test]
+    fn mask_applies_in_a_non_default_database() {
+        let store = masked("7/users", "support", "email");
+        let mut scope = scope("support");
+        let mut raw = CdcEvent::clone(&event("users", "INSERT", Some(row("a@b.c")), None));
+        raw.database_id = DatabaseId::new(7);
+        let delivered = scope
+            .apply(&store, &Arc::new(raw))
+            .expect("event is deliverable");
+        assert_eq!(delivered.new_value.as_ref().expect("new")["email"], "***");
+
+        // The same bare name in the default database is another collection.
+        let clear = scope
+            .apply(&store, &event("users", "INSERT", Some(row("a@b.c")), None))
+            .expect("event is deliverable");
+        assert_eq!(clear.new_value.as_ref().expect("new")["email"], "a@b.c");
     }
 
     /// An UPDATE pre-image is the same row one version back — masking only the

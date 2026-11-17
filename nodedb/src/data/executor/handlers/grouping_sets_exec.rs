@@ -99,24 +99,29 @@ fn grouping_set_rows(
         let active_specs: Vec<GroupKeySpec> = active.iter().map(|&i| group_by[i].clone()).collect();
 
         let mut groups: HashMap<String, GroupState> = HashMap::new();
-        for raw in &rows {
-            let key = msgpack_scan::build_group_key(raw, &active_specs, crs)?;
+        for (seq, raw) in rows.iter().enumerate() {
+            let (key, values) = msgpack_scan::build_group_key_values(raw, &active_specs, crs)?;
             let state = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+                // The first row in input order opens the group, so its typed
+                // values are the group's output key columns.
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(GroupState::new(&real_aggs)?)
+                    slot.insert(GroupState::with_key(&real_aggs, seq as u64, values)?)
                 }
             };
             state.feed(&real_aggs, raw, crs)?;
         }
         // The grand-total set yields one row even over zero input rows.
         if active.is_empty() && groups.is_empty() {
-            groups.insert(String::new(), GroupState::new(&real_aggs)?);
+            groups.insert(
+                String::new(),
+                GroupState::with_key(&real_aggs, 0, Vec::new())?,
+            );
         }
 
-        for (group_key, state) in groups {
+        for (_, state) in groups {
             let mut row: HashMap<String, Value> = HashMap::new();
-            let values = active_key_values(&group_key, &active_specs)?;
+            let values = active_key_values(&state, &active_specs)?;
             for spec in group_by {
                 row.insert(spec.output_name.clone(), Value::Null);
             }
@@ -143,7 +148,8 @@ fn grouping_set_rows(
     sort_aggregated_rows(&mut all_rows, sort_keys, crs)?;
     all_rows.truncate(limit);
 
-    super::super::response_codec::encode_value_vec(&all_rows)
+    // Group rows feed joins and post-processing: their keys keep their type.
+    super::super::response_codec::encode_native_rows(&all_rows)
 }
 
 /// The rows the WHERE predicates admit.
@@ -196,20 +202,20 @@ fn grouping_column(agg: &AggregateSpec, key_count: usize) -> crate::Result<u32> 
     Ok(index)
 }
 
-/// The grouped values of one group key, one per active key spec.
+/// The grouped values of one group, one per active key spec: the typed
+/// values of the first row the group admitted.
 ///
-/// `build_group_key` writes one slot per spec that has a column or an
-/// expression, so a spec with neither takes NULL. A key that does not parse
-/// is an error.
-fn active_key_values(group_key: &str, active_specs: &[GroupKeySpec]) -> crate::Result<Vec<Value>> {
+/// `build_group_key_values` writes one slot per spec that has a column or an
+/// expression, so a spec with neither takes NULL. A state without key
+/// values, or with too few, is an error.
+fn active_key_values(
+    state: &GroupState,
+    active_specs: &[GroupKeySpec],
+) -> crate::Result<Vec<Value>> {
     if active_specs.is_empty() {
         return Ok(Vec::new());
     }
-    let parts: Vec<serde_json::Value> =
-        sonic_rs::from_str(group_key).map_err(|e| crate::Error::Codec {
-            detail: format!("grouping set group key decode: {e}"),
-        })?;
-    let mut parts = parts.into_iter();
+    let mut parts = state.require_key_values("grouping set group")?.into_iter();
     let mut values = Vec::with_capacity(active_specs.len());
     for spec in active_specs {
         if spec.field.is_none() && spec.expr.is_none() {
@@ -217,9 +223,9 @@ fn active_key_values(group_key: &str, active_specs: &[GroupKeySpec]) -> crate::R
             continue;
         }
         let part = parts.next().ok_or(crate::Error::Codec {
-            detail: format!("grouping set group key '{group_key}' has too few values"),
+            detail: "grouping set group key has too few values".to_owned(),
         })?;
-        values.push(Value::from(part));
+        values.push(part);
     }
     Ok(values)
 }
@@ -264,15 +270,56 @@ mod tests {
     #[test]
     fn key_values_follow_the_specs() {
         let specs = vec![GroupKeySpec::column("a"), GroupKeySpec::column("b")];
-        let values = active_key_values(r#"["x",3]"#, &specs).expect("parses");
+        let state =
+            GroupState::with_key(&[], 0, vec![Value::String("x".into()), Value::Integer(3)])
+                .expect("state");
+        let values = active_key_values(&state, &specs).expect("values");
         assert_eq!(values.len(), 2);
         assert!(matches!(&values[0], Value::String(s) if s == "x"));
     }
 
     #[test]
-    fn unparsable_key_errors() {
+    fn missing_or_short_key_values_error() {
         let specs = vec![GroupKeySpec::column("a")];
-        assert!(active_key_values("not json", &specs).is_err());
-        assert!(active_key_values("[]", &specs).is_err());
+        assert!(active_key_values(&GroupState::new(&[]).expect("state"), &specs).is_err());
+        let short = GroupState::with_key(&[], 0, Vec::new()).expect("state");
+        assert!(active_key_values(&short, &specs).is_err());
+    }
+
+    /// A group's output column keeps the typed value of its first row: a
+    /// `Decimal(2.5)` stays a decimal, and `Integer(5)` then
+    /// `Decimal(5.00)` group as one and show the integer.
+    #[test]
+    fn group_output_keeps_the_first_row_value() {
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let specs = vec![GroupKeySpec::column("a")];
+        let row = |value: Value| {
+            zerompk::to_msgpack_vec(&Value::Object(
+                [("a".to_owned(), value)].into_iter().collect(),
+            ))
+            .expect("row")
+        };
+        let decimal = Value::Decimal("2.5".parse().expect("decimal"));
+        let rows = [
+            row(decimal.clone()),
+            row(Value::Integer(5)),
+            row(Value::Decimal("5.00".parse().expect("decimal"))),
+        ];
+        let mut groups: HashMap<String, GroupState> = HashMap::new();
+        for (seq, raw) in rows.iter().enumerate() {
+            let (key, values) =
+                msgpack_scan::build_group_key_values(raw, &specs, &crs).expect("key");
+            groups
+                .entry(key)
+                .or_insert(GroupState::with_key(&[], seq as u64, values).expect("state"));
+        }
+        let mut outputs: Vec<Vec<Value>> = groups
+            .values()
+            .map(|state| active_key_values(state, &specs).expect("values"))
+            .collect();
+        outputs.sort_by_key(|values| format!("{values:?}"));
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs.contains(&vec![decimal]));
+        assert!(outputs.contains(&vec![Value::Integer(5)]));
     }
 }

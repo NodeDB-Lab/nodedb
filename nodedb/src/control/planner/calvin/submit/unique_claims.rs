@@ -369,17 +369,19 @@ fn nest(field: &str, value: serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Decode a submitted document body: a MessagePack map or JSON. `None` for
-/// any other form, such as a tagged value array or a strict Binary Tuple.
+/// Decode a submitted document body: a MessagePack map, a native object, or
+/// JSON. `None` for any other form, such as a tagged non-object value or a
+/// strict Binary Tuple.
 fn decode_body(body: &[u8]) -> Option<serde_json::Value> {
     let first = *body.first()?;
     let msgpack_map = matches!(first, 0x80..=0x8f | 0xde | 0xdf);
     let msgpack_array = matches!(first, 0x90..=0x9f | 0xdc | 0xdd);
-    if msgpack_map {
-        return nodedb_types::json_from_msgpack(body).ok();
-    }
-    if msgpack_array {
-        return None;
+    // A native object reads as the plain body of the same values, so its
+    // claims equal the plain body's. Any other array is no document.
+    if msgpack_map || msgpack_array {
+        return crate::data::executor::response_codec::decode_body_plain_json(body)
+            .ok()
+            .filter(serde_json::Value::is_object);
     }
     sonic_rs::from_slice::<serde_json::Value>(body)
         .ok()
@@ -426,6 +428,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -548,6 +551,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert!(unique_claim_sets(&[plan], paths).expect("ok").is_empty());
     }

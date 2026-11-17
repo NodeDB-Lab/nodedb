@@ -9,6 +9,8 @@
 # subsequent `test` runs start warm and only need to recompile what
 # changed. Avoids the previous 3x compile (lint + test + test-cluster).
 #
+# The `msrv` job checks the workspace on the `rust-version` toolchain.
+#
 # Job structure: fast tests and 3-node cluster tests run sequentially
 # in the same job so we don't pay the ~10-minute cold compile twice.
 
@@ -103,6 +105,37 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: Dependency audit
         run: cargo deny check
+
+  # Minimum supported Rust version. The toolchain comes from the workspace
+  # `rust-version` in Cargo.toml, the only place the version is pinned. The
+  # Dockerfile base image tag is checked against it in docker-source-build.yml.
+  msrv:
+    name: MSRV check
+    # Free ARM64 runner — see the lint job for rationale.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install Rust at the MSRV
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: msrv
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang libclang-dev pkg-config protobuf-compiler perl \
+            libcurl4-openssl-dev libsasl2-dev mold
+      - name: Check workspace at the MSRV
+        run: cargo check --workspace --all-targets --profile ci
 
   # Single test job: runs the fast suite first, then the 3-node cluster
   # suite (`nodedb-cluster-tests`) on the same runner. Combining them

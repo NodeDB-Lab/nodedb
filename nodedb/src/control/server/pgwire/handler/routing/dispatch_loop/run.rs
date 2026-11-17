@@ -17,15 +17,15 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
-use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::types::{ShapedRows, StatementTag, TaskTagRole};
 use crate::control::server::shared::ddl::neutral::maintenance::auto_analyze;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::returning::StagedReturningBudget;
 use crate::control::server::shared::session::{DmlTxnCtx, SessionId};
 use crate::control::server::shared::write_admission::plan_is_write;
 use crate::types::TenantId;
-use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
+use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::super::types::{
     dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, response_status_to_sqlstate,
@@ -85,19 +85,6 @@ impl NodeDbPgHandler {
         }
         let projection = shaping.projection;
         let result_formats = shaping.formats;
-        let needs_set_op = tasks.iter().any(|t| t.post_set_op != PostSetOp::None);
-        // A set-op merge blends rows from every branch into one result, so the
-        // union of the branches' sources governs redaction. Resolved before the
-        // loop consumes `tasks`.
-        let set_op_redaction = needs_set_op.then(|| {
-            QueryRedaction::for_plans(
-                tenant_id,
-                auth_ctx,
-                tasks.iter().map(|t| (&t.plan, t.database_id)),
-            )
-        });
-        let mut dedup_payloads: Vec<Vec<u8>> = Vec::new();
-        let mut dedup_set_op = PostSetOp::None;
         // A statement's RETURNING rows are ONE result set, however many tasks
         // the statement planned to. A multi-row `INSERT ... RETURNING` plans one
         // task per row, so the rows are folded here and emitted once after the
@@ -116,7 +103,6 @@ impl NodeDbPgHandler {
         // computed columns, resolved once: every task of one statement
         // targets the same database, so the first task's names it.
         let session_sequences = self.sessions.sequence_values(session_id);
-        let statement_database_id = tasks.first().map(|t| t.database_id);
         // Checked once rather than per task — metering is disabled by
         // default, so this keeps the per-task extraction below (which clones
         // the collection name) a true no-op on the hot path for every
@@ -137,6 +123,9 @@ impl NodeDbPgHandler {
             fire_triggers: true,
         });
         let mut statement_events = StatementEvents::default();
+        // The statement's staged `RETURNING` replies are held to the
+        // response limits. Past one, it fails and its transaction rolls back.
+        let mut staged_budget = StagedReturningBudget::new(&self.state.tuning.network);
 
         for mut task in tasks {
             if task.tenant_id != tenant_id {
@@ -180,6 +169,9 @@ impl NodeDbPgHandler {
                         continue;
                     }
                     StatementTxnOutcome::Returning(returning) => {
+                        for rows in &returning {
+                            staged_budget.admit(rows).map_err(|e| error_to_pg(&e))?;
+                        }
                         for rows in returning {
                             self.shape_task_response(
                                 ShapeTaskParams {
@@ -258,7 +250,6 @@ impl NodeDbPgHandler {
 
             let plan_kind = describe_plan(&task.plan);
             let tag_role = statement_tag.role_of(&task.plan);
-            let resp_post_set_op = task.post_set_op;
             let task_database_id = task.database_id;
             let plan_for_response = task.plan.clone();
             // Extracted from the clone above, before dispatch — metering
@@ -424,17 +415,12 @@ impl NodeDbPgHandler {
                 );
             }
 
-            // This task's own row count, for metering below — `None` for the
-            // set-op-deferred branch (its rows are only known after the
-            // later cross-task merge) and for `Passthrough` (no row payload
-            // to count); `meter_dispatch` charges one unit for `None`.
-            let task_rows = if needs_set_op && resp_post_set_op != PostSetOp::None {
-                dedup_payloads.push(resp.payload.to_vec());
-                if dedup_set_op == PostSetOp::None {
-                    dedup_set_op = resp_post_set_op;
-                }
-                None
-            } else {
+            // This task's own row count, for metering below — `None` for
+            // `Passthrough` (no row payload to count); `meter_dispatch`
+            // charges one unit for `None`. A set operation is one
+            // `QueryOp::SetOp` task whose merged rows shape here like any
+            // other read.
+            let task_rows = {
                 self.shape_task_response(
                     ShapeTaskParams {
                         response: &resp,
@@ -476,14 +462,7 @@ impl NodeDbPgHandler {
             StatementTail {
                 returning_rows,
                 statement_tag,
-                dedup_payloads,
-                dedup_set_op,
-                projection,
                 result_formats,
-                set_op_redaction,
-                session_sequences,
-                statement_database_id,
-                tenant_id,
                 session_id,
             },
         )?;

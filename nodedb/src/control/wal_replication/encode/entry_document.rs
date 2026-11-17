@@ -9,7 +9,7 @@
 
 use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::document;
-use super::document::{SumFields, WireReturning};
+use super::document::{SumFields, WirePut, WireReturning};
 use super::document_join;
 use super::document_join::{JoinFields, MergeFields};
 use super::entry::encode_returning;
@@ -28,6 +28,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             pk_bytes: _,
             returning,
             rls_filters,
+            rls_write_check,
             // Resolved at plan time and copied onto the record: the applier can't
             // resolve the target row's identity itself — see `document`'s module doc.
             resolved_sum_targets,
@@ -37,8 +38,13 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             value,
             surrogate.as_u32(),
             resolved_sum_targets,
-            encode_returning(returning),
-            rls_filters,
+            WirePut {
+                returning: WireReturning {
+                    returning: encode_returning(returning),
+                    rls_filters,
+                },
+                rls_write_check,
+            },
         ),
         DocumentOp::PointInsert {
             collection,
@@ -48,6 +54,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             surrogate,
             returning,
             rls_filters,
+            rls_write_check,
             // See `PointPut`.
             resolved_sum_targets,
             deferred_sum_targets,
@@ -61,9 +68,12 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
                 resolved: resolved_sum_targets,
                 deferred: deferred_sum_targets,
             },
-            WireReturning {
-                returning: encode_returning(returning),
-                rls_filters,
+            WirePut {
+                returning: WireReturning {
+                    returning: encode_returning(returning),
+                    rls_filters,
+                },
+                rls_write_check,
             },
         ),
         DocumentOp::PointDelete {
@@ -220,6 +230,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             surrogates,
             returning,
             rls_filters,
+            rls_write_check,
             // See `PointPut`.
             resolved_sum_targets,
             deferred_sum_targets,
@@ -232,8 +243,13 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             },
             resolved_sum_targets,
             deferred_sum_targets,
-            encode_returning(returning),
-            rls_filters,
+            WirePut {
+                returning: WireReturning {
+                    returning: encode_returning(returning),
+                    rls_filters,
+                },
+                rls_write_check,
+            },
         ),
 
         // The resolved apply pass of an autocommit MERGE: the orchestrator

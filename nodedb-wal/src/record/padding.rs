@@ -102,10 +102,42 @@ pub(crate) fn pad_buffer_to_alignment(
     Ok(())
 }
 
+/// Frame one record alone in an aligned buffer sized to it.
+///
+/// A record larger than a writer's batch buffer goes to the file by itself.
+/// Under O_DIRECT it closes with a padding record, as a batch does, so the
+/// written length and the next file offset stay on a boundary. The written
+/// bytes are `as_slice()` of the result in both modes.
+pub(crate) fn one_shot_record_buffer(
+    header: &[u8],
+    payload: &[u8],
+    alignment: usize,
+    direct_io: bool,
+) -> Result<AlignedBuf> {
+    let len = header.len().saturating_add(payload.len());
+    let reserve = if direct_io {
+        alignment.saturating_add(MIN_PADDING_RECORD_SIZE)
+    } else {
+        0
+    };
+    let mut buffer = AlignedBuf::new(len.saturating_add(reserve), alignment)?;
+    buffer.write(header);
+    buffer.write(payload);
+    if direct_io {
+        pad_buffer_to_alignment(
+            &mut buffer,
+            alignment,
+            "one-shot record buffer has no room for its alignment padding record",
+        )?;
+    }
+    Ok(buffer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::align::DEFAULT_ALIGNMENT;
+    use crate::record::RecordHeader;
 
     #[test]
     fn aligned_length_needs_no_padding() {
@@ -155,6 +187,22 @@ mod tests {
         assert_eq!(record.header.lsn, 0);
         assert_eq!(record.header.record_type, RecordType::Noop as u32);
         assert!(record.verify_checksum().is_ok());
+    }
+
+    #[test]
+    fn one_shot_buffer_ends_on_a_boundary_under_direct_io() {
+        let header = [1u8; HEADER_SIZE];
+        let payload = vec![2u8; 3 * DEFAULT_ALIGNMENT + 7];
+        let direct = one_shot_record_buffer(&header, &payload, DEFAULT_ALIGNMENT, true).unwrap();
+        assert_eq!(direct.len() % DEFAULT_ALIGNMENT, 0);
+        assert_eq!(&direct.as_slice()[..HEADER_SIZE], &header);
+        let tail = &direct.as_slice()[HEADER_SIZE + payload.len()..];
+        let padding = RecordHeader::from_bytes(tail[..HEADER_SIZE].try_into().unwrap());
+        assert_eq!(padding.record_type, RecordType::Noop as u32);
+        assert_eq!(HEADER_SIZE + padding.payload_len as usize, tail.len());
+
+        let buffered = one_shot_record_buffer(&header, &payload, DEFAULT_ALIGNMENT, false).unwrap();
+        assert_eq!(buffered.len(), HEADER_SIZE + payload.len());
     }
 
     #[test]

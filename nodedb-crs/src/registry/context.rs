@@ -317,8 +317,48 @@ mod tests {
         );
     }
 
+    /// Web Mercator and the UTM zones resolve in every build, with the
+    /// kind and datum of WGS 84.
+    #[test]
+    fn core_builtins_resolve() {
+        let ctx = CrsContext::builtin_only();
+        assert_eq!(ctx.kind(Srid::WEB_MERCATOR), Ok(CrsKind::Projected));
+        let wgs84 = ctx.resolve(Srid::WGS84).unwrap();
+        for code in [32601, 32650, 32660, 32661, 32701, 32760, 32761] {
+            let def = ctx.resolve(Srid::new(code).unwrap()).unwrap();
+            assert_eq!(def.kind, CrsKind::Projected, "{code}");
+            assert!(def.datum.same_datum(&wgs84.datum), "{code}");
+        }
+        let t = ctx
+            .transformer(Srid::WGS84, Srid::new(32650).unwrap())
+            .unwrap();
+        let p = t.apply([117.0, 0.0, 0.0]).unwrap();
+        assert!(
+            (p[0] - 500_000.0).abs() < 1e-6 && p[1].abs() < 1e-6,
+            "{p:?}"
+        );
+    }
+
+    /// Without `epsg` an EPSG code outside the core set is undefined.
+    #[cfg(not(feature = "epsg"))]
+    #[test]
+    fn epsg_only_codes_are_undefined_without_the_feature() {
+        let ctx = CrsContext::builtin_only();
+        for code in [3375, 4742, 12287, 27700] {
+            let srid = Srid::new(code).unwrap();
+            assert_eq!(ctx.resolve(srid), Err(UnknownSrid::Undefined { code }));
+            assert_eq!(ctx.kind(srid), Err(UnknownSrid::Undefined { code }));
+            assert_eq!(
+                ctx.resolve_name(&format!("EPSG:{code}")),
+                Err(UnknownSrid::Undefined { code })
+            );
+        }
+        assert_eq!(ctx.resolve_code(3857), Ok(Srid::WEB_MERCATOR));
+    }
+
     /// A built-in carries its EPSG datum code, so a projected CRS and its
     /// geographic base share a datum.
+    #[cfg(feature = "epsg")]
     #[test]
     fn builtin_datum_codes() {
         let ctx = CrsContext::builtin_only();

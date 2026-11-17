@@ -16,7 +16,7 @@
 
 use nodedb_array::types::ArrayId;
 
-use super::meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
+use super::meta_restore_keys::{RestoredColumnarKey, RestoredSyncedText, RestoredVectorRow};
 
 /// One restored edge version.
 #[derive(
@@ -183,6 +183,9 @@ pub struct RestoredRedo {
     /// Every vector row `rows_redo` writes. Each carries every node of the
     /// row at its backed-up span.
     pub vector_rows: Vec<RestoredVectorRow>,
+    /// Every row whose stored sync-frame text `rows_redo` writes. Each
+    /// carries every frame version of the row at its backed-up ordinal.
+    pub synced_text: Vec<RestoredSyncedText>,
     /// Every timeseries collection `rows_redo` writes: its series catalog,
     /// its ended partitions and its restored rows. A timeseries row has no
     /// key, so its writers lock the collection.
@@ -248,6 +251,10 @@ mod tests {
             vector_rows: vec![RestoredVectorRow {
                 collection: "docs".into(),
                 surrogate: 8,
+            }],
+            synced_text: vec![RestoredSyncedText {
+                collection: "notes".into(),
+                surrogate: 10,
             }],
             timeseries: vec!["cpu".into()],
             collections: vec!["knows".into(), "people".into()],

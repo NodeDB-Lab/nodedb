@@ -2,9 +2,10 @@
 
 //! Cursor-paginated document scan for the clone materializer. Returns
 //! `(doc_id_hex, surrogate_u32, value_bytes, stamp)` entries plus a
-//! next-cursor. `doc_id` is the hex-encoded surrogate; `value_bytes` is always
+//! next-cursor. `doc_id` is the hex-encoded surrogate; `value_bytes` is
 //! standard MessagePack — Binary Tuple and vector-primary sidecar sources are
-//! transcoded here so consumers never re-decide the source format.
+//! transcoded here so consumers never re-decide the source format. The one
+//! exception is a raw vector-primary sidecar, below.
 //! `value_bytes` also carries the row identity under the collection's identity
 //! column via `sparse_row_to_doc`, so a Control-Plane filter sees the same
 //! identity the read paths produce. A `raw_bodies` scan adds no identity: the
@@ -15,7 +16,14 @@
 //! A clone copy installs at exactly these stamps. A row a transaction overlay
 //! staged carries nil: it is no committed version.
 //!
-//! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value, stamp], ...]]`.
+//! A `raw_bodies` scan of a vector-primary collection returns each sidecar
+//! in its stored tagged encoding. A `raw_bodies` scan also carries each
+//! row's nodes in every vector index of the collection
+//! (`materialize_scan_vectors`), so a clone copy installs the row with its
+//! vectors. Any other scan carries no node bytes.
+//!
+//! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value, stamp,
+//! vectors], ...]]`.
 
 use std::collections::HashMap;
 
@@ -159,8 +167,10 @@ impl CoreLoop {
                 ) {
                     return self.response_error(task, e);
                 }
-            } else {
-                self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &in_scope);
+            } else if let Err(e) =
+                self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &in_scope)
+            {
+                return self.response_error(task, e);
             }
             let entries = rows
                 .into_iter()
@@ -202,17 +212,27 @@ impl CoreLoop {
         let identity_column =
             self.identity_column(task.request.database_id.as_u64(), tid, collection);
         // A raw body goes out as stored, with no `id` added: the clone
-        // materializer copies the exact stored contents.
+        // materializer copies the exact stored contents. A vector-primary
+        // sidecar keeps its tagged encoding, which its clone copy stores.
+        let raw_sidecar = raw_bodies && matches!(body_format, SparseBodyFormat::VectorSidecar);
         for (key, value, _) in &mut entries {
-            *value = if raw_bodies {
-                sparse_body_to_msgpack(value, format_ref).into_owned()
+            if raw_sidecar {
+                continue;
+            }
+            let shaped = if raw_bodies {
+                sparse_body_to_msgpack(value, format_ref).map(std::borrow::Cow::into_owned)
             } else {
-                sparse_row_to_doc(key, value, format_ref, &identity_column).1
+                sparse_row_to_doc(key, value, format_ref, &identity_column).map(|(_, body)| body)
+            };
+            *value = match shaped {
+                Ok(body) => body,
+                Err(error) => return self.response_error(task, error),
             };
         }
         // A read of a vector-primary row carries its vector under the vector
         // field, as a scan does: the page is a source a copy reads rows from.
-        // The clone materializer's raw copy is the stored sidecar alone.
+        // A raw scan carries the stored sidecar as its body and the row's
+        // nodes apart from it, below.
         if !raw_bodies
             && matches!(body_format, SparseBodyFormat::VectorSidecar)
             && let Some(field) =
@@ -244,11 +264,29 @@ impl CoreLoop {
             }
         }
 
-        // Encode response: [next_cursor: bin, entries: [[str, u32, bin, stamp], ...]]
+        // A raw scan carries each row's nodes in every vector index of the
+        // collection, as a read at the cut sees them: a clone copy installs
+        // the row with its vectors. Any other scan carries none.
+        let vector_indexes = if raw_bodies {
+            self.collection_vector_indexes(task.request.database_id.as_u64(), tid, collection)
+        } else {
+            Vec::new()
+        };
+        let mut row_vectors: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+        for (key, _, _) in &entries {
+            match self.copied_vector_nodes(&vector_indexes, key.surrogate(), system_as_of) {
+                Ok(nodes) => row_vectors.push(nodes),
+                Err(e) => return self.response_error(task, e),
+            }
+        }
+
+        // Encode response:
+        // [next_cursor: bin, entries: [[str, u32, bin, stamp, vectors: bin], ...]]
         let mut payload = Vec::with_capacity(
             entries
                 .iter()
-                .map(|(_, v, _)| 8 + 4 + v.len() + 12 + 28)
+                .zip(&row_vectors)
+                .map(|((_, v, _), nodes)| 8 + 4 + v.len() + 12 + 28 + nodes.len() + 5)
                 .sum::<usize>()
                 + next_cursor.len()
                 + 16,
@@ -256,12 +294,13 @@ impl CoreLoop {
         nodedb_query::msgpack_scan::write_array_header(&mut payload, 2);
         write_bin(&mut payload, &next_cursor);
         nodedb_query::msgpack_scan::write_array_header(&mut payload, entries.len());
-        for (key, value, stamp) in &entries {
-            nodedb_query::msgpack_scan::write_array_header(&mut payload, 4);
+        for ((key, value, stamp), nodes) in entries.iter().zip(&row_vectors) {
+            nodedb_query::msgpack_scan::write_array_header(&mut payload, 5);
             write_str(&mut payload, key.to_string().as_bytes());
             write_u32(&mut payload, key.surrogate().as_u32());
             write_bin(&mut payload, value);
             DocVersionStamp::write(stamp.as_ref(), &mut payload);
+            write_bin(&mut payload, nodes);
         }
 
         self.response_with_payload(task, payload)
@@ -456,12 +495,13 @@ mod tests {
         let mut states = Vec::new();
         for _ in 0..count {
             let (len, mut entry) = msgpack_scan::array_header(payload, off).expect("entry");
-            assert_eq!(len, 4);
+            assert_eq!(len, 5);
             msgpack_scan::read_str_advance(payload, &mut entry).expect("doc id");
             msgpack_scan::read_u32_advance(payload, &mut entry).expect("surrogate");
             let body = msgpack_scan::read_bin_advance(payload, &mut entry).expect("body");
             let doc = nodedb_types::json_from_msgpack(body).expect("decode body");
             let stamp = DocVersionStamp::read(payload, &mut entry).expect("stamp");
+            msgpack_scan::read_bin_advance(payload, &mut entry).expect("vector nodes");
             states.push((
                 doc["state"].as_str().expect("state field").to_string(),
                 stamp,

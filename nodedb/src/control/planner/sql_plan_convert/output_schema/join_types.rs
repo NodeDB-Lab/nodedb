@@ -234,6 +234,7 @@ mod tests {
                 open_schema: nodedb_sql::types::CollectionInfo::open_schema_for(
                     EngineType::DocumentStrict,
                 ),
+                text_indexes: None,
             }))
         }
     }

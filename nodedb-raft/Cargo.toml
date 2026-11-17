@@ -38,9 +38,5 @@ rand = { workspace = true }
 # Checksums
 crc32c = { workspace = true }
 
-# Timestamps
-tokio = { workspace = true }
-
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

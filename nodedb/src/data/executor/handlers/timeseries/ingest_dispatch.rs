@@ -61,6 +61,7 @@ pub(in crate::data::executor) struct TimeseriesIngestParams<'a> {
     pub collection: &'a str,
     pub payload: &'a [u8],
     pub wal_lsn: Option<u64>,
+    pub provenance: Option<&'a SyncProvenance>,
     pub now_ms: i64,
     pub mode: TimeseriesApplyMode,
     /// Compiled row-level-security WRITE predicate, decided against every
@@ -251,6 +252,7 @@ impl CoreLoop {
                 collection,
                 payload,
                 wal_lsn,
+                provenance,
                 now_ms,
                 mode,
                 rls_write_check,
@@ -263,6 +265,7 @@ impl CoreLoop {
                 collection,
                 payload,
                 wal_lsn,
+                provenance,
                 now_ms,
                 mode,
                 rls_write_check,
@@ -275,6 +278,7 @@ impl CoreLoop {
                 collection,
                 payload,
                 wal_lsn,
+                provenance,
                 now_ms,
                 mode,
                 rls_write_check,
@@ -287,6 +291,7 @@ impl CoreLoop {
                 collection,
                 payload,
                 wal_lsn,
+                provenance,
                 now_ms,
                 mode,
                 rls_write_check,
@@ -299,6 +304,7 @@ impl CoreLoop {
                 collection,
                 payload,
                 wal_lsn,
+                provenance,
                 now_ms,
                 mode,
                 rls_write_check,
@@ -315,12 +321,24 @@ impl CoreLoop {
             }
         };
 
-        if let Some(prov) = provenance
-            && ingest_response.status == Status::Ok
-        {
-            self.sync_commit(prov);
-            let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
-            return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
+        if let Some(prov) = provenance {
+            if ingest_response.status == Status::Ok {
+                self.sync_commit(prov);
+                let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
+                return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
+            }
+            // Every ingest format checks the complete batch policy before source mutation.
+            if let Some(ErrorCode::RejectedAuthz { resource }) =
+                ingest_response.error_code.as_deref()
+            {
+                return self.sync_reject_response(
+                    task,
+                    nodedb_types::sync::violation::ViolationType::RlsPolicyViolation {
+                        policy_name: resource.clone(),
+                    },
+                    prov,
+                );
+            }
         }
         if ingest_response.status == Status::Ok
             && let Err(e) = self.note_collection_write(task, collection)

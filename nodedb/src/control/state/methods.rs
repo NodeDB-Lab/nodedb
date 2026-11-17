@@ -126,22 +126,28 @@ impl SharedState {
         self.installed_gateway()?.shared()
     }
 
-    /// Whether this node is the leader of the metadata Raft group.
+    /// The status of this node's replica of `group_id`, read from that group
+    /// alone. `None` before `start_raft` runs, or when this node hosts no
+    /// replica of it.
     ///
-    /// Reuses the installed `raft_status_fn` snapshot (set by `start_raft`),
-    /// looks up the metadata group (`METADATA_GROUP_ID == 0`), and reports
-    /// whether its role string is `"Leader"`. Returns `false` before
-    /// `start_raft` installs `raft_status_fn`.
+    /// Locks `MultiRaft`, which then reads `cluster_routing`. Never call it
+    /// while holding a `cluster_routing` guard.
+    pub fn raft_group_status(&self, group_id: u64) -> Option<nodedb_cluster::GroupStatus> {
+        self.multi_raft
+            .get()?
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .group_status(group_id)
+    }
+
+    /// Whether this node is the leader of the metadata Raft group. Returns
+    /// `false` before `start_raft` runs.
     ///
-    /// Not unit-tested in isolation: it requires a live `raft_status_fn`, so
+    /// Not unit-tested in isolation: it requires a live `MultiRaft`, so
     /// it is exercised by the cluster-level constraint-reconcile test.
     pub fn is_metadata_leader(&self) -> bool {
-        let Some(status_fn) = self.raft_status_fn.get() else {
-            return false;
-        };
-        status_fn()
-            .into_iter()
-            .any(|g| g.group_id == nodedb_cluster::METADATA_GROUP_ID && g.role == "Leader")
+        self.raft_group_status(nodedb_cluster::METADATA_GROUP_ID)
+            .is_some_and(|g| g.role == "Leader")
     }
 
     /// Whether this node runs work that must happen exactly once

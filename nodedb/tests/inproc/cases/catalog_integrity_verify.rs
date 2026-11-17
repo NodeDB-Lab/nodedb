@@ -228,6 +228,10 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         CatalogEntry::PutCustomType(_) => VariantClass::Exempt,
         CatalogEntry::DeleteCustomType { .. } => VariantClass::Exempt,
 
+        // The purge-log prune trims log rows; it names no object and writes
+        // no owner row.
+        CatalogEntry::PruneCollectionPurgeLog { .. } => VariantClass::Exempt,
+
         // WAL replay barrier — replicated for replay correctness, but it is
         // not a parent object and carries no per-object owner row.
         CatalogEntry::RecordWalTombstone { .. } => VariantClass::Exempt,

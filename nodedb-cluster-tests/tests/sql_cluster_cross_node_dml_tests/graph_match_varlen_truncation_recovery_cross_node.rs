@@ -136,7 +136,7 @@ async fn varlen_match_capped_drains_to_complete_set_cross_node() {
     // Wait until EVERY node converges on the COMPLETE set — edges applied +
     // replicated AND routing converged so a non-owning coordinator scatters,
     // continues across boundaries, and drains every truncation resume round.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         let sql = match_sql.clone();
         let expected_ref = &expected;
         wait_for(
@@ -146,7 +146,7 @@ async fn varlen_match_capped_drains_to_complete_set_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = varlen_b_bindings(&cluster.nodes[idx].client, &sql).await;
+                        let rows = varlen_b_bindings(&node.client, &sql).await;
                         let set: HashSet<String> = rows.into_iter().collect();
                         &set == expected_ref
                     })
@@ -159,8 +159,8 @@ async fn varlen_match_capped_drains_to_complete_set_cross_node() {
     // Hard assertion from every node: the DISTINCT result set equals the
     // COMPLETE expected set. A truncation-dropping implementation returns a
     // strict subset; the recovery pipeline must return all CHAIN_LEN-1 nodes.
-    for idx in 0..cluster.nodes.len() {
-        let rows = varlen_b_bindings(&cluster.nodes[idx].client, &match_sql).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = varlen_b_bindings(&node.client, &match_sql).await;
         let set: HashSet<String> = rows.iter().cloned().collect();
         assert_eq!(
             set,

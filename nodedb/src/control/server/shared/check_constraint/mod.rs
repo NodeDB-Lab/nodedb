@@ -11,6 +11,8 @@ mod enforce;
 mod simple;
 pub mod statement;
 mod subquery;
+mod subquery_bind;
+mod subquery_match;
 
 pub use enforce::enforce_check_constraints;
 pub use statement::{enforce_statement_checks, enforce_statement_enum_labels};

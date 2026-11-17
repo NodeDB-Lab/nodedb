@@ -8,14 +8,17 @@
 //!
 //! Instant ext values (`fixext8` type 1 / 2) become `Value::DateTime` /
 //! `Value::NaiveDateTime`. A geometry ext (type 3) becomes
-//! `Value::Geometry`. Every other ext becomes `Value::Null`. Map keys that are not strings are
-//! rendered with `Debug`.
+//! `Value::Geometry`. A UUID ext (type 4) and a decimal ext (type 5) become
+//! `Value::Uuid` / `Value::Decimal`. Every other ext becomes `Value::Null`.
+//! A map key that is not a string renders as bounded text that escapes
+//! nothing (see `read_native_key`).
 
 use zerompk::{Read, SliceReader};
 
 use super::super::error::{MsgpackError, MsgpackResult};
 use super::super::geometry_ext::geometry_from_ext;
 use super::super::instant_ext::instant_from_ext;
+use super::super::scalar_ext::scalar_from_ext;
 use crate::Value;
 
 const FIXEXT8: u8 = 0xD7;
@@ -102,7 +105,7 @@ pub(crate) fn read_native_value<'de, R: Read<'de>>(reader: &mut R) -> zerompk::R
                 Some((kind, micros)) => kind.from_micros(micros),
                 None => match geometry_from_ext(ext_type, &payload) {
                     Some(g) => Value::Geometry(g),
-                    None => Value::Null,
+                    None => scalar_from_ext(ext_type, &payload).unwrap_or(Value::Null),
                 },
             })
         }
@@ -110,15 +113,24 @@ pub(crate) fn read_native_value<'de, R: Read<'de>>(reader: &mut R) -> zerompk::R
     }
 }
 
-/// Read a map key. A string key is taken as-is; any other value is rendered
-/// with `Debug`.
+/// Read a map key. A string key is taken as-is. Any other key renders as
+/// [`native_key_text`], bounded and with nothing escaped.
 fn read_native_key<'de, R: Read<'de>>(reader: &mut R) -> zerompk::Result<String> {
     match reader.peek_marker()? {
         0xA0..=0xBF | 0xD9..=0xDB => Ok(reader.read_string()?.into_owned()),
-        _ => {
-            let v = read_native_value(reader)?;
-            Ok(format!("{v:?}"))
-        }
+        _ => read_native_value(reader).map(|key| native_key_text(&key)),
+    }
+}
+
+/// The text of a key that is not a string. A container key names its kind
+/// and a bytes key its length, so a key nested in a key never renders again. A
+/// scalar key renders with `Debug`, cut to [`super::key_text::bounded`].
+fn native_key_text(key: &Value) -> String {
+    match key {
+        Value::Array(_) | Value::Set(_) => "<array>".to_string(),
+        Value::Object(_) => "<map>".to_string(),
+        Value::Bytes(bytes) => format!("<bytes of {}>", bytes.len()),
+        other => super::key_text::bounded(format!("{other:?}")),
     }
 }
 

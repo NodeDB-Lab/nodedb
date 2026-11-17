@@ -8,79 +8,68 @@
 //! where a query's rows are redacted, so the subscriber's rules are applied to
 //! the stored bytes here through the one shared hook.
 //!
-//! The roles a policy is keyed on belong to the session, not to the delta, so
-//! they are resolved once when the drain starts. The rules themselves are
-//! keyed per collection, so the resolved [`QueryRedaction`] is rebuilt only
-//! when consecutive deltas cross a collection boundary — a drain of one
-//! collection's deltas resolves exactly once.
+//! The roles a policy is keyed on belong to the session, and the rules are
+//! keyed per collection. The push gate resolves one [`RowPushRedaction`] per
+//! collection per drain and reuses it for every delta of that collection.
 
 use crate::control::security::redaction::RedactionStore;
-use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::{
     QueryRedaction, redact_document_row_bytes,
 };
-use crate::control::server::sync::session::SyncSession;
-use crate::control::state::SharedState;
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
-/// The session-scoped redaction inputs for its outbound row pushes.
+/// The subscriber's redaction inputs for the row pushes of one collection.
 pub(super) struct RowPushRedaction {
-    tenant_id: TenantId,
-    roles: Vec<String>,
-    /// The last collection resolved, with its inputs.
-    resolved: Option<(String, QueryRedaction)>,
+    query: QueryRedaction,
 }
 
 impl RowPushRedaction {
-    /// Resolve the subscriber's roles for this session.
+    /// The redaction a principal holding `roles` gets on `collection` in
+    /// `database_id`.
     ///
-    /// Returns `Ok(None)` when the session has no established identity: there
-    /// is then no principal to evaluate a policy against, and the caller must
-    /// deliver nothing rather than deliver unredacted. An error means the
-    /// subscriber's request scope could not be resolved, which the caller
-    /// treats the same way.
-    pub(super) fn for_session(
-        shared: &SharedState,
-        session: &SyncSession,
-    ) -> crate::Result<Option<Self>> {
-        let Some(identity) = session.identity.as_ref() else {
-            return Ok(None);
-        };
-        let scope =
-            RequestAuthScope::for_database(identity, shared.auth_stores(), session.database_id())?;
-        Ok(Some(Self {
-            tenant_id: identity.tenant_id,
-            roles: scope.auth().roles.clone(),
-            resolved: None,
-        }))
+    /// Policies are stored under the database-qualified name, the same key
+    /// the snapshot path's `QueryRedaction::for_plan` resolves, so the bare
+    /// name is qualified here. Outside the default database a bare key
+    /// matches no policy.
+    pub(super) fn new(
+        tenant_id: TenantId,
+        roles: Vec<String>,
+        database_id: DatabaseId,
+        collection: &str,
+    ) -> Self {
+        let qualified = nodedb_types::QualifiedCollection::new(database_id, collection);
+        Self {
+            query: QueryRedaction::new(
+                tenant_id,
+                roles,
+                vec![(String::new(), qualified.as_str().to_string())],
+            ),
+        }
     }
 
-    /// Redact one row post-image in place, reporting whether it may be sent.
+    /// Redact one row image in place, reporting whether it can be sent.
     ///
-    /// `false` means a rule covers `collection` but the payload could not be
-    /// rewritten; the caller must drop the push rather than deliver it.
-    pub(super) fn redact(
-        &mut self,
+    /// `false` means a rule covers the collection but the payload does not
+    /// rewrite; the caller must drop the push rather than deliver it.
+    pub(super) fn redact(&self, store: &RedactionStore, payload: &mut Vec<u8>) -> bool {
+        redact_document_row_bytes(Some(&self.query), store, payload)
+    }
+
+    /// The first field of a shape predicate a redaction rule covers, if any.
+    ///
+    /// A shape predicate tests stored values, so a predicate on a redacted
+    /// column discloses the column through which rows arrive. The push gate
+    /// lets such a shape match nothing, as the snapshot path refuses it.
+    pub(super) fn predicate_redacted_field(
+        &self,
         store: &RedactionStore,
-        collection: &str,
-        payload: &mut Vec<u8>,
-    ) -> bool {
-        let needs_resolve =
-            !matches!(&self.resolved, Some((resolved, _)) if resolved.as_str() == collection);
-        if needs_resolve {
-            self.resolved = Some((
-                collection.to_string(),
-                QueryRedaction::new(
-                    self.tenant_id,
-                    self.roles.clone(),
-                    vec![(String::new(), collection.to_string())],
-                ),
-            ));
-        }
-        let Some((_, redaction)) = self.resolved.as_ref() else {
-            return false;
-        };
-        redact_document_row_bytes(Some(redaction), store, payload)
+        predicate_bytes: &[u8],
+    ) -> Option<String> {
+        crate::control::server::sync::async_dispatch::predicate_redacted_field(
+            predicate_bytes,
+            &self.query,
+            store,
+        )
     }
 }
 
@@ -106,12 +95,41 @@ mod tests {
         store
     }
 
-    fn redaction_for(role: &str) -> RowPushRedaction {
-        RowPushRedaction {
-            tenant_id: TenantId::new(1),
-            roles: vec![role.to_string()],
-            resolved: None,
-        }
+    fn redaction_for(role: &str, collection: &str) -> RowPushRedaction {
+        RowPushRedaction::new(
+            TenantId::new(1),
+            vec![role.to_string()],
+            DatabaseId::DEFAULT,
+            collection,
+        )
+    }
+
+    /// A policy created in a non-default database is stored under the
+    /// qualified name. The push resolves the same key, so the mask applies
+    /// there too, and a predicate on the masked column is reported.
+    #[test]
+    fn policy_in_a_non_default_database_masks_the_push() {
+        let store = store_with_mask("7/users", "support", "email");
+        let redaction = RowPushRedaction::new(
+            TenantId::new(1),
+            vec!["support".to_string()],
+            DatabaseId::new(7),
+            "users",
+        );
+        let mut payload = row("a@b.c");
+
+        assert!(redaction.redact(&store, &mut payload));
+        assert_eq!(email_of(&payload), "***");
+        assert_eq!(
+            redaction.predicate_redacted_field(&store, &eq_predicate("email")),
+            Some("email".to_string())
+        );
+
+        // The same bare name in the default database names another collection.
+        let other = redaction_for("support", "users");
+        let mut clear = row("a@b.c");
+        assert!(other.redact(&store, &mut clear));
+        assert_eq!(email_of(&clear), "a@b.c");
     }
 
     fn row(email: &str) -> Vec<u8> {
@@ -123,38 +141,37 @@ mod tests {
         nodedb_types::json_from_msgpack(payload).expect("decode row post-image")["email"].clone()
     }
 
+    fn eq_predicate(field: &str) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&nodedb_types::filter::MetadataFilter::Eq {
+            field: field.into(),
+            value: nodedb_types::Value::String("x".into()),
+        })
+        .expect("encode predicate")
+    }
+
     /// The leak this type closes: a row post-image pushed to a device carried
     /// every column in the clear, and the device then persisted it.
     #[test]
     fn pushed_row_is_masked_for_a_ruled_role() {
         let store = store_with_mask("users", "support", "email");
-        let mut redaction = redaction_for("support");
+        let redaction = redaction_for("support", "users");
         let mut payload = row("a@b.c");
 
-        assert!(redaction.redact(&store, "users", &mut payload));
+        assert!(redaction.redact(&store, &mut payload));
 
         assert_eq!(email_of(&payload), "***");
     }
 
-    /// The rules are keyed per collection, so the cached inputs must be
-    /// rebuilt when consecutive deltas cross a collection boundary — a stale
-    /// cache would either leak the ruled collection or over-redact the other.
+    /// The rules are keyed per collection: a collection no rule names reads
+    /// in the clear for the same role.
     #[test]
-    fn cached_inputs_are_rebuilt_when_the_collection_changes() {
+    fn rules_apply_only_to_their_collection() {
         let store = store_with_mask("users", "support", "email");
-        let mut redaction = redaction_for("support");
+        let unruled = redaction_for("support", "audit");
+        let mut payload = row("d@e.f");
 
-        let mut ruled = row("a@b.c");
-        assert!(redaction.redact(&store, "users", &mut ruled));
-        assert_eq!(email_of(&ruled), "***");
-
-        let mut unruled = row("d@e.f");
-        assert!(redaction.redact(&store, "audit", &mut unruled));
-        assert_eq!(email_of(&unruled), "d@e.f");
-
-        let mut ruled_again = row("g@h.i");
-        assert!(redaction.redact(&store, "users", &mut ruled_again));
-        assert_eq!(email_of(&ruled_again), "***");
+        assert!(unruled.redact(&store, &mut payload));
+        assert_eq!(email_of(&payload), "d@e.f");
     }
 
     /// A role no policy names reads the pushed row in the clear, byte for
@@ -162,11 +179,11 @@ mod tests {
     #[test]
     fn pushed_row_is_byte_identical_for_an_unruled_role() {
         let store = store_with_mask("users", "support", "email");
-        let mut redaction = redaction_for("analyst");
+        let redaction = redaction_for("analyst", "users");
         let original = row("a@b.c");
         let mut payload = original.clone();
 
-        assert!(redaction.redact(&store, "users", &mut payload));
+        assert!(redaction.redact(&store, &mut payload));
 
         assert_eq!(payload, original);
     }
@@ -175,10 +192,28 @@ mod tests {
     #[test]
     fn delete_tombstone_is_delivered_unchanged() {
         let store = store_with_mask("users", "support", "email");
-        let mut redaction = redaction_for("support");
+        let redaction = redaction_for("support", "users");
         let mut payload = Vec::new();
 
-        assert!(redaction.redact(&store, "users", &mut payload));
+        assert!(redaction.redact(&store, &mut payload));
         assert!(payload.is_empty());
+    }
+
+    /// A shape predicate on a redacted column is reported, so the push gate
+    /// lets that shape match nothing.
+    #[test]
+    fn predicate_on_a_redacted_column_is_reported() {
+        let store = store_with_mask("users", "support", "email");
+        let redaction = redaction_for("support", "users");
+
+        assert_eq!(
+            redaction.predicate_redacted_field(&store, &eq_predicate("email")),
+            Some("email".to_string())
+        );
+        assert_eq!(
+            redaction.predicate_redacted_field(&store, &eq_predicate("name")),
+            None
+        );
+        assert_eq!(redaction.predicate_redacted_field(&store, &[]), None);
     }
 }

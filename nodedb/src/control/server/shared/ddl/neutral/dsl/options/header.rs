@@ -15,6 +15,7 @@
 use super::super::super::super::result::DdlError;
 use super::super::support::ddl_err;
 use super::lex::Tok;
+use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
 
 /// Whether the statement may name the index it creates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,27 +86,17 @@ pub fn parse_index_header(
             let tok = toks
                 .get(i)
                 .ok_or_else(|| ddl_err("42601", format!("syntax: {syntax}")))?;
-            let name = ident(tok).ok_or_else(|| {
-                ddl_err(
-                    "42601",
-                    format!("expected an index name, found '{}'", tok.describe()),
-                )
-            })?;
-            if name.eq_ignore_ascii_case("ON") {
+            if tok.is_keyword("ON") {
                 return Err(ddl_err("42601", format!("syntax: {syntax}")));
             }
+            let name = ident(tok, "an index name")?;
             i += 1;
             name
         }
         NameMode::Optional { fallback } => match toks.get(i) {
             Some(tok) if tok.is_keyword("ON") => fallback.to_string(),
             Some(tok) => {
-                let name = ident(tok).ok_or_else(|| {
-                    ddl_err(
-                        "42601",
-                        format!("expected an index name or ON, found '{}'", tok.describe()),
-                    )
-                })?;
+                let name = ident(tok, "an index name or ON")?;
                 i += 1;
                 name
             }
@@ -127,15 +118,7 @@ pub fn parse_index_header(
     let collection_tok = toks
         .get(i)
         .ok_or_else(|| ddl_err("42601", "expected a collection name after ON"))?;
-    let collection = ident(collection_tok).ok_or_else(|| {
-        ddl_err(
-            "42601",
-            format!(
-                "expected a collection name after ON, found '{}'",
-                collection_tok.describe()
-            ),
-        )
-    })?;
+    let collection = ident(collection_tok, "a collection name after ON")?;
     i += 1;
 
     let (columns, next) = parse_columns(toks, i, syntax)?;
@@ -195,16 +178,10 @@ fn parse_column_list(
         let tok = toks
             .get(i)
             .ok_or_else(|| ddl_err("42601", format!("syntax: {syntax}")))?;
-        let column = ident(tok).ok_or_else(|| {
-            ddl_err(
-                "42601",
-                format!("expected a column name, found '{}'", tok.describe()),
-            )
-        })?;
-        if column.eq_ignore_ascii_case("FIELDS") {
+        if tok.is_keyword("FIELDS") {
             return Err(ddl_err("42601", format!("syntax: {syntax}")));
         }
-        columns.push(column);
+        columns.push(ident(tok, "a column name")?);
         i += 1;
         match toks.get(i) {
             Some(Tok::Comma) => i += 1,
@@ -230,13 +207,34 @@ fn check_column_count(columns: &[String], mode: ColumnMode, syntax: &str) -> Res
     Err(ddl_err("42601", format!("{detail}; syntax: {syntax}")))
 }
 
-/// The identifier text of a bare or quoted token.
-fn ident(tok: &Tok) -> Option<String> {
-    match tok {
-        Tok::Word(w) => Some(w.clone()),
-        Tok::Quoted(s) => Some(s.clone()),
-        _ => None,
-    }
+/// The identifier `tok` names, by the SQL identifier rule.
+///
+/// A bare word lowercases and is checked against the reserved words. A
+/// double-quoted identifier keeps its case. The SQL planner resolves names by
+/// the same rule, so a field this header stores matches the field a query and
+/// an `INSERT` name. A single-quoted literal is a string, not an identifier.
+/// `expected` names the slot in the error.
+fn ident(tok: &Tok, expected: &str) -> Result<String, DdlError> {
+    let raw = match tok {
+        Tok::Word(w) => w.clone(),
+        Tok::QuotedIdent(s) => format!("\"{s}\""),
+        Tok::Quoted(s) => {
+            return Err(ddl_err(
+                "42601",
+                format!(
+                    "expected {expected}, found the string literal '{s}'; \
+                     write a case-sensitive name in double quotes: \"{s}\""
+                ),
+            ));
+        }
+        Tok::LParen | Tok::RParen | Tok::Comma | Tok::Eq => {
+            return Err(ddl_err(
+                "42601",
+                format!("expected {expected}, found '{}'", tok.describe()),
+            ));
+        }
+    };
+    parse_ident_token(&raw)
 }
 
 #[cfg(test)]
@@ -319,6 +317,45 @@ mod tests {
         };
         let (h, _) = head("CREATE FULLTEXT INDEX idx ON coll (title, content)", &spec).unwrap();
         assert_eq!(h.columns, ["title", "content"]);
+    }
+
+    #[test]
+    fn identifiers_follow_the_sql_rule() {
+        let spec = HeaderSpec {
+            name: NameMode::Required,
+            columns: ColumnMode::OneOrMore,
+            syntax: "…",
+        };
+        let (bare, _) = head("CREATE SEARCH INDEX Idx ON Notes (Body, Title)", &spec).unwrap();
+        assert_eq!(bare.name, "idx");
+        assert_eq!(bare.collection, "notes");
+        assert_eq!(bare.columns, ["body", "title"]);
+
+        let (quoted, _) = head(
+            "CREATE SEARCH INDEX \"Idx\" ON \"Notes\" (\"Body\", title)",
+            &spec,
+        )
+        .unwrap();
+        assert_eq!(quoted.name, "Idx");
+        assert_eq!(quoted.collection, "Notes");
+        assert_eq!(quoted.columns, ["Body", "title"]);
+
+        let (fields, _) = head("CREATE SEARCH INDEX idx ON notes FIELDS Body", &spec).unwrap();
+        assert_eq!(fields.columns, ["body"]);
+    }
+
+    #[test]
+    fn a_string_literal_is_not_an_identifier() {
+        let err = head("CREATE SPATIAL INDEX ON coll ('geom')", &SPATIAL).unwrap_err();
+        assert!(err.message.contains("string literal"), "{err:?}");
+        assert!(head("CREATE SPATIAL INDEX ON 'coll' (geom)", &SPATIAL).is_err());
+    }
+
+    #[test]
+    fn a_quoted_on_is_a_name_not_the_keyword() {
+        let (h, _) = head("CREATE VECTOR INDEX \"ON\" ON coll", &VECTOR).unwrap();
+        assert_eq!(h.name, "ON");
+        assert!(head("CREATE VECTOR INDEX ON coll", &VECTOR).is_err());
     }
 
     #[test]

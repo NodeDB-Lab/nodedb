@@ -56,11 +56,21 @@ pub async fn process_write_event(
         return;
     }
 
+    // Definitions are keyed by the bare catalog name, and an action's SQL
+    // runs in the event's database, so it names the collection bare too. An
+    // event whose name is not qualified for its database names no collection
+    // a definition is on.
+    let Some(collection) =
+        event.routed_collection(crate::event::unrouted::UnroutedConsumer::EventTrigger)
+    else {
+        return;
+    };
+
     // The committed definitions, from memory: the Event Plane reads no redb.
     let Some(event_defs) = shared.credentials.catalog().event_definitions(
         event.database_id,
         event.tenant_id.as_u64(),
-        &event.collection,
+        collection,
     ) else {
         return;
     };
@@ -88,7 +98,7 @@ pub async fn process_write_event(
             "event trigger fired"
         );
 
-        let rendered = render_then_action_sql(&event_def.then_action, event);
+        let rendered = render_then_action_sql(&event_def.then_action, event, collection);
         let outcome = match &rendered {
             Ok(sql) => {
                 run_event_action_sql(
@@ -122,14 +132,14 @@ pub async fn process_write_event(
                 "event_trigger",
                 format!(
                     "event '{}' on '{}': doc={}, op={}, action={}",
-                    event_def.name, event.collection, event.row_id, op_str, event_def.then_action
+                    event_def.name, collection, event.row_id, op_str, event_def.then_action
                 ),
             ),
             Err(error) => (
                 "event_trigger_failed",
                 format!(
                     "event '{}' on '{}': doc={}, op={}, action={}, error={error}",
-                    event_def.name, event.collection, event.row_id, op_str, event_def.then_action
+                    event_def.name, collection, event.row_id, op_str, event_def.then_action
                 ),
             ),
         };
@@ -160,7 +170,7 @@ pub async fn process_write_event(
                     context: ActionContext {
                         database_id: event.database_id,
                         tenant_id: event.tenant_id.as_u64(),
-                        collection: event.collection.to_string(),
+                        collection: collection.to_string(),
                         row_id: event.row_id.as_str().to_owned(),
                         cascade_depth: 0,
                     },
@@ -227,7 +237,11 @@ fn canonical_trigger_template_sql(fragment: &str) -> &str {
     fragment
 }
 
-fn render_then_action_sql(action: &str, event: &WriteEvent) -> Result<String, TriggerRenderError> {
+fn render_then_action_sql(
+    action: &str,
+    event: &WriteEvent,
+    collection: &str,
+) -> Result<String, TriggerRenderError> {
     let mut rendered = String::with_capacity(action.len());
     let mut cursor = 0;
     while cursor < action.len() {
@@ -298,7 +312,7 @@ fn render_then_action_sql(action: &str, event: &WriteEvent) -> Result<String, Tr
             rendered.push_str(&::nodedb_types::quote_literal(event.row_id.as_str()));
             cursor += "$document_id".len();
         } else if rest.starts_with("$collection") {
-            rendered.push_str(&::nodedb_types::quote_ident(&event.collection));
+            rendered.push_str(&::nodedb_types::quote_ident(collection));
             cursor += "$collection".len();
         } else if rest.starts_with("$operation") {
             let operation = event_operation(event.op);
@@ -361,13 +375,7 @@ pub async fn run_event_action_sql(
     );
 
     let (tasks, _output_schema, versions, _) = query_ctx
-        .plan_sql_with_rls_and_versions(
-            sql,
-            tenant_id,
-            database_id,
-            &security.context(&shared),
-            None,
-        )
+        .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security.context(&shared))
         .await
         .map_err(|source| TriggerActionError::Plan { source })?;
 
@@ -492,9 +500,31 @@ mod tests {
         assert_eq!(event_operation(WriteOp::Heartbeat), "HEARTBEAT");
     }
 
+    /// Render `action` for `event`, with the collection as the dispatcher
+    /// resolves it.
+    fn render(action: &str, event: &WriteEvent) -> Result<String, TriggerRenderError> {
+        let collection = event
+            .bare_collection()
+            .expect("the test event's collection is qualified for its database");
+        render_then_action_sql(action, event, collection)
+    }
+
+    /// Outside the default database the event names its collection
+    /// qualified. The action runs in the event's database, so `$collection`
+    /// renders the bare catalog name.
+    #[test]
+    fn collection_placeholder_renders_the_bare_name_in_a_non_default_database() {
+        let event =
+            crate::event::test_utils::write_event_in(crate::types::DatabaseId::new(7), "orders");
+        assert_eq!(event.collection.as_ref(), "7/orders");
+        let sql = render("DELETE FROM $collection WHERE id = $document_id", &event)
+            .expect("render trigger SQL");
+        assert_eq!(sql, "DELETE FROM \"orders\" WHERE id = 'row-1'");
+    }
+
     #[test]
     fn trigger_placeholders_render_as_canonical_sql_tokens() {
-        let sql = render_then_action_sql(
+        let sql = render(
             "INSERT INTO $collection (id, op) VALUES ($document_id, $operation)",
             &hostile_event(),
         )
@@ -507,10 +537,9 @@ mod tests {
 
     #[test]
     fn trigger_placeholders_reject_manual_quoting_and_preserve_opaque_comments() {
-        assert!(render_then_action_sql("SELECT '$document_id'", &hostile_event()).is_err());
+        assert!(render("SELECT '$document_id'", &hostile_event()).is_err());
         assert_eq!(
-            render_then_action_sql("SELECT 1 -- $document_id\n", &hostile_event())
-                .expect("comment is opaque"),
+            render("SELECT 1 -- $document_id\n", &hostile_event()).expect("comment is opaque"),
             "SELECT 1 -- $document_id\n"
         );
     }
@@ -518,12 +547,12 @@ mod tests {
     #[test]
     fn trigger_renderer_preserves_escape_string_literal_boundaries() {
         assert_eq!(
-            render_then_action_sql(r"SELECT E'escaped \' quote'", &hostile_event())
+            render(r"SELECT E'escaped \' quote'", &hostile_event())
                 .expect("escape string is opaque"),
             r"SELECT E'escaped \' quote'"
         );
         assert_eq!(
-            render_then_action_sql(r"SELECT e'escaped \' $document_id'", &hostile_event()),
+            render(r"SELECT e'escaped \' $document_id'", &hostile_event()),
             Err(TriggerRenderError::QuotedPlaceholder)
         );
     }

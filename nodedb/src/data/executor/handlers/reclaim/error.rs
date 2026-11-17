@@ -25,6 +25,14 @@ pub enum ReclaimError {
         path: PathBuf,
         detail: String,
     },
+    /// A checkpoint file's stored key could not be read, so whether it belongs
+    /// to the dropped collection is unknown. Fail-closed for the same reason.
+    #[error("{engine} checkpoint key at '{}' is unreadable: {detail}", path.display())]
+    Key {
+        engine: &'static str,
+        path: PathBuf,
+        detail: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ReclaimError>;

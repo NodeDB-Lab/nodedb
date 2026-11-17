@@ -7,12 +7,13 @@
 //! and split the plans into parts when one sequencer entry cannot carry
 //! them. The plan batch decodes once here, and every stage reads the
 //! decoded plans. The class's plan bytes change only when edge slicing
-//! changes the plans, and then encode once.
+//! changes the plans, and then encode once. A class whose plans carry a full
+//! `RETURNING` list also gets its response contract here.
 
 use nodedb_cluster::calvin::types::TxClass;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use super::local::ReplyFold;
+use super::reported_results::ReplyFold;
 use super::stream::PartStream;
 use crate::Error;
 use crate::control::state::SharedState;
@@ -41,6 +42,7 @@ pub(crate) fn prepare_submit(
     state: &SharedState,
     tx_class: &mut TxClass,
 ) -> crate::Result<Prepared> {
+    check_carried_bytes(tx_class)?;
     super::local::raise_metadata_floor(state, tx_class);
     if tx_class.is_multi_part() {
         return Ok(Prepared {
@@ -54,15 +56,73 @@ pub(crate) fn prepare_submit(
     } else {
         "calvin unique claims"
     };
-    let plans = decode_plans(&tx_class.plans, stage)?;
+    let plans = bind_volatile_defaults(state, tx_class, decode_plans(&tx_class.plans, stage)?)?;
     super::local::stamp_incarnations(state, tx_class, &plans)?;
     super::unique_claims::stamp_unique_claims(state, tx_class, &plans)?;
+    super::chain_heads::stamp_chain_heads(state, tx_class, &plans)?;
+    super::period_lock_reads::stamp_period_lock_reads(state, tx_class, &plans)?;
+    super::sum_target_rows::stamp_sum_target_rows(state, tx_class, &plans)?;
     // A batch edge op spans the homes of all its edges. Split into one batch
     // per home pair, it spans at most two, which every part can carry.
     let sliced = super::edge_slices::slice_edge_batches(tx_class, plans)?;
+    // The contract keys each plan by its index in the plans the class
+    // carries, which are the sliced plans.
+    super::returning_contract::stamp_returning_contract(state, tx_class, &sliced.plans)?;
     let stream = super::parts::split_into_parts(state, tx_class, &sliced)?;
     let fold = ReplyFold::of_prepared(tx_class, &sliced.plans);
     Ok(Prepared { stream, fold })
+}
+
+/// Refuse a class whose published messages or applied key do not decode.
+///
+/// A participant decodes both when it builds its redo, after the COMMIT
+/// verdict. A decode error there halts its vShard. Here it refuses the
+/// submit before the class is sequenced.
+fn check_carried_bytes(tx_class: &TxClass) -> crate::Result<()> {
+    crate::wal::RedoPublish::decode_all(&tx_class.publishes)?;
+    if !tx_class.applied_key.is_empty() {
+        zerompk::from_msgpack::<crate::wal::CrossShardAppliedKey>(&tx_class.applied_key).map_err(
+            |e| Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("Calvin transaction applied key: {e}"),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// `plans` with every volatile DEFAULT their bodies leave unset bound once,
+/// here on the submitter. Every participant replica executes the sequenced
+/// plans on its own, so a DEFAULT left for the apply would draw a different
+/// value on each. The class's plan bytes re-encode only when a body changed.
+/// A class an earlier submit already bound binds nothing again.
+fn bind_volatile_defaults(
+    state: &SharedState,
+    tx_class: &mut TxClass,
+    mut plans: Vec<PhysicalPlan>,
+) -> crate::Result<Vec<PhysicalPlan>> {
+    let mut changed = false;
+    for plan in &mut plans {
+        if let Some(bound) = crate::control::write_resolve::bind_volatile_defaults(
+            state,
+            tx_class.tenant_id,
+            tx_class.database_id,
+            plan,
+        )? {
+            *plan = bound;
+            changed = true;
+        }
+    }
+    if changed {
+        tx_class.plans =
+            nodedb_physical::physical_plan::wire::encode_batch(&plans).map_err(|e| {
+                Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("calvin default binding: plan encode: {e}"),
+                }
+            })?;
+    }
+    Ok(plans)
 }
 
 /// Decode the plan batch `bytes`. `stage` names the reader in a decode
@@ -178,6 +238,28 @@ mod tests {
             "every slice of a body task is a body task"
         );
         assert!(!class.incarnations.is_empty(), "the plans name collections");
+    }
+
+    /// A class whose messages or applied key do not decode is refused before
+    /// it is sequenced. A participant decodes both after the COMMIT verdict,
+    /// where an error halts its vShard.
+    #[tokio::test]
+    async fn undecodable_carried_bytes_are_refused_before_sequencing() {
+        let (state, _directory) = test_state();
+        // 0xc1 is never a valid MessagePack byte.
+        let mut class = edge_class(&[truncate("a")], Vec::new());
+        class.publishes = vec![0xc1];
+        assert!(matches!(
+            prepare_submit(&state, &mut class),
+            Err(Error::Serialization { .. })
+        ));
+
+        let mut class = edge_class(&[truncate("a")], Vec::new());
+        class.applied_key = vec![0xc1];
+        assert!(matches!(
+            prepare_submit(&state, &mut class),
+            Err(Error::Serialization { .. })
+        ));
     }
 
     /// A class split into parts by its coordinator decodes nothing.

@@ -97,7 +97,9 @@ async fn batch_insert(stream: &mut TcpStream, seq: u64, collection: &str, ids: &
         .iter()
         .map(|id| BatchDocument {
             id: id.to_string(),
-            fields: serde_json::json!({ "v": 1 }),
+            fields: nodedb_types::Value::Object(
+                [("v".to_string(), nodedb_types::Value::Integer(1))].into(),
+            ),
         })
         .collect();
     let resp = send_request(

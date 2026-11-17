@@ -44,6 +44,7 @@ use nodedb_types::columnar::{
 use nodedb_types::value::Value;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::encode_columnar_truncate_payload;
 use crate::data::executor::handlers::columnar_write::row_values_to_object;
 use crate::data::executor::handlers::transaction::overlay::{
@@ -120,7 +121,7 @@ pub(super) struct ColumnarCollectionImages<'a> {
 /// collection) and the collection's `columnar_image` record to `ops`.
 pub(super) fn serialize_columnar_collection(
     params: ColumnarCollectionImages<'_>,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
     let ColumnarCollectionImages {
         overlay,
@@ -139,19 +140,17 @@ pub(super) fn serialize_columnar_collection(
         });
     }
 
-    let entries: BTreeMap<u32, &Staged> = overlay.iter_for_collection(coll_key).collect();
-    let mut rows = Vec::with_capacity(entries.len());
-    for (surrogate, staged) in entries {
+    // The scan yields ascending surrogates, the order the record keeps.
+    let mut rows = Vec::new();
+    for item in overlay.iter_for_collection(coll_key) {
+        let (surrogate, staged) = item?;
         let prior_pk_msgpack = if truncated {
             Vec::new()
         } else {
-            overlay
-                .base_pk(coll_key, surrogate)
-                .map(<[u8]>::to_vec)
-                .unwrap_or_default()
+            overlay.base_pk(coll_key, surrogate)?.unwrap_or_default()
         };
         let system_from = stamps.and_then(|stamps| stamps.get(&surrogate).copied());
-        let image_msgpack = match staged {
+        let image_msgpack = match &*staged {
             Staged::Put(body) => staged_image(collection, schema, surrogate, body, system_from)?,
             Staged::Tombstone if prior_pk_msgpack.is_empty() => continue,
             Staged::Tombstone => Vec::new(),
@@ -259,7 +258,7 @@ mod tests {
 
     fn serialize(overlay: &TxnOverlay) -> Vec<RedoSubRecord> {
         let schema = schema();
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_columnar_collection(
             ColumnarCollectionImages {
                 overlay,
@@ -278,12 +277,14 @@ mod tests {
     #[test]
     fn a_staged_put_carries_the_image_the_transaction_was_shown() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(
-            coll_key(),
-            5,
-            &RowIdentity::from_user_key("a"),
-            body("a", 7),
-        );
+        overlay
+            .insert_put(
+                coll_key(),
+                5,
+                &RowIdentity::from_user_key("a"),
+                body("a", 7),
+            )
+            .unwrap();
         let ops = serialize(&overlay);
         assert_eq!(ops.len(), 1);
         let record = decode(&ops[0]);
@@ -303,9 +304,13 @@ mod tests {
     fn a_tombstone_of_a_base_row_names_its_key_and_an_own_insert_emits_nothing() {
         let mut overlay = TxnOverlay::new();
         let key = nodedb_types::value_to_msgpack(&Value::String("b".into())).expect("key");
-        overlay.note_base_pk(&coll_key(), 6, key.clone());
-        overlay.insert_tombstone(coll_key(), 6, &RowIdentity::from_user_key("b"));
-        overlay.insert_tombstone(coll_key(), 9, &RowIdentity::from_user_key("own"));
+        overlay.note_base_pk(&coll_key(), 6, key.clone()).unwrap();
+        overlay
+            .insert_tombstone(coll_key(), 6, &RowIdentity::from_user_key("b"))
+            .unwrap();
+        overlay
+            .insert_tombstone(coll_key(), 9, &RowIdentity::from_user_key("own"))
+            .unwrap();
         let record = decode(&serialize(&overlay)[0]);
         assert_eq!(record.rows.len(), 1);
         assert_eq!(record.rows[0].surrogate, 6);
@@ -317,14 +322,16 @@ mod tests {
     fn a_truncate_precedes_the_rows_and_drops_their_base_keys() {
         let mut overlay = TxnOverlay::new();
         let key = nodedb_types::value_to_msgpack(&Value::String("c".into())).expect("key");
-        overlay.note_base_pk(&coll_key(), 4, key);
-        overlay.mark_truncated(coll_key());
-        overlay.insert_put(
-            coll_key(),
-            4,
-            &RowIdentity::from_user_key("c"),
-            body("c", 1),
-        );
+        overlay.note_base_pk(&coll_key(), 4, key).unwrap();
+        overlay.mark_truncated(coll_key()).unwrap();
+        overlay
+            .insert_put(
+                coll_key(),
+                4,
+                &RowIdentity::from_user_key("c"),
+                body("c", 1),
+            )
+            .unwrap();
         let ops = serialize(&overlay);
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[0].record_type, RecordType::ColumnarTruncate as u32);
@@ -336,7 +343,9 @@ mod tests {
     fn rows_emit_in_surrogate_order() {
         let mut overlay = TxnOverlay::new();
         for (s, id) in [(30, "c"), (10, "a"), (20, "b")] {
-            overlay.insert_put(coll_key(), s, &RowIdentity::from_user_key(id), body(id, 1));
+            overlay
+                .insert_put(coll_key(), s, &RowIdentity::from_user_key(id), body(id, 1))
+                .unwrap();
         }
         let record = decode(&serialize(&overlay)[0]);
         let order: Vec<u32> = record.rows.iter().map(|r| r.surrogate).collect();

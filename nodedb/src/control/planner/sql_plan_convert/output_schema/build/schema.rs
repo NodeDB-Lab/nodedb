@@ -155,8 +155,11 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             schema_from_projection(projection, &types, &[])
         }
         SqlPlan::ConstantResult {
-            columns, values, ..
-        } => constant_schema(columns, values),
+            columns,
+            values,
+            cast_types,
+            ..
+        } => constant_schema(columns, values, cast_types),
         SqlPlan::Aggregate {
             input,
             group_by,

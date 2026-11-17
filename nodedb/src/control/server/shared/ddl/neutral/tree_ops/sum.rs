@@ -19,8 +19,8 @@ use crate::types::{DatabaseId, TraceId};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::read_gate::CollectionReadGate;
-use super::parse::{extract_function_args, extract_number_after, json_to_decimal};
-use super::support::ddl_err;
+use super::parse::{extract_function_args, extract_number_after, value_to_decimal};
+use super::support::{bfs_node_ids, ddl_err};
 
 pub async fn tree_sum(
     state: &SharedState,
@@ -109,14 +109,7 @@ pub async fn tree_sum(
     .await
     .map_err(|e| DdlError::from_error_in_context("BFS failed", &e))?;
 
-    // Parse BFS result as JSON array of node IDs.
-    let bfs_json =
-        crate::data::executor::response_codec::decode_payload_to_json(&bfs_result.payload);
-    let bfs_nodes: Vec<String> = sonic_rs::from_str::<Vec<serde_json::Value>>(&bfs_json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+    let bfs_nodes = bfs_node_ids(&bfs_result.payload)?;
 
     // Include root itself.
     let mut all_ids: Vec<String> = vec![root_id];
@@ -194,12 +187,17 @@ pub async fn tree_sum(
             )
             .await
             {
-                let doc_json =
-                    crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-                if let Ok(doc) = sonic_rs::from_str::<serde_json::Value>(&doc_json)
-                    && let Some(val) = doc.get(&sum_column)
-                {
-                    total += json_to_decimal(val);
+                // A point get answers the row body itself, plain or native.
+                // An absent row answers no bytes.
+                if resp.payload.is_empty() {
+                    continue;
+                }
+                let doc = crate::data::executor::response_codec::decode_row_body(&resp.payload)
+                    .map_err(|e| {
+                        DdlError::from_error_in_context("point get does not decode", &e)
+                    })?;
+                if let Some(val) = doc.get(&sum_column) {
+                    total += value_to_decimal(val);
                     break; // Found in this collection, skip others.
                 }
             }

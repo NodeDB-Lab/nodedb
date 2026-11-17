@@ -22,11 +22,8 @@ pub(in crate::control::server::shared::ddl::neutral::collection) type PlanBuilde
 
 /// What a statement plans from.
 pub(super) enum StatementSource<'s> {
-    /// SQL text, with the item text of a stripped `RETURNING` clause.
-    Sql {
-        sql: &'s str,
-        returning_items: Option<&'s str>,
-    },
+    /// Complete SQL text, including its response clause.
+    Sql { sql: &'s str },
     /// Plans built against the catalog.
     Built(PlanBuilder<'s>),
 }
@@ -92,17 +89,17 @@ pub(super) async fn plan_statement(
     })?;
     query_ctx.set_txn_snapshot(txn_snapshot);
     let planned = match source {
-        StatementSource::Sql {
-            sql,
-            returning_items,
-        } => query_ctx
-            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec, returning_items)
+        StatementSource::Sql { sql } => query_ctx
+            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec)
             .await
-            .map(|(tasks, output_schema, versions, _)| PlannedStatement {
-                tasks,
-                output_schema,
-                versions,
-                has_returning: returning_items.is_some(),
+            .map(|(tasks, output_schema, versions, _)| {
+                let has_returning = output_schema.is_star || !output_schema.columns.is_empty();
+                PlannedStatement {
+                    tasks,
+                    output_schema,
+                    versions,
+                    has_returning,
+                }
             }),
         StatementSource::Built(build) => query_ctx
             .plan_built_with_rls_and_versions(build, tenant_id, database_id, &sec)

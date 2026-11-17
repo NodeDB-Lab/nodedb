@@ -104,10 +104,12 @@ impl TestCluster {
     /// node that holds none after 15 s.
     pub async fn exec_ddl_on_any_leader(&self, sql: &str) -> Result<usize, String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        // The first error names why the statement was refused at all. A
-        // later retry can only report what the first attempt left behind.
+        // The first error names why the statement was refused at all. Each
+        // node's last error names how that node refused it at the deadline:
+        // the metadata leader refuses for its own reason, and a follower
+        // reports why its forward failed.
         let mut first_err: Option<String> = None;
-        let mut last_err = String::new();
+        let mut last_errs: Vec<Option<String>> = vec![None; self.nodes.len()];
         while std::time::Instant::now() < deadline {
             for (idx, node) in self.nodes.iter().enumerate() {
                 match node.exec(sql).await {
@@ -125,15 +127,30 @@ impl TestCluster {
                         if first_err.is_none() {
                             first_err = Some(format!("node {idx}: {e}"));
                         }
-                        last_err = e;
+                        last_errs[idx] = Some(e);
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        let per_node: Vec<String> = self
+            .nodes
+            .iter()
+            .zip(&last_errs)
+            .enumerate()
+            .map(|(idx, (node, err))| {
+                format!(
+                    "node {idx} (id {}): {}; last error: {}",
+                    node.node_id,
+                    metadata_group_view(node),
+                    err.as_deref().unwrap_or("none")
+                )
+            })
+            .collect();
         Err(format!(
-            "no node accepted DDL within 10s; first error: {}; last error: {last_err}",
-            first_err.unwrap_or_default()
+            "no node accepted DDL within 10s; first error: {}; per node: [{}]",
+            first_err.unwrap_or_default(),
+            per_node.join("; ")
         ))
     }
 
@@ -146,4 +163,31 @@ impl TestCluster {
             node.shutdown().await;
         }
     }
+}
+
+/// `node`'s own Raft view of the metadata group: role, term, the leader it
+/// names, commit and apply positions, and membership counts.
+fn metadata_group_view(node: &TestClusterNode) -> String {
+    let Some(status_fn) = node.shared.raft_status_fn.get() else {
+        return "no raft status".to_owned();
+    };
+    status_fn()
+        .into_iter()
+        .find(|g| g.group_id == nodedb_cluster::METADATA_GROUP_ID)
+        .map_or_else(
+            || "hosts no metadata group".to_owned(),
+            |g| {
+                format!(
+                    "metadata group {} term {} leader {} commit {} applied {} voters {} \
+                     learners {}",
+                    g.role,
+                    g.term,
+                    g.leader_id,
+                    g.commit_index,
+                    g.last_applied,
+                    g.member_count,
+                    g.learner_count
+                )
+            },
+        )
 }

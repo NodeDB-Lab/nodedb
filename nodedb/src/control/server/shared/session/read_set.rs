@@ -515,6 +515,39 @@ mod tests {
         assert_eq!(rs[0].key, ReadKey::Predicate);
     }
 
+    /// A distributed capture of a collection the catalog no longer holds
+    /// records a collection-scoped predicate on the name's vShard, so commit
+    /// validates it like any other read of that collection.
+    #[tokio::test]
+    async fn an_absence_read_records_a_predicate_on_the_name() {
+        let (state, _dir) = test_state();
+        let (sessions, a) = begun_session();
+        let plan = crate::control::server::exchange::full_scan::read_set_scan_plan(
+            &state,
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            crate::control::server::exchange::full_scan::ScanSide::read_set_only("gone"),
+        )
+        .expect("absence read");
+        record_read_set(
+            &state,
+            &sessions,
+            a,
+            TenantId::new(1),
+            ReadCapture {
+                plan: &plan,
+                read_vshards: &observed("gone"),
+                found: false,
+            },
+        )
+        .await;
+        let rs = sessions.take_read_set(a);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].collection, "gone");
+        assert_eq!(rs[0].key, ReadKey::Predicate);
+        assert_eq!(rs[0].validation_vshard(), Some(home_of("gone")));
+    }
+
     #[tokio::test]
     async fn a_read_records_every_vshard_it_reported() {
         let (state, _dir) = test_state();

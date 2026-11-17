@@ -21,8 +21,10 @@ use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 impl CoreLoop {
     /// Index a document's `(field, text)` pairs into the inverted BM25
     /// indexes (whole-document and per field), optionally gating on the
-    /// `SyncProvenance` for idempotent replay. Empty `fields` remove the
-    /// document from every index.
+    /// `SyncProvenance` for idempotent replay. Only the collection's declared
+    /// text fields are kept. No declared field left in `fields` removes the
+    /// document from every index. A collection that declares no text field
+    /// indexes nothing.
     ///
     /// Without provenance behaves identically to the pre-gate implementation.
     /// With provenance: runs the idempotency gate (`sync_admit`) before
@@ -37,11 +39,31 @@ impl CoreLoop {
         fields: &[(String, String)],
         provenance: Option<&SyncProvenance>,
     ) -> Response {
-        if let Some(refusal) =
-            super::unbound_surrogate::refuse_unbound("fts", collection, surrogate)
-        {
-            return self.response_error(task, refusal);
-        }
+        let frame = SyncedFrame {
+            collection,
+            surrogate,
+            fields,
+            sys_from: None,
+        };
+        self.execute_fts_index_doc_at(task, tid, frame, provenance)
+    }
+
+    /// [`Self::execute_fts_index_doc`] for `frame`. A frame with a
+    /// `sys_from` installs at that ordinal through
+    /// [`Self::install_synced_text`].
+    pub(in crate::data::executor) fn execute_fts_index_doc_at(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        frame: SyncedFrame<'_>,
+        provenance: Option<&SyncProvenance>,
+    ) -> Response {
+        let SyncedFrame {
+            collection,
+            surrogate,
+            fields,
+            sys_from,
+        } = frame;
         // ── Idempotency gate ────────────────────────────────────────────────
         if let Some(prov) = provenance {
             match self.sync_admit(prov) {
@@ -59,20 +81,36 @@ impl CoreLoop {
             }
         }
 
+        if let Some(refusal) =
+            super::unbound_surrogate::refuse_unbound("fts", collection, surrogate)
+        {
+            if let Some(prov) = provenance.filter(|prov| prov.producer_id != 0) {
+                return self.sync_reject_response(
+                    task,
+                    nodedb_types::sync::violation::ViolationType::SchemaViolation {
+                        field: "doc_id".to_owned(),
+                        reason: crate::error_from_data_plane::data_plane_code_to_public(refusal)
+                            .to_string(),
+                    },
+                    prov,
+                );
+            }
+            return self.response_error(task, refusal);
+        }
+
         // ── Engine write ────────────────────────────────────────────────────
-        let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
-        let text = nodedb_fts::DocumentText::from_fields(fields.iter().cloned());
-        // The prior text version ends at the write's system time.
-        let ordinal = self.bitemporal_ordinal();
-        match self.inverted.index_document_at(
-            database_id,
-            tenant_id,
-            collection,
-            surrogate,
-            &text,
-            ordinal,
-        ) {
+        let written = match sys_from {
+            // The prior text version ends at the write's system time.
+            None => {
+                let base = self.bitemporal_ordinal();
+                self.write_synced_text(database_id, tid, collection, surrogate, fields, base)
+            }
+            Some(ordinal) => {
+                self.install_synced_text(database_id, tid, collection, surrogate, fields, ordinal)
+            }
+        };
+        match written {
             Ok(()) => {
                 // Note this committed FTS write.
                 if let Err(e) = self.note_collection_write(task, collection) {
@@ -109,6 +147,21 @@ impl CoreLoop {
         surrogate: Option<Surrogate>,
         provenance: Option<&SyncProvenance>,
     ) -> Response {
+        self.execute_fts_delete_doc_at(task, tid, collection, surrogate, provenance, None)
+    }
+
+    /// [`Self::execute_fts_delete_doc`] at `sys_from`. A delete with a
+    /// `sys_from` installs its tombstone version at that ordinal through
+    /// [`Self::install_synced_text`].
+    pub(in crate::data::executor) fn execute_fts_delete_doc_at(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        surrogate: Option<Surrogate>,
+        provenance: Option<&SyncProvenance>,
+        sys_from: Option<i64>,
+    ) -> Response {
         // ── Idempotency gate ────────────────────────────────────────────────
         if let Some(prov) = provenance {
             match self.sync_admit(prov) {
@@ -133,17 +186,18 @@ impl CoreLoop {
         };
 
         // ── Engine write ────────────────────────────────────────────────────
-        let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
-        // The text version ends at the delete's system time.
-        let ordinal = self.bitemporal_ordinal();
-        match self.inverted.remove_document_at(
-            database_id,
-            tenant_id,
-            collection,
-            surrogate,
-            ordinal,
-        ) {
+        let written = match sys_from {
+            // The text version ends at the delete's system time.
+            None => {
+                let base = self.bitemporal_ordinal();
+                self.write_synced_text(database_id, tid, collection, surrogate, &[], base)
+            }
+            Some(ordinal) => {
+                self.install_synced_text(database_id, tid, collection, surrogate, &[], ordinal)
+            }
+        };
+        match written {
             Ok(()) => {
                 // Note this committed FTS delete.
                 if let Err(e) = self.note_collection_write(task, collection) {
@@ -169,161 +223,126 @@ impl CoreLoop {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use nodedb_types::sync::wire::{SyncAckResult, SyncOutcome};
-
-    use super::*;
-    use crate::bridge::envelope::Status;
-    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
-
-    const TID: u64 = 1;
-
-    fn prov(seq: u64) -> SyncProvenance {
-        SyncProvenance {
-            producer_id: 7,
-            epoch: 1,
-            stream_id: 42,
-            seq,
-        }
+impl CoreLoop {
+    /// Store a live frame's `fields` as the document's newest synced-text
+    /// version and index the collection's declared fields of it, in one
+    /// write transaction. Empty `fields` store a tombstone version and end
+    /// the document's text.
+    ///
+    /// The version stamps `base`, raised one above the row's newest stored
+    /// frame when that frame sits at or above `base`. A document version
+    /// stamps by the same rule (`KeyStamps`). So two frames of one row
+    /// under one Calvin ordinal store two versions, the second newest. A
+    /// frame below a restored head stores above it. The live frame is
+    /// always the row's newest version, so it holds the current text. The
+    /// stamp folds into the shared clock.
+    ///
+    /// The frame indexes exactly what a local write would: the declared
+    /// text fields. A collection that declares none indexes nothing, and
+    /// still stores the frame. A full-text index created later rebuilds the
+    /// document's text history from the stored versions when the document
+    /// store holds no body.
+    pub(in crate::data::executor) fn write_synced_text(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        fields: &[(String, String)],
+        base: i64,
+    ) -> crate::Result<()> {
+        let mut doc = crate::engine::sparse::inverted::IndexDocScope {
+            database_id,
+            tid: nodedb_types::TenantId::new(tid),
+            collection,
+            surrogate,
+            ordinal: base,
+        };
+        let txn = self.sparse.begin_write()?;
+        doc.ordinal = match self.inverted.synced_text_head_in_txn(&txn, doc)? {
+            Some(head) if head.ordinal >= base => head.ordinal.checked_add(1).ok_or_else(|| {
+                crate::Error::NumericValueOutOfRange {
+                    detail: format!(
+                        "synced text version ordinal for '{collection}' cannot advance beyond {}",
+                        head.ordinal
+                    ),
+                }
+            })?,
+            _ => base,
+        };
+        self.inverted.put_synced_text_in_txn(&txn, doc, fields)?;
+        self.replay_frame_text(&txn, doc, fields)?;
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "inverted".into(),
+            detail: format!("synced text commit ({collection}): {e}"),
+        })?;
+        self.observe_bitemporal_ordinal(doc.ordinal);
+        Ok(())
     }
 
-    fn assert_applied(response: &Response, seq: u64) {
-        assert_eq!(response.status, Status::Ok);
-        let ack: SyncAckResult = zerompk::from_msgpack(&response.payload).expect("sync ack");
-        assert_eq!(ack.outcome, SyncOutcome::Ack(AckStatus::Applied));
-        assert_eq!(ack.applied_seq, seq);
-    }
-
-    /// A message body whose only string field is `body`.
-    fn body(text: &str) -> Vec<(String, String)> {
-        vec![("body".to_string(), text.to_string())]
-    }
-
-    /// Two documents under bound surrogates.
-    fn index_documents(core: &mut CoreLoop, task: &ExecutionTask) {
-        for surrogate in [Surrogate::new(5), Surrogate::new(6)] {
-            let response = core.execute_fts_index_doc(
-                task,
-                TID,
-                "notes",
-                surrogate,
-                &body("hello world"),
-                None,
-            );
-            assert_eq!(response.status, Status::Ok);
-        }
-    }
-
-    /// Ids of `notes` documents matching `query` in one index.
-    fn hits(core: &CoreLoop, index: nodedb_fts::IndexScope<'_>, query: &str) -> Vec<u32> {
-        let mut ids: Vec<u32> = core
+    /// Store a frame's `fields` as the document's synced-text version at
+    /// its source `ordinal`, as a RESTORE re-issues it. The frame indexes
+    /// its declared fields only when the document store holds no version
+    /// of the row. A row with a stored body takes its text from the body,
+    /// as a text-index rebuild and a snapshot restore read it. A frame
+    /// indexed at an older ordinal than the body would end the body's
+    /// text version before it starts. A frame below the row's newest
+    /// stored frame is only stored: the newer frame holds the current text.
+    pub(in crate::data::executor) fn install_synced_text(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        fields: &[(String, String)],
+        ordinal: i64,
+    ) -> crate::Result<()> {
+        let doc = crate::engine::sparse::inverted::IndexDocScope {
+            database_id,
+            tid: nodedb_types::TenantId::new(tid),
+            collection,
+            surrogate,
+            ordinal,
+        };
+        let bodied = self
+            .sparse
+            .versioned_latest_sys_from(
+                database_id,
+                tid,
+                collection,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )?
+            .is_some();
+        let txn = self.sparse.begin_write()?;
+        // A version below the row's newest stored frame is history only.
+        // The newer frame set the current text, as for a document version.
+        let below = self
             .inverted
-            .search(
-                nodedb_types::DatabaseId::DEFAULT.as_u64(),
-                nodedb_types::TenantId::new(TID),
-                index,
-                nodedb_fts::FtsSearchParams {
-                    query,
-                    top_k: 10,
-                    fuzzy_enabled: false,
-                    mode: nodedb_fts::QueryMode::And,
-                    prefilter: None,
-                },
-            )
-            .expect("search")
-            .into_iter()
-            .map(|r| r.doc_id.as_u32())
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// A synced document is searchable per field, and a later message with no
-    /// fields removes it from every index.
-    #[test]
-    fn synced_fields_index_per_field_and_empty_fields_remove() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-        let title = nodedb_fts::IndexScope::field("notes", "title").expect("field scope");
-        let body_index = nodedb_fts::IndexScope::field("notes", "body").expect("field scope");
-        let doc = vec![
-            ("title".to_string(), "rust".to_string()),
-            ("body".to_string(), "guide".to_string()),
-        ];
-        let response =
-            core.execute_fts_index_doc(&task, TID, "notes", Surrogate::new(5), &doc, None);
-        assert_eq!(response.status, Status::Ok);
-        let response =
-            core.execute_fts_index_doc(&task, TID, "notes", Surrogate::new(6), &body("rust"), None);
-        assert_eq!(response.status, Status::Ok);
-
-        assert_eq!(hits(&core, title, "rust"), vec![5]);
-        assert_eq!(hits(&core, body_index, "rust"), vec![6]);
-        assert_eq!(hits(&core, "notes".into(), "rust"), vec![5, 6]);
-
-        let response =
-            core.execute_fts_index_doc(&task, TID, "notes", Surrogate::new(5), &[], Some(&prov(1)));
-        assert_applied(&response, 1);
-        assert!(hits(&core, title, "rust").is_empty());
-        assert!(hits(&core, body_index, "guide").is_empty());
-        assert_eq!(hits(&core, "notes".into(), "rust"), vec![6]);
-        assert_eq!(doc_count(&core), 1);
-    }
-
-    /// The indexed document count of `notes`.
-    fn doc_count(core: &CoreLoop) -> u32 {
-        core.inverted
-            .corpus_stats(
-                nodedb_types::DatabaseId::DEFAULT.as_u64(),
-                nodedb_types::TenantId::new(TID),
-                "notes",
-            )
-            .expect("corpus stats")
-            .0
-    }
-
-    #[test]
-    fn an_index_without_a_surrogate_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-
-        let response =
-            core.execute_fts_index_doc(&task, TID, "notes", Surrogate::ZERO, &body("hello"), None);
-        assert!(matches!(
-            response.error_code.as_deref(),
-            Some(crate::bridge::envelope::ErrorCode::RejectedPrevalidation { .. })
-        ));
-        assert_eq!(doc_count(&core), 0, "nothing is indexed");
-    }
-
-    #[test]
-    fn unbound_delete_with_provenance_commits_the_sequence_and_removes_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-        index_documents(&mut core, &task);
-        let before = doc_count(&core);
-        assert_eq!(before, 2);
-
-        let response = core.execute_fts_delete_doc(&task, TID, "notes", None, Some(&prov(1)));
-        assert_applied(&response, 1);
-        assert_eq!(core.sync_hwm_value(7, 42), 1, "the sequence commits");
-        assert_eq!(doc_count(&core), before, "no document is removed");
-    }
-
-    #[test]
-    fn unbound_delete_without_provenance_is_ok_and_removes_nothing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
-        let task = make_default_task();
-        index_documents(&mut core, &task);
-
-        let response = core.execute_fts_delete_doc(&task, TID, "notes", None, None);
-        assert_eq!(response.status, Status::Ok);
-        assert!(response.payload.is_empty());
-        assert_eq!(doc_count(&core), 2);
+            .synced_text_head_in_txn(&txn, doc)?
+            .is_some_and(|head| ordinal < head.ordinal);
+        self.inverted.put_synced_text_in_txn(&txn, doc, fields)?;
+        if !bodied && !below {
+            self.replay_frame_text(&txn, doc, fields)?;
+        }
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "inverted".into(),
+            detail: format!("synced text install commit ({collection}): {e}"),
+        })
     }
 }
+
+/// One sync frame an `FtsIndex` write carries.
+pub(in crate::data::executor) struct SyncedFrame<'a> {
+    /// The collection as the Data Plane stores it.
+    pub collection: &'a str,
+    pub surrogate: Surrogate,
+    /// Every `(field, text)` pair the frame carried.
+    pub fields: &'a [(String, String)],
+    /// The source ordinal of a re-issued frame version. `None` for a live
+    /// frame, which stamps above the row's newest stored frame.
+    pub sys_from: Option<i64>,
+}
+
+#[cfg(test)]
+#[path = "fts_sync_tests.rs"]
+mod tests;

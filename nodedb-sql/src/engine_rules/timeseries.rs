@@ -17,6 +17,7 @@ impl EngineRules for TimeseriesRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
         // Timeseries INSERT routes to TimeseriesIngest — append-only semantics.
         Ok(vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
+            returning: None,
             collection: p.collection,
             rows: p.rows,
             volatile_defaults: p.volatile_defaults,

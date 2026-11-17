@@ -24,3 +24,8 @@ chrono = { workspace = true }
 sonic-rs = { workspace = true }
 rust_decimal = { workspace = true }
 hex = { workspace = true }
+zerompk = { workspace = true }
+
+[dev-dependencies]
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

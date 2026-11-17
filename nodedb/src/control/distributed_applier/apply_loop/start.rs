@@ -8,9 +8,8 @@
 //! receives a group's writes in the order the log fixed. Other groups never
 //! wait on it.
 
-use crate::control::array_sync::ArrayOpTarget;
 use crate::control::array_sync::raft_apply::{
-    AppliedPosition, ArraySchemaPayload, apply_array_op, apply_array_schema,
+    AppliedPosition, ArraySchemaPayload, apply_array_schema,
 };
 use nodedb_raft::message::LogEntry;
 
@@ -19,10 +18,12 @@ use crate::control::distributed_applier::propose_tracker::ProposeTracker;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{DatabaseId, TenantId};
 
+use super::array_op_prepare::{ArrayOpWrite, prepare_array_op};
 use super::calvin_read_result::{
     CalvinReadResultFields, forward_calvin_read_result, forward_calvin_read_timeout,
+    forward_calvin_sequence_effects,
 };
-use super::context::{ApplyContext, ApplyFuture, EnqueueFuture, FinishedApply};
+use super::context::{ApplyContext, ApplyFuture, EnqueueFuture};
 use super::group_watch::GroupWatch;
 use super::lane::QueuedEntry;
 use super::proposal_gate::{EntryOutcome, ProposalGate};
@@ -53,6 +54,9 @@ pub(super) fn prepare_entry<'a>(
     group_id: u64,
     queued: QueuedEntry,
 ) -> Prepared<'a> {
+    // A second copy of an applied proposal never reaches the funnel, so its
+    // plan is classified here.
+    let plan_writes = queued.plan_writes_user_data();
     let QueuedEntry { entry, mut decoded } = queued;
     let log_index = entry.index;
     let log_term = entry.term;
@@ -80,8 +84,29 @@ pub(super) fn prepare_entry<'a>(
     // A second committed copy of a proposal this node already applied (a
     // re-proposal after a leader change whose first copy also committed)
     // resolves its waiter with the first copy's result and applies nothing.
+    let wrote_rows = plan_writes && gate.prior_wrote_rows(applied_key);
     if gate.skip_duplicate(ctx.tracker, group_id, log_index, applied_key) {
-        return Prepared::Concluded(EntryOutcome::Repeat);
+        let repeat = EntryOutcome::Repeat { wrote_rows };
+        // The same entry delivered again after a restart, whose change
+        // events the journal does not hold: they stage again from what boot
+        // read of its WAL records before it settles. A second committed copy
+        // of a proposal finds nothing at its own index.
+        if let Some(recovered) = ctx
+            .state
+            .change_stream
+            .unjournaled()
+            .take_recovered(group_id, log_index)
+        {
+            let pos = AppliedPosition {
+                group_id,
+                log_index,
+                applied_key,
+                commit_hlc,
+                system_ordinal: scope.system_ordinal,
+            };
+            return super::marker_changes::restage_recovered(ctx, pos, recovered, repeat);
+        }
+        return Prepared::Concluded(repeat);
     }
 
     let pos = AppliedPosition {
@@ -375,6 +400,7 @@ fn prepare_replicated<'a>(
             passive_vshard,
             tenant_id: _,
             ref values,
+            refused,
         } => {
             // The event's stored row is its durable effect: the entry
             // extends the applied prefix once the row holds it.
@@ -387,9 +413,33 @@ fn prepare_replicated<'a>(
                     position,
                     passive_vshard,
                     values,
+                    refused,
                 },
             ))
         }
+        // The stored row is the entry's durable effect.
+        ReplicatedWrite::CalvinFrozenReply { ref reply } => {
+            Prepared::Concluded(super::calvin_frozen_reply::apply_calvin_frozen_reply(
+                ctx,
+                pos,
+                replicated.vshard_id,
+                reply,
+            ))
+        }
+        ReplicatedWrite::CalvinSequenceEffects {
+            epoch,
+            position,
+            source_vshard,
+            ref plans,
+            ..
+        } => Prepared::Concluded(forward_calvin_sequence_effects(
+            ctx,
+            pos,
+            replicated.vshard_id,
+            (epoch, position),
+            source_vshard,
+            plans,
+        )),
         ReplicatedWrite::CalvinReadTimeout {
             epoch,
             position,
@@ -410,70 +460,6 @@ fn prepare_replicated<'a>(
         }
         _ => prepare_generic_entry(ctx, pos, entry, scope, false),
     }
-}
-
-/// The parts of a `ReplicatedWrite::ArrayOp` its apply takes.
-struct ArrayOpWrite {
-    cell: super::array_cell_route::CellWrite,
-    /// The vShard the entry was proposed to: the tile route of the cell.
-    vshard: crate::types::VShardId,
-    op_bytes: Vec<u8>,
-    cell_surrogate: Option<u32>,
-    provenance: Option<Vec<u8>>,
-}
-
-/// Prepare an array op. The op path submits through the write funnel, so
-/// its redo is durable before it reports success. A failure breaks the
-/// prefix: the entry must stay replayable.
-fn prepare_array_op<'a>(
-    ctx: ApplyContext<'a>,
-    pos: AppliedPosition,
-    entry_database: DatabaseId,
-    write: ArrayOpWrite,
-) -> Prepared<'a> {
-    Prepared::Exclusive(Box::pin(async move {
-        let ArrayOpWrite {
-            cell,
-            vshard,
-            op_bytes,
-            cell_surrogate,
-            provenance,
-        } = write;
-        let (_gate, database_id) = match super::array_cell_route::route_cell_write(
-            ctx,
-            pos,
-            entry_database,
-            &cell,
-        )
-        .await
-        {
-            Ok(routed) => routed,
-            Err(finished) => return *finished,
-        };
-        let applied_ok = apply_array_op(
-            ctx.state,
-            ctx.tracker,
-            pos,
-            ArrayOpTarget {
-                tenant_id: cell.tenant_id,
-                database_id,
-                array: &cell.array,
-                vshard,
-            },
-            &op_bytes,
-            cell_surrogate,
-            provenance.as_deref(),
-        )
-        .await;
-        FinishedApply {
-            group_id: pos.group_id,
-            log_index: pos.log_index,
-            outcome: EntryOutcome::Applied {
-                durable: applied_ok,
-                result: None,
-            },
-        }
-    }))
 }
 
 #[cfg(test)]

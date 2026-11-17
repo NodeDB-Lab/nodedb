@@ -12,17 +12,29 @@ use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
+    /// The staged mutation of `surrogate` in `coll_key` inside `txn_id`, in
+    /// any overlay tier. `None` when the transaction staged nothing there.
+    pub(in crate::data::executor) fn staged_row(
+        &self,
+        txn_id: crate::types::TxnId,
+        coll_key: &super::context::CollKey,
+        surrogate: u32,
+    ) -> crate::Result<Option<Staged>> {
+        match self.txn_overlays.get(&txn_id) {
+            Some(overlay) => Ok(overlay
+                .get(coll_key, surrogate)?
+                .map(std::borrow::Cow::into_owned)),
+            None => Ok(None),
+        }
+    }
+
     /// The row's current stored body inside `ctx.txn_id`: a staged put wins
     /// over base, a staged tombstone means absent, otherwise base storage
     /// (the current version on a bitemporal collection). `Ok(None)` when the
     /// row is absent, tombstoned, or hidden by a staged TRUNCATE.
     pub(super) fn stage_current_body(&self, ctx: &StageCtx<'_>) -> crate::Result<Option<Vec<u8>>> {
-        match self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .and_then(|o| o.get(&ctx.coll_key, ctx.surrogate.0))
-        {
-            Some(Staged::Put(body)) => Ok(Some(body.clone())),
+        match self.staged_row(ctx.txn_id, &ctx.coll_key, ctx.surrogate.0)? {
+            Some(Staged::Put(body)) => Ok(Some(body)),
             Some(Staged::Tombstone) => Ok(None),
             None if !self.stage_base_visible(ctx.txn_id, &ctx.coll_key) => Ok(None),
             None => {

@@ -133,7 +133,8 @@ pub(super) fn text_collection(op: &TextOp) -> Option<&str> {
         | TextOp::FtsIndexDoc { collection, .. }
         | TextOp::FtsDeleteDoc { collection, .. }
         | TextOp::HybridSearchTriple { collection, .. }
-        | TextOp::SetTextConfig { collection, .. } => Some(collection.as_str()),
+        | TextOp::SetTextConfig { collection, .. }
+        | TextOp::RebuildIndex { collection, .. } => Some(collection.as_str()),
     }
 }
 

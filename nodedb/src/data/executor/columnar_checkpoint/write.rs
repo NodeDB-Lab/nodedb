@@ -10,9 +10,10 @@ use super::format::{
 };
 use super::manifest::storage_err;
 use super::paths::{
-    COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_filename, columnar_ckpt_gen_dir,
+    COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_gen_dir, columnar_ckpt_key,
 };
 use crate::data::executor::applied_prefix::ReplayStamp;
+use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 
@@ -162,17 +163,15 @@ impl CoreLoop {
                     ),
                 })?;
 
-            let fname = columnar_ckpt_filename(db_id.as_u64(), tenant_id.as_u64(), collection);
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &fname, &bytes).map_err(|e| {
-                crate::Error::Storage {
-                    engine: "columnar".to_string(),
-                    detail: format!(
-                        "columnar checkpoint write failed for database {} tenant {} \
+            let key = columnar_ckpt_key(db_id.as_u64(), tenant_id.as_u64(), collection);
+            write_keyed_checkpoint(gen_dir, &key, &bytes).map_err(|e| crate::Error::Storage {
+                engine: "columnar".to_string(),
+                detail: format!(
+                    "columnar checkpoint write failed for database {} tenant {} \
                          collection {collection}: {e}",
-                        db_id.as_u64(),
-                        tenant_id.as_u64()
-                    ),
-                }
+                    db_id.as_u64(),
+                    tenant_id.as_u64()
+                ),
             })?;
             written += 1;
         }

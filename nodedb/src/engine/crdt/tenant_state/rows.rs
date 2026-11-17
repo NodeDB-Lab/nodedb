@@ -14,6 +14,13 @@ impl TenantCrdtEngine {
             .and_then(|state| state.read_row(loro_root(collection), row_id))
     }
 
+    /// Read a single row with its nested containers (a block list) resolved.
+    pub fn read_row_deep(&self, collection: &str, row_id: &str) -> Option<LoroValue> {
+        self.collections
+            .get(collection)
+            .and_then(|state| state.read_row_deep(loro_root(collection), row_id))
+    }
+
     /// Check if a row exists in a collection's document store.
     pub fn row_exists(&self, collection: &str, row_id: &str) -> bool {
         self.collections

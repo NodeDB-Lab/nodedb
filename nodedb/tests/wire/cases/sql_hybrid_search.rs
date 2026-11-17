@@ -331,6 +331,12 @@ async fn create_scoped_hybrid_collection(server: &TestServer, name: &str) {
         ))
         .await
         .unwrap();
+    server
+        .exec(&format!(
+            "CREATE SEARCH INDEX idx_{name}_fts ON {name} (title, body)"
+        ))
+        .await
+        .unwrap();
     for (id, tenant, title, body, emb) in [
         (
             "t",
@@ -422,6 +428,10 @@ async fn hybrid_vector_leg_reads_the_named_column() {
         .unwrap();
     server
         .exec("CREATE VECTOR INDEX idx_hs_two_vec_b ON hs_two_vec (emb_b) METRIC cosine DIM 4")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE SEARCH INDEX idx_hs_two_vec_fts ON hs_two_vec (body)")
         .await
         .unwrap();
     // `x` is nearest the query in `emb_b`, `y` in `emb_a`.

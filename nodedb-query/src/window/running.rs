@@ -75,7 +75,7 @@ pub(super) fn running_aggregate(
             let result = match spec.func_name.as_str() {
                 "sum" => running_sum.sum()?,
                 "count" => Value::from_u64(running_count),
-                "avg" => running_sum.avg()?,
+                "avg" => running_sum.avg_value()?,
                 "min" | "max" => running_extreme.clone().unwrap_or(Value::Null),
                 "first_value" => arg_at(arg_values, 0),
                 "last_value" => arg_at(arg_values, pos),

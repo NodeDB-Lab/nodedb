@@ -28,12 +28,15 @@ impl CoreLoop {
             .is_some();
         // Discard the synthetic overlay entry alongside the raw plan buffer;
         // idempotent no-op if it was never staged or already removed.
-        self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        let cleanup = self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
         debug!(
             core = self.core_id,
             epoch, position, vshard_id, existed, "calvin drop: discarding staged commit"
         );
-        self.response_ok(task)
+        match cleanup {
+            Ok(()) => self.response_ok(task),
+            Err(e) => self.response_error(task, e),
+        }
     }
 }
 

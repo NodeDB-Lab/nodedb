@@ -10,7 +10,7 @@ use object_store::ObjectStore;
 
 use super::error::RestoreError;
 use crate::ServerConfig;
-use crate::config::server::{SnapshotStorageSettings, apply_env_overrides};
+use crate::config::server::{SnapshotStorageSettings, apply_env_overrides, log_applied_overrides};
 use crate::storage::cold::{ColdStorage, DEFAULT_COLD_LOCAL_DIR};
 use crate::storage::snapshot_writer::build_snapshot_store;
 
@@ -31,7 +31,7 @@ impl RestoreEnv {
     /// `NODEDB_*` environment overrides.
     pub async fn from_config_file(path: &Path, kept: &[&str]) -> Result<Self, RestoreError> {
         let mut config = ServerConfig::from_file(path)?;
-        apply_env_overrides(&mut config)?;
+        log_applied_overrides(&apply_env_overrides(&mut config)?);
         Self::from_config(&config, kept).await
     }
 

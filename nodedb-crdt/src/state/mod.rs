@@ -13,12 +13,17 @@ pub(crate) mod document_cell;
 pub mod frontier_digest;
 pub mod history;
 pub(crate) mod import_admission;
+mod materialize;
 pub mod preview;
 pub mod rekey;
 pub mod remove_fields;
 pub(crate) mod restore_containers;
+mod row_deep;
 pub mod row_image;
+pub mod row_write;
+pub mod scalar_row;
 pub mod snapshot;
+mod write_fork;
 pub mod write_set;
 
 pub use changed_rows::TrackedImport;
@@ -31,4 +36,6 @@ pub use preview::{
     DEFAULT_MAX_ENCODED_DELTA_OPS, DEFAULT_MAX_POST_IMAGE_BYTES,
 };
 pub use row_image::RowImage;
+pub use row_write::RowWrite;
+pub use scalar_row::ScalarRowBase;
 pub use write_set::WriteSetImport;

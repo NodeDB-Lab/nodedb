@@ -5,7 +5,7 @@
 //! (see `calvin_txn_id.rs`).
 //!
 //! Staging is the producer side for `CalvinResolve`, which reads the overlay
-//! the same way `MetaOp::ResolveTxn` does for session transactions
+//! the same way `MetaOp::ResolveTxnPart` does for session transactions
 //! (`resolve/entry.rs`). The redo record it builds is what the stamped redo
 //! entry installs.
 
@@ -16,6 +16,7 @@ use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::resolve::check_calvin_resolvable;
 use crate::data::executor::handlers::transaction::stage_write::{
     StageBalanceDeltaParams, StageBatchInsertParams, StageCtx, StageTimeseriesInsertParams,
 };
@@ -57,6 +58,11 @@ impl CoreLoop {
         tenant_id: TenantId,
         plan: &PhysicalPlan,
     ) -> Result<Vec<u8>, ErrorCode> {
+        // A plan the resolve refuses is refused here. Resolve runs after the
+        // COMMIT verdict, where a refusal halts the vShard. This refusal is
+        // an abort vote instead, and every replica reaches it from the same
+        // plan bytes.
+        check_calvin_resolvable(plan).map_err(ErrorCode::from)?;
         let tid = tenant_id.as_u64();
         match plan {
             PhysicalPlan::Document(DocumentOp::PointInsert {
@@ -65,6 +71,7 @@ impl CoreLoop {
                 value,
                 if_absent,
                 surrogate,
+                rls_write_check,
                 ..
             }) => {
                 let ctx = StageCtx::new(
@@ -75,7 +82,7 @@ impl CoreLoop {
                     RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
-                let resp = self.stage_point_insert(&ctx, value, *if_absent);
+                let resp = self.stage_point_insert(&ctx, value, *if_absent, rls_write_check);
                 Self::stage_result(&resp)
             }
             PhysicalPlan::Document(DocumentOp::PointPut {
@@ -83,6 +90,7 @@ impl CoreLoop {
                 document_id,
                 value,
                 surrogate,
+                rls_write_check,
                 ..
             }) => {
                 let ctx = StageCtx::new(
@@ -93,7 +101,7 @@ impl CoreLoop {
                     RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
-                let resp = self.stage_point_put(&ctx, value);
+                let resp = self.stage_point_put(&ctx, value, rls_write_check);
                 Self::stage_result(&resp)
             }
             PhysicalPlan::Document(DocumentOp::PointDelete {
@@ -213,6 +221,7 @@ impl CoreLoop {
                 documents,
                 surrogates,
                 if_absent,
+                rls_write_check,
                 ..
             }) => {
                 let resp = self.stage_document_batch_insert(StageBatchInsertParams {
@@ -223,6 +232,7 @@ impl CoreLoop {
                     documents,
                     surrogates,
                     if_absent: *if_absent,
+                    rls_write_check,
                 });
                 Self::stage_result(&resp)
             }
@@ -420,22 +430,24 @@ impl CoreLoop {
     /// [`CoreLoop::install_calvin_redo`] and [`CoreLoop::execute_calvin_drop`]
     /// so neither overlay outlives the `commit_pending` entry it shadows.
     /// Idempotent: a missing key (already removed, or the id derivation
-    /// itself failing) is a silent no-op — the same shape as the
-    /// `commit_pending` removal it accompanies.
+    /// itself failing) is a no-op — the same shape as the `commit_pending`
+    /// removal it accompanies.
     ///
     /// Runs the same teardown as `MetaOp::DropTxnOverlay`
     /// (`drop_overlay_entry`), so the `active_txn_overlays` gauge stays exact.
+    /// A spill directory the teardown cannot remove is returned.
     pub(in crate::data::executor) fn drop_calvin_synthetic_overlay(
         &mut self,
         epoch: u64,
         position: u32,
         vshard: u32,
-    ) {
+    ) -> crate::Result<()> {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
             // The shared teardown also drops a columnar engine staging
             // auto-created that the install left empty.
-            self.drop_overlay_entry(synthetic_txn_id);
+            self.drop_overlay_entry(synthetic_txn_id)?;
         }
+        Ok(())
     }
 }
 

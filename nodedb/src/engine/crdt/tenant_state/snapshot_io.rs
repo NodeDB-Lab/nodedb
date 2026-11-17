@@ -83,6 +83,10 @@ impl TenantCrdtEngine {
                     detail: "the bytes do not decode as a snapshot".into(),
                 },
             )),
+            // A row the snapshot writes holds a value no reader can decode.
+            super::ValidatedApplyOutcome::UndecodableValue { error } => {
+                Err(crate::Error::Crdt(error))
+            }
             super::ValidatedApplyOutcome::PendingDependencies => Err(crate::Error::Crdt(
                 nodedb_crdt::CrdtError::DeltaApplyFailed(
                     "snapshot import left operations causally pending".into(),

@@ -113,7 +113,7 @@ async fn wcc_two_components_cross_node() {
     // Wait until EVERY node sees all 15 nodes in the WCC result — edges applied +
     // replicated AND each node's routing view converged so a non-owning
     // coordinator runs the contraction round across all owning shards.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all 15 wcc nodes"),
             Duration::from_secs(30),
@@ -121,7 +121,7 @@ async fn wcc_two_components_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = wcc_rows(&cluster.nodes[idx].client, WCC_SQL).await;
+                        let rows = wcc_rows(&node.client, WCC_SQL).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         names == all_nodes
                     })
@@ -132,8 +132,8 @@ async fn wcc_two_components_cross_node() {
     }
 
     // From every node: exactly two components, correctly partitioned.
-    for idx in 0..cluster.nodes.len() {
-        let rows = wcc_rows(&cluster.nodes[idx].client, WCC_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = wcc_rows(&node.client, WCC_SQL).await;
         let map: HashMap<String, i64> = rows.iter().cloned().collect();
 
         // (i) Exactly 15 rows, one per distinct node.

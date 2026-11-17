@@ -67,6 +67,14 @@ pub struct RedoRecord {
     /// each reaches the same verdict. Empty for a record no user committed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_roles: Vec<String>,
+    /// The materialized-sum targets the install folds the record's document
+    /// writes into, keyed by source collection. The `TransactionRedo` WAL
+    /// record of a whole record carries the targets its install used, so
+    /// boot can fold a record whose install never became durable. A stream
+    /// marker's content header carries them instead. Empty on every other
+    /// copy of a record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
 }
 
 /// One `PUBLISH TO` message a committed transaction owes its topic.
@@ -393,6 +401,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = record.to_bytes().expect("encode");
         let decoded = RedoRecord::from_bytes(&bytes).expect("decode");
@@ -423,6 +432,7 @@ mod tests {
             }],
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -459,6 +469,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = record.to_bytes().expect("encode");
         let decoded = RedoRecord::from_bytes(&bytes).expect("decode");
@@ -500,6 +511,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: vec!["approver".into(), "readwrite".into()],
+            sum_targets: Vec::new(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -520,6 +532,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -541,6 +554,34 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
+        };
+        let bytes = record.to_bytes().expect("encode");
+        assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
+    }
+
+    /// The sum targets a whole record's WAL copy carries decode to the same
+    /// targets on every replica and at every restart.
+    #[test]
+    fn roundtrip_with_sum_targets() {
+        use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
+        let record = RedoRecord {
+            version: 1,
+            ops: sample_ops(),
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+            sum_targets: vec![RedoSumTargets {
+                collection: "charges".into(),
+                resolved: vec![ResolvedSumTarget::new(
+                    "balances",
+                    "a1",
+                    nodedb_types::Surrogate::new(42),
+                )],
+            }],
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);

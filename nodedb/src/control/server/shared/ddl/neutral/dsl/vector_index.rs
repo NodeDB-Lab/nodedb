@@ -18,7 +18,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::catalog::IndexKind;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
-    IndexRegistration, propose_index_record,
+    IndexRegistration, index_name_holder, propose_index_record,
 };
 use crate::control::server::shared::session::ddl_buffer;
 use crate::control::state::SharedState;
@@ -137,12 +137,7 @@ pub async fn create_vector_index(
 
     // A name already taken by an index of any kind will leave exactly one of
     // the two droppable, since the registry is keyed by name.
-    if let Some(taken) = state
-        .credentials
-        .catalog()
-        .get_index_record(database_id.as_u64(), tenant_id.as_u64(), index_name)
-        .map_err(|e| DdlError::from_error_in_context("read index registry", &e))?
-    {
+    if let Some(taken) = index_name_holder(state, database_id, tenant_id, index_name, CONTEXT)? {
         if stmt.header.if_not_exists && taken.kind == IndexKind::Vector {
             return Ok(vec![status()]);
         }
@@ -242,6 +237,7 @@ pub async fn create_vector_index(
             kind: IndexKind::Vector,
             collection,
             fields: vec![field_name.clone()],
+            state: crate::control::security::catalog::IndexRecordState::Ready,
         },
     )
     .await?;

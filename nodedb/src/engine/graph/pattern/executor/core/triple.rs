@@ -4,9 +4,12 @@
 //! variable-length expansion, read-your-own-writes overlay dispatch, and
 //! cross-shard frontier recording.
 
+use nodedb_types::Value;
+
 use crate::engine::graph::csr::{CsrIndex, GraphOverlayDelta};
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::pattern::ast::PatternTriple;
+use crate::engine::graph::pattern::executor::edge_props::CrossedEdge;
 use crate::engine::graph::pattern::executor::expansion;
 use crate::engine::graph::pattern::executor::overlay_expand;
 use crate::engine::graph::pattern::executor::types::{
@@ -47,7 +50,7 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
         && !ov.is_empty()
         && !triple.edge.is_variable_length()
     {
-        return Ok(overlay_expand::expand_triple_overlay(
+        return overlay_expand::expand_triple_overlay(
             triple,
             triple_idx,
             csr,
@@ -55,7 +58,7 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
             state,
             frontier_bitmap,
             ov,
-        ));
+        );
     }
 
     let direction = triple.edge.direction.to_csr_direction();
@@ -132,7 +135,7 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
                 bind_node(&mut row, &triple.src, csr, src_id);
                 bind_node(&mut row, &triple.dst, csr, dst_id);
                 if let Some(ref edge_name) = triple.edge.name {
-                    row.insert(edge_name.clone(), path);
+                    row.insert(edge_name.clone(), Value::String(path));
                 }
                 results.push(row);
             }
@@ -149,7 +152,7 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
                         bind_node(&mut row, &triple.src, csr, src_id);
                         bind_node(&mut row, &triple.dst, csr, dst_id);
                         if let Some(ref edge_name) = triple.edge.name {
-                            row.insert(edge_name.clone(), path);
+                            row.insert(edge_name.clone(), Value::String(path));
                         }
                         results.push(row);
                     }
@@ -161,7 +164,7 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
                         bind_node(&mut row, &triple.src, csr, src_id);
                         overlay_expand::bind_name(&mut row, &triple.dst, &dst_name);
                         if let Some(ref edge_name) = triple.edge.name {
-                            row.insert(edge_name.clone(), path);
+                            row.insert(edge_name.clone(), Value::String(path));
                         }
                         results.push(row);
                     }
@@ -229,14 +232,15 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
                 continue;
             }
 
-            let neighbors = expansion::collect_neighbors(
+            let neighbors = expansion::collect_oriented_neighbors(
                 csr,
                 src_id,
                 label_filter,
                 direction,
                 state.collection_filter,
             );
-            for (lid, dst_id) in neighbors {
+            for neighbor in neighbors {
+                let (lid, dst_id) = (neighbor.label, neighbor.other);
                 if !binding_compatible(&triple.dst, csr, input_row, dst_id) {
                     continue;
                 }
@@ -249,8 +253,22 @@ pub(in crate::engine::graph::pattern::executor) fn execute_triple(
                     let label_name = csr.label_name(lid);
                     row.insert(
                         edge_name.clone(),
-                        format!("{src_name}|{label_name}|{dst_name}"),
+                        Value::String(format!("{src_name}|{label_name}|{dst_name}")),
                     );
+                    // The physical edge runs from the source of the crossing,
+                    // under the collection the CSR holds it in.
+                    let (src, dst) = if neighbor.outgoing {
+                        (src_name, dst_name)
+                    } else {
+                        (dst_name, src_name)
+                    };
+                    let crossed = CrossedEdge {
+                        collection: csr.collection_name(neighbor.collection),
+                        src,
+                        label: label_name,
+                        dst,
+                    };
+                    state.capture_edge(&mut row, edge_name, crossed)?;
                 }
                 results.push(row);
             }
@@ -273,6 +291,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
     };
     use crate::engine::graph::pattern::executor::types::BindingRow;
     use crate::engine::sparse::btree::SparseEngine;
+    use nodedb_types::Value;
 
     /// Open a standalone `SparseEngine` in a fresh tempdir for tests that need
     /// to exercise the property-predicate path (or just to satisfy the
@@ -296,7 +315,14 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: Some("col"),
             document_cut: Default::default(),
+            edge_cut: Default::default(),
+            staged_edges: None,
         }
+    }
+
+    /// A text binding value.
+    pub(crate) fn s(text: &str) -> Value {
+        Value::String(text.to_string())
     }
 
     fn make_social_graph() -> (CsrIndex, EdgeStore, tempfile::TempDir) {
@@ -330,8 +356,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a"], "alice");
-        assert_eq!(rows[0]["b"], "bob");
+        assert_eq!(rows[0]["a"], s("alice"));
+        assert_eq!(rows[0]["b"], s("bob"));
     }
 
     #[test]
@@ -356,7 +382,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["c"], "carol");
+        assert_eq!(rows[0]["c"], s("carol"));
     }
 
     #[test]
@@ -383,7 +409,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["c"], "NULL");
+        assert_eq!(rows[0]["c"], Value::Null);
     }
 
     #[test]
@@ -528,8 +554,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
         // Only carol->dave where dave is Bot.
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a"], "carol");
-        assert_eq!(rows[0]["b"], "dave");
+        assert_eq!(rows[0]["a"], s("carol"));
+        assert_eq!(rows[0]["b"], s("dave"));
 
         // Both labels — Person->Bot.
         let query = parse("MATCH (a:Person)-[:KNOWS]->(b:Bot) RETURN a, b").unwrap();
@@ -548,7 +574,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a"], "carol");
+        assert_eq!(rows[0]["a"], s("carol"));
 
         // Non-matching labels — should return 0.
         let query = parse("MATCH (a:Bot)-[:KNOWS]->(b:Person) RETURN a, b").unwrap();
@@ -572,12 +598,12 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
     #[test]
     fn rows_to_msgpack_format() {
         let mut row = BindingRow::new();
-        row.insert("a".into(), "alice".into());
-        row.insert("b".into(), "bob".into());
-        let msgpack = rows_to_msgpack(&[row]).unwrap();
-        let json = nodedb_types::json_from_msgpack(&msgpack).unwrap();
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr[0]["a"], "alice");
+        row.insert("a".into(), s("alice"));
+        row.insert("b".into(), s("bob"));
+        let msgpack = rows_to_msgpack(std::slice::from_ref(&row)).unwrap();
+        // The native row transport: an array of tagged objects.
+        let decoded: Vec<Value> = zerompk::from_msgpack(&msgpack).unwrap();
+        assert_eq!(decoded, vec![Value::Object(row)]);
     }
 
     /// Anchor nodes not in the frontier bitmap are never expanded as sources.
@@ -621,8 +647,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         // Only alice->bob should appear; bob->carol and carol->dave are blocked
         // because the src anchor (bob, carol) is not in the bitmap.
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a"], "alice");
-        assert_eq!(rows[0]["b"], "bob");
+        assert_eq!(rows[0]["a"], s("alice"));
+        assert_eq!(rows[0]["b"], s("bob"));
     }
 
     // ── Unresolved frontier tests ─────────────────────────────────────────
@@ -717,10 +743,13 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         assert_eq!(entry.triple_idx, 1, "hop-2 is triple_idx 1");
         // partial_row carries the hop-1 binding.
         assert_eq!(
-            entry.partial_row.get("a").map(String::as_str),
+            entry.partial_row.get("a").and_then(Value::as_str),
             Some("alice")
         );
-        assert_eq!(entry.partial_row.get("b").map(String::as_str), Some("bob"));
+        assert_eq!(
+            entry.partial_row.get("b").and_then(Value::as_str),
+            Some("bob")
+        );
     }
 
     /// No false positive on label miss: a source HAS out-edges but none
@@ -798,7 +827,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap();
 
         assert_eq!(outcome.rows.len(), 1);
-        assert_eq!(outcome.rows[0]["b"], "bob");
+        assert_eq!(outcome.rows[0]["b"], s("bob"));
         assert!(
             outcome.unresolved_frontier.is_empty(),
             "frontier must be empty when all edges resolve locally"
@@ -845,8 +874,14 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         assert_eq!(entry.node_name, "mid", "frontier source should be mid");
         assert_eq!(entry.triple_idx, 1, "second triple is index 1");
         // partial_row must carry x=root and y=mid (hop-1 bindings).
-        assert_eq!(entry.partial_row.get("x").map(String::as_str), Some("root"));
-        assert_eq!(entry.partial_row.get("y").map(String::as_str), Some("mid"));
+        assert_eq!(
+            entry.partial_row.get("x").and_then(Value::as_str),
+            Some("root")
+        );
+        assert_eq!(
+            entry.partial_row.get("y").and_then(Value::as_str),
+            Some("mid")
+        );
     }
 
     // ── Property-predicate filtering (the silent-wrong-results bug fix) ────────
@@ -857,7 +892,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
     /// node and its same-pk document share one surrogate, so the caller
     /// assigns the same surrogate to the node in the CSR via
     /// `set_node_surrogate`.
-    fn put_node_doc(
+    pub(crate) fn put_node_doc(
         sparse: &SparseEngine,
         surrogate: nodedb_types::Surrogate,
         doc: nodedb_types::Value,
@@ -928,8 +963,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
 
         assert_eq!(rows.len(), 1, "only alice(age=30) matches");
-        assert_eq!(rows[0]["a"], "alice");
-        assert_eq!(rows[0]["b"], "carol");
+        assert_eq!(rows[0]["a"], s("alice"));
+        assert_eq!(rows[0]["b"], s("carol"));
     }
 
     /// A bitemporal node document read at a system-time ordinal cut: two
@@ -1073,7 +1108,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .unwrap()
         .rows;
         assert_eq!(rows.len(), 1, "bob has no document so is excluded");
-        assert_eq!(rows[0]["a"], "alice");
+        assert_eq!(rows[0]["a"], s("alice"));
     }
 
     /// A property predicate with NO `IN '<collection>'` clause is unresolvable
@@ -1091,6 +1126,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: None,
             document_cut: Default::default(),
+            edge_cut: Default::default(),
+            staged_edges: None,
         };
         put_node_doc(
             &sparse,
@@ -1162,9 +1199,9 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
     // ── Property projection (`RETURN a.field`) ────────────────────────────────
 
     /// `RETURN a.name, a.age` now projects the node's STORED property values
-    /// instead of the old `"NULL"` stub. alice's document `{name, age}` resolves
-    /// to the string forms "Alice" / "30" via the canonical value display
-    /// convention. The non-dotted `b` column still projects the node identity.
+    /// as their exact typed values: alice's document `{name, age}` resolves to
+    /// the string "Alice" and the integer 30. The non-dotted `b` column still
+    /// projects the node identity.
     #[test]
     fn property_projection_returns_stored_values() {
         let (mut csr, store, _dir) = make_csr(&[("alice", "KNOWS", "bob")]);
@@ -1200,15 +1237,20 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a.name"], "Alice", "string property projected");
-        assert_eq!(rows[0]["a.age"], "30", "integer property stringified");
+        assert_eq!(rows[0]["a.name"], s("Alice"), "string property projected");
         assert_eq!(
-            rows[0]["b"], "bob",
+            rows[0]["a.age"],
+            Value::Integer(30),
+            "integer property keeps its type"
+        );
+        assert_eq!(
+            rows[0]["b"],
+            s("bob"),
             "non-dotted identity projection unchanged"
         );
     }
 
-    /// A node WITHOUT a stored document projects `"NULL"` for a property column
+    /// A node WITHOUT a stored document projects SQL NULL for a property column
     /// (SQL projection: missing row → NULL), not an error.
     #[test]
     fn property_projection_no_document_is_null() {
@@ -1237,11 +1279,11 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a.name"], "NULL", "absent document → NULL");
+        assert_eq!(rows[0]["a.name"], Value::Null, "absent document → NULL");
     }
 
     /// A property column whose `field` is absent from an EXISTING document
-    /// projects `"NULL"` (missing field → NULL), not an error.
+    /// projects SQL NULL (missing field → NULL), not an error.
     #[test]
     fn property_projection_missing_field_is_null() {
         let (mut csr, store, _dir) = make_csr(&[("alice", "KNOWS", "bob")]);
@@ -1273,12 +1315,12 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["a.age"], "NULL", "missing field → NULL");
+        assert_eq!(rows[0]["a.age"], Value::Null, "missing field → NULL");
     }
 
     /// Property PROJECTION with no `IN '<collection>'` clause is unresolvable and
     /// must return a typed `BadRequest` — the same rule as the predicate path,
-    /// never a silent `"NULL"`.
+    /// never a silent NULL.
     #[test]
     fn property_projection_without_collection_is_bad_request() {
         let (csr, store, _dir) = make_csr(&[("alice", "KNOWS", "bob")]);
@@ -1291,6 +1333,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             tenant_id: 1,
             collection: None,
             document_cut: Default::default(),
+            edge_cut: Default::default(),
+            staged_edges: None,
         };
         put_node_doc(
             &sparse,
@@ -1353,8 +1397,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         .rows;
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["who"], "Alice", "property keyed by alias");
-        assert_eq!(rows[0]["a"], "alice", "non-dotted identity unchanged");
+        assert_eq!(rows[0]["who"], s("Alice"), "property keyed by alias");
+        assert_eq!(rows[0]["a"], s("alice"), "non-dotted identity unchanged");
     }
 
     /// The clause names the collection bare, and outside the default database
@@ -1372,6 +1416,8 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
                 tenant_id: 1,
                 collection,
                 document_cut: Default::default(),
+                edge_cut: Default::default(),
+                staged_edges: None,
             };
             execute(
                 &bare,

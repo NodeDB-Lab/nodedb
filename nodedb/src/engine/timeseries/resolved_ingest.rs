@@ -178,12 +178,18 @@ impl ResolvedTsBatch {
 }
 
 /// The empty value a column the batch does not name takes, as a memtable
-/// fills a column added after rows landed. A symbol, text or float column
-/// takes SQL NULL, never an empty string. Integer and time columns have no NULL.
+/// fills a column added after rows landed. A symbol, text, float, decimal,
+/// UUID or boolean column takes SQL NULL, never an empty string. Integer and
+/// time columns have no NULL.
 pub fn empty_value(column_type: ColumnType) -> ColumnValue {
     match column_type {
         ColumnType::Timestamp(_) => ColumnValue::Timestamp(0),
-        ColumnType::Float64 | ColumnType::Symbol | ColumnType::Text => ColumnValue::Null,
+        ColumnType::Float64
+        | ColumnType::Symbol
+        | ColumnType::Text
+        | ColumnType::Decimal(_)
+        | ColumnType::Uuid
+        | ColumnType::Bool => ColumnValue::Null,
         ColumnType::Int64 => ColumnValue::Int64(0),
     }
 }
@@ -199,9 +205,17 @@ pub fn value_fits(value: &ColumnValue, column_type: ColumnType) -> bool {
                 ColumnValue::Symbol(_),
                 ColumnType::Symbol | ColumnType::Text
             )
+            | (ColumnValue::Decimal(_), ColumnType::Decimal(_))
+            | (ColumnValue::Uuid(_), ColumnType::Uuid)
+            | (ColumnValue::Bool(_), ColumnType::Bool)
             | (
                 ColumnValue::Null,
-                ColumnType::Symbol | ColumnType::Text | ColumnType::Float64
+                ColumnType::Symbol
+                    | ColumnType::Text
+                    | ColumnType::Float64
+                    | ColumnType::Decimal(_)
+                    | ColumnType::Uuid
+                    | ColumnType::Bool
             )
     )
 }

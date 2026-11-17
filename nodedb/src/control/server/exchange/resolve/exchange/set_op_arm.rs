@@ -35,6 +35,7 @@ pub(super) async fn resolve_set_op(
     captures: &mut Vec<DistributedReadCapture>,
     inputs: Vec<PhysicalPlan>,
     op: SetOpKind,
+    columns: Vec<Vec<String>>,
 ) -> crate::Result<Resolved> {
     let branches = inputs.into_iter().map(|input| async move {
         let mut branch_captures = Vec::new();
@@ -60,26 +61,31 @@ pub(super) async fn resolve_set_op(
     }
 
     // The merged rows carry the requirements of every branch.
-    let merged = merge_set_op_rows(&payloads, op)?;
+    let merged = merge_set_op_rows(&payloads, op, &columns)?;
     Ok(Resolved::Plan(Box::new(provider_scan_of_rows(
         merged, sources,
     ))))
 }
 
 /// Merge materialized branch payloads with `op`. Each payload is one msgpack
-/// array of flat row maps. The mapping from kind to merge mirrors the pgwire
-/// per-task set-op path: `INTERSECT [ALL]` and `EXCEPT [ALL]` share one
-/// value-keyed merge each, `UNION` dedups on raw bytes, and `UNION ALL`
-/// concatenates. A payload in no row shape fails the merge.
-fn merge_set_op_rows(payloads: &[Vec<u8>], op: SetOpKind) -> crate::Result<Vec<u8>> {
+/// array of flat row maps, and `columns[i]` is branch `i`'s output column
+/// keys in SELECT-list order. `UNION` dedups, and `INTERSECT [ALL]` and
+/// `EXCEPT [ALL]` filter, by positional value identity. `UNION ALL`
+/// concatenates. A payload in no row shape, or branches of different column
+/// counts, fail the merge.
+fn merge_set_op_rows(
+    payloads: &[Vec<u8>],
+    op: SetOpKind,
+    columns: &[Vec<String>],
+) -> crate::Result<Vec<u8>> {
     match op {
         SetOpKind::UnionAll => merge_payload_rows(payloads),
-        SetOpKind::UnionDistinct => dedup_union_payloads(payloads),
+        SetOpKind::UnionDistinct => dedup_union_payloads(payloads, columns),
         SetOpKind::Intersect | SetOpKind::IntersectAll => {
-            merge_set_op_payloads(payloads, SetMergeMode::Intersect)
+            merge_set_op_payloads(payloads, SetMergeMode::Intersect, columns)
         }
         SetOpKind::Except | SetOpKind::ExceptAll => {
-            merge_set_op_payloads(payloads, SetMergeMode::Except)
+            merge_set_op_payloads(payloads, SetMergeMode::Except, columns)
         }
     }
 }
@@ -93,6 +99,10 @@ mod tests {
         nodedb_types::json_to_msgpack(&serde_json::Value::Array(rows.to_vec())).unwrap()
     }
 
+    fn x() -> Vec<Vec<String>> {
+        vec![vec!["x".to_string()], vec!["x".to_string()]]
+    }
+
     fn decode(payload: &[u8]) -> String {
         crate::data::executor::response_codec::decode_payload_to_json(payload)
     }
@@ -101,7 +111,7 @@ mod tests {
     fn union_all_keeps_every_row_in_branch_order() {
         let left = encode_array(&[serde_json::json!({"x": 1}), serde_json::json!({"x": 2})]);
         let right = encode_array(&[serde_json::json!({"x": 2})]);
-        let merged = merge_set_op_rows(&[left, right], SetOpKind::UnionAll).unwrap();
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::UnionAll, &x()).unwrap();
         assert_eq!(decode(&merged), r#"[{"x":1},{"x":2},{"x":2}]"#);
     }
 
@@ -109,7 +119,7 @@ mod tests {
     fn union_distinct_drops_duplicates() {
         let left = encode_array(&[serde_json::json!({"x": 1}), serde_json::json!({"x": 2})]);
         let right = encode_array(&[serde_json::json!({"x": 2})]);
-        let merged = merge_set_op_rows(&[left, right], SetOpKind::UnionDistinct).unwrap();
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::UnionDistinct, &x()).unwrap();
         assert_eq!(decode(&merged), r#"[{"x":1},{"x":2}]"#);
     }
 
@@ -117,7 +127,7 @@ mod tests {
     fn intersect_keeps_rows_present_in_every_branch() {
         let left = encode_array(&[serde_json::json!({"x": 1}), serde_json::json!({"x": 2})]);
         let right = encode_array(&[serde_json::json!({"x": 2}), serde_json::json!({"x": 3})]);
-        let merged = merge_set_op_rows(&[left, right], SetOpKind::Intersect).unwrap();
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::Intersect, &x()).unwrap();
         assert_eq!(decode(&merged), r#"[{"x":2}]"#);
     }
 
@@ -125,7 +135,7 @@ mod tests {
     fn except_drops_rows_present_in_later_branches() {
         let left = encode_array(&[serde_json::json!({"x": 1}), serde_json::json!({"x": 2})]);
         let right = encode_array(&[serde_json::json!({"x": 2})]);
-        let merged = merge_set_op_rows(&[left, right], SetOpKind::Except).unwrap();
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::Except, &x()).unwrap();
         assert_eq!(decode(&merged), r#"[{"x":1}]"#);
     }
 
@@ -140,7 +150,7 @@ mod tests {
             SetOpKind::Except,
         ] {
             assert!(matches!(
-                merge_set_op_rows(&[left.clone(), vec![0x2a]], op),
+                merge_set_op_rows(&[left.clone(), vec![0x2a]], op, &x()),
                 Err(crate::Error::Codec { .. })
             ));
         }

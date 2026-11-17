@@ -17,6 +17,12 @@ pub enum CrdtError {
     #[error("delta application failed: {0}")]
     DeltaApplyFailed(String),
 
+    /// Write preparation requires a source without pending operations.
+    #[error(
+        "write preparation source has {operations} pending operations; finish the source mutation before preparing writes"
+    )]
+    SourceTransactionPending { operations: usize },
+
     /// A generic CRDT import exceeded its encoded byte limit before metadata
     /// parsing, forking, or import.
     #[error("CRDT import exceeds byte limit: {actual} > {limit}")]
@@ -144,6 +150,12 @@ pub enum CrdtError {
     /// Loro internal error.
     #[error("loro error: {0}")]
     Loro(String),
+
+    /// A Loro binary value is not the tagged MessagePack of one NodeDB
+    /// value, or a value does not encode as one. See
+    /// [`crate::loro_value`] for the encoding.
+    #[error("CRDT typed value malformed: {detail}")]
+    TypedValueMalformed { detail: String },
 
     /// Dead-letter queue is full.
     #[error("dead-letter queue full: capacity {capacity}, pending {pending}")]

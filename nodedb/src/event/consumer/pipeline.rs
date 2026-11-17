@@ -186,11 +186,17 @@ fn accumulate_data_event(
         event.lsn.as_u64(),
         event_time_ms,
     );
-    let matching_streams = shared_state.stream_registry.find_matching(
-        event.database_id,
-        event.tenant_id.as_u64(),
-        &event.collection,
-    );
+    // A stream names its collection bare. An event whose name is not
+    // qualified for its database matches no stream.
+    let matching_streams = event
+        .routed_collection(crate::event::unrouted::UnroutedConsumer::Pipeline)
+        .map_or_else(Vec::new, |collection| {
+            shared_state.stream_registry.find_matching(
+                event.database_id,
+                event.tenant_id.as_u64(),
+                collection,
+            )
+        });
     if !matching_streams.is_empty() {
         shared_state.mv_registry.applied().apply_once(key, || {
             for stream_def in &matching_streams {

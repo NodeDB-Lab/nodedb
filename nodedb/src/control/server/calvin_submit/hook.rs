@@ -37,8 +37,10 @@ use std::sync::Arc;
 use nodedb_cluster::calvin::types::TxClass;
 use nodedb_cluster::{SubmitCalvinTxnRequest, SubmitCalvinTxnResponse, TypedClusterError};
 
+use crate::control::cluster::calvin::refusal::{RefusedSequences, encode_refused_sequences};
 use crate::control::cluster::data_plane_error_wire::execution_error_to_typed;
 use crate::control::cluster::forwarded_budget::hook_deadline;
+use crate::control::planner::calvin::refused_sequences::collecting;
 use crate::control::planner::calvin::submit_and_await_calvin_until;
 use crate::control::state::SharedState;
 
@@ -70,6 +72,7 @@ impl nodedb_cluster::CalvinSubmit for RegistryCalvinSubmit {
                 return SubmitCalvinTxnResponse {
                     error: Some(refusal),
                     payload_bytes: None,
+                    refused_sequences: None,
                 };
             }
         };
@@ -83,6 +86,7 @@ impl nodedb_cluster::CalvinSubmit for RegistryCalvinSubmit {
                         message: format!("calvin-submit: failed to decode TxClass: {e}"),
                     }),
                     payload_bytes: None,
+                    refused_sequences: None,
                 };
             }
         };
@@ -95,16 +99,27 @@ impl nodedb_cluster::CalvinSubmit for RegistryCalvinSubmit {
                     message: format!("calvin-submit: TxClass participants underivable: {e}"),
                 }),
                 payload_bytes: None,
+                refused_sequences: None,
             };
         }
 
-        match submit_and_await_calvin_until(&self.state, tx_class, deadline).await {
+        // This leader runs no statement of the writer's, so it collects the
+        // sequence results a refused `RETURNING` evaluation drew, and the
+        // reply carries them to the coordinator.
+        let (outcome, refused) = collecting(submit_and_await_calvin_until(
+            &self.state,
+            tx_class,
+            deadline,
+        ))
+        .await;
+        match outcome {
             // Forward the applied RETURNING payload (drained from this leader's
             // local sidecar) back to the remote coordinator over the non-Raft
             // RPC response; `None` for a plain write with no rows to surface.
             Ok(applied) => SubmitCalvinTxnResponse {
                 error: None,
                 payload_bytes: applied.map(|r| r.payload.to_vec()),
+                refused_sequences: None,
             },
             // The awaited apply verdict is a Data-Plane verdict: carry its
             // code so the coordinator renders the SQLSTATE a local write
@@ -112,7 +127,23 @@ impl nodedb_cluster::CalvinSubmit for RegistryCalvinSubmit {
             Err(e) => SubmitCalvinTxnResponse {
                 error: Some(execution_error_to_typed(e)),
                 payload_bytes: None,
+                refused_sequences: refused.as_ref().and_then(encoded_sequences),
             },
+        }
+    }
+}
+
+/// The wire form of `sequences`. Results with no wire form are logged and
+/// dropped: the error still reaches the coordinator.
+fn encoded_sequences(sequences: &RefusedSequences) -> Option<Vec<u8>> {
+    match encode_refused_sequences(sequences) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "calvin-submit: the sequence results of a refusal have no wire form"
+            );
+            None
         }
     }
 }

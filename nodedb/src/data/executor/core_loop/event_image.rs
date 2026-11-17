@@ -9,8 +9,6 @@
 //! is corrupt on disk: it is reported once at detection, and its image is
 //! withheld, never handed on as raw bytes no reader can decode.
 
-use nodedb_query::msgpack_scan;
-
 use super::CoreLoop;
 use crate::data::executor::strict_format::strict_row_to_msgpack;
 
@@ -34,6 +32,116 @@ pub(in crate::data::executor) enum StoredImage {
 pub(in crate::data::executor) struct UndecodableImage;
 
 impl CoreLoop {
+    /// Render the accepted post-image once, using its captured storage schema.
+    pub(in crate::data::executor) fn prepare_installed_event_image(
+        &self,
+        row: &super::redo_image::WriteSetRow<'_>,
+        image: &crate::types::SharedInstalledDocument,
+    ) -> crate::Result<Vec<u8>> {
+        use nodedb_physical::physical_plan::StorageMode;
+        match &*image.schema {
+            StorageMode::Schemaless => self.native_body_event_image(
+                row.database_id,
+                row.tid,
+                row.collection,
+                row.identity.as_str(),
+                &image.stored,
+                true,
+            ),
+            StorageMode::Strict { schema } => {
+                let version = nodedb_strict::TupleDecoder::new(schema)
+                    .schema_version(&image.stored)
+                    .map_err(|error| crate::Error::Serialization {
+                        format: "binary_tuple".into(),
+                        detail: format!(
+                            "installed event tuple version for '{}': {error}",
+                            row.collection
+                        ),
+                    })?;
+                if version == 0 || version > schema.version {
+                    return Err(crate::Error::Serialization {
+                        format: "binary_tuple".into(),
+                        detail: format!(
+                            "installed event tuple version {version} for '{}' is outside captured schema versions 1..={}",
+                            row.collection, schema.version,
+                        ),
+                    });
+                }
+                match strict_row_to_msgpack(&image.stored, schema) {
+                    Ok(Some(bytes)) => Ok(bytes),
+                    Ok(None) => Err(crate::Error::Serialization {
+                        format: "binary_tuple".into(),
+                        detail: format!(
+                            "installed event row '{}' of '{}' is not a Binary Tuple under captured schema version {version}",
+                            row.identity.as_str(),
+                            row.collection
+                        ),
+                    }),
+                    Err(fault) => Err(crate::Error::Serialization {
+                        format: "binary_tuple".into(),
+                        detail: format!(
+                            "installed event row '{}' of '{}' cannot decode under captured schema version {version}: {}",
+                            row.identity.as_str(),
+                            row.collection,
+                            fault.as_str()
+                        ),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Capture both public row images before the source transaction commits.
+    pub(in crate::data::executor) fn prepare_installed_put_event(
+        &self,
+        row: &super::redo_image::WriteSetRow<'_>,
+        image: &crate::types::SharedInstalledDocument,
+        prior_stored: Option<&[u8]>,
+    ) -> crate::Result<crate::types::document_event::DocumentPutEvent> {
+        let new_value = self.prepare_installed_event_image(row, image)?;
+        let old_value = prior_stored.map(|prior| {
+            match &*image.schema {
+                nodedb_physical::physical_plan::StorageMode::Schemaless => {
+                    self.native_body_event_image(
+                        row.database_id, row.tid, row.collection,
+                        row.identity.as_str(), prior, true,
+                    )
+                }
+                nodedb_physical::physical_plan::StorageMode::Strict { schema } => {
+                    match strict_row_to_msgpack(prior, schema) {
+                        Ok(Some(bytes)) => Ok(bytes),
+                        Ok(None) => self.native_body_event_image(
+                            row.database_id, row.tid, row.collection,
+                            row.identity.as_str(), prior, false,
+                        ),
+                        Err(fault) => Err(crate::Error::Serialization {
+                            format: "binary_tuple".into(),
+                            detail: format!(
+                                "prior event row '{}' of '{}' cannot decode under captured schema: {}",
+                                row.identity.as_str(), row.collection, fault.as_str(),
+                            ),
+                        }),
+                    }
+                }
+            }
+        }).transpose()?;
+        let event = crate::types::document_event::DocumentPutEvent {
+            new_value,
+            old_value,
+        };
+        // Every image the row's write-set entry journals is held to the row
+        // limit before the caller commits, so a refusal leaves no row, no
+        // write set and no event.
+        crate::data::executor::row_image_limit::check_installed_row(
+            row.collection,
+            row.identity.as_str(),
+            &image.canonical,
+            &image.stored,
+            &event,
+        )?;
+        Ok(event)
+    }
+
     /// How `stored`, a row of `collection`, reads as MessagePack.
     pub(in crate::data::executor) fn resolve_event_payload(
         &self,
@@ -85,7 +193,11 @@ impl CoreLoop {
         match self.resolve_event_payload(database_id, tid, collection, stored) {
             StoredImage::Converted(converted) => Ok(converted),
             StoredImage::AsStored => {
-                Ok(self.body_event_image(database_id, tid, collection, identity, stored))
+                self.body_event_image(database_id, tid, collection, identity, stored)
+                    .map_err(|error| {
+                        tracing::error!(collection, %error, "stored document event image cannot render");
+                        UndecodableImage
+                    })
             }
             StoredImage::Undecodable => Err(UndecodableImage),
         }
@@ -101,13 +213,45 @@ impl CoreLoop {
         collection: &str,
         identity: &str,
         body: &[u8],
-    ) -> Vec<u8> {
-        if self.is_schemaless_document_collection(database_id, tid, collection) {
-            let identity_column = self.identity_column(database_id, tid, collection);
-            msgpack_scan::inject_str_field(body, &identity_column, identity)
-        } else {
-            body.to_vec()
+    ) -> crate::Result<Vec<u8>> {
+        self.native_body_event_image(
+            database_id,
+            tid,
+            collection,
+            identity,
+            body,
+            self.is_schemaless_document_collection(database_id, tid, collection),
+        )
+    }
+
+    /// Convert native storage to the public event shape at the final boundary.
+    fn native_body_event_image(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        identity: &str,
+        body: &[u8],
+        inject_identity: bool,
+    ) -> crate::Result<Vec<u8>> {
+        let mut value = crate::data::executor::doc_format::decode_document_value(body)?;
+        let nodedb_types::Value::Object(fields) = &mut value else {
+            return Err(crate::Error::Serialization {
+                format: "document".into(),
+                detail: format!(
+                    "public event row '{identity}' of '{collection}' is not a document object"
+                ),
+            });
+        };
+        if inject_identity {
+            fields
+                .entry(self.identity_column(database_id, tid, collection))
+                .or_insert_with(|| nodedb_types::Value::String(identity.to_owned()));
         }
+        nodedb_types::value_to_msgpack(&value).map_err(|error| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("render public event row '{identity}' of '{collection}': {error}"),
+        })
     }
 
     /// Whether `collection` is a schemaless document collection.
@@ -135,172 +279,5 @@ impl CoreLoop {
 }
 
 #[cfg(test)]
-mod tests {
-    use nodedb_physical::physical_plan::StorageMode;
-    use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
-    use nodedb_types::value::Value;
-
-    use super::*;
-    use crate::data::executor::core_loop::redo_image::WriteSetRow;
-    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
-    use crate::engine::document::store::{CollectionConfig, RowIdentity};
-    use crate::event::bus::{EventConsumerRx, create_event_bus_with_capacity};
-    use crate::event::image_fault::ImageFault;
-    use crate::event::{WriteEvent, WriteOp};
-    use crate::types::{DatabaseId, TenantId};
-
-    const TID: u64 = 1;
-    const COLL: &str = "strict_images";
-    /// Bytes no strict row is stored as: neither a Binary Tuple nor a map.
-    const CORRUPT: &[u8] = b"corrupt row bytes";
-
-    fn schema() -> StrictSchema {
-        StrictSchema::new(vec![
-            ColumnDef::required("id", ColumnType::String),
-            ColumnDef::nullable("name", ColumnType::String),
-        ])
-        .expect("valid schema")
-    }
-
-    fn strict_core(dir: &std::path::Path) -> (CoreLoop, EventConsumerRx) {
-        let (mut core, _tx, _rx) = make_core_with_dir(dir);
-        core.seed_doc_configs(&[(
-            (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
-            CollectionConfig::new(COLL).with_storage_mode(StorageMode::Strict { schema: schema() }),
-        )]);
-        let (mut producers, mut consumers) = create_event_bus_with_capacity(1, 16);
-        core.set_event_producer(producers.pop().expect("producer"));
-        (core, consumers.pop().expect("consumer"))
-    }
-
-    fn tuple(name: &str) -> Vec<u8> {
-        let row = Value::Object(
-            [
-                ("id".to_string(), Value::String("r1".into())),
-                ("name".to_string(), Value::String(name.into())),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        crate::data::executor::strict_format::value_to_binary_tuple(&row, &schema(), COLL)
-            .expect("row encodes")
-    }
-
-    fn drain(events: &mut EventConsumerRx) -> Vec<WriteEvent> {
-        std::iter::from_fn(|| events.try_recv()).collect()
-    }
-
-    fn name_of(image: &[u8]) -> String {
-        nodedb_types::value_from_msgpack(image)
-            .expect("image is MessagePack")
-            .as_object()
-            .and_then(|o| o.get("name"))
-            .and_then(|v| v.as_str())
-            .expect("name field")
-            .to_owned()
-    }
-
-    #[test]
-    fn a_tuple_converts_and_corrupt_bytes_are_undecodable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (core, _events) = strict_core(dir.path());
-        match core.resolve_event_payload(0, TID, COLL, &tuple("alice")) {
-            StoredImage::Converted(image) => assert_eq!(name_of(&image), "alice"),
-            other => panic!("a tuple converts, got {other:?}"),
-        }
-        assert_eq!(
-            core.resolve_event_payload(0, TID, COLL, CORRUPT),
-            StoredImage::Undecodable
-        );
-        // A collection with no strict schema reads its bytes as stored.
-        assert_eq!(
-            core.resolve_event_payload(0, TID, "schemaless", CORRUPT),
-            StoredImage::AsStored
-        );
-    }
-
-    #[test]
-    fn a_corrupt_prior_row_withholds_the_old_image_and_names_the_fault() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, mut events) = strict_core(dir.path());
-        let task = make_default_task();
-        core.emit_put_event(
-            &task,
-            TID,
-            COLL,
-            RowIdentity::from_user_key("r1"),
-            &tuple("bob"),
-            Some(CORRUPT),
-        );
-        let emitted = drain(&mut events);
-        assert_eq!(emitted.len(), 1);
-        let event = &emitted[0];
-        assert_eq!(event.op, WriteOp::Update);
-        assert_eq!(event.image_fault, Some(ImageFault::Old));
-        assert!(
-            event.old_value.is_none(),
-            "raw bytes never reach the Event Plane"
-        );
-        assert_eq!(
-            name_of(event.new_value.as_deref().expect("new image")),
-            "bob"
-        );
-    }
-
-    #[test]
-    fn a_corrupt_deleted_row_emits_no_raw_bytes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, mut events) = strict_core(dir.path());
-        let task = make_default_task();
-        core.emit_document_delete_event(
-            &task,
-            TID,
-            COLL,
-            RowIdentity::from_user_key("r1"),
-            Some(CORRUPT),
-        );
-        let emitted = drain(&mut events);
-        assert_eq!(emitted.len(), 1);
-        assert_eq!(emitted[0].op, WriteOp::Delete);
-        assert_eq!(emitted[0].image_fault, Some(ImageFault::Old));
-        assert!(emitted[0].old_value.is_none());
-
-        // A decodable prior converts and names no fault.
-        core.emit_document_delete_event(
-            &task,
-            TID,
-            COLL,
-            RowIdentity::from_user_key("r1"),
-            Some(&tuple("carol")),
-        );
-        let emitted = drain(&mut events);
-        assert_eq!(emitted[0].image_fault, None);
-        assert_eq!(
-            name_of(emitted[0].old_value.as_deref().expect("old image")),
-            "carol"
-        );
-    }
-
-    #[test]
-    fn a_corrupt_post_image_refuses_its_write_set_and_stops_the_core() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _events) = strict_core(dir.path());
-        let row = || WriteSetRow {
-            database_id: 0,
-            tid: TID,
-            collection: COLL,
-            surrogate: 7,
-            identity: RowIdentity::from_user_key("r1"),
-        };
-        assert!(core.stored_row_image(row(), &tuple("dave"), 1).is_ok());
-        assert!(!core.is_fail_stopped());
-        let error = core
-            .stored_row_image(row(), CORRUPT, 1)
-            .expect_err("a corrupt row journals no redo body");
-        assert!(
-            matches!(error, crate::Error::Serialization { .. }),
-            "{error:?}"
-        );
-        assert!(core.is_fail_stopped());
-    }
-}
+#[path = "event_image_tests.rs"]
+mod tests;

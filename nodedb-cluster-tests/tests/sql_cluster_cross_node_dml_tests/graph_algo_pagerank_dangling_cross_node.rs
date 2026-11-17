@@ -129,7 +129,7 @@ async fn pagerank_dangling_nodes_mass_conserved_cross_node() {
     // Wait until EVERY node sees all expected nodes in the PageRank result —
     // edges applied + replicated AND routing view converged so a non-owning
     // coordinator runs the BSP loop across all owning shards.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {total_nodes} pagerank nodes (dangling test)"),
             Duration::from_secs(30),
@@ -137,7 +137,7 @@ async fn pagerank_dangling_nodes_mass_conserved_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+                        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         names == expected_nodes
                     })
@@ -148,8 +148,8 @@ async fn pagerank_dangling_nodes_mass_conserved_cross_node() {
     }
 
     // From every coordinator node: assert completeness AND mass conservation.
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, PAGERANK_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&node.client, PAGERANK_SQL).await;
 
         // (a) Completeness — exactly the expected distinct node set, no dups.
         let names: HashSet<String> = rows.iter().map(|(n, _)| n.clone()).collect();

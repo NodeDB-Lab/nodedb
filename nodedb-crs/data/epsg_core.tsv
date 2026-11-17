@@ -1,0 +1,126 @@
+# EPSG v12.029 PROJ 9.8.1
+code	kind	name	area	accuracy_m	datum	proj
+3857	projected	WGS 84 / Pseudo-Mercator	-180,-85.06,180,85.06		6326	+proj=webmerc +datum=WGS84 +units=m +no_defs
+4326	geographic	WGS 84	-180,-90,180,90		6326	+proj=longlat +datum=WGS84 +no_defs
+32601	projected	WGS 84 / UTM zone 1N	-180,0,-174,84		6326	+proj=utm +zone=1 +datum=WGS84 +units=m +no_defs
+32602	projected	WGS 84 / UTM zone 2N	-174,0,-168,84		6326	+proj=utm +zone=2 +datum=WGS84 +units=m +no_defs
+32603	projected	WGS 84 / UTM zone 3N	-168,0,-162,84		6326	+proj=utm +zone=3 +datum=WGS84 +units=m +no_defs
+32604	projected	WGS 84 / UTM zone 4N	-162,0,-156,84		6326	+proj=utm +zone=4 +datum=WGS84 +units=m +no_defs
+32605	projected	WGS 84 / UTM zone 5N	-156,0,-150,84		6326	+proj=utm +zone=5 +datum=WGS84 +units=m +no_defs
+32606	projected	WGS 84 / UTM zone 6N	-150,0,-144,84		6326	+proj=utm +zone=6 +datum=WGS84 +units=m +no_defs
+32607	projected	WGS 84 / UTM zone 7N	-144,0,-138,84		6326	+proj=utm +zone=7 +datum=WGS84 +units=m +no_defs
+32608	projected	WGS 84 / UTM zone 8N	-138,0,-132,84		6326	+proj=utm +zone=8 +datum=WGS84 +units=m +no_defs
+32609	projected	WGS 84 / UTM zone 9N	-132,0,-126,84		6326	+proj=utm +zone=9 +datum=WGS84 +units=m +no_defs
+32610	projected	WGS 84 / UTM zone 10N	-126,0,-120,84		6326	+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs
+32611	projected	WGS 84 / UTM zone 11N	-120,0,-114,84		6326	+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs
+32612	projected	WGS 84 / UTM zone 12N	-114,0,-108,84		6326	+proj=utm +zone=12 +datum=WGS84 +units=m +no_defs
+32613	projected	WGS 84 / UTM zone 13N	-108,0,-102,84		6326	+proj=utm +zone=13 +datum=WGS84 +units=m +no_defs
+32614	projected	WGS 84 / UTM zone 14N	-102,0,-96,84		6326	+proj=utm +zone=14 +datum=WGS84 +units=m +no_defs
+32615	projected	WGS 84 / UTM zone 15N	-96,0,-90,84		6326	+proj=utm +zone=15 +datum=WGS84 +units=m +no_defs
+32616	projected	WGS 84 / UTM zone 16N	-90,0,-84,84		6326	+proj=utm +zone=16 +datum=WGS84 +units=m +no_defs
+32617	projected	WGS 84 / UTM zone 17N	-84,0,-78,84		6326	+proj=utm +zone=17 +datum=WGS84 +units=m +no_defs
+32618	projected	WGS 84 / UTM zone 18N	-78,0,-72,84		6326	+proj=utm +zone=18 +datum=WGS84 +units=m +no_defs
+32619	projected	WGS 84 / UTM zone 19N	-72,0,-66,84		6326	+proj=utm +zone=19 +datum=WGS84 +units=m +no_defs
+32620	projected	WGS 84 / UTM zone 20N	-66,0,-60,84		6326	+proj=utm +zone=20 +datum=WGS84 +units=m +no_defs
+32621	projected	WGS 84 / UTM zone 21N	-60,0,-54,84		6326	+proj=utm +zone=21 +datum=WGS84 +units=m +no_defs
+32622	projected	WGS 84 / UTM zone 22N	-54,0,-48,84		6326	+proj=utm +zone=22 +datum=WGS84 +units=m +no_defs
+32623	projected	WGS 84 / UTM zone 23N	-48,0,-42,84		6326	+proj=utm +zone=23 +datum=WGS84 +units=m +no_defs
+32624	projected	WGS 84 / UTM zone 24N	-42,0,-36,84		6326	+proj=utm +zone=24 +datum=WGS84 +units=m +no_defs
+32625	projected	WGS 84 / UTM zone 25N	-36,0,-30,84		6326	+proj=utm +zone=25 +datum=WGS84 +units=m +no_defs
+32626	projected	WGS 84 / UTM zone 26N	-30,0,-24,84		6326	+proj=utm +zone=26 +datum=WGS84 +units=m +no_defs
+32627	projected	WGS 84 / UTM zone 27N	-24,0,-18,84		6326	+proj=utm +zone=27 +datum=WGS84 +units=m +no_defs
+32628	projected	WGS 84 / UTM zone 28N	-18,0,-12,84		6326	+proj=utm +zone=28 +datum=WGS84 +units=m +no_defs
+32629	projected	WGS 84 / UTM zone 29N	-12.01,0,-6,84.01		6326	+proj=utm +zone=29 +datum=WGS84 +units=m +no_defs
+32630	projected	WGS 84 / UTM zone 30N	-6,0,0,84		6326	+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs
+32631	projected	WGS 84 / UTM zone 31N	0,0,6,84		6326	+proj=utm +zone=31 +datum=WGS84 +units=m +no_defs
+32632	projected	WGS 84 / UTM zone 32N	6,0,12,84		6326	+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs
+32633	projected	WGS 84 / UTM zone 33N	12,0,18,84		6326	+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs
+32634	projected	WGS 84 / UTM zone 34N	18,0,24,84		6326	+proj=utm +zone=34 +datum=WGS84 +units=m +no_defs
+32635	projected	WGS 84 / UTM zone 35N	24,0,30,84		6326	+proj=utm +zone=35 +datum=WGS84 +units=m +no_defs
+32636	projected	WGS 84 / UTM zone 36N	30,0,36,84		6326	+proj=utm +zone=36 +datum=WGS84 +units=m +no_defs
+32637	projected	WGS 84 / UTM zone 37N	36,0,42,84		6326	+proj=utm +zone=37 +datum=WGS84 +units=m +no_defs
+32638	projected	WGS 84 / UTM zone 38N	42,0,48,84		6326	+proj=utm +zone=38 +datum=WGS84 +units=m +no_defs
+32639	projected	WGS 84 / UTM zone 39N	48,0,54,84		6326	+proj=utm +zone=39 +datum=WGS84 +units=m +no_defs
+32640	projected	WGS 84 / UTM zone 40N	54,0,60,84		6326	+proj=utm +zone=40 +datum=WGS84 +units=m +no_defs
+32641	projected	WGS 84 / UTM zone 41N	60,0,66,84		6326	+proj=utm +zone=41 +datum=WGS84 +units=m +no_defs
+32642	projected	WGS 84 / UTM zone 42N	66,0,72,84		6326	+proj=utm +zone=42 +datum=WGS84 +units=m +no_defs
+32643	projected	WGS 84 / UTM zone 43N	72,0,78,84		6326	+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs
+32644	projected	WGS 84 / UTM zone 44N	78,0,84,84		6326	+proj=utm +zone=44 +datum=WGS84 +units=m +no_defs
+32645	projected	WGS 84 / UTM zone 45N	84,0,90,84		6326	+proj=utm +zone=45 +datum=WGS84 +units=m +no_defs
+32646	projected	WGS 84 / UTM zone 46N	90,0,96,84		6326	+proj=utm +zone=46 +datum=WGS84 +units=m +no_defs
+32647	projected	WGS 84 / UTM zone 47N	96,0,102,84		6326	+proj=utm +zone=47 +datum=WGS84 +units=m +no_defs
+32648	projected	WGS 84 / UTM zone 48N	102,0,108,84		6326	+proj=utm +zone=48 +datum=WGS84 +units=m +no_defs
+32649	projected	WGS 84 / UTM zone 49N	108,0,114,84		6326	+proj=utm +zone=49 +datum=WGS84 +units=m +no_defs
+32650	projected	WGS 84 / UTM zone 50N	114,0,120,84		6326	+proj=utm +zone=50 +datum=WGS84 +units=m +no_defs
+32651	projected	WGS 84 / UTM zone 51N	120,0,126,84		6326	+proj=utm +zone=51 +datum=WGS84 +units=m +no_defs
+32652	projected	WGS 84 / UTM zone 52N	126,0,132,84		6326	+proj=utm +zone=52 +datum=WGS84 +units=m +no_defs
+32653	projected	WGS 84 / UTM zone 53N	132,0,138,84		6326	+proj=utm +zone=53 +datum=WGS84 +units=m +no_defs
+32654	projected	WGS 84 / UTM zone 54N	138,0,144,84		6326	+proj=utm +zone=54 +datum=WGS84 +units=m +no_defs
+32655	projected	WGS 84 / UTM zone 55N	144,0,150,84		6326	+proj=utm +zone=55 +datum=WGS84 +units=m +no_defs
+32656	projected	WGS 84 / UTM zone 56N	150,0,156,84		6326	+proj=utm +zone=56 +datum=WGS84 +units=m +no_defs
+32657	projected	WGS 84 / UTM zone 57N	156,0,162,84		6326	+proj=utm +zone=57 +datum=WGS84 +units=m +no_defs
+32658	projected	WGS 84 / UTM zone 58N	162,0,168,84		6326	+proj=utm +zone=58 +datum=WGS84 +units=m +no_defs
+32659	projected	WGS 84 / UTM zone 59N	168,0,174,84		6326	+proj=utm +zone=59 +datum=WGS84 +units=m +no_defs
+32660	projected	WGS 84 / UTM zone 60N	174,0,180,84		6326	+proj=utm +zone=60 +datum=WGS84 +units=m +no_defs
+32661	projected	WGS 84 / UPS North (N,E)	-180,60,180,90		6326	+proj=stere +lat_0=90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs
+32701	projected	WGS 84 / UTM zone 1S	-180,-80,-174,0		6326	+proj=utm +zone=1 +south +datum=WGS84 +units=m +no_defs
+32702	projected	WGS 84 / UTM zone 2S	-174,-80,-168,0		6326	+proj=utm +zone=2 +south +datum=WGS84 +units=m +no_defs
+32703	projected	WGS 84 / UTM zone 3S	-168,-80,-162,0		6326	+proj=utm +zone=3 +south +datum=WGS84 +units=m +no_defs
+32704	projected	WGS 84 / UTM zone 4S	-162,-80,-156,0		6326	+proj=utm +zone=4 +south +datum=WGS84 +units=m +no_defs
+32705	projected	WGS 84 / UTM zone 5S	-156,-80,-150,0		6326	+proj=utm +zone=5 +south +datum=WGS84 +units=m +no_defs
+32706	projected	WGS 84 / UTM zone 6S	-150,-80,-144,0		6326	+proj=utm +zone=6 +south +datum=WGS84 +units=m +no_defs
+32707	projected	WGS 84 / UTM zone 7S	-144,-80,-138,0		6326	+proj=utm +zone=7 +south +datum=WGS84 +units=m +no_defs
+32708	projected	WGS 84 / UTM zone 8S	-138,-80,-132,0		6326	+proj=utm +zone=8 +south +datum=WGS84 +units=m +no_defs
+32709	projected	WGS 84 / UTM zone 9S	-132,-80,-126,0		6326	+proj=utm +zone=9 +south +datum=WGS84 +units=m +no_defs
+32710	projected	WGS 84 / UTM zone 10S	-126,-80,-120,0		6326	+proj=utm +zone=10 +south +datum=WGS84 +units=m +no_defs
+32711	projected	WGS 84 / UTM zone 11S	-120,-80,-114,0		6326	+proj=utm +zone=11 +south +datum=WGS84 +units=m +no_defs
+32712	projected	WGS 84 / UTM zone 12S	-114,-80,-108,0		6326	+proj=utm +zone=12 +south +datum=WGS84 +units=m +no_defs
+32713	projected	WGS 84 / UTM zone 13S	-108,-80,-102,0		6326	+proj=utm +zone=13 +south +datum=WGS84 +units=m +no_defs
+32714	projected	WGS 84 / UTM zone 14S	-102,-80,-96,0		6326	+proj=utm +zone=14 +south +datum=WGS84 +units=m +no_defs
+32715	projected	WGS 84 / UTM zone 15S	-96,-80,-90,0		6326	+proj=utm +zone=15 +south +datum=WGS84 +units=m +no_defs
+32716	projected	WGS 84 / UTM zone 16S	-90,-80,-84,0		6326	+proj=utm +zone=16 +south +datum=WGS84 +units=m +no_defs
+32717	projected	WGS 84 / UTM zone 17S	-84,-80,-78,0		6326	+proj=utm +zone=17 +south +datum=WGS84 +units=m +no_defs
+32718	projected	WGS 84 / UTM zone 18S	-78,-80,-72,0		6326	+proj=utm +zone=18 +south +datum=WGS84 +units=m +no_defs
+32719	projected	WGS 84 / UTM zone 19S	-72,-80,-66,0		6326	+proj=utm +zone=19 +south +datum=WGS84 +units=m +no_defs
+32720	projected	WGS 84 / UTM zone 20S	-66,-80,-60,0		6326	+proj=utm +zone=20 +south +datum=WGS84 +units=m +no_defs
+32721	projected	WGS 84 / UTM zone 21S	-60,-80,-54,0		6326	+proj=utm +zone=21 +south +datum=WGS84 +units=m +no_defs
+32722	projected	WGS 84 / UTM zone 22S	-54,-80,-48,0		6326	+proj=utm +zone=22 +south +datum=WGS84 +units=m +no_defs
+32723	projected	WGS 84 / UTM zone 23S	-48,-80,-42,0		6326	+proj=utm +zone=23 +south +datum=WGS84 +units=m +no_defs
+32724	projected	WGS 84 / UTM zone 24S	-42,-80,-36,0		6326	+proj=utm +zone=24 +south +datum=WGS84 +units=m +no_defs
+32725	projected	WGS 84 / UTM zone 25S	-36,-80,-30,0		6326	+proj=utm +zone=25 +south +datum=WGS84 +units=m +no_defs
+32726	projected	WGS 84 / UTM zone 26S	-30,-80,-24,0		6326	+proj=utm +zone=26 +south +datum=WGS84 +units=m +no_defs
+32727	projected	WGS 84 / UTM zone 27S	-24,-80,-18,0		6326	+proj=utm +zone=27 +south +datum=WGS84 +units=m +no_defs
+32728	projected	WGS 84 / UTM zone 28S	-18,-80,-12,0		6326	+proj=utm +zone=28 +south +datum=WGS84 +units=m +no_defs
+32729	projected	WGS 84 / UTM zone 29S	-12,-80,-6,0		6326	+proj=utm +zone=29 +south +datum=WGS84 +units=m +no_defs
+32730	projected	WGS 84 / UTM zone 30S	-6,-80,0,0		6326	+proj=utm +zone=30 +south +datum=WGS84 +units=m +no_defs
+32731	projected	WGS 84 / UTM zone 31S	0,-80,6,0		6326	+proj=utm +zone=31 +south +datum=WGS84 +units=m +no_defs
+32732	projected	WGS 84 / UTM zone 32S	6,-80,12,0		6326	+proj=utm +zone=32 +south +datum=WGS84 +units=m +no_defs
+32733	projected	WGS 84 / UTM zone 33S	12,-80,18,0		6326	+proj=utm +zone=33 +south +datum=WGS84 +units=m +no_defs
+32734	projected	WGS 84 / UTM zone 34S	18,-80,24,0		6326	+proj=utm +zone=34 +south +datum=WGS84 +units=m +no_defs
+32735	projected	WGS 84 / UTM zone 35S	24,-80,30,0		6326	+proj=utm +zone=35 +south +datum=WGS84 +units=m +no_defs
+32736	projected	WGS 84 / UTM zone 36S	30,-80,36,0		6326	+proj=utm +zone=36 +south +datum=WGS84 +units=m +no_defs
+32737	projected	WGS 84 / UTM zone 37S	36,-80,42,0		6326	+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs
+32738	projected	WGS 84 / UTM zone 38S	42,-80,48,0		6326	+proj=utm +zone=38 +south +datum=WGS84 +units=m +no_defs
+32739	projected	WGS 84 / UTM zone 39S	48,-80,54,0		6326	+proj=utm +zone=39 +south +datum=WGS84 +units=m +no_defs
+32740	projected	WGS 84 / UTM zone 40S	54,-80,60,0		6326	+proj=utm +zone=40 +south +datum=WGS84 +units=m +no_defs
+32741	projected	WGS 84 / UTM zone 41S	60,-80,66,0		6326	+proj=utm +zone=41 +south +datum=WGS84 +units=m +no_defs
+32742	projected	WGS 84 / UTM zone 42S	66,-80,72,0		6326	+proj=utm +zone=42 +south +datum=WGS84 +units=m +no_defs
+32743	projected	WGS 84 / UTM zone 43S	72,-80,78,0		6326	+proj=utm +zone=43 +south +datum=WGS84 +units=m +no_defs
+32744	projected	WGS 84 / UTM zone 44S	78,-80,84,0		6326	+proj=utm +zone=44 +south +datum=WGS84 +units=m +no_defs
+32745	projected	WGS 84 / UTM zone 45S	84,-80,90,0		6326	+proj=utm +zone=45 +south +datum=WGS84 +units=m +no_defs
+32746	projected	WGS 84 / UTM zone 46S	90,-80,96,0		6326	+proj=utm +zone=46 +south +datum=WGS84 +units=m +no_defs
+32747	projected	WGS 84 / UTM zone 47S	96,-80,102,0		6326	+proj=utm +zone=47 +south +datum=WGS84 +units=m +no_defs
+32748	projected	WGS 84 / UTM zone 48S	102,-80,108,0		6326	+proj=utm +zone=48 +south +datum=WGS84 +units=m +no_defs
+32749	projected	WGS 84 / UTM zone 49S	108,-80,114,0		6326	+proj=utm +zone=49 +south +datum=WGS84 +units=m +no_defs
+32750	projected	WGS 84 / UTM zone 50S	114,-80,120,0		6326	+proj=utm +zone=50 +south +datum=WGS84 +units=m +no_defs
+32751	projected	WGS 84 / UTM zone 51S	120,-80,126,0		6326	+proj=utm +zone=51 +south +datum=WGS84 +units=m +no_defs
+32752	projected	WGS 84 / UTM zone 52S	126,-80,132,0		6326	+proj=utm +zone=52 +south +datum=WGS84 +units=m +no_defs
+32753	projected	WGS 84 / UTM zone 53S	132,-80,138,0		6326	+proj=utm +zone=53 +south +datum=WGS84 +units=m +no_defs
+32754	projected	WGS 84 / UTM zone 54S	138,-80,144,0		6326	+proj=utm +zone=54 +south +datum=WGS84 +units=m +no_defs
+32755	projected	WGS 84 / UTM zone 55S	144,-80,150,0		6326	+proj=utm +zone=55 +south +datum=WGS84 +units=m +no_defs
+32756	projected	WGS 84 / UTM zone 56S	150,-80,156,0		6326	+proj=utm +zone=56 +south +datum=WGS84 +units=m +no_defs
+32757	projected	WGS 84 / UTM zone 57S	156,-80,162,0		6326	+proj=utm +zone=57 +south +datum=WGS84 +units=m +no_defs
+32758	projected	WGS 84 / UTM zone 58S	162,-80,168,0		6326	+proj=utm +zone=58 +south +datum=WGS84 +units=m +no_defs
+32759	projected	WGS 84 / UTM zone 59S	168,-80,174,0		6326	+proj=utm +zone=59 +south +datum=WGS84 +units=m +no_defs
+32760	projected	WGS 84 / UTM zone 60S	174,-80,180,0		6326	+proj=utm +zone=60 +south +datum=WGS84 +units=m +no_defs
+32761	projected	WGS 84 / UPS South (N,E)	-180,-90,180,-60		6326	+proj=stere +lat_0=-90 +lon_0=0 +k=0.994 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs

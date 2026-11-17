@@ -7,12 +7,14 @@
 //! reads, comparisons, and hashing all work on raw byte offsets.
 
 pub mod aggregate_helpers;
+pub mod canonical_key;
 pub mod compare;
 pub mod compare_decimal;
 pub mod field;
 pub mod filter;
 pub mod group_key;
 pub mod index;
+pub mod join_key;
 pub mod kv_body;
 pub mod kv_row;
 pub mod reader;
@@ -22,8 +24,11 @@ pub mod writer;
 pub use compare::{compare_field_bytes, hash_field_bytes};
 pub use compare_decimal::{compare_decimal_field_bytes, decimal_reading};
 pub use field::{extract_field, extract_path};
-pub use group_key::build_group_key;
+pub use group_key::{build_group_key, build_group_key_values, build_group_key_values_indexed};
 pub use index::FieldIndex;
+pub use join_key::{
+    join_key_identity, join_key_values, join_match_identity, join_match_key, resolve_qualified_key,
+};
 pub use kv_body::{
     KvBodyError, KvBodyShape, kv_body_shape, kv_body_to_row, kv_row_to_body_fields, row_to_kv_body,
 };

@@ -82,6 +82,22 @@ impl CsrIndex {
         self.dense_scoped(node, collection_id, false).into_iter()
     }
 
+    /// Raw outbound iteration with each edge's collection: yields
+    /// `(label_id, dst, collection_id)` for every live edge (dense + buffer,
+    /// minus deleted). [`Self::collection_name`] names the collection, so a
+    /// reader of one crossed edge finds its storage key without a collection
+    /// scope.
+    pub fn iter_out_edges_raw_with_collection(&self, node: u32) -> Vec<(u32, u32, u32)> {
+        self.dense_iter_out_coll(node)
+    }
+
+    /// Raw inbound iteration with each edge's collection: yields
+    /// `(label_id, src, collection_id)` (see
+    /// [`Self::iter_out_edges_raw_with_collection`]).
+    pub fn iter_in_edges_raw_with_collection(&self, node: u32) -> Vec<(u32, u32, u32)> {
+        self.dense_iter_in_coll(node)
+    }
+
     /// Build the collection-filtered `(label, neighbor)` list for a node.
     /// `outbound = true` selects out-edges, `false` selects in-edges.
     fn dense_scoped(&self, node: u32, collection_id: u32, outbound: bool) -> Vec<(u32, u32)> {

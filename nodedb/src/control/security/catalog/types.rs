@@ -26,7 +26,7 @@ pub use super::collection_constraints::{
     MaterializedSumDef, PeriodLockDef, StateTransitionDef, TransitionCheckDef, TransitionRule,
 };
 pub use super::continuous_aggregate::StoredContinuousAggregate;
-pub use super::index_record::{IndexKind, StoredIndexRecord};
+pub use super::index_record::{IndexKind, IndexRecordState, StoredIndexRecord};
 pub use super::materialized_view::StoredMaterializedView;
 pub use super::system_catalog::SystemCatalog;
 

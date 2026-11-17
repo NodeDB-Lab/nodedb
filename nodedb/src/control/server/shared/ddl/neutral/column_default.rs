@@ -153,6 +153,9 @@ fn clause_error(clause: &str, owner: &str, error: &SqlError) -> DdlError {
         | SqlError::NumericLiteralOutOfRange { .. } => sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
         SqlError::DivisionByZero => sqlstate::DIVISION_BY_ZERO,
         SqlError::DataException { .. } => sqlstate::DATA_EXCEPTION,
+        SqlError::MathDomain(fault) => fault.sqlstate(),
+        SqlError::InvalidTextRepresentation { .. } => sqlstate::INVALID_TEXT_REPRESENTATION,
+        SqlError::InvalidDatetimeFormat { .. } => sqlstate::INVALID_DATETIME_FORMAT,
         SqlError::InvalidLimitValue { .. } => sqlstate::INVALID_LIMIT_VALUE,
         SqlError::UnknownTable { .. } | SqlError::CollectionDeactivated { .. } => {
             sqlstate::UNDEFINED_TABLE

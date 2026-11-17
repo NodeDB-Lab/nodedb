@@ -175,6 +175,7 @@ fn expand_batch_insert(task: &PhysicalTask) -> crate::Result<Vec<PhysicalTask>> 
         if_absent,
         returning,
         rls_filters,
+        rls_write_check,
         resolved_sum_targets,
         deferred_sum_targets,
     }) = &task.plan
@@ -211,6 +212,7 @@ fn expand_batch_insert(task: &PhysicalTask) -> crate::Result<Vec<PhysicalTask>> 
                 surrogate,
                 returning: returning.clone(),
                 rls_filters: rls_filters.clone(),
+                rls_write_check: rls_write_check.clone(),
                 resolved_sum_targets: resolved_sum_targets.clone(),
                 deferred_sum_targets: deferred_sum_targets.clone(),
             }),

@@ -7,6 +7,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::planner::calvin::{is_dependent_predicate, is_write_plan};
+use crate::control::server::shared::statement_exec::fallible_returning::orchestrated_returning_can_fail;
 use crate::control::state::SharedState;
 use crate::control::trigger::dml_hook::classify_dml_write;
 use crate::control::trigger::statement_txn::fires_joined_body;
@@ -45,7 +46,7 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 }
 
 /// Whether a statement outside a transaction block runs in an implicit
-/// transaction. It does in four cases:
+/// transaction. It does in five cases:
 ///
 /// - It holds a predicate write that follows another write. A request of
 ///   several statements plans as one task set, and each later statement must
@@ -59,13 +60,22 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 ///   the source of a materialized sum whose target lives on another vShard.
 ///   The expansion ships that balance on an `ApplyBalanceDelta` task homed
 ///   on the target, and COMMIT applies it with the source rows.
+/// - It is an `INSERT ... SELECT`, `UPDATE ... FROM` or `MERGE` whose
+///   `RETURNING` list can fail. Each row it writes stages and answers from
+///   its staged image, so an error in the list rolls the statement back.
+///   The statement is bounded by the transaction staging budget.
 ///
-/// A MERGE target name without its database's form is an error.
+/// A MERGE target name without its database's form is an error. The
+/// fallibility of a `RETURNING` list reads the columns the statement
+/// announced, so a caller runs this in their scope.
 pub fn statement_needs_implicit_txn(
     state: &SharedState,
     tasks: &[PhysicalTask],
 ) -> crate::Result<bool> {
-    if holds_ordered_predicate_write(tasks) || statement_fires_joined_body(state, tasks) {
+    if holds_ordered_predicate_write(tasks)
+        || statement_fires_joined_body(state, tasks)
+        || orchestrated_returning_can_fail(state, tasks)
+    {
         return Ok(true);
     }
     for task in tasks {

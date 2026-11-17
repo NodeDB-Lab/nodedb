@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use nodedb_physical::physical_plan::GraphReadScope;
 use nodedb_types::filter::MetadataFilter;
 use nodedb_types::graph::Direction;
-use nodedb_types::{DatabaseId, TenantId, Value};
+use nodedb_types::{DatabaseId, TenantId};
 
 use crate::engine::graph::edge_store::{EdgePropertyReader, EdgeRef, EdgeStore};
 
@@ -37,9 +37,9 @@ pub(in crate::data::executor) struct HopEdgeProperties<'a> {
 pub(in crate::data::executor) enum EdgeCrossing {
     /// The predicate rejects the edge: the hop drops its row.
     Rejected,
-    /// The row stays. Carries the edge's property object when the hop
-    /// returns properties.
-    Admitted(Option<Value>),
+    /// The row stays. Carries the edge's stored property image when the hop
+    /// returns properties: a well-formed object, or empty bytes for `{}`.
+    Admitted(Option<Vec<u8>>),
 }
 
 /// The scope a hop reads edge properties in.
@@ -122,11 +122,8 @@ impl<'a> HopEdgeProperties<'a> {
         if !self.with_properties {
             return Ok(EdgeCrossing::Admitted(None));
         }
-        Ok(EdgeCrossing::Admitted(Some(property_object(
-            &properties,
-            src,
-            label,
-            dst,
+        Ok(EdgeCrossing::Admitted(Some(property_image(
+            properties, src, label, dst,
         )?)))
     }
 
@@ -155,22 +152,20 @@ impl<'a> HopEdgeProperties<'a> {
     }
 }
 
-/// The stored property map as a `Value::Object`. Empty bytes are `{}`.
-fn property_object(bytes: &[u8], src: &str, label: &str, dst: &str) -> crate::Result<Value> {
-    if bytes.is_empty() {
-        return Ok(Value::Object(Default::default()));
+/// The stored property image, checked to be one well-formed object: a
+/// native tagged object or a plain map. Empty bytes stand for `{}`.
+fn property_image(
+    bytes: Cow<'_, [u8]>,
+    src: &str,
+    label: &str,
+    dst: &str,
+) -> crate::Result<Vec<u8>> {
+    if !bytes.is_empty() {
+        nodedb_types::ObjectView::new(&bytes).map_err(|e| crate::Error::Codec {
+            detail: format!("edge ({src})-[{label}]->({dst}) properties are not one object: {e}"),
+        })?;
     }
-    match nodedb_types::json_msgpack::value_from_msgpack(bytes) {
-        Ok(object @ Value::Object(_)) => Ok(object),
-        Ok(other) => Err(crate::Error::Codec {
-            detail: format!(
-                "edge ({src})-[{label}]->({dst}) stores properties that are not a map: {other:?}"
-            ),
-        }),
-        Err(e) => Err(crate::Error::Codec {
-            detail: format!("edge ({src})-[{label}]->({dst}) properties do not decode: {e}"),
-        }),
-    }
+    Ok(bytes.into_owned())
 }
 
 /// One oriented pass of a hop: the edges leaving, or entering, the frontier.
@@ -251,6 +246,7 @@ pub(in crate::data::executor) fn hop_passes(direction: Direction, oriented: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::Value;
 
     #[test]
     fn both_splits_only_when_oriented() {
@@ -276,20 +272,39 @@ mod tests {
     }
 
     #[test]
-    fn property_object_reads_a_map_and_refuses_anything_else() {
-        assert_eq!(
-            property_object(&[], "a", "L", "b").unwrap(),
-            Value::Object(Default::default())
-        );
-        let map = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"w": 2}))
+    fn property_image_keeps_an_object_and_refuses_anything_else() {
+        fn image(bytes: &[u8]) -> crate::Result<Vec<u8>> {
+            property_image(Cow::Borrowed(bytes), "a", "L", "b")
+        }
+        assert!(image(&[]).expect("empty is {}").is_empty());
+        let native = nodedb_graph::encode_edge_properties(std::collections::HashMap::from([(
+            "w".to_string(),
+            Value::Decimal("12.50".parse().expect("decimal")),
+        )]))
+        .expect("encode");
+        assert_eq!(image(&native).expect("a native object"), native);
+        let plain = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"w": 2}))
             .expect("encode");
-        let Value::Object(fields) = property_object(&map, "a", "L", "b").unwrap() else {
-            panic!("a map decodes as an object");
-        };
-        assert_eq!(fields.get("w"), Some(&Value::Integer(2)));
+        assert_eq!(image(&plain).expect("a plain map"), plain);
         let list =
             nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!([1])).expect("encode");
-        assert!(property_object(&list, "a", "L", "b").is_err());
+        assert!(image(&list).is_err());
+    }
+
+    /// The stored image of `fields`, as an edge write stores it.
+    fn stored(fields: Vec<(&str, Value)>) -> Vec<u8> {
+        nodedb_graph::encode_edge_properties(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+        .expect("encode properties")
+    }
+
+    /// The property object a returned image decodes to.
+    fn object(image: &[u8]) -> std::collections::HashMap<String, Value> {
+        nodedb_graph::decode_edge_properties(image).expect("decode properties")
     }
 
     fn store() -> (EdgeStore, tempfile::TempDir) {
@@ -335,8 +350,10 @@ mod tests {
     #[test]
     fn cross_filters_on_stored_properties_and_returns_them() {
         let (store, _dir) = store();
-        let props = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"score": 9}))
-            .expect("encode");
+        let props = stored(vec![
+            ("score", Value::Integer(9)),
+            ("price", Value::Decimal("12.50".parse().expect("decimal"))),
+        ]);
         let edge = EdgeRef::new(DatabaseId::DEFAULT, TenantId::new(1), "g", "a", "L", "b");
         store
             .put_edge_versioned(edge, &props, 10, 10, i64::MAX)
@@ -349,8 +366,13 @@ mod tests {
             .unwrap()
             .expect("a predicate opens a reader");
         match hop.cross("a", "L", "b", None).unwrap() {
-            EdgeCrossing::Admitted(Some(Value::Object(fields))) => {
+            EdgeCrossing::Admitted(Some(image)) => {
+                let fields = object(&image);
                 assert_eq!(fields.get("score"), Some(&Value::Integer(9)));
+                assert_eq!(
+                    fields.get("price"),
+                    Some(&Value::Decimal("12.50".parse().expect("decimal")))
+                );
             }
             _ => panic!("score 9 > 5 admits the edge with its properties"),
         }
@@ -365,14 +387,12 @@ mod tests {
     #[test]
     fn staged_properties_replace_the_stored_map() {
         let (store, _dir) = store();
-        let stored = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"score": 9}))
-            .expect("encode");
+        let stored_map = stored(vec![("score", Value::Integer(9))]);
         let edge = EdgeRef::new(DatabaseId::DEFAULT, TenantId::new(1), "g", "a", "L", "b");
         store
-            .put_edge_versioned(edge, &stored, 10, 10, i64::MAX)
+            .put_edge_versioned(edge, &stored_map, 10, 10, i64::MAX)
             .expect("put edge");
-        let staged = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"score": 1}))
-            .expect("encode");
+        let staged = stored(vec![("score", Value::Integer(1))]);
         let filters = [MetadataFilter::Gt {
             field: "score".into(),
             value: Value::Integer(5),
@@ -388,11 +408,10 @@ mod tests {
             hop.reader.is_none(),
             "a staged map reads nothing from the store"
         );
-        let fresh = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"score": 7}))
-            .expect("encode");
+        let fresh = stored(vec![("score", Value::Integer(7))]);
         match hop.cross("a", "L", "new", Some(&fresh)).unwrap() {
-            EdgeCrossing::Admitted(Some(Value::Object(fields))) => {
-                assert_eq!(fields.get("score"), Some(&Value::Integer(7)));
+            EdgeCrossing::Admitted(Some(image)) => {
+                assert_eq!(object(&image).get("score"), Some(&Value::Integer(7)));
             }
             _ => panic!("a staged edge with score 7 is admitted with its staged map"),
         }

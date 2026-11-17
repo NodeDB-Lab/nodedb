@@ -216,9 +216,9 @@ impl TestServer {
     /// Spawn a single-core NodeDB server and connect via pgwire.
     pub(super) async fn start_with_config(cfg: StartConfig) -> Self {
         let graph_tuning = cfg.graph_tuning.clone().unwrap_or_default();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create the temp data directory");
         let wal_path = dir.path().join("test.wal");
-        let wal = Arc::new(WalManager::open_for_testing(&wal_path).unwrap());
+        let wal = Arc::new(WalManager::open_for_testing(&wal_path).expect("open the test WAL"));
 
         let (dispatcher, data_sides) = Dispatcher::new(1, 64);
         let (event_producers, event_consumers) = create_event_bus(1);
@@ -227,7 +227,7 @@ impl TestServer {
         let catalog_path = dir.path().join("system.redb");
         let mut credential_store =
             nodedb::control::security::credential::store::CredentialStore::open(&catalog_path)
-                .unwrap();
+                .expect("open the credential store");
         // Apply the lockout policy before the store is shared — `set_lockout_policy`
         // needs `&mut`, so it cannot be called once wrapped in an `Arc`.
         if let Some((max_failed, lockout_secs)) = cfg.lockout {
@@ -318,6 +318,7 @@ impl TestServer {
                     num_cores: 1,
                     data_side,
                     core_dir: dir.path().to_path_buf(),
+                    wal_source: wal.read_source(),
                     core_array_catalog: shared.array_catalog.clone(),
                     event_producer,
                     // Share the Control-Plane `SystemMetrics` so the Data-Plane
@@ -368,10 +369,12 @@ impl TestServer {
             }
         });
 
-        let watermark_store =
-            Arc::new(nodedb::event::watermark::WatermarkStore::open(dir.path()).unwrap());
+        let watermark_store = Arc::new(
+            nodedb::event::watermark::WatermarkStore::open(dir.path())
+                .expect("open the watermark store"),
+        );
         let trigger_dlq = Arc::new(std::sync::Mutex::new(
-            nodedb::event::trigger::TriggerDlq::open(dir.path()).unwrap(),
+            nodedb::event::trigger::TriggerDlq::open(dir.path()).expect("open the trigger DLQ"),
         ));
         // Create the canonical bus before the Event Plane so every consumer
         // and listener observes the same shutdown phases.
@@ -395,9 +398,13 @@ impl TestServer {
             .expect("start the one-node cluster");
 
         // PgWire listener.
-        let pg_listener = PgListener::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let pg_listener = PgListener::bind(
+            "127.0.0.1:0"
+                .parse()
+                .expect("parse the loopback listener address"),
+        )
+        .await
+        .expect("bind the pgwire listener");
         let pg_addr = pg_listener.local_addr();
 
         let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
@@ -419,7 +426,7 @@ impl TestServer {
                     bus_pg,
                 )
                 .await
-                .unwrap();
+                .expect("run the pgwire listener");
         });
 
         // Native (MessagePack) listener — same SharedState, ephemeral port.
@@ -489,7 +496,7 @@ impl TestServer {
         let original_dir = {
             // SAFETY: we swap the dir out before drop so neither the old
             // nor the new TempDir is double-freed.
-            let placeholder = tempfile::tempdir().unwrap();
+            let placeholder = tempfile::tempdir().expect("create the placeholder temp directory");
             std::mem::replace(&mut self._dir, placeholder)
         };
         (self, TestDataDir(original_dir))

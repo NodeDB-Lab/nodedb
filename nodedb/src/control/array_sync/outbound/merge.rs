@@ -34,7 +34,7 @@ use nodedb_types::sync::wire::SyncMessageType;
 use nodedb_types::sync::wire::array::ArrayDeltaMsg;
 use tracing::warn;
 
-use super::delivery::ArrayDeliveryRegistry;
+use super::delivery::{ArrayDeliveryRegistry, ArrayFrame};
 use super::subscriber_state::SubscriberMap;
 
 /// Number of buffered ops that triggers an immediate drain regardless of the
@@ -266,7 +266,10 @@ impl MultiShardMerger {
             }
         };
 
-        if !delivery.enqueue(&self.session_id, frame) {
+        if !delivery.enqueue(
+            &self.session_id,
+            ArrayFrame::new(self.array.as_str(), frame),
+        ) {
             return false;
         }
 
@@ -488,7 +491,7 @@ mod tests {
         while let Ok(frame) = rx.try_recv() {
             // Decode the frame to extract the op and check HLC order.
             // Frame is a raw SyncFrame bytes — just check we received 3 frames.
-            assert!(!frame.is_empty());
+            assert!(!frame.bytes.is_empty());
             timestamps.push(timestamps.len() as u64); // placeholder count
         }
         assert_eq!(timestamps.len(), 3, "expected 3 frames delivered");

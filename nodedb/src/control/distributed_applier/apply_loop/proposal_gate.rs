@@ -22,8 +22,9 @@ pub(super) enum EntryOutcome {
     Skipped,
     /// A second committed copy of a proposal this node already applied. Its
     /// first copy's outcome is durable, so it extends the prefix. The ledger
-    /// already holds the proposal.
-    Repeat,
+    /// already holds the proposal. `wrote_rows` says the first copy wrote
+    /// user rows, so this copy carries the tenant write mark again.
+    Repeat { wrote_rows: bool },
     /// A snapshot this node installed holds the entry's effects: the
     /// snapshot was cut above its Raft index. The installed state is durable,
     /// so the entry extends the prefix without applying.
@@ -50,6 +51,10 @@ pub(super) enum HoldReason {
     /// The entry's enqueue or apply panicked here, so its effect on this
     /// replica is unknown.
     ApplyPanicked,
+    /// The entry installed here, and its change events did not stage after
+    /// every retry. Settling it without them loses them from this node's
+    /// change feed.
+    ChangesUnstaged,
 }
 
 impl HoldReason {
@@ -58,6 +63,7 @@ impl HoldReason {
             Self::BodyMissing => "body_missing",
             Self::Malformed => "malformed",
             Self::ApplyPanicked => "apply_panicked",
+            Self::ChangesUnstaged => "changes_unstaged",
         }
     }
 }
@@ -67,17 +73,18 @@ impl EntryOutcome {
     pub fn hold_reason(&self) -> Option<HoldReason> {
         match self {
             Self::Held { reason } => Some(*reason),
-            Self::Skipped | Self::Repeat | Self::Covered | Self::Applied { .. } => None,
+            Self::Skipped | Self::Repeat { .. } | Self::Covered | Self::Applied { .. } => None,
         }
     }
 
     /// Whether the apply wrote the entry's rows. A refused or failed apply
     /// wrote none, so it raises no tenant write mark. A second copy writes
-    /// nothing itself: its mark follows its first copy (see
-    /// [`ProposalGate::prior_wrote_rows`]).
+    /// nothing itself, and reports what its first copy wrote: its mark
+    /// follows its first copy (see [`ProposalGate::prior_wrote_rows`]).
     pub fn wrote_rows(&self) -> bool {
         match self {
-            Self::Skipped | Self::Repeat | Self::Covered | Self::Held { .. } => false,
+            Self::Repeat { wrote_rows } => *wrote_rows,
+            Self::Skipped | Self::Covered | Self::Held { .. } => false,
             Self::Applied {
                 result: Some(outcome),
                 ..
@@ -229,7 +236,7 @@ impl ProposalGate {
         }
         match outcome {
             EntryOutcome::Skipped => Settlement::Settles(PrefixStep::Neutral),
-            EntryOutcome::Repeat => Settlement::Settles(PrefixStep::Record(true)),
+            EntryOutcome::Repeat { .. } => Settlement::Settles(PrefixStep::Record(true)),
             EntryOutcome::Covered => {
                 self.note_covered(proposal_key);
                 Settlement::Settles(PrefixStep::Record(true))
@@ -321,5 +328,32 @@ mod tests {
 
         gate.note_covered(9);
         assert!(gate.skip_duplicate(&tracker, 1, 12, 9));
+    }
+
+    /// A repeat reports what its first copy wrote, so a repeat that stages
+    /// its change events again carries the first copy's tenant mark.
+    #[test]
+    fn a_repeat_reports_what_its_first_copy_wrote_and_extends_the_prefix() {
+        let mut gate = ProposalGate::new(ProposalLedger::new(PROPOSAL_LEDGER_CAPACITY));
+        assert!(EntryOutcome::Repeat { wrote_rows: true }.wrote_rows());
+        assert!(!EntryOutcome::Repeat { wrote_rows: false }.wrote_rows());
+        gate.open(5);
+        let step = gate.conclude(5, true, EntryOutcome::Repeat { wrote_rows: true });
+        assert_eq!(step, Settlement::Settles(PrefixStep::Record(true)));
+        assert!(!gate.in_flight(5));
+    }
+
+    /// An entry whose change events did not stage holds its lane.
+    #[test]
+    fn an_entry_without_its_change_events_holds_its_lane() {
+        let mut gate = ProposalGate::new(ProposalLedger::new(PROPOSAL_LEDGER_CAPACITY));
+        let held = EntryOutcome::Held {
+            reason: HoldReason::ChangesUnstaged,
+        };
+        assert_eq!(
+            gate.conclude(6, false, held),
+            Settlement::Holds(HoldReason::ChangesUnstaged)
+        );
+        assert_eq!(HoldReason::ChangesUnstaged.as_str(), "changes_unstaged");
     }
 }

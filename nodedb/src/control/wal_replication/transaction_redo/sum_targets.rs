@@ -55,10 +55,10 @@ fn shipped_on_own_task(target: &ResolvedSumTarget, deferred: &[String]) -> bool 
     deferred.contains(&target.target_collection)
 }
 
-type SumTargetSlots<'a> = (&'a str, &'a [ResolvedSumTarget], &'a [String]);
+pub(crate) type SumTargetSlots<'a> = (&'a str, &'a [ResolvedSumTarget], &'a [String]);
 
 /// The source collection and sum-target slots of one document write.
-fn document_sum_targets(op: &DocumentOp) -> Option<SumTargetSlots<'_>> {
+pub(crate) fn document_sum_targets(op: &DocumentOp) -> Option<SumTargetSlots<'_>> {
     match op {
         DocumentOp::PointInsert {
             collection,
@@ -185,6 +185,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: vec![target],
             deferred_sum_targets: vec![deferred.to_string()],
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 

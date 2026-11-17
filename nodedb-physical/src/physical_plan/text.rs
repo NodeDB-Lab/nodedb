@@ -268,14 +268,12 @@ pub enum TextOp {
         system_time: SystemTimeScope,
     },
 
-    /// Bind a collection's per-collection FTS analyzer.
+    /// Bind a collection's per-collection FTS analyzer on an embedded store.
     ///
-    /// Persists to backend metadata (`InvertedIndex::set_collection_analyzer`)
-    /// so `InvertedIndex::analyze_for_collection` resolves it for every
-    /// subsequent tokenization of the collection's text — forward indexing,
-    /// the in-transaction staged-write overlay, and query-time scoring alike.
-    /// Config-only, single-node, non-WAL-durable — the same dispatch shape
-    /// `VectorOp::SetParams` uses for `CREATE VECTOR INDEX`.
+    /// Lite applies it to its own index. Origin refuses it: there the
+    /// analyzer and fuzzy default travel on the collection's full-text index
+    /// records, and `DocumentOp::Register` carries them to every core of
+    /// every node in its `TextFieldSet`.
     SetTextConfig {
         collection: QualifiedCollection,
         /// Analyzer name, already checked against
@@ -287,4 +285,68 @@ pub enum TextOp {
         /// by default. `None` leaves the current setting in place.
         fuzzy_default: Option<bool>,
     },
+
+    /// Make sure a rebuild of a collection's full-text index over
+    /// `text_fields` runs or ran on the core, and report where it stands.
+    ///
+    /// The core installs `text_fields` as the collection's declared field
+    /// list and starts a rebuild off the core. The rebuild replays every
+    /// stored version of every document at its own system time, then every
+    /// stored sync frame of a document with no stored version. The core
+    /// cuts the rebuilt index over in one transaction, with every write made
+    /// during the rebuild replayed on top. An empty `text_fields` leaves no
+    /// text.
+    ///
+    /// The core installs `analyzer` and `fuzzy_default` first, so the rebuild
+    /// tokenizes with the analysis the catalog's records name, even on a node
+    /// whose Register of them has not landed yet. A change of the installed
+    /// analysis ends every rebuild of the collection that ran under the old
+    /// one, and starts a new one.
+    ///
+    /// The op is idempotent under `text_fields`. A rebuild over the same
+    /// fields that runs, or that cut over with the declared fields unchanged
+    /// since, answers its state and starts nothing. Two drivers of one step,
+    /// or two statements that agree on the fields, share one rebuild per
+    /// core. A rebuild over other fields is replaced. The answer is an
+    /// encoded [`TextRebuildProgress`]. A rebuild that failed answers its
+    /// error once, and the next op starts a new rebuild.
+    ///
+    /// The index is derived state, so the op is not WAL-durable. The DDL
+    /// layer sends it to every node that hosts the collection's rows, and
+    /// sends it again until each node answers `Installed`.
+    RebuildIndex {
+        collection: QualifiedCollection,
+        /// The declared full-text fields, sorted and deduped.
+        text_fields: Vec<String>,
+        /// The analyzer the collection's full-text records name. `None`
+        /// means the standard analyzer.
+        #[serde(default)]
+        analyzer: Option<String>,
+        /// The fuzzy default the collection's full-text records name.
+        #[serde(default)]
+        fuzzy_default: bool,
+    },
+}
+
+/// Where one `TextOp::RebuildIndex` rebuild stands on the core that
+/// answers it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub enum TextRebuildProgress {
+    /// The rebuild runs off the core. `replayed` counts every document
+    /// version, frame version and carried row its walk visited so far,
+    /// replayed or skipped. It moves while the walk moves.
+    Running { replayed: u64 },
+    /// The rebuilt index is live. `replayed` counts every item the
+    /// rebuild's walk visited.
+    Installed { replayed: u64 },
 }

@@ -51,6 +51,7 @@ impl MutationEngine {
         rows: impl IntoIterator<Item = BatchRow<'a>>,
         conflict: BatchConflict,
     ) -> Result<Vec<MutationResult>, ColumnarError> {
+        self.require_primary_key()?;
         let start = self.memtable.row_count();
         let mut priors: HashMap<Vec<u8>, PriorBinding> = HashMap::new();
         let mut results = Vec::new();

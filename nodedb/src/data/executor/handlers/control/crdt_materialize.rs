@@ -36,12 +36,25 @@ use crate::data::executor::handlers::transaction::undo::document_outcome::{
 use nodedb_types::{RowIdentity, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::enforcement::chain_guard::{AbandonedWrite, abandon_write};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
 use crate::engine::document::store::StorageKey;
 use crate::types::TenantId;
+use loro::LoroValue;
+use nodedb_crdt::state::RowWrite;
+
+/// The row a one-row CRDT write projects into the sparse store.
+pub(super) struct ProjectedRow<'a> {
+    pub collection: &'a str,
+    /// The Loro row id the client addresses the row by.
+    pub document_id: &'a str,
+    pub surrogate: Surrogate,
+    /// See [`CrdtMaterializeWrite::index_text`].
+    pub index_text: bool,
+}
 
 /// One CRDT row write to materialize into the sparse store.
 pub(super) struct CrdtMaterializeWrite<'a> {
@@ -58,28 +71,29 @@ pub(super) struct CrdtMaterializeWrite<'a> {
 }
 
 impl CoreLoop {
-    /// Read the merged Loro row back and encode it into the schemaless
-    /// MessagePack bytes the native put path accepts.
+    /// Read the merged Loro row back, its block lists resolved, and encode it
+    /// into the native object body the native put path accepts.
     ///
     /// Called while the CRDT engine `&mut` borrow is still live (the borrow
     /// checker forbids touching `self.sparse` here), so it is an associated
-    /// function over the borrowed engine rather than a method. Returns `None`
-    /// when the row is absent or cannot be converted — the caller then skips
-    /// the sparse write. A materialization miss must never fail the delta
-    /// apply: the Loro merge has already succeeded and the sync stream must
-    /// not wedge.
+    /// function over the borrowed engine rather than a method. `Ok(None)`
+    /// when the row is absent. A row that does not decode (a Loro binary that
+    /// is not a tagged value) is an error: the caller fails its read or
+    /// write, or faults the sync apply, rather than drop the projection.
     ///
-    /// The returned bytes are the pre-canonicalization MessagePack, matching
-    /// the raw `value` a native put receives; `apply_point_put` canonicalizes
-    /// (or Binary-Tuple-encodes) internally, so encoding here would diverge
-    /// from the native pipeline.
+    /// The returned bytes are the pre-canonicalization body, matching the raw
+    /// `value` a native put receives; `apply_point_put` canonicalizes (or
+    /// Binary-Tuple-encodes) internally, so encoding here would diverge from
+    /// the native pipeline.
     pub(crate) fn encode_crdt_row(
         engine: &TenantCrdtEngine,
         collection: &str,
         document_id: &str,
-    ) -> Option<Vec<u8>> {
-        let loro_val = engine.read_row(collection, document_id)?;
-        super::convert::crdt_row_body(&loro_val)
+    ) -> crate::Result<Option<Vec<u8>>> {
+        engine
+            .read_row_deep(collection, document_id)
+            .map(|loro_val| super::convert::crdt_row_body(&loro_val))
+            .transpose()
     }
 
     /// Write the merged CRDT document into the sparse document store — with the
@@ -96,9 +110,12 @@ impl CoreLoop {
     /// live apply paths skip a re-delivered delta: it imports no Loro
     /// operation. Inverted BM25 text indexing is skipped
     /// (`index_text: false`) — the sync path delivers a separate `FtsIndex`
-    /// frame. Any failure is logged and swallowed (the transaction is dropped,
-    /// leaving no partial write) so a materialization miss never wedges the
-    /// sync stream.
+    /// frame.
+    ///
+    /// A failure drops the transaction, leaving no partial write, and is the
+    /// caller's error. A live sync apply undoes its staged install and
+    /// refuses the delta. WAL replay records the fault and stops, since its
+    /// delta is already durable.
     pub(crate) fn materialize_synced_document(
         &mut self,
         task: &ExecutionTask,
@@ -107,9 +124,8 @@ impl CoreLoop {
         document_id: &str,
         surrogate: Surrogate,
         value: &[u8],
-    ) {
-        // A materialization miss is logged and never wedges the sync stream.
-        if let Err(error) = self.materialize_document_write(
+    ) -> crate::Result<()> {
+        self.materialize_document_write(
             task,
             CrdtMaterializeWrite {
                 tid,
@@ -119,15 +135,75 @@ impl CoreLoop {
                 value,
                 index_text: false,
             },
-        ) {
-            warn!(
-                core = self.core_id,
-                %collection,
-                surrogate = surrogate.as_u32(),
-                %error,
-                "crdt sync materialize into sparse document store failed"
-            );
-        }
+        )
+    }
+
+    /// Predict the deep row `write` leaves and encode it as the native body
+    /// the sparse store takes. Changes nothing: a refused write answers here.
+    pub(super) fn predict_row_body(
+        &mut self,
+        task: &ExecutionTask,
+        row: &ProjectedRow<'_>,
+        write: &RowWrite<'_>,
+    ) -> crate::Result<(LoroValue, Vec<u8>)> {
+        let predicted = self
+            .get_crdt_engine(task.request.database_id, task.request.tenant_id)?
+            .predict_row(row.collection, row.document_id, write)?;
+        let body = super::convert::crdt_row_body(&predicted)?;
+        Ok((predicted, body))
+    }
+
+    /// Land a predicted one-row write: project `body` into the sparse store,
+    /// then run `write` on the CRDT document.
+    ///
+    /// A projection that fails returns its error and the document never
+    /// changed. Once the projection has landed, the write's failure modes
+    /// were all checked by the prediction, so a write that still fails, or
+    /// leaves another row than `predicted`, fail-stops the core: the
+    /// projection is ahead of the document, and a restart rebuilds both from
+    /// the WAL.
+    pub(super) fn land_row_write(
+        &mut self,
+        task: &ExecutionTask,
+        row: &ProjectedRow<'_>,
+        write: &RowWrite<'_>,
+        predicted: &LoroValue,
+        body: &[u8],
+    ) -> crate::Result<()> {
+        self.materialize_document_write(
+            task,
+            CrdtMaterializeWrite {
+                tid: task.request.tenant_id.as_u64(),
+                collection: row.collection,
+                document_id: row.document_id,
+                surrogate: row.surrogate,
+                value: body,
+                index_text: row.index_text,
+            },
+        )?;
+        let landed = self
+            .get_crdt_engine(task.request.database_id, task.request.tenant_id)
+            .and_then(|engine| {
+                engine.apply_row_write(row.collection, row.document_id, write)?;
+                Ok(engine.read_row_deep(row.collection, row.document_id))
+            });
+        let fault = match landed {
+            Ok(Some(written)) if &written == predicted => return Ok(()),
+            Ok(written) => crate::Error::Internal {
+                detail: format!(
+                    "crdt write on '{}'/'{}' left {written:?}, not its predicted row \
+                     {predicted:?}",
+                    row.collection, row.document_id
+                ),
+            },
+            Err(error) => error,
+        };
+        let detail = format!(
+            "crdt write on '{}'/'{}' failed after its row projected: {fault}",
+            row.collection, row.document_id
+        );
+        self.fail_stop_core(FailStopCause::CrdtWriteAfterProjection, &detail);
+        Err(fault)
     }
 
     /// Shared body of the sparse-store materialization. `index_text` gates

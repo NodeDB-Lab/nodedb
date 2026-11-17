@@ -26,6 +26,10 @@ use nodedb_types::{DatabaseId, OrdinalClock};
 
 use super::checkpoint_floors::CheckpointFloors;
 use super::priority_queues::PriorityQueues;
+use super::state_types::{
+    AggregateCache, ArrayTxnOverlays, ColumnarMemtables, DeletedNodes, DocConfigs,
+    GraphTxnOverlays, TsLastValueCaches, TsRegistries, TxnOverlays, TxnSavepointsMap, VectorDocMap,
+};
 
 /// Per-core event loop for the Data Plane.
 ///
@@ -137,16 +141,7 @@ pub struct CoreLoop {
     /// Populated on every vector index insert; consulted by
     /// `apply_point_delete` to soft-delete the orphaned vector when its owning
     /// document is removed.
-    pub(in crate::data::executor) vector_doc_map: std::collections::HashMap<
-        (
-            DatabaseId,
-            TenantId,
-            String,
-            String,
-            nodedb_types::StorageKey,
-        ),
-        u32,
-    >,
+    pub(in crate::data::executor) vector_doc_map: VectorDocMap,
 
     /// Base data directory for this core (used for sort spill temp files).
     pub(in crate::data::executor) data_dir: std::path::PathBuf,
@@ -160,10 +155,7 @@ pub struct CoreLoop {
     /// `RejectedDanglingEdge`. Cleared periodically or on compaction.
     /// Entries are raw user-visible node names, structurally
     /// tenant-partitioned like every graph concern.
-    pub(in crate::data::executor) deleted_nodes: HashMap<
-        (nodedb_types::DatabaseId, TenantId),
-        HashMap<String, std::collections::HashSet<String>>,
-    >,
+    pub(in crate::data::executor) deleted_nodes: DeletedNodes,
 
     /// Whether each recent idempotency key succeeded.
     pub(in crate::data::executor) idempotency: super::idempotency::IdempotencyCache,
@@ -198,10 +190,7 @@ pub struct CoreLoop {
     /// still evict explicitly via `invalidate_aggregate_cache_for_collection`;
     /// KV writes are caught by the epoch stamp instead, since a KV write has
     /// no equivalent per-write invalidation call site.
-    pub(in crate::data::executor) aggregate_cache: HashMap<
-        (DatabaseId, TenantId, String),
-        super::super::handlers::aggregate::AggregateCacheEntry,
-    >,
+    pub(in crate::data::executor) aggregate_cache: AggregateCache,
 
     /// Per-collection full index config (includes index_type, PQ params, IVF params).
     /// Stored alongside vector_params for collections that use non-default index types.
@@ -221,10 +210,7 @@ pub struct CoreLoop {
 
     /// Per-collection columnar timeseries memtables (!Send, per-core owned).
     /// Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) columnar_memtables: HashMap<
-        (DatabaseId, TenantId, String),
-        crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
-    >,
+    pub(in crate::data::executor) columnar_memtables: ColumnarMemtables,
 
     /// Live engine-memory reservation for each columnar timeseries memtable's resident footprint.
     /// Recharged via `recharge_ts_memtable_budget` after every ingest (so the Timeseries budget
@@ -281,10 +267,7 @@ pub struct CoreLoop {
 
     /// Per-collection last-value caches for O(1) recent value lookup.
     /// Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) ts_last_value_caches: HashMap<
-        (DatabaseId, TenantId, String),
-        crate::engine::timeseries::last_value_cache::LastValueCache,
-    >,
+    pub(in crate::data::executor) ts_last_value_caches: TsLastValueCaches,
 
     /// Per-collection series catalogs — the only source of `SeriesId`.
     ///
@@ -299,10 +282,7 @@ pub struct CoreLoop {
 
     /// Per-collection timeseries partition registries for this core.
     /// Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) ts_registries: HashMap<
-        (DatabaseId, TenantId, String),
-        crate::engine::timeseries::partition_registry::PartitionRegistry,
-    >,
+    pub(in crate::data::executor) ts_registries: TsRegistries,
 
     /// The newest TRUNCATE ordinal this process applied, per timeseries
     /// collection. A truncate resets the collection's continuous aggregates,
@@ -326,9 +306,9 @@ pub struct CoreLoop {
 
     /// Per-collection document index configurations.
     /// Maps (DatabaseId, TenantId, collection) → CollectionConfig.
-    /// Populated via RegisterDocumentCollection plans.
-    pub(in crate::data::executor) doc_configs:
-        HashMap<(DatabaseId, TenantId, String), crate::engine::document::store::CollectionConfig>,
+    /// Populated via RegisterDocumentCollection plans. A lookup by
+    /// `DocConfigRef` borrows the collection name.
+    pub(in crate::data::executor) doc_configs: DocConfigs,
 
     /// Chain heads and in-flight chain links of every HASH_CHAIN collection.
     pub(in crate::data::executor) chain: super::hash_chain_state::HashChainState,
@@ -396,6 +376,10 @@ pub struct CoreLoop {
     /// Shared system metrics — Arc is safe for `!Send` since all fields are atomic.
     pub(in crate::data::executor) metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
 
+    /// The node's WAL directory and key ring. A committed chunked redo's
+    /// install reads its stream back through it.
+    pub(in crate::data::executor) wal_source: crate::wal::WalReadSource,
+
     /// The event bus producer, its sequence, and the collections it emits for.
     pub(in crate::data::executor) events: super::event_outlet::EventOutlet,
 
@@ -429,38 +413,26 @@ pub struct CoreLoop {
     /// handlers that need "current time" (KV TTL expire_at, timeseries system_ms) call
     /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that single-shard (non-Calvin)
     /// paths read the wall clock. A bitemporal document or columnar stamp reads
-    /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`).
-    ///
-    /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded per core, and staging
-    /// never recurses into another Calvin execute.
+    /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`). `CoreLoop` is
+    /// `!Send` and single-threaded, and staging never recurses into another Calvin execute.
     pub(in crate::data::executor) epoch_system_ms: Option<i64>,
 
-    /// Per-transaction staging overlay: not-yet-durable writes for each
-    /// in-flight transaction on this core, keyed by `TxnId`. Populated by
+    /// Per-transaction staging overlay of each in-flight transaction on this core. Populated by
     /// `MetaOp::StageWrite`, released by `MetaOp::DropTxnOverlay`.
-    pub(in crate::data::executor) txn_overlays: HashMap<
-        crate::types::TxnId,
-        crate::data::executor::handlers::transaction::overlay::TxnOverlay,
-    >,
+    pub(in crate::data::executor) txn_overlays: TxnOverlays,
     /// Parallel to `txn_overlays`, for GRAPH writes (edge identity is a
     /// string tuple, not a surrogate -- see `GraphTxnOverlay`). Same lifecycle.
-    pub(in crate::data::executor) graph_txn_overlays: HashMap<
-        crate::types::TxnId,
-        crate::data::executor::handlers::transaction::overlay::GraphTxnOverlay,
-    >,
+    pub(in crate::data::executor) graph_txn_overlays: GraphTxnOverlays,
     /// Parallel to `txn_overlays`, for ARRAY writes (cell identity is a
     /// coordinate tuple, not a surrogate -- see `ArrayTxnOverlay`). Same
     /// lifecycle.
-    pub(in crate::data::executor) array_txn_overlays: HashMap<
-        crate::types::TxnId,
-        crate::data::executor::handlers::transaction::overlay::ArrayTxnOverlay,
-    >,
+    pub(in crate::data::executor) array_txn_overlays: ArrayTxnOverlays,
     /// Savepoint records of each transaction's overlays on this core. Same
     /// lifecycle as the overlays.
-    pub(in crate::data::executor) txn_savepoints: HashMap<
-        crate::types::TxnId,
-        crate::data::executor::handlers::transaction::savepoint_marks::TxnSavepoints,
-    >,
+    pub(in crate::data::executor) txn_savepoints: TxnSavepointsMap,
+    /// The open resolve cursor of each committing transaction on this core.
+    pub(in crate::data::executor) resolve_cursors:
+        crate::data::executor::handlers::transaction::resolve::ResolveCursors,
     /// Columnar engines THIS txn newly created while staging; `DropTxnOverlay`
     /// drops still-empty entries (rollback) and leaves filled ones (commit).
     pub(in crate::data::executor) txn_created_columnar_engines:

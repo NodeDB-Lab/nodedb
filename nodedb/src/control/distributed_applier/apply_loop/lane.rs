@@ -70,6 +70,8 @@ impl QueuedEntry {
                     | ReplicatedWrite::MirrorSeal { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
                     | ReplicatedWrite::CalvinReadTimeout { .. }
+                    | ReplicatedWrite::CalvinFrozenReply { .. }
+                    | ReplicatedWrite::CalvinSequenceEffects { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
@@ -106,6 +108,8 @@ impl QueuedEntry {
             | ReplicatedWrite::MirrorSeal { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
+            | ReplicatedWrite::CalvinFrozenReply { .. }
+            | ReplicatedWrite::CalvinSequenceEffects { .. }
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,
@@ -441,11 +445,13 @@ impl Lane {
         Some(slot.proposal_key)
     }
 
-    /// Whether the durable floor moved past the floor last saved.
-    pub fn floor_pending(&self) -> bool {
-        self.prefix
-            .floor()
-            .is_some_and(|floor| self.saved_floor.is_none_or(|saved| saved < floor))
+    /// The durable floor to save, when it moved past the floor last saved,
+    /// without taking it.
+    pub fn floor_to_save(&self) -> Option<u64> {
+        let floor = self.prefix.floor()?;
+        self.saved_floor
+            .is_none_or(|saved| saved < floor)
+            .then_some(floor)
     }
 
     /// The durable floor to save, when it moved past the floor last saved.
@@ -748,6 +754,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             },
             collections: vec!["orders".into()],
             incarnation_names: Vec::new(),

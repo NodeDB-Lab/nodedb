@@ -32,6 +32,7 @@ use nodedb_physical::physical_plan::VectorResolvedMutation;
 use nodedb_types::{PayloadIndexKind, Surrogate, VectorQuantization, VectorStorageDtype};
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::{
     VectorResolvedDirectWritePayload, encode_vector_direct_truncate_payload,
     encode_vector_resolved_direct_write_payload,
@@ -97,7 +98,7 @@ impl CoreLoop {
         overlay: &TxnOverlay,
         coll_key: &(DatabaseId, TenantId, String),
         writes: &VectorPrimaryWrites,
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         let (database_id, tid, collection) =
             (coll_key.0.as_u64(), coll_key.1.as_u64(), &coll_key.2);
@@ -110,9 +111,10 @@ impl CoreLoop {
         }
 
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, &writes.field);
-        let entries: BTreeMap<u32, &Staged> = overlay.iter_for_collection(coll_key).collect();
-        let mut mutations = Vec::with_capacity(entries.len());
-        for (surrogate_u32, staged) in entries {
+        // The scan yields ascending surrogates, the order the record keeps.
+        let mut mutations = Vec::new();
+        for item in overlay.iter_for_collection(coll_key) {
+            let (surrogate_u32, staged) = item?;
             let surrogate = Surrogate::new(surrogate_u32);
             let base = if !truncated && self.vector_direct_node(&index_key, surrogate).is_some() {
                 Some(
@@ -128,7 +130,7 @@ impl CoreLoop {
             } else {
                 None
             };
-            match staged {
+            match &*staged {
                 Staged::Put(body) => {
                     let row = StagedVectorRow::from_bytes(body)?;
                     mutations.push(VectorResolvedMutation::Upsert {

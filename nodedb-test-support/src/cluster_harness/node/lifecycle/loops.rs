@@ -24,8 +24,9 @@ pub(super) fn spawn_production_loops(
     shared: &Arc<SharedState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut loop_config = nodedb::ServerConfig::default();
-    nodedb::config::server::apply_env_overrides(&mut loop_config)
+    let applied = nodedb::config::server::apply_env_overrides(&mut loop_config)
         .map_err(|e| format!("environment override rejected: {e}"))?;
+    nodedb::config::server::log_applied_overrides(&applied);
 
     // CRDT constraint reconcile (leader-gated): constraint delivery to every
     // replica's validator.

@@ -23,6 +23,7 @@ mod dispatch;
 mod entry;
 mod gather_arm;
 mod hash_join_arm;
+mod lateral_arm;
 mod post_process_arm;
 mod set_op_arm;
 mod shuffle_arm;

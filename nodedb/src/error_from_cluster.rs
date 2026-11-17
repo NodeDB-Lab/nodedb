@@ -154,10 +154,20 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
                     detail,
                 },
             },
+            Error::InvalidArgumentForLogarithm { detail } => TypedClusterError::DataPlane {
+                code: nodedb_cluster::rpc_codec::DataPlaneErrorCode::InvalidArgumentForLogarithm {
+                    detail,
+                },
+            },
+            Error::InvalidArgumentForPowerFunction { detail } => TypedClusterError::DataPlane {
+                code:
+                    nodedb_cluster::rpc_codec::DataPlaneErrorCode::InvalidArgumentForPowerFunction {
+                        detail,
+                    },
+            },
             // Every other error crosses as its public numeric code, so a
             // multi-hop forward keeps its class.
-            other @ (Error::TxnOverlayMemoryExceeded { .. }
-            | Error::RejectedAuthz { .. }
+            other @ (Error::RejectedAuthz { .. }
             | Error::OffsetRegression { .. }
             | Error::ConflictRetry { .. }
             | Error::RejectedPrevalidation { .. }
@@ -245,7 +255,6 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::Shaping(_)
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
-            | Error::CollectionPurgeRowMissing { .. }
             | Error::CollectionUnstamped { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)

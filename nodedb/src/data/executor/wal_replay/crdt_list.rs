@@ -135,7 +135,7 @@ impl CoreLoop {
                 surrogate: _,
                 list_path,
                 index,
-                fields_json,
+                fields,
             } => {
                 let index = match wal_list_index("index", index) {
                     Ok(index) => index,
@@ -160,18 +160,21 @@ impl CoreLoop {
                     document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     index,
-                    fields_json: fields_json.clone(),
+                    fields: fields.clone(),
                     surrogate,
                 });
                 let task =
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
                 let response = self.execute_crdt_list_insert(
                     &task,
-                    &collection,
-                    document_id.as_str(),
-                    &list_path,
+                    crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                        collection: &collection,
+                        document_id: document_id.as_str(),
+                        list_path: &list_path,
+                        surrogate,
+                    },
                     index,
-                    &fields_json,
+                    &fields,
                 );
                 (collection, document_id, list_path, response)
             }
@@ -211,9 +214,12 @@ impl CoreLoop {
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
                 let response = self.execute_crdt_list_delete(
                     &task,
-                    &collection,
-                    document_id.as_str(),
-                    &list_path,
+                    crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                        collection: &collection,
+                        document_id: document_id.as_str(),
+                        list_path: &list_path,
+                        surrogate,
+                    },
                     index,
                 );
                 (collection, document_id, list_path, response)
@@ -258,9 +264,12 @@ impl CoreLoop {
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
                 let response = self.execute_crdt_list_move(
                     &task,
-                    &collection,
-                    document_id.as_str(),
-                    &list_path,
+                    crate::data::executor::handlers::control::crdt_list::CrdtListTarget {
+                        collection: &collection,
+                        document_id: document_id.as_str(),
+                        list_path: &list_path,
+                        surrogate,
+                    },
                     from_index,
                     to_index,
                 );
@@ -349,12 +358,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {
@@ -384,13 +395,26 @@ mod tests {
             .expect("export snapshot")
     }
 
-    fn list_insert_plan(index: usize, fields_json: &str) -> PhysicalPlan {
+    /// A list insert of a block whose `id` field is `block_id`, with a
+    /// Decimal `price` that must keep its type and scale through replay.
+    fn list_insert_plan(index: usize, block_id: &str) -> PhysicalPlan {
+        let block = std::collections::HashMap::from([
+            (
+                "id".to_string(),
+                nodedb_types::Value::String(block_id.into()),
+            ),
+            (
+                "price".to_string(),
+                nodedb_types::Value::Decimal("12.50".parse().expect("decimal literal")),
+            ),
+        ]);
         PhysicalPlan::Crdt(CrdtOp::ListInsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             document_id: DOCUMENT_ID.to_string(),
             list_path: "blocks".to_string(),
             index,
-            fields_json: fields_json.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(&block)
+                .expect("block fields encode"),
             surrogate: Surrogate::new(DOCUMENT_SURROGATE),
         })
     }
@@ -420,7 +444,7 @@ mod tests {
     fn autocommit_list_insert_produces_durable_lsn() {
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
-        let plan = list_insert_plan(0, r#"{"id":"blk-0"}"#);
+        let plan = list_insert_plan(0, "blk-0");
         let outcome = wal_append_if_write(
             &wal,
             TenantId::new(TID),
@@ -460,8 +484,8 @@ mod tests {
 
         // blocks: [] -> [blk-0] -> [blk-0, blk-1] -> [blk-1, blk-0] -> [blk-0]
         let plans = [
-            list_insert_plan(0, r#"{"id":"blk-0"}"#),
-            list_insert_plan(1, r#"{"id":"blk-1"}"#),
+            list_insert_plan(0, "blk-0"),
+            list_insert_plan(1, "blk-1"),
             list_move_plan(0, 1),
             list_delete_plan(0),
         ];
@@ -500,6 +524,17 @@ mod tests {
                 "surviving block must be blk-0: insert blk-0, insert blk-1, \
                  move(0,1) -> [blk-1, blk-0], delete(0) removes blk-1"
             );
+            let price = map
+                .get("price")
+                .map(nodedb_crdt::loro_value::loro_to_value)
+                .transpose()
+                .expect("price decodes");
+            match price {
+                Some(nodedb_types::Value::Decimal(price)) => {
+                    assert_eq!(price.to_string(), "12.50", "the scale survives replay");
+                }
+                other => panic!("price replays as a Decimal, got {other:?}"),
+            }
         } else {
             panic!("expected a map block, got {remaining:?}");
         }
@@ -538,10 +573,10 @@ mod tests {
         // blocks: [] -> [blk-0, blk-1, blk-2, blk-3] -> move(3, 1)
         // -> [blk-0, blk-3, blk-1, blk-2]
         let plans = [
-            list_insert_plan(0, r#"{"id":"blk-0"}"#),
-            list_insert_plan(1, r#"{"id":"blk-1"}"#),
-            list_insert_plan(2, r#"{"id":"blk-2"}"#),
-            list_insert_plan(3, r#"{"id":"blk-3"}"#),
+            list_insert_plan(0, "blk-0"),
+            list_insert_plan(1, "blk-1"),
+            list_insert_plan(2, "blk-2"),
+            list_insert_plan(3, "blk-3"),
             list_move_plan(3, 1),
         ];
         for plan in &plans {

@@ -446,6 +446,7 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
         superseded: false,
         gates: Vec::new(),
         ungated: false,
+        returning: Default::default(),
     }
 }
 

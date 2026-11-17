@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::align::DEFAULT_ALIGNMENT;
 use crate::double_write::{DoubleWriteBuffer, DwbDegradation, DwbMode, DwbProtection};
+use crate::error::{Result, WalError};
 use crate::time_anchors::TimeAnchors;
 
 /// Default write buffer size: 2 MiB.
@@ -113,8 +114,10 @@ pub(crate) fn open_dwb_at(dwb_path: &Path, mode: DwbMode) -> Option<DoubleWriteB
 /// Every completed flush ends on an alignment boundary (the batch is padded
 /// with a framed `Noop` record), so an unaligned recovery offset means the
 /// final batch was torn by a crash mid-write. O_DIRECT cannot write at an
-/// unaligned offset, and the torn block was never fsynced — so it was never
-/// acknowledged to any client — so the block is rewritten from its boundary.
+/// unaligned offset, so the writer resumes at the block boundary below the
+/// committed end. That block can still hold committed bytes, such as the tail
+/// of an intact record whose padding was torn. [`resume_carry`] reads them so
+/// the writer's first write puts them back unchanged.
 pub fn resume_offset(end_offset: u64, use_direct_io: bool, alignment: usize, path: &Path) -> u64 {
     if !use_direct_io {
         return end_offset;
@@ -126,8 +129,32 @@ pub fn resume_offset(end_offset: u64, use_direct_io: bool, alignment: usize, pat
             path = %path.display(),
             end_offset,
             resume_offset = aligned,
-            "WAL segment ends mid-block — discarding the torn final block (never fsynced, never acknowledged)"
+            "WAL segment ends mid-block; the next write rewrites the block and keeps its committed bytes"
         );
     }
     aligned
+}
+
+/// The committed bytes of a reopened segment between `resume` and
+/// `end_offset`.
+///
+/// The writer preloads them into its write buffer, so the block it resumes in
+/// is rewritten with them intact. Empty when the writer resumes at the
+/// committed end.
+pub(crate) fn resume_carry(path: &Path, resume: u64, end_offset: u64) -> Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt as _;
+
+    let len = usize::try_from(end_offset.saturating_sub(resume)).map_err(|_| {
+        WalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAL resume carry does not fit usize",
+        ))
+    })?;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let file = std::fs::File::open(path)?;
+    let mut carry = vec![0u8; len];
+    file.read_exact_at(&mut carry, resume)?;
+    Ok(carry)
 }

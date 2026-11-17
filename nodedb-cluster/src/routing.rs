@@ -316,6 +316,24 @@ impl RoutingTable {
             .collect()
     }
 
+    /// How many vShards each group owns, from one pass over the table. A
+    /// group that owns none is absent.
+    pub fn group_vshard_counts(&self) -> std::collections::BTreeMap<u64, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for &group_id in &self.vshard_to_group {
+            *counts.entry(group_id).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// How many vShards `group_id` owns.
+    pub fn group_vshard_count(&self, group_id: u64) -> usize {
+        self.vshard_to_group
+            .iter()
+            .filter(|&&gid| gid == group_id)
+            .count()
+    }
+
     /// Number of Raft groups.
     pub fn num_groups(&self) -> usize {
         self.group_members.len()

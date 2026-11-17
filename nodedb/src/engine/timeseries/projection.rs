@@ -67,6 +67,9 @@ pub fn apply_permutation(data: &ColumnData, perm: &[usize]) -> ColumnData {
             reverse: reverse.clone(),
             valid: perm.iter().map(|&i| valid[i]).collect(),
         },
+        ColumnData::Decimal(v) => ColumnData::Decimal(perm.iter().map(|&i| v[i]).collect()),
+        ColumnData::Uuid(v) => ColumnData::Uuid(perm.iter().map(|&i| v[i]).collect()),
+        ColumnData::Bool(v) => ColumnData::Bool(perm.iter().map(|&i| v[i]).collect()),
     }
 }
 
@@ -79,6 +82,10 @@ fn compare_column_values(col: &ColumnData, a: usize, b: usize) -> std::cmp::Orde
         ColumnData::Symbol(v) => v[a].cmp(&v[b]),
         // Compare dict-encoded rows by their string IDs (lexicographic by ID, not string value).
         ColumnData::DictEncoded { ids, .. } => ids[a].cmp(&ids[b]),
+        // `None` (NULL) orders first, as `Option` orders.
+        ColumnData::Decimal(v) => v[a].cmp(&v[b]),
+        ColumnData::Uuid(v) => v[a].cmp(&v[b]),
+        ColumnData::Bool(v) => v[a].cmp(&v[b]),
     }
 }
 

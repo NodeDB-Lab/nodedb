@@ -25,6 +25,10 @@ impl CoreLoop {
     /// - `inserts`: `Vec<(join_key, body_msgpack)>` — the NOT-MATCHED rows, for
     ///   which the orchestrator assigns a fresh, registered surrogate.
     ///
+    /// A fourth element carries each arm row's ordinal in the join's output
+    /// order, as `(update_ordinals, delete_ordinals, insert_ordinals)`, one
+    /// per row of its arm (see `MergePlanActions`).
+    ///
     /// The autocommit orchestrator consumes only `inserts`; the in-transaction
     /// COMMIT expander rewrites all three arms into concrete point ops.
     pub(in crate::data::executor) fn execute_merge_resolve(
@@ -42,6 +46,11 @@ impl CoreLoop {
             Ok(p) => p,
             Err(e) => return self.response_error(task, e),
         };
+        let ordinals: (Vec<u64>, Vec<u64>, Vec<u64>) = (
+            plan.updates.iter().map(|u| u.ordinal).collect(),
+            plan.deletes.iter().map(|d| d.ordinal).collect(),
+            plan.inserts.iter().map(|i| i.ordinal).collect(),
+        );
         let updates: Vec<crate::query::ResolvedUpdateRowWire> = plan
             .updates
             .into_iter()
@@ -64,7 +73,7 @@ impl CoreLoop {
             .into_iter()
             .map(|i| (i.join_key, i.body))
             .collect();
-        match zerompk::to_msgpack_vec(&(updates, deletes, inserts)) {
+        match zerompk::to_msgpack_vec(&(updates, deletes, inserts, ordinals)) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,

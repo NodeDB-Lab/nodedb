@@ -327,7 +327,7 @@ mod tests {
     fn row(pairs: &[(&str, &str)]) -> BindingRow {
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| (k.to_string(), nodedb_types::Value::String(v.to_string())))
             .collect()
     }
 
@@ -372,13 +372,16 @@ mod tests {
             merged, envelope_rows,
             "merged rows must equal the envelope's bare rows array byte-for-byte"
         );
-        // And each decoded row's bindings are intact regardless of key order.
-        let decoded_json = nodedb_types::json_from_msgpack(&merged).unwrap();
-        let arr = decoded_json.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["a"], "alice");
-        assert_eq!(arr[0]["b"], "bob");
-        assert_eq!(arr[1]["a"], "carol");
+        // And each decoded row's bindings are intact regardless of key order:
+        // every row is a native tagged object.
+        let decoded_rows: Vec<nodedb_types::Value> = zerompk::from_msgpack(&merged).unwrap();
+        assert_eq!(
+            decoded_rows,
+            rows.iter()
+                .cloned()
+                .map(nodedb_types::Value::Object)
+                .collect::<Vec<_>>()
+        );
 
         // Frontier preserved.
         assert_eq!(decoded.frontier.len(), 1);
@@ -386,7 +389,10 @@ mod tests {
         assert_eq!(decoded.frontier[0].binding_var, "b");
         assert_eq!(decoded.frontier[0].triple_idx, 1);
         assert_eq!(
-            decoded.frontier[0].partial_row.get("a").map(String::as_str),
+            decoded.frontier[0]
+                .partial_row
+                .get("a")
+                .and_then(nodedb_types::Value::as_str),
             Some("alice")
         );
     }

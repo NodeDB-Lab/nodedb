@@ -278,8 +278,8 @@ mod tests {
 
     fn open(reg: &Arc<QuarantineRegistry>) -> (RedbFtsBackend, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db = redb::Database::create(dir.path().join("fts.redb")).expect("create");
-        let mut backend = RedbFtsBackend::open(Arc::new(GatedDatabase::new(db))).expect("open");
+        let db = GatedDatabase::create(dir.path().join("fts.redb")).expect("create");
+        let mut backend = RedbFtsBackend::open(Arc::new(db)).expect("open");
         backend.set_quarantine_registry(Arc::clone(reg));
         (backend, dir)
     }

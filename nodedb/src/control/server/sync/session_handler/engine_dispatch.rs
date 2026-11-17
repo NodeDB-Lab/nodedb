@@ -10,10 +10,8 @@
 
 use std::sync::Arc;
 
-use futures::SinkExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::super::session::SyncSession;
 use super::super::wire::{
@@ -48,14 +46,16 @@ macro_rules! dispatch {
             } else {
                 $session.$method(&msg, &$noop).await
             };
+            if ordered_outcome_requires_close($frame.msg_type, ack.is_some()) {
+                return EngineOutcome::Break;
+            }
             if let Some(ack) = ack
-                && $ws
-                    .send(Message::Binary(ack.to_bytes().into()))
-                    .await
-                    .is_err()
+                && !super::session_loop::send_frame($ws, $session, &ack).await
             {
                 return EngineOutcome::Break;
             }
+        } else if ordered_outcome_requires_close($frame.msg_type, false) {
+            return EngineOutcome::Break;
         }
         return EngineOutcome::Handled;
     }};
@@ -207,5 +207,173 @@ pub(super) async fn dispatch_engine_frame(
             kv_handler::NoOpKvDispatcher
         ),
         _ => EngineOutcome::NotEngine,
+    }
+}
+
+/// Ordered engines reconnect when the core outcome is unknown.
+fn ordered_outcome_requires_close(kind: SyncMessageType, has_ack: bool) -> bool {
+    !has_ack
+        && matches!(
+            kind,
+            SyncMessageType::ColumnarInsert
+                | SyncMessageType::TimeseriesPush
+                | SyncMessageType::KvPush
+                | SyncMessageType::VectorInsert
+                | SyncMessageType::VectorDelete
+                | SyncMessageType::FtsIndex
+                | SyncMessageType::FtsDelete
+                | SyncMessageType::SpatialInsert
+                | SyncMessageType::SpatialDelete
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_engines_close_without_an_ack_and_keep_valid_outcomes() {
+        for kind in [
+            SyncMessageType::ColumnarInsert,
+            SyncMessageType::TimeseriesPush,
+            SyncMessageType::KvPush,
+            SyncMessageType::VectorInsert,
+            SyncMessageType::VectorDelete,
+            SyncMessageType::FtsIndex,
+            SyncMessageType::FtsDelete,
+            SyncMessageType::SpatialInsert,
+            SyncMessageType::SpatialDelete,
+        ] {
+            assert!(ordered_outcome_requires_close(kind, false));
+            assert!(!ordered_outcome_requires_close(kind, true));
+        }
+        assert!(!ordered_outcome_requires_close(
+            SyncMessageType::PingPong,
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_ordered_frames_break_the_session_dispatch_path() {
+        use super::super::super::wire::SyncFrame;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let _client = client.unwrap();
+        let (server, _) = server.unwrap();
+        let mut ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut session = SyncSession::new("fts-outcomes".to_owned());
+        session.authenticated = true;
+        for kind in [
+            SyncMessageType::ColumnarInsert,
+            SyncMessageType::TimeseriesPush,
+            SyncMessageType::KvPush,
+            SyncMessageType::FtsIndex,
+            SyncMessageType::FtsDelete,
+            SyncMessageType::SpatialInsert,
+            SyncMessageType::SpatialDelete,
+        ] {
+            let frame = SyncFrame::try_encode(kind, &"invalid body").unwrap();
+            assert!(matches!(
+                dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+                EngineOutcome::Break
+            ));
+        }
+        let columnar = ColumnarInsertMsg {
+            lite_id: "lite".to_owned(),
+            collection: "metrics".to_owned(),
+            rows: vec![zerompk::to_msgpack_vec(&vec![nodedb_types::Value::Integer(1)]).unwrap()],
+            schema_bytes: vec![],
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::ColumnarInsert, &columnar).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let kv = KvPushMsg {
+            lite_id: "lite".to_owned(),
+            collection: "cfg".to_owned(),
+            key: b"key".to_vec(),
+            op: nodedb_types::sync::wire::KvPushOp::Delete,
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::KvPush, &kv).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let index = FtsIndexMsg {
+            lite_id: "lite".to_owned(),
+            collection: "articles".to_owned(),
+            doc_id: "a".to_owned(),
+            fields: vec![],
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::FtsIndex, &index).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let delete = FtsDeleteMsg {
+            lite_id: "lite".to_owned(),
+            collection: "articles".to_owned(),
+            doc_id: "a".to_owned(),
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::FtsDelete, &delete).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let spatial = SpatialInsertMsg {
+            lite_id: "lite".to_owned(),
+            collection: "places".to_owned(),
+            field: "loc".to_owned(),
+            doc_id: "a".to_owned(),
+            geometry_bytes: zerompk::to_msgpack_vec(&nodedb_types::geometry::SridGeometry::wgs84(
+                nodedb_types::geometry::Geometry::point(1.0, 2.0),
+            ))
+            .unwrap(),
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::SpatialInsert, &spatial).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let spatial = SpatialDeleteMsg {
+            lite_id: "lite".to_owned(),
+            collection: "places".to_owned(),
+            field: "loc".to_owned(),
+            doc_id: "a".to_owned(),
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::SpatialDelete, &spatial).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
     }
 }

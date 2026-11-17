@@ -10,10 +10,10 @@ use tracing::{debug, info_span};
 use nodedb_cluster::calvin::types::PassiveReadKey;
 use nodedb_types::Value;
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
+use crate::bridge::envelope::{ErrorCode, Response, StageVote, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
-use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
+use crate::data::executor::handlers::control::calvin_reply::CalvinStaging;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -55,9 +55,21 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let mut results: Vec<(PassiveReadKeyId, Value)> = Vec::with_capacity(keys_to_read.len());
         for passive_key in keys_to_read {
+            // Fails the read of one collection's rows with a typed error, so
+            // a test can check that the error reaches the client.
+            #[cfg(feature = "failpoints")]
+            if let Some(detail) = crate::fail_point::eval_fail(
+                self.fail_scope,
+                &format!(
+                    "calvin::passive_read::{}",
+                    passive_key.engine_key.collection()
+                ),
+            ) {
+                return self.passive_read_refused(task, ErrorCode::DataException { detail });
+            }
             match self.read_passive_key(database_id, tenant_id, &passive_key.engine_key) {
                 Ok(values) => results.extend(values),
-                Err(code) => return self.response_error(task, code),
+                Err(code) => return self.passive_read_refused(task, code),
             }
         }
 
@@ -74,6 +86,15 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+
+    /// The answer of a passive read that failed with `code`: an abort stage
+    /// vote whose refusal is the error, so the participant's abort vote
+    /// carries it to the client.
+    fn passive_read_refused(&self, task: &ExecutionTask, code: ErrorCode) -> Response {
+        let mut response = self.response_error(task, code);
+        response.stage_vote = Some(StageVote::ParticipantError);
+        response
     }
 
     /// Stage an active-participant dependent-read Calvin txn for commit.
@@ -145,12 +166,15 @@ impl CoreLoop {
             for plan in plans {
                 self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut staging)?;
             }
-            Ok::<CalvinReply, ErrorCode>(staging.into_reply())
+            // A committed slice cannot abort: every check its install runs
+            // runs here, so a refusal is this slice's abort vote.
+            self.check_calvin_commit_boundary(task, synthetic_txn_id, *tenant_id, plans)?;
+            self.finish_calvin_staging(synthetic_txn_id, tenant_id.as_u64(), staging)
         }));
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
-        let reply = match staged {
-            Ok(Ok(reply)) => reply,
+        let (reply, images) = match staged {
+            Ok(Ok(parts)) => parts,
             Ok(Err(e)) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
             Err(payload) => {
                 return self.calvin_stage_failure(
@@ -181,6 +205,14 @@ impl CoreLoop {
             Err(e) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
         };
 
+        // The response carries the staged `RETURNING` images to the leader.
+        let payload = match super::shared::stage_images_payload(&images) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
+            }
+        };
+
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
         self.calvin.commit_pending.insert(
@@ -198,7 +230,7 @@ impl CoreLoop {
             status: Status::Ok,
             attempt: 1,
             partial: false,
-            payload: Payload::empty(),
+            payload,
             watermark_lsn: self.watermark,
             error_code: None,
             // The OLLP check passed above. The vote is the snapshot's.
@@ -329,7 +361,8 @@ mod tests {
     }
 
     /// A key set that names no readable row refuses the read, so the
-    /// passive participant votes abort instead of reporting a value.
+    /// passive participant votes abort instead of reporting a value. The
+    /// abort stage vote carries the error as its refusal.
     #[test]
     fn calvin_execute_passive_refuses_a_lock_only_key_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -344,7 +377,7 @@ mod tests {
         let resp = core.execute_calvin_execute_passive(&task, 1, 0, &TenantId::new(1), &keys);
 
         assert_eq!(resp.status, Status::Error);
-        assert_eq!(resp.stage_vote, None);
+        assert_eq!(resp.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             resp.error_code.as_deref(),
             Some(ErrorCode::Unsupported { .. })
@@ -406,10 +439,8 @@ mod tests {
         let coll_key = (DatabaseId::DEFAULT, tenant_id, "orders".to_string());
         let expected_body = doc_format::canonicalize_document_for_storage(&doc_value("a", "1"));
         assert_eq!(
-            core.txn_overlays
-                .get(&synthetic)
-                .and_then(|o| o.get(&coll_key, 7)),
-            Some(&Staged::Put(expected_body)),
+            core.staged_row(synthetic, &coll_key, 7).unwrap(),
+            Some(Staged::Put(expected_body)),
             "the active Calvin write plan must be staged into the synthetic-TxnId overlay"
         );
     }

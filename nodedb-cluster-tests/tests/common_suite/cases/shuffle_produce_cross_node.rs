@@ -98,7 +98,8 @@ fn read_frames(path: &Path) -> Vec<Vec<u8>> {
 /// Uses the SAME shared hash the producer uses, so the test's expectations and
 /// the producer's routing cannot drift.
 fn expected_part(row: &[u8]) -> u32 {
-    (nodedb_query::partition_hash(row, &["k"]) % NUM_PARTS as u64) as u32
+    let hash = nodedb_query::partition_hash(row, &["k"]).expect("test row is an object");
+    (hash % NUM_PARTS as u64) as u32
 }
 
 /// A `ProviderScan` plan that streams `rows` inline (no collection needed).

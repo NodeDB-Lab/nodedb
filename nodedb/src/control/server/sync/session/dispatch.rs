@@ -111,6 +111,10 @@ impl SyncSession {
                         &msg,
                         &s.shape_registry,
                     );
+                    // The shape stops admitting row pushes with the
+                    // unsubscribe, not at the next reconnect.
+                    s.crdt_sync_delivery
+                        .unsubscribe_shape(&self.session_id, &msg.shape_id);
                 } else {
                     let registry = super::super::shape::registry::ShapeRegistry::new();
                     super::super::shape::handler::handle_unsubscribe(
@@ -240,10 +244,9 @@ impl SyncSession {
                 None
             }
             SyncMessageType::CollectionSchema => {
-                // A peer announces a collection descriptor. Materialize it
-                // into the local catalog (create-only) so it becomes
-                // catalog-visible and queryable cluster-wide; the handler
-                // handles the permissive `shared == None` path by warn+skip.
+                // A peer announces a collection descriptor. The handler
+                // materializes it create-only and answers with the held
+                // collection's incarnation, or with a typed refusal.
                 let msg: CollectionSchemaSyncMsg = frame.decode_body()?;
                 self.handle_collection_schema(&msg, shared).await
             }

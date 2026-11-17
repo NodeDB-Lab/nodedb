@@ -37,6 +37,14 @@ pub fn is_plain_path_component(name: &str) -> bool {
     !name.chars().any(char::is_control)
 }
 
+/// A fixed-length file name stem for `key`: 32 hex digits, the first 128 bits
+/// of SHA-256 over the bytes. The result is always a plain path component.
+pub fn hashed_file_stem(key: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(key);
+    hex::encode(&digest[..16])
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_plain_path_component;

@@ -3,8 +3,8 @@
 //! CRDT engine reclaim — unlink a dropped collection's Loro checkpoint files.
 //!
 //! Checkpoint layout:
-//! `{data_dir}/crdt-ckpt/core-{n}/gen-{m}/db-{dbid}-tenant-{tid}-coll-{hex(coll)}.ckpt`,
-//! with each core's `MANIFEST` naming its live generation.
+//! `{data_dir}/crdt-ckpt/core-{n}/gen-{m}/{hash(key)}.ckpt`, with each core's
+//! `MANIFEST` naming its live generation.
 //!
 //! The CRDT checkpoint is written PER COLLECTION, not per tenant, so a dropped
 //! collection leaves a file of its own behind. Without this pass that file stays
@@ -13,18 +13,16 @@
 //! WAL records that dropped it are truncated away long before.
 //!
 //! Reclaim walks EVERY core's directory, because `data_dir` is shared and a
-//! tenant's CRDT state is fragmented across cores by collection. The filename is
-//! built by the SAME encoder the write path uses ([`crdt_ckpt_stem`]), and the
-//! hex encoding is injective, so an equality match cannot swallow a longer
-//! collection name.
+//! tenant's CRDT state is fragmented across cores by collection. The key comes
+//! from the SAME builder the write path uses ([`crdt_ckpt_key`]), and the file
+//! must store exactly that key before it is unlinked.
 
 use std::path::Path;
 
-use tracing::debug;
-
+use super::keyed::reclaim_keyed_exact;
 use super::{ReclaimError, ReclaimStats, Result};
 use crate::data::executor::crdt_checkpoint::{
-    crdt_ckpt_gen_dir, crdt_ckpt_stem, read_crdt_manifest_at,
+    crdt_ckpt_gen_dir, crdt_ckpt_key, read_crdt_manifest_at,
 };
 
 /// Unlink every CRDT checkpoint file for `(database_id, tenant_id, collection)`
@@ -50,7 +48,7 @@ pub fn reclaim_crdt_checkpoints(
         }
     };
 
-    let stem = crdt_ckpt_stem(database_id, tenant_id, collection);
+    let key = crdt_ckpt_key(database_id, tenant_id, collection);
 
     let mut stats = ReclaimStats::default();
     for core_entry in cores {
@@ -81,53 +79,37 @@ pub fn reclaim_crdt_checkpoints(
         };
         // `.ckpt.tmp` is debris from a write that never renamed; it belongs to
         // this collection just the same and nothing else will collect it.
-        for extension in ["ckpt", "ckpt.tmp"] {
-            unlink(&gen_dir.join(format!("{stem}.{extension}")), &mut stats)?;
-        }
+        reclaim_keyed_exact("crdt", &gen_dir, &key, &[], &mut stats)?;
     }
     Ok(stats)
-}
-
-/// Remove one file, counting its bytes. A file that is already gone is not an
-/// error — reclaim is idempotent and runs again after a partial failure.
-fn unlink(path: &Path, stats: &mut ReclaimStats) -> Result<()> {
-    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-            stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-            debug!(path = %path.display(), size, "crdt reclaim: unlinked");
-            Ok(())
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ReclaimError::Io {
-            operation: "unlink CRDT checkpoint",
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::executor::crdt_checkpoint::{
-        crdt_ckpt_dir, crdt_ckpt_filename, test_manifest_bytes,
-    };
+    use crate::data::executor::checkpoint_key::{CheckpointKey, write_keyed_checkpoint};
+    use crate::data::executor::crdt_checkpoint::{crdt_ckpt_dir, test_manifest_bytes};
     use tempfile::TempDir;
 
     /// Publish a live generation under `core_id` holding `files`, through the
-    /// same manifest the load path reads.
-    fn publish(data_dir: &Path, core_id: usize, generation: u64, files: &[(&str, &[u8])]) {
+    /// same manifest the load path reads. Returns each file's path.
+    fn publish(
+        data_dir: &Path,
+        core_id: usize,
+        generation: u64,
+        files: &[(CheckpointKey, &[u8])],
+    ) -> Vec<std::path::PathBuf> {
         let ckpt_dir = crdt_ckpt_dir(data_dir, core_id);
         let gen_dir = crdt_ckpt_gen_dir(&ckpt_dir, generation);
         std::fs::create_dir_all(&gen_dir).expect("mkdir");
-        for (name, bytes) in files {
-            std::fs::write(gen_dir.join(name), bytes).expect("write");
-        }
+        let paths = files
+            .iter()
+            .map(|(key, bytes)| write_keyed_checkpoint(&gen_dir, key, bytes).expect("write"))
+            .collect();
         let manifest = test_manifest_bytes(generation);
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, "MANIFEST", &manifest)
             .expect("manifest");
+        paths
     }
 
     fn gen_dir_of(data_dir: &Path, core_id: usize, generation: u64) -> std::path::PathBuf {
@@ -140,68 +122,72 @@ mod tests {
     fn unlinks_the_collections_file_across_cores() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        publish(
+        let core0 = publish(
             base,
             0,
             2,
             &[
-                (crdt_ckpt_filename(0, 1, "orders").as_str(), b"x"),
+                (crdt_ckpt_key(0, 1, "orders"), b"x"),
                 // Different collection: must survive.
-                (crdt_ckpt_filename(0, 1, "users").as_str(), b"keep"),
+                (crdt_ckpt_key(0, 1, "users"), b"keep"),
             ],
         );
-        publish(
+        let core1 = publish(
             base,
             1,
             0,
             &[
-                (crdt_ckpt_filename(0, 1, "orders").as_str(), b"yy"),
+                (crdt_ckpt_key(0, 1, "orders"), b"yy"),
                 // Different tenant: must survive.
-                (crdt_ckpt_filename(0, 2, "orders").as_str(), b"keep"),
+                (crdt_ckpt_key(0, 2, "orders"), b"keep"),
                 // Different database: must survive.
-                (crdt_ckpt_filename(1, 1, "orders").as_str(), b"keep"),
+                (crdt_ckpt_key(1, 1, "orders"), b"keep"),
             ],
         );
+        let expected = [&core0[0], &core1[0]]
+            .iter()
+            .map(|p| std::fs::metadata(p).expect("metadata").len())
+            .sum::<u64>();
 
         let stats = reclaim_crdt_checkpoints(base, 0, 1, "orders").expect("reclaim");
         assert_eq!(stats.files_unlinked, 2, "both cores' files must be reached");
-        assert_eq!(stats.bytes_freed, 1 + 2);
-        assert!(
-            !gen_dir_of(base, 0, 2)
-                .join(crdt_ckpt_filename(0, 1, "orders"))
-                .exists()
-        );
-        assert!(
-            gen_dir_of(base, 0, 2)
-                .join(crdt_ckpt_filename(0, 1, "users"))
-                .exists()
-        );
-        assert!(
-            gen_dir_of(base, 1, 0)
-                .join(crdt_ckpt_filename(0, 2, "orders"))
-                .exists()
-        );
-        assert!(
-            gen_dir_of(base, 1, 0)
-                .join(crdt_ckpt_filename(1, 1, "orders"))
-                .exists()
-        );
+        assert_eq!(stats.bytes_freed, expected);
+        assert!(!core0[0].exists());
+        assert!(core0[1].exists());
+        assert!(!core1[0].exists());
+        assert!(core1[1].exists());
+        assert!(core1[2].exists());
     }
 
     /// A collection whose name merely starts with the target's bytes must
-    /// survive: the hex encoding is injective and the match is an equality.
+    /// survive: the match is on the full stored key.
     #[test]
     fn does_not_unlink_a_longer_collection_name() {
         let tmp = TempDir::new().expect("tempdir");
-        publish(
+        let paths = publish(
             tmp.path(),
             0,
             0,
-            &[(crdt_ckpt_filename(0, 1, "orders_archive").as_str(), b"keep")],
+            &[(crdt_ckpt_key(0, 1, "orders_archive"), b"keep")],
         );
 
         let stats = reclaim_crdt_checkpoints(tmp.path(), 0, 1, "orders").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
+        assert!(paths[0].exists());
+    }
+
+    /// A file at the collection's name that stores another key is not the
+    /// collection's: reclaim fails closed and leaves it.
+    #[test]
+    fn file_holding_another_key_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let paths = publish(tmp.path(), 0, 0, &[(crdt_ckpt_key(0, 1, "users"), b"keep")]);
+        let target = gen_dir_of(tmp.path(), 0, 0).join(crdt_ckpt_key(0, 1, "orders").file_name());
+        std::fs::rename(&paths[0], &target).expect("rename");
+
+        let error = reclaim_crdt_checkpoints(tmp.path(), 0, 1, "orders").expect_err("must fail");
+        assert!(matches!(error, ReclaimError::Key { .. }), "{error}");
+        assert!(target.exists());
     }
 
     /// Files under a SUPERSEDED generation are already unreachable.
@@ -212,15 +198,26 @@ mod tests {
             tmp.path(),
             0,
             1,
-            &[(crdt_ckpt_filename(0, 1, "orders").as_str(), b"live")],
+            &[(crdt_ckpt_key(0, 1, "orders"), b"live")],
         );
         let stale = gen_dir_of(tmp.path(), 0, 0);
         std::fs::create_dir_all(&stale).expect("mkdir");
-        std::fs::write(stale.join(crdt_ckpt_filename(0, 1, "orders")), b"old").expect("write");
+        let old =
+            write_keyed_checkpoint(&stale, &crdt_ckpt_key(0, 1, "orders"), b"old").expect("write");
 
         let stats = reclaim_crdt_checkpoints(tmp.path(), 0, 1, "orders").expect("reclaim");
         assert_eq!(stats.files_unlinked, 1, "only the live generation's file");
-        assert!(stale.join(crdt_ckpt_filename(0, 1, "orders")).exists());
+        assert!(old.exists());
+    }
+
+    #[test]
+    fn long_collection_name_is_reclaimed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let coll = "c".repeat(255);
+        let paths = publish(tmp.path(), 0, 0, &[(crdt_ckpt_key(0, 1, &coll), b"x")]);
+        let stats = reclaim_crdt_checkpoints(tmp.path(), 0, 1, &coll).expect("reclaim");
+        assert_eq!(stats.files_unlinked, 1);
+        assert!(!paths[0].exists());
     }
 
     #[test]

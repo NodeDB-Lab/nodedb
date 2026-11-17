@@ -2136,7 +2136,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef975e30683b2d965054bb0a836f8973857c4ebf6acf274fe46617cd285060d8"
 dependencies = [
- "foldhash 0.2.0",
+ "foldhash",
  "libm",
  "portable-atomic",
  "siphasher",
@@ -2355,12 +2355,6 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
-name = "foldhash"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "foldhash"
@@ -2756,24 +2750,13 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.1.5",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]
@@ -2782,7 +2765,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "foldhash 0.2.0",
+ "foldhash",
  "serde",
  "serde_core",
 ]
@@ -4106,6 +4089,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "hashbrown 0.16.1",
  "hex",
  "hkdf",
  "hmac 0.12.1",
@@ -4202,7 +4186,6 @@ dependencies = [
  "loro",
  "nodedb-codec",
  "nodedb-crs",
- "nodedb-spatial",
  "nodedb-types",
  "nodedb-wal",
  "rustc-hash",
@@ -4233,6 +4216,8 @@ name = "nodedb-client"
 version = "0.7.0-dev"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
+ "bytes",
  "nodedb-types",
  "rust_decimal",
  "rustls-pemfile",
@@ -4251,6 +4236,7 @@ dependencies = [
 name = "nodedb-client-tests"
 version = "0.7.0-dev"
 dependencies = [
+ "bytes",
  "nodedb",
  "nodedb-client",
  "nodedb-test-support",
@@ -4353,7 +4339,6 @@ dependencies = [
  "rand 0.10.3",
  "ruzstd",
  "serde",
- "serde_json",
  "sonic-rs",
  "thiserror 2.0.21",
  "zerompk",
@@ -4408,6 +4393,7 @@ name = "nodedb-crs"
 version = "0.7.0-dev"
 dependencies = [
  "nodedb-srid",
+ "ruzstd",
  "serde",
  "thiserror 2.0.21",
  "zerompk",
@@ -4417,7 +4403,6 @@ dependencies = [
 name = "nodedb-fts"
 version = "0.7.0-dev"
 dependencies = [
- "arc-swap",
  "crc32c",
  "icu_segmenter",
  "lindera",
@@ -4429,7 +4414,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "unicode-normalization",
- "whatlang",
  "zerompk",
 ]
 
@@ -4437,11 +4421,9 @@ dependencies = [
 name = "nodedb-graph"
 version = "0.7.0-dev"
 dependencies = [
- "arc-swap",
  "nodedb-mem",
  "nodedb-types",
  "rkyv",
- "rmpv",
  "serde",
  "serde_json",
  "sonic-rs",
@@ -4473,7 +4455,6 @@ dependencies = [
  "nodedb-crs",
  "nodedb-graph",
  "nodedb-query",
- "nodedb-sql",
  "nodedb-types",
  "rust_decimal",
  "serde",
@@ -4512,7 +4493,6 @@ dependencies = [
  "serde_json",
  "sonic-rs",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "zerompk",
@@ -4574,6 +4554,7 @@ dependencies = [
  "sonic-rs",
  "sqlparser",
  "thiserror 2.0.21",
+ "zerompk",
 ]
 
 [[package]]
@@ -4671,7 +4652,6 @@ dependencies = [
 name = "nodedb-vector"
 version = "0.7.0-dev"
 dependencies = [
- "arc-swap",
  "bytemuck",
  "crc32c",
  "fluxbench",
@@ -4696,7 +4676,6 @@ dependencies = [
 name = "nodedb-vector-gpu"
 version = "0.7.0-dev"
 dependencies = [
- "nodedb-vector",
  "thiserror 2.0.21",
 ]
 
@@ -8151,15 +8130,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "whatlang"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e8f38b596e2a359b755342473520a99421e43658548c79489ee221b728c107"
-dependencies = [
- "hashbrown 0.15.5",
-]
 
 [[package]]
 name = "whoami"

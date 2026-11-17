@@ -7,7 +7,9 @@ use nodedb_array::sync::hlc::Hlc;
 use nodedb_types::sync::wire::array::{ArrayRejectMsg, ArrayRejectReason};
 
 use crate::bridge::envelope::ErrorCode;
-use crate::control::server::sync::refusal::is_retryable_dispatch_error;
+use crate::control::server::sync::refusal::{
+    is_retryable_dispatch_error, is_unknown_commit_outcome,
+};
 
 /// Build an [`ArrayRejectMsg`] for a rejected inbound op.
 ///
@@ -67,14 +69,6 @@ fn is_authorization_denial(error: &crate::Error) -> bool {
         error,
         crate::Error::RejectedAuthz { .. }
             | crate::Error::DataPlane(ErrorCode::RejectedAuthz { .. })
-    )
-}
-
-fn is_unknown_commit_outcome(error: &crate::Error) -> bool {
-    matches!(
-        error,
-        crate::Error::ProposalOutcomeUnknown { .. }
-            | crate::Error::CommittedResultUnavailable { .. }
     )
 }
 

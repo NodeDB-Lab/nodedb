@@ -101,13 +101,13 @@ async fn ollp_implicit_edge_pk_delete_cleans_reverse_cross_node() {
 
     // PRE-DELETE: a 1-hop reverse traversal from `hub` must reach all sources on
     // every node — proves the cross-shard implicit edges dual-homed onto `hub`.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                cluster.nodes[idx]
+                node
                     .traversed_node_ids("GRAPH TRAVERSE IN 'ollp_impl_edge_pk_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in")
                     .len()
                     > SOURCES
@@ -165,13 +165,13 @@ async fn ollp_implicit_edge_pk_delete_cleans_reverse_cross_node() {
     // stays reachable. If the PK delete had taken the static `PointDelete` path,
     // `src_3`'s cross-shard reverse edge would dangle on hub's home shard and
     // `src_3` would still be reverse-reachable — failing this assertion.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse traversal from hub drops only src_3 after PK delete"),
             Duration::from_secs(20),
             Duration::from_millis(100),
             || {
-                let ids = cluster.nodes[idx]
+                let ids = node
                     .traversed_node_ids("GRAPH TRAVERSE IN 'ollp_impl_edge_pk_del' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in");
                 let src3_gone = !ids.iter().any(|id| id == "src_3");
                 let others_present = (0..SOURCES)

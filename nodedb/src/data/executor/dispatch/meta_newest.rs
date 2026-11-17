@@ -8,6 +8,7 @@ use nodedb_physical::physical_plan::MetaOp;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::task::ExecutionTask;
 
 /// Whether `op` can remove or replace stored versions wholesale: a snapshot
@@ -38,13 +39,24 @@ impl CoreLoop {
     /// Dispatch a meta operation. One that replaces stored versions resets
     /// the newest-ordinal cache, whether or not it finished: a partial purge
     /// removed versions too.
+    #[cfg(test)]
     pub(super) fn dispatch_meta(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
         op: &MetaOp,
     ) -> Response {
-        let response = self.dispatch_meta_op(task, tid, op);
+        self.dispatch_meta_with_journal(task, tid, op, None)
+    }
+
+    pub(super) fn dispatch_meta_with_journal(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        op: &MetaOp,
+        permit: Option<RootJournalPermit>,
+    ) -> Response {
+        let response = self.dispatch_meta_op(task, tid, op, permit);
         if replaces_stored_versions(op) {
             self.forget_newest_ordinals();
             // A snapshot install, a tenant purge, or a departure moved

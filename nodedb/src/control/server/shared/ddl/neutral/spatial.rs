@@ -25,7 +25,7 @@
 use crate::control::security::catalog::IndexKind;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
-    IndexRegistration, propose_index_record,
+    IndexRegistration, index_name_holder, propose_index_record,
 };
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -95,14 +95,7 @@ pub async fn create_spatial_index(
     } else {
         index_name.clone()
     };
-    if let Some(taken) = state
-        .credentials
-        .catalog()
-        .get_index_record(database_id.as_u64(), tenant_id.as_u64(), &index_name)
-        .map_err(|e| {
-            DdlError::from_error_in_context(&format!("{CONTEXT}: read index registry"), &e)
-        })?
-    {
+    if let Some(taken) = index_name_holder(state, database_id, tenant_id, &index_name, CONTEXT)? {
         if stmt.header.if_not_exists && taken.kind == IndexKind::Spatial {
             return Ok(vec![DdlResult::Status {
                 command: CONTEXT.to_string(),
@@ -128,6 +121,7 @@ pub async fn create_spatial_index(
             kind: IndexKind::Spatial,
             collection,
             fields: vec![field.to_string()],
+            state: crate::control::security::catalog::IndexRecordState::Ready,
         },
     )
     .await?;

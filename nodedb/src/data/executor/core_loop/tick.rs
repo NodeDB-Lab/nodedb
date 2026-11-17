@@ -107,10 +107,9 @@ impl CoreLoop {
             }
         } else {
             task.state = TaskState::Running;
-            if journal.is_some() {
-                self.begin_journalled();
-            }
-            let resp = self.execute(&task);
+            let journalled = journal.is_some();
+            let permit = journal.and_then(|group| self.begin_task_journal(&task, group));
+            let mut resp = self.execute_with_journal(&task, permit);
             // Every engine's next checkpoint, flush or manifest stamps what
             // this core applied, so a record applied here is noted whichever
             // engine applied it. A refused record carries a durable abort
@@ -134,8 +133,11 @@ impl CoreLoop {
                     );
                 }
             }
-            if let Some(group) = journal {
-                self.finish_journalled_task(&task, group, &resp);
+            if journalled {
+                if let Err(error) = self.finish_journalled_task(&task, &mut resp) {
+                    resp.status = Status::Error;
+                    resp.error_code = Some(Box::new(ErrorCode::from(error)));
+                }
                 // A crash test kills the process here: the write's write set
                 // is stored and its parts are not journalled yet.
                 #[cfg(feature = "failpoints")]
@@ -248,12 +250,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .unwrap();
         (core, req_tx, resp_rx, dir)
@@ -425,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn point_put_stores_schemaless_docs_as_canonical_msgpack_maps() {
+    fn point_put_stores_schemaless_docs_as_native_tagged_objects() {
         let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
 
         let mut obj = std::collections::HashMap::new();
@@ -450,6 +454,7 @@ mod tests {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 }),
             )))
             .unwrap();
@@ -469,9 +474,20 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(nodedb_query::msgpack_scan::map_header(&stored, 0).is_some());
-        assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "user_id").is_some());
-        assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "item").is_some());
+        let view = nodedb_types::object_msgpack::ObjectView::new(&stored).unwrap();
+        assert_eq!(
+            view.format(),
+            nodedb_types::object_msgpack::ObjectFormat::Native
+        );
+        assert_eq!(
+            view.get("user_id").unwrap(),
+            Some(nodedb_types::Value::String("u1".into()))
+        );
+        assert_eq!(
+            view.get("item").unwrap(),
+            Some(nodedb_types::Value::String("book".into()))
+        );
+        assert_eq!(view.fields().count(), 2);
     }
 
     #[test]
@@ -498,6 +514,7 @@ mod tests {
                         returning: None,
                         rls_filters: Vec::new(),
                         resolved_sum_targets: Vec::new(),
+                        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     }),
                 )))
                 .unwrap();

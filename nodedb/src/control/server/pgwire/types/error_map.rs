@@ -6,7 +6,6 @@ use nodedb_types::error::sqlstate;
 use pgwire::error::{ErrorInfo, PgWireError};
 
 use crate::OllpExhaustedCause;
-use crate::bridge::envelope::{ErrorCode, Status};
 use crate::control::server::response_shape::types::DmlFoldError;
 
 pub(crate) use super::numeric_sqlstate::numeric_code_to_sqlstate;
@@ -128,6 +127,16 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DataException { detail } => {
             ("ERROR", sqlstate::DATA_EXCEPTION, detail.clone())
         }
+        crate::Error::InvalidArgumentForLogarithm { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM,
+            detail.clone(),
+        ),
+        crate::Error::InvalidArgumentForPowerFunction { detail } => (
+            "ERROR",
+            sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+            detail.clone(),
+        ),
         crate::Error::MixedSrid { .. } => ("ERROR", sqlstate::DATA_EXCEPTION, err.to_string()),
         crate::Error::UnknownSrid { .. } => ("ERROR", sqlstate::DATA_EXCEPTION, err.to_string()),
         crate::Error::NumericValueOutOfRange { detail } => (
@@ -167,7 +176,8 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             crate::control::server::shared::ddl::sqlstate::constraint_sqlstate(constraint),
             detail.clone(),
         ),
-        crate::Error::TxnOverlayMemoryExceeded { .. } => {
+        // A resource limit, `54000` as PostgreSQL reports one.
+        crate::Error::ExecutionLimitExceeded { .. } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, err.to_string())
         }
         // Control-Plane twins of Data-Plane codes take the SQLSTATE their
@@ -228,6 +238,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::GroupQuorumUnavailable { .. } => {
             ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
         }
+        // Nothing was proposed, and a retry succeeds once the metadata group
+        // has a leader that takes the proposal.
+        crate::Error::MetadataLeaderUnavailable => {
+            ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
+        }
         // Nothing was restored, and a retry succeeds once a replica of the
         // group answers.
         crate::Error::GroupMarksUnavailable { .. } => {
@@ -261,6 +276,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         // retries ran out. The client retries the statement, so it takes
         // SERIALIZATION_FAILURE (40001), the SQLSTATE drivers retry on.
         crate::Error::RetryableSchemaChanged { .. } => {
+            ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
+        }
+        // Another owner took the DDL preparation lease first, so the DDL
+        // changed nothing. The client retries the statement.
+        crate::Error::MetadataDdlSuperseded { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }
         // The session's bearer token expired. The client re-authenticates.
@@ -381,7 +401,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::CrdtAdmissionInvalidPlan { .. }
         | crate::Error::CrdtAdmissionCallerFence
         | crate::Error::CrdtApplyRequiresAdmission
-        | crate::Error::ExecutionLimitExceeded { .. }
         | crate::Error::LimitExceeded { .. }
         | crate::Error::Promql(_)
         | crate::Error::SequencerUnavailable
@@ -437,8 +456,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         // of them, and their public codes are internal classes.
         crate::Error::MaterializedSumResolutionMissing { .. }
         | crate::Error::RetryableLeaderChange { .. }
-        | crate::Error::MetadataLeaderUnavailable
-        | crate::Error::MetadataDdlSuperseded { .. }
         | crate::Error::Wal(_)
         | crate::Error::Dispatch { .. }
         | crate::Error::Storage { .. }
@@ -456,39 +473,8 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         | crate::Error::Internal { .. }
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::CollectionUnstamped { .. }
         | crate::Error::CascadeCycle { .. } => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
-    }
-}
-
-/// Create a notice response (WARNING level).
-pub fn notice_warning(message: &str) -> pgwire::messages::response::NoticeResponse {
-    pgwire::messages::response::NoticeResponse::from(pgwire::error::ErrorInfo::new(
-        "WARNING".to_owned(),
-        sqlstate::WARNING.to_owned(),
-        message.to_owned(),
-    ))
-}
-
-/// Map a Data Plane response status + error code to a SQLSTATE triple.
-pub fn response_status_to_sqlstate(
-    status: Status,
-    error_code: Option<&ErrorCode>,
-) -> Option<(&'static str, &'static str, String)> {
-    match status {
-        Status::Ok | Status::Partial => None,
-        Status::Error => {
-            if let Some(code) = error_code {
-                Some(crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code))
-            } else {
-                Some((
-                    "ERROR",
-                    sqlstate::INTERNAL_ERROR,
-                    "unknown data plane error".into(),
-                ))
-            }
-        }
     }
 }
 

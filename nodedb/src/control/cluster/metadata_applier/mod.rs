@@ -25,6 +25,8 @@
 //! - [`surrogate`]: cross-engine surrogate HWM + HiLo batch reservation.
 //! - [`database_id`]: replicated database-id reservation.
 //! - [`restore_point`]: cluster restore points.
+//! - [`purge_log`]: purge-log rows of collection hard-deletes and their
+//!   online sync notices.
 //! - [`sync_and_routing`]: Lite sync-producer register/fence + live
 //!   routing-table `SetPlacement`.
 //! - [`catalog_ddl`]: `CatalogDdl` / `CatalogDdlAudited` decode + apply.
@@ -54,6 +56,7 @@ mod lease_events;
 mod membership_effects;
 mod mirror_cut;
 mod pending_ddl;
+mod purge_log;
 mod restore_point;
 mod surrogate;
 mod sync_and_routing;

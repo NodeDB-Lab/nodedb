@@ -285,11 +285,15 @@ mod tests {
         StorageKey::for_surrogate(SURROGATE)
     }
 
-    /// Register the collection with an index on `city`.
+    /// Register the collection with a secondary index and a full-text index
+    /// on `city`.
     fn seed(core: &mut CoreLoop) {
+        let mut config = CollectionConfig::new(COLL).with_index("city");
+        config.text_fields =
+            nodedb_physical::physical_plan::TextFieldSet::all_readable(vec!["city".to_string()]);
         core.doc_configs.insert(
             (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
-            CollectionConfig::new(COLL).with_index("city"),
+            config,
         );
     }
 
@@ -331,7 +335,7 @@ mod tests {
         core.apply_scope
             .bitemporal_stamps
             .remove(&SURROGATE.as_u32());
-        assert_eq!(outcome.version_sys_from, sys_from);
+        assert_eq!(outcome.installed.version.sys_from, sys_from);
         outcome.history.is_some()
     }
 

@@ -435,12 +435,14 @@ mod tests {
         drop(req_tx);
         drop(resp_rx);
         CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir,
-            hlc,
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir,
+                hlc,
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("CoreLoop::open")
     }

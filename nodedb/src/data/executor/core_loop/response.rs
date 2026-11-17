@@ -233,8 +233,8 @@ impl CoreLoop {
     /// In-memory build key for a vector collection: `"{db}:{tid}:{coll}"`.
     /// `coll` may itself contain `:` — parsing uses `splitn(3, ':')`.
     ///
-    /// This key never becomes a filename; the on-disk name comes from
-    /// `vector_ckpt_stem`, which hex-encodes the collection.
+    /// This key never becomes a filename; the on-disk name is a hash of
+    /// `vector_ckpt_key`.
     pub(in crate::data::executor) fn vector_build_key(
         key: &(DatabaseId, TenantId, String),
     ) -> String {

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Shared helpers for integration tests.
 
 pub mod array_sync;
 pub mod booted_state;
+pub mod calvin_resolve;
 pub mod catalog_fixtures;
 pub mod cluster_harness;
 pub mod core_loop_runner;

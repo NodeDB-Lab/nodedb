@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Filesystem naming for CRDT checkpoints: directories, generation
-//! directories, per-collection filenames, and the inverse parse.
+//! directories, and the per-collection checkpoint key.
 //!
 //! The write path, the load path, and reclaim all build every path through
 //! these helpers so the three can never drift.
+
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 
 /// Filename of the manifest that names the live generation.
 pub(crate) const CRDT_CKPT_MANIFEST: &str = "MANIFEST";
@@ -24,42 +26,27 @@ pub(crate) fn crdt_ckpt_gen_dir(ckpt_dir: &std::path::Path, generation: u64) -> 
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// Per-collection checkpoint filename:
-/// `db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt`.
-///
-/// The collection is hex-encoded so the filename is filesystem-safe (collection
-/// names may contain `/`, `:` or `-`) and unambiguously parseable: hex contains
-/// only `[0-9a-f]`, so the `-coll-` separator never collides with the encoded
-/// name and the numeric tenant id never collides with the encoding.
-pub(crate) fn crdt_ckpt_filename(database_id: u64, tenant_id: u64, collection: &str) -> String {
-    format!(
-        "db-{database_id}-tenant-{tenant_id}-coll-{}.ckpt",
-        hex::encode(collection)
+/// The checkpoint key for one collection. The file name is a fixed-length
+/// hash of it, and the file stores it, so no collection name length can
+/// overflow the name and reclaim matches by the stored key.
+pub(crate) fn crdt_ckpt_key(database_id: u64, tenant_id: u64, collection: &str) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::Crdt,
+        database_id,
+        tenant_id,
+        vec![collection.to_string()],
     )
 }
 
-/// Shared prefix builder for reclaim: every checkpoint file for
-/// `(database, tenant, collection)` is EXACTLY this stem. The hex encoding is
-/// injective, so an equality match cannot swallow a longer collection name the
-/// way a `starts_with` could.
-pub(crate) fn crdt_ckpt_stem(database_id: u64, tenant_id: u64, collection: &str) -> String {
-    format!(
-        "db-{database_id}-tenant-{tenant_id}-coll-{}",
-        hex::encode(collection)
-    )
-}
-
-/// Parse a per-collection checkpoint file stem (no extension) back into
-/// `(database_id, tenant_id, collection)`. Returns `None` for any unparseable
-/// stem.
-pub(super) fn parse_crdt_ckpt_stem(stem: &str) -> Option<(u64, u64, String)> {
-    let rest = stem.strip_prefix("db-")?;
-    let (database_str, rest) = rest.split_once("-tenant-")?;
-    let database_id = database_str.parse::<u64>().ok()?;
-    let (tid_str, encoded) = rest.split_once("-coll-")?;
-    let tenant_id = tid_str.parse::<u64>().ok()?;
-    let collection = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
-    Some((database_id, tenant_id, collection))
+/// The `(database_id, tenant_id, collection)` a stored key restores under, or
+/// `None` when the key is not a CRDT key.
+pub(super) fn crdt_map_key(key: &CheckpointKey) -> Option<(u64, u64, String)> {
+    match (key.engine, key.parts.as_slice()) {
+        (CheckpointEngine::Crdt, [collection]) => {
+            Some((key.database_id, key.tenant_id, collection.clone()))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -67,49 +54,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stem_roundtrips_through_parse() {
+    fn key_roundtrips_through_map_key() {
         for coll in ["orders", "2/orders", "a-coll-b", "weird:name", "-coll-"] {
-            let fname = crdt_ckpt_filename(3, 7, coll);
-            let stem = fname.strip_suffix(".ckpt").expect("has .ckpt suffix");
             let (database_id, tid, parsed) =
-                parse_crdt_ckpt_stem(stem).expect("must parse own filename");
+                crdt_map_key(&crdt_ckpt_key(3, 7, coll)).expect("crdt key");
             assert_eq!(database_id, 3);
             assert_eq!(tid, 7);
             assert_eq!(parsed, coll);
         }
     }
 
-    /// The reclaim stem and the write path's filename must name the same file,
-    /// or a DROP leaves the collection's checkpoint reachable forever.
+    /// A collection whose name merely starts with the target's bytes gets a
+    /// distinct file name.
     #[test]
-    fn reclaim_stem_matches_the_written_filename() {
-        assert_eq!(
-            format!("{}.ckpt", crdt_ckpt_stem(3, 7, "orders")),
-            crdt_ckpt_filename(3, 7, "orders")
-        );
-    }
-
-    /// A collection whose name merely starts with the target's bytes must get a
-    /// different stem — hex is injective, so equality can never collide.
-    #[test]
-    fn longer_collection_name_gets_a_distinct_stem() {
+    fn longer_collection_name_gets_a_distinct_name() {
         assert_ne!(
-            crdt_ckpt_stem(0, 1, "orders"),
-            crdt_ckpt_stem(0, 1, "orders_archive")
+            crdt_ckpt_key(0, 1, "orders").file_name(),
+            crdt_ckpt_key(0, 1, "orders_archive").file_name()
         );
     }
 
     #[test]
-    fn unparseable_stems_are_rejected() {
-        assert!(parse_crdt_ckpt_stem("tenant-5").is_none(), "no db- prefix");
-        assert!(
-            parse_crdt_ckpt_stem("db-x-tenant-1-coll-6162").is_none(),
-            "non-numeric database"
-        );
-        assert!(
-            parse_crdt_ckpt_stem("db-0-tenant-1-coll-616").is_none(),
-            "odd hex length"
-        );
+    fn max_length_collection_name_fits() {
+        let name = crdt_ckpt_key(0, 1, &"c".repeat(255)).file_name();
+        assert!(name.len() < 64, "{name}");
     }
 
     #[test]

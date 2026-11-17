@@ -12,7 +12,7 @@ use nodedb_physical::physical_plan::RegisteredIndexState;
 ///
 /// Example: `IndexPath::new("$.user.email")` extracts the `user.email` field
 /// from each document and indexes it in redb for efficient lookups.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IndexPath {
     /// Index name (catalog-assigned, used in UNIQUE violation errors).
     pub name: String,

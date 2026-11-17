@@ -48,6 +48,17 @@ impl SqlPlan {
     /// replay one execution's value into every later one.
     pub fn cache_eligibility(&self) -> PlanCacheEligibility {
         use PlanCacheEligibility::{Cacheable, DataDependent};
+        if self.returning().is_some_and(|returning| {
+            returning.projection.iter().any(|item| match item {
+                crate::types::Projection::Computed { expr, .. }
+                | crate::types::Projection::CpComputed { expr, .. } => {
+                    super::volatility_scan::expr_is_volatile(expr)
+                }
+                _ => false,
+            })
+        }) {
+            return DataDependent;
+        }
 
         match self {
             Self::ConstantResult { volatile: true, .. } => DataDependent,
@@ -211,12 +222,13 @@ mod tests {
             assignments: Vec::new(),
             filters: Vec::new(),
             target_keys,
-            returning: false,
+            returning: None,
         }
     }
 
     fn delete(engine: EngineType, target_keys: Vec<SqlValue>) -> SqlPlan {
         SqlPlan::Delete {
+            returning: None,
             collection: "docs".into(),
             engine,
             filters: Vec::new(),

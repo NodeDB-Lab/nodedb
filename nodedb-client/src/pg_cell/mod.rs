@@ -9,5 +9,5 @@ mod error;
 mod raw;
 mod text;
 
-pub(crate) use decode::decode_cell;
+pub(crate) use decode::{decode_cell, decode_text_cell};
 pub(crate) use raw::RawCell;

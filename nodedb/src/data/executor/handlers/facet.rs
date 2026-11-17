@@ -229,27 +229,8 @@ impl CoreLoop {
             let mp = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                 bytes,
                 body_format.as_format_ref(),
-            );
-            if let Some((start, end)) = nodedb_query::msgpack_scan::extract_field(&mp, 0, field) {
-                let value_str = if let Some(s) = nodedb_query::msgpack_scan::read_str(&mp, start) {
-                    s.to_string()
-                } else if let Some(i) = nodedb_query::msgpack_scan::read_integer(&mp, start) {
-                    i.to_string()
-                } else if let Some(f) = nodedb_query::msgpack_scan::read_f64(&mp, start) {
-                    f.to_string()
-                } else if let Some(b) = nodedb_query::msgpack_scan::read_bool(&mp, start) {
-                    b.to_string()
-                } else if nodedb_query::msgpack_scan::read_null(&mp, start) {
-                    continue;
-                } else {
-                    // Complex value — stringify via transcoder.
-                    nodedb_types::msgpack_to_json_string(&mp[start..end]).map_err(|e| {
-                        crate::Error::Serialization {
-                            format: "msgpack".to_string(),
-                            detail: format!("facet value of '{field}' in {key}: {e}"),
-                        }
-                    })?
-                };
+            )?;
+            if let Some(value_str) = facet_value_text(&mp, field, key)? {
                 *counts.entry(value_str).or_default() += 1;
             }
         }
@@ -258,6 +239,56 @@ impl CoreLoop {
         result.sort_by_key(|r| std::cmp::Reverse(r.1)); // Count descending.
         Ok(result)
     }
+}
+
+/// The facet key of `field` in one normalized body, or `None` when the field
+/// is absent or null.
+///
+/// A native body (`[7, {...}]`) is read through [`nodedb_types::ObjectView`],
+/// and its field is re-encoded in the plain form of its typed value, so a
+/// native row counts under the key its plain form counts under. A body that
+/// does not decode fails the facet.
+fn facet_value_text(
+    mp: &[u8],
+    field: &str,
+    key: &nodedb_types::StorageKey,
+) -> crate::Result<Option<String>> {
+    let error = |detail: String| crate::Error::Serialization {
+        format: "msgpack".to_string(),
+        detail: format!("facet value of '{field}' in {key}: {detail}"),
+    };
+    let plain_field;
+    let value: &[u8] = if nodedb_query::msgpack_scan::array_header(mp, 0).is_some() {
+        let view = nodedb_types::ObjectView::new(mp).map_err(|e| error(e.to_string()))?;
+        match view.get(field).map_err(|e| error(e.to_string()))? {
+            Some(typed) => {
+                plain_field =
+                    nodedb_types::value_to_msgpack(&typed).map_err(|e| error(e.to_string()))?;
+                &plain_field
+            }
+            None => return Ok(None),
+        }
+    } else {
+        match nodedb_query::msgpack_scan::extract_field(mp, 0, field) {
+            Some((start, end)) => mp.get(start..end).unwrap_or_default(),
+            None => return Ok(None),
+        }
+    };
+    let text = if let Some(s) = nodedb_query::msgpack_scan::read_str(value, 0) {
+        s.to_string()
+    } else if let Some(i) = nodedb_query::msgpack_scan::read_integer(value, 0) {
+        i.to_string()
+    } else if let Some(f) = nodedb_query::msgpack_scan::read_f64(value, 0) {
+        f.to_string()
+    } else if let Some(b) = nodedb_query::msgpack_scan::read_bool(value, 0) {
+        b.to_string()
+    } else if nodedb_query::msgpack_scan::read_null(value, 0) {
+        return Ok(None);
+    } else {
+        // Complex value — stringify via transcoder.
+        nodedb_types::msgpack_to_json_string(value).map_err(|e| error(e.to_string()))?
+    };
+    Ok(Some(text))
 }
 
 /// The matched rows one facet field is counted over.
@@ -306,4 +337,65 @@ fn facet_cache_key(
         crate::types::TenantId::new(tid),
         rest,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::Value;
+
+    fn row() -> Value {
+        Value::Object(
+            [
+                (
+                    "price".to_string(),
+                    Value::Decimal("12.50".parse().unwrap()),
+                ),
+                (
+                    "uid".to_string(),
+                    Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                ),
+                (
+                    "seen".to_string(),
+                    Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                        1_583_402_400_000_000,
+                    )),
+                ),
+                (
+                    "tags".to_string(),
+                    Value::Array(vec![Value::Integer(7), Value::String("x".into())]),
+                ),
+                ("gone".to_string(), Value::Null),
+            ]
+            .into(),
+        )
+    }
+
+    /// A native body counts each field under the key its plain form counts
+    /// under; a null or absent field is not counted.
+    #[test]
+    fn a_native_body_counts_as_its_plain_form() {
+        let key = nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(1));
+        let native = zerompk::to_msgpack_vec(&row()).unwrap();
+        let plain = nodedb_types::value_to_msgpack(&row()).unwrap();
+        for field in ["price", "uid", "seen", "tags", "gone", "absent"] {
+            assert_eq!(
+                facet_value_text(&native, field, &key).unwrap(),
+                facet_value_text(&plain, field, &key).unwrap(),
+                "field {field}"
+            );
+        }
+        assert_eq!(
+            facet_value_text(&native, "price", &key).unwrap().as_deref(),
+            Some("12.50")
+        );
+        assert_eq!(
+            facet_value_text(&native, "tags", &key).unwrap().as_deref(),
+            Some(r#"[7,"x"]"#)
+        );
+        assert_eq!(facet_value_text(&native, "gone", &key).unwrap(), None);
+
+        let malformed = [0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
+        assert!(facet_value_text(&malformed, "a", &key).is_err());
+    }
 }

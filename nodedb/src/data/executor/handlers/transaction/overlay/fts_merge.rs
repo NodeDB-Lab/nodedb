@@ -80,10 +80,11 @@ impl CoreLoop {
         let hide_all = overlay.is_truncated(&coll_key);
         let mut hidden = SurrogateBitmap::new();
         let mut docs = Vec::new();
-        for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
+        for item in overlay.iter_for_collection(&coll_key) {
+            let (surrogate, staged) = item?;
             let doc_id = Surrogate::new(surrogate);
             hidden.insert(doc_id);
-            if let Staged::Put(body) = staged
+            if let Staged::Put(body) = &*staged
                 && let Some(tokens) =
                     self.tokenize_staged_body(database_id.as_u64(), &coll_key, index, body)?
             {
@@ -120,10 +121,7 @@ fn merge_cut_view(
     at_cut: crate::engine::sparse::inverted::TextCutView,
 ) -> Option<StagedView> {
     let Some(staged) = staged else {
-        if at_cut.hidden.is_empty() && at_cut.docs.is_empty() {
-            return None;
-        }
-        return Some(StagedView::new(at_cut.hidden, false, at_cut.docs));
+        return (!at_cut.is_empty()).then(|| at_cut.into_staged());
     };
     if staged.hides_all() {
         return Some(staged);

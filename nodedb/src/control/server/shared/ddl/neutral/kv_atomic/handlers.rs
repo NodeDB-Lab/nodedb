@@ -16,7 +16,7 @@ use nodedb_sql::planner::dml_helpers::KvCounterKind;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::dispatch::{
-    KvAtomicDispatch, ddl_err, dispatch_and_respond, parse_function_args, parse_i64,
+    KvAtomicDispatch, ddl_err, dispatch_and_respond, name_arg, parse_function_args, parse_i64,
     parse_optional_ttl, unquote,
 };
 
@@ -41,7 +41,7 @@ pub async fn kv_incr(
         ));
     }
 
-    let collection = unquote(&args[0]).to_lowercase();
+    let collection = name_arg(&args[0])?;
     let key = unquote(&args[1]);
     let delta: i64 = parse_i64(&args[2], func_name)?;
     let delta = if negate {
@@ -118,7 +118,7 @@ pub async fn kv_incr_float(
         ));
     }
 
-    let collection = unquote(&args[0]).to_lowercase();
+    let collection = name_arg(&args[0])?;
     let key = unquote(&args[1]);
     // The delta stays the client's decimal text, so the engine adds every
     // digit the client wrote.
@@ -230,7 +230,7 @@ pub async fn kv_cas(
         ));
     }
 
-    let collection = unquote(&args[0]).to_lowercase();
+    let collection = name_arg(&args[0])?;
     let key = unquote(&args[1]);
     let expected = unquote(&args[2]);
     let new_value = unquote(&args[3]);
@@ -289,7 +289,7 @@ pub async fn kv_getset(
         ));
     }
 
-    let collection = unquote(&args[0]).to_lowercase();
+    let collection = name_arg(&args[0])?;
     let key = unquote(&args[1]);
     let new_value = unquote(&args[2]);
 

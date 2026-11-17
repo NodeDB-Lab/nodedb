@@ -76,13 +76,18 @@ impl UringSeqReader {
     /// cannot be opened, mirroring the `Option`-return fallback convention of
     /// the writer/reader siblings.
     pub fn open(path: &Path, chunk_size: usize) -> Option<Self> {
+        Self::open_at(path, 0, chunk_size)
+    }
+
+    /// Open `path` for streaming reads that start at byte `offset`.
+    pub fn open_at(path: &Path, offset: u64, chunk_size: usize) -> Option<Self> {
         let ring = io_uring::IoUring::new(QUEUE_DEPTH).ok()?;
         let file = std::fs::File::open(path).ok()?;
 
         Some(Self {
             ring,
             file,
-            file_offset: 0,
+            file_offset: offset,
             buf: vec![0u8; chunk_size.max(1)],
             pos: 0,
             filled: 0,
@@ -189,6 +194,35 @@ impl UringSeqReader {
         }
         Ok(true)
     }
+
+    /// Restart the stream at file byte `offset`, dropping the buffered bytes.
+    pub fn seek(&mut self, offset: u64) {
+        self.file_offset = offset;
+        self.pos = 0;
+        self.filled = 0;
+        self.eof = false;
+    }
+
+    /// Step over the next `len` bytes of the stream without reading them.
+    /// The bytes already buffered are dropped first, then the file offset
+    /// moves past the rest, so a skip past the buffer costs no read.
+    pub fn skip(&mut self, len: u64) -> crate::Result<()> {
+        let buffered = (self.filled - self.pos) as u64;
+        if len <= buffered {
+            // `len` is at most the buffered count, which is a `usize`.
+            self.pos += len as usize;
+            return Ok(());
+        }
+        self.pos = self.filled;
+        self.file_offset = self
+            .file_offset
+            .checked_add(len - buffered)
+            .ok_or_else(|| crate::Error::Storage {
+                engine: "wal_reader".into(),
+                detail: format!("a skip of {len} bytes passes the largest file offset"),
+            })?;
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -200,6 +234,11 @@ impl UringSeqReader {
     }
 
     /// io_uring streaming reads are Linux-only. Non-Linux builds return `None`.
+    pub fn open_at(_path: &Path, _offset: u64, _chunk_size: usize) -> Option<Self> {
+        None
+    }
+
+    /// io_uring streaming reads are Linux-only. Non-Linux builds return `None`.
     pub fn open_default(_path: &Path) -> Option<Self> {
         None
     }
@@ -207,6 +246,14 @@ impl UringSeqReader {
     /// Stub so generic call sites compile on non-Linux hosts.
     pub fn read_exact(&mut self, _dst: &mut [u8]) -> crate::Result<bool> {
         Ok(false)
+    }
+
+    /// Stub so generic call sites compile on non-Linux hosts.
+    pub fn seek(&mut self, _offset: u64) {}
+
+    /// Stub so generic call sites compile on non-Linux hosts.
+    pub fn skip(&mut self, _len: u64) -> crate::Result<()> {
+        Ok(())
     }
 }
 

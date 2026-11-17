@@ -22,7 +22,7 @@
 //! the version we read, `acquire_descriptor_lease` returns
 //! `Err::RetryableSchemaChanged`. We surface that as
 //! `SqlCatalogError::RetryableSchemaChanged`, which the statement
-//! entry points catch and retry (up to the retry budget) together
+//! entry points catch and retry (until the statement deadline) together
 //! with the post-planning lease acquisition, which can observe the
 //! same drain. On any other lease-acquire failure we log and
 //! proceed with the descriptor we read — lease acquisition is
@@ -34,9 +34,11 @@ mod adapter;
 mod cagg_relation;
 mod sequence_access;
 mod sql_catalog_impl;
+mod text_index_fields;
 mod type_convert;
 
 pub use adapter::OriginCatalog;
+pub(crate) use text_index_fields::check_text_read;
 pub(crate) use type_convert::{
     convert_collection_type, declared_column_info, document_declared_key,
 };

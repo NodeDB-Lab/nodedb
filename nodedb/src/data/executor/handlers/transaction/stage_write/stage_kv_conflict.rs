@@ -33,7 +33,10 @@ impl CoreLoop {
         ttl_ms: u64,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let existing = self.resolve_kv_current(ctx, key);
+        let existing = match self.resolve_kv_current(ctx, key) {
+            Ok(existing) => existing,
+            Err(e) => return self.response_error(ctx.task, e),
+        };
         let op = if existing.is_some() {
             "update"
         } else {
@@ -64,12 +67,18 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
+        if let Err(e) = crate::engine::kv::KvRowTooLarge::check(ctx.collection, key, &stored_bytes)
+        {
+            return self.response_error(ctx.task, e);
+        }
         // `ttl_ms` applies unconditionally, on both the insert and the
         // update branch above -- mirrors `execute_kv_insert_on_conflict_update`,
         // which passes `ttl_ms` straight into `kv_engine.put(..)` regardless
         // of whether `existing_bytes` was `None` or `Some`.
-        self.stage_kv_ttl_side_effect(ctx, ttl_ms);
-        if let Err(e) = self.stage_put_capped(ctx, stored_bytes) {
+        if let Err(e) = self
+            .stage_kv_ttl_side_effect(ctx, ttl_ms)
+            .and_then(|()| self.stage_put(ctx, stored_bytes))
+        {
             return self.response_error(ctx.task, e);
         }
 

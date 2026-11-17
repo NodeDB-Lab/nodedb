@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Shared NodeDB type definitions: strong IDs (TenantId, VShardId, RequestId,
 //! Lsn, Surrogate), error types (NodeDbError + ErrorCode + ErrorDetails), wire
 //! types for cross-plane and cross-node messages, value types, configuration
@@ -20,6 +23,7 @@ pub mod array_route;
 pub mod ascii;
 pub mod backup_envelope;
 pub mod bbox;
+pub mod bytea_text;
 pub mod calvin;
 pub mod calvin_passive;
 pub mod clone;
@@ -29,6 +33,7 @@ pub mod columnar;
 pub mod conversion;
 pub mod crdt_preview;
 pub mod datetime;
+pub mod decimal_float;
 pub mod decode_bounds;
 pub mod diagnostic;
 pub mod document;
@@ -48,15 +53,19 @@ pub mod kv;
 pub mod kv_parsing;
 pub mod lsn;
 pub mod mirror;
+pub mod msgpack_span;
 pub mod multi_vector;
 pub mod namespace;
 pub mod numeric_cmp;
+pub mod object_msgpack;
 pub mod path_component;
 pub mod pg_compat;
 pub mod protocol;
 pub mod result;
+pub mod returning;
 pub mod rls_write_check;
 pub mod row_identity;
+pub mod row_limits;
 pub mod sparse_vector;
 pub mod sql_quote;
 pub mod surrogate;
@@ -111,9 +120,12 @@ pub use id::{
 };
 pub use identity::KeyRepr;
 pub use json_msgpack::{
-    InstantKind, JsonValue, MsgpackError, MsgpackResult, NativeCell, json_from_msgpack,
-    json_to_msgpack, json_to_msgpack_or_empty, msgpack_to_json_string, ordered_map_to_msgpack,
-    read_instant, value_from_msgpack, value_to_msgpack, write_instant,
+    InstantKind, JsonValue, MsgpackError, MsgpackResult, NATIVE_CELL_CONSTANT,
+    NATIVE_CELL_GROWTH_DEN, NATIVE_CELL_GROWTH_NUM, NativeCell, NonStringKey,
+    find_body_non_string_key, find_non_string_key, json_from_msgpack, json_to_msgpack,
+    json_to_msgpack_or_empty, msgpack_to_json_string, native_cell_bound, ordered_map_to_msgpack,
+    plain_msgpack_keeps_type, read_instant, value_from_msgpack, value_to_document_body,
+    value_to_msgpack, value_to_typed_msgpack, write_instant,
 };
 pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key_type};
 pub use lsn::Lsn;
@@ -124,15 +136,21 @@ pub use mirror::{
 };
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
-pub use path_component::is_plain_path_component;
+pub use object_msgpack::{ObjectFormat, ObjectView, decode_object};
+pub use path_component::{hashed_file_stem, is_plain_path_component};
 pub use quota::{
     PriorityClass, PriorityClassParseError, QuotaRecord, QuotaSpec, QuotaValidationError,
 };
 pub use result::{QueryResult, SearchResult, SubGraph};
+pub use returning::{ReturningColumns, ReturningItem, ReturningSpec};
 pub use rls_write_check::{RlsWriteCheck, WriteGateDecision};
 pub use row_identity::{
     DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, ROWID_COLUMN, RowIdentity, StorageKey,
     declared_key, extract_pk_value, value_to_pk_string,
+};
+pub use row_limits::{
+    MAX_ADDED_COLUMN_IMAGE_BYTES, MAX_COLLECTION_NAME_BYTES, MAX_OLD_EVENT_IMAGE_BYTES,
+    MAX_ROW_IMAGE_BYTES, MAX_SCHEMA_WITNESS_BYTES, added_column_image_bytes,
 };
 pub use sparse_vector::{SparseVector, SparseVectorError};
 pub use sql_quote::{quote_ident, quote_literal};

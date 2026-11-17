@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use nodedb::bridge::envelope::{Priority, Request, Status};
 use nodedb::data::executor::core_loop::CoreLoop;
-use nodedb::data::executor::response_codec::decode_payload_to_json;
 use nodedb::types::*;
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
 use nodedb_physical::physical_plan::{
@@ -45,12 +44,14 @@ fn open_core() -> (
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx, dir)
@@ -104,7 +105,13 @@ fn send_ok(
 
 /// Parse a JSON response payload into a `serde_json::Value`.
 fn parse_json(payload: &[u8]) -> serde_json::Value {
-    let s = decode_payload_to_json(payload);
+    // Search and scan payloads decode as rows; a native row renders as its
+    // typed values.
+    let s = nodedb::data::executor::response_codec::decode_row_payload_to_json(
+        payload,
+        nodedb::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .expect("payload rows decode");
     serde_json::from_str(&s).unwrap_or(serde_json::Value::Array(vec![]))
 }
 
@@ -180,6 +187,7 @@ fn fts_derived_bitmap_filters_vector_search() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -348,6 +356,7 @@ fn document_scan_bitmap_filters_columnar_aggregate() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }

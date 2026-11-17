@@ -14,7 +14,10 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
 use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
+use crate::control::server::shared::statement_exec::fallible_returning::returning_commits_through_calvin;
+use crate::control::server::shared::statement_exec::{SeveralWrites, several_writes_route};
 use crate::control::server::shared::write_admission::{all_writes_bufferable, plan_is_write};
 use crate::types::TenantId;
 
@@ -23,7 +26,7 @@ use super::super::core::NodeDbPgHandler;
 use super::dispatch_loop::DispatchTaskContext;
 use super::result_shaping::ResultShaping;
 use super::setup_error::StatementSetupError;
-use crate::control::server::shared::retry::retry_on_schema_change;
+use crate::control::server::shared::retry::{DrainWait, retry_on_schema_change};
 
 impl NodeDbPgHandler {
     pub(super) async fn execute_planned_sql_inner(
@@ -48,7 +51,7 @@ impl NodeDbPgHandler {
             .get_current_database(session_id)
             .unwrap_or(crate::types::DatabaseId::DEFAULT);
         let (tasks, output_schema, auth_ctx, plan_lease_scope, sum_target_reads) =
-            retry_on_schema_change(&self.state.lease_drain, move || async move {
+            retry_on_schema_change(DrainWait::of_statement(&self.state), move || async move {
                 let (mut tasks, output_schema, versions, auth_ctx) = self
                     .plan_statement_to_tasks(identity, sql, tenant_id, session_id, params)
                     .await?;
@@ -174,9 +177,16 @@ impl NodeDbPgHandler {
             // known only to this statement's plan, so it rides along under the
             // Describe-phase columns: the shaper evaluates it before those
             // columns project, and a computed alias never renders as NULL.
+            //
+            // A Describe-phase column reads the cell of the same position in
+            // this statement's own schema. A column name derives from the
+            // item text, which a bound parameter rewrites (`SELECT $1 + 1`
+            // planned with NULL at Describe and with 5 here), so the
+            // Describe-phase key need not be the key this plan writes. The
+            // Describe-phase name and type stay what the client was told.
             let effective_schema_owned = match shaping.projection {
                 Some(described) => crate::control::server::response_shape::schema::OutputSchema {
-                    columns: described.columns.clone(),
+                    columns: keyed_by_position(&described.columns, &output_schema),
                     is_star: described.is_star,
                     cp_computed: output_schema.cp_computed,
                     declared_key: output_schema.declared_key,
@@ -185,21 +195,41 @@ impl NodeDbPgHandler {
             };
             let effective_schema = Some(&effective_schema_owned);
 
+            // The statement is planned. Every route below runs after this gate.
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_route(self.state.node_id).await;
+
             // A statement outside a transaction block whose writes fire a
             // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
-            // edge-bearing collection, or an INSERT ... SELECT, UPDATE ... FROM
-            // or MERGE into the source of a cross-shard materialized sum,
-            // runs in an implicit transaction,
-            // ahead of every autocommit route:
-            // its writes stage on their vShards' leaders and commit together
-            // at its end.
+            // edge-bearing collection, an INSERT ... SELECT, UPDATE ... FROM
+            // or MERGE into the source of a cross-shard materialized sum, or
+            // one of those three whose RETURNING list can fail, runs in an
+            // implicit transaction, ahead of every autocommit route: its
+            // writes stage on their vShards' leaders and commit together at
+            // its end. A list's fallibility reads the announced columns.
             let tx_state = self.sessions.transaction_state(session_id);
-            if tx_state != TransactionState::InBlock
-                && crate::control::server::shared::txn_route::statement_needs_implicit_txn(
+            // An autocommit statement of several writes commits them as one,
+            // ahead of the gateway gate: a forward applies its tasks one by
+            // one, each its own commit.
+            let several_writes = if tx_state == TransactionState::InBlock {
+                None
+            } else {
+                several_writes_route(
                     &self.state,
                     &tasks,
+                    self.sessions.cross_shard_txn_mode(session_id),
                 )
-                .map_err(|error| sql_error(&error))?
+            };
+            if tx_state != TransactionState::InBlock
+                && (several_writes == Some(SeveralWrites::ImplicitTxn)
+                    || with_announced_returning(effective_schema, async {
+                        crate::control::server::shared::txn_route::statement_needs_implicit_txn(
+                            &self.state,
+                            &tasks,
+                        )
+                    })
+                    .await
+                    .map_err(|error| sql_error(&error))?)
             {
                 if !all_writes_bufferable(&tasks) {
                     return Err(sql_error(
@@ -235,7 +265,6 @@ impl NodeDbPgHandler {
                         identity,
                         session_id,
                         result_formats: shaping.formats,
-                        auth: &auth_ctx,
                         projection: effective_schema,
                     },
                     &sum_target_reads,
@@ -245,8 +274,33 @@ impl NodeDbPgHandler {
                 return Ok(responses);
             }
 
-            #[cfg(feature = "failpoints")]
-            crate::control::fail_gate::before_route(self.state.node_id).await;
+            // The direct path evaluates `RETURNING` after its write is stored.
+            // An autocommit list that can fail commits as one Calvin
+            // transaction on any vShard count, ahead of the gateway gate: its
+            // participant evaluates the list before it votes, so an error
+            // stores nothing. A predicate write takes the recon coordinator.
+            // Several writes commit there too, as one transaction.
+            if tx_state != TransactionState::InBlock
+                && (several_writes == Some(SeveralWrites::Calvin)
+                    || with_announced_returning(effective_schema, async {
+                        returning_commits_through_calvin(&self.state, tenant_id, &tasks)
+                    })
+                    .await)
+            {
+                return self
+                    .dispatch_calvin_multishard(
+                        tasks,
+                        tenant_id,
+                        super::calvin_dispatch::CalvinDispatchSession {
+                            identity,
+                            session_id,
+                            result_formats: shaping.formats,
+                            projection: effective_schema,
+                        },
+                        &sum_target_reads,
+                    )
+                    .await;
+            }
 
             // Read once, ahead of the gateway gate: an in-block write must never
             // forward here, or it applies durably outside the transaction. A
@@ -306,7 +360,6 @@ impl NodeDbPgHandler {
                                     identity,
                                     session_id,
                                     result_formats: shaping.formats,
-                                    auth: &auth_ctx,
                                     projection: effective_schema,
                                 },
                                 &sum_target_reads,
@@ -344,7 +397,6 @@ impl NodeDbPgHandler {
                                         identity,
                                         session_id,
                                         result_formats: shaping.formats,
-                                        auth: &auth_ctx,
                                         projection: effective_schema,
                                     },
                                     &sum_target_reads,
@@ -397,4 +449,29 @@ fn sql_error(error: &crate::Error) -> PgWireError {
         code.to_owned(),
         message,
     )))
+}
+
+/// The Describe-phase `described` columns, each reading the lookup key of
+/// the column at its position in this statement's `planned` schema.
+///
+/// The two schemas come from one statement, so they hold the same columns
+/// in the same order. When either is a star or their lengths differ, the
+/// Describe-phase keys stand.
+fn keyed_by_position(
+    described: &[crate::control::server::response_shape::schema::OutputColumn],
+    planned: &crate::control::server::response_shape::schema::OutputSchema,
+) -> Vec<crate::control::server::response_shape::schema::OutputColumn> {
+    if planned.is_star || planned.columns.len() != described.len() {
+        return described.to_vec();
+    }
+    described
+        .iter()
+        .zip(&planned.columns)
+        .map(
+            |(described, planned)| crate::control::server::response_shape::schema::OutputColumn {
+                lookup_key: planned.lookup_key.clone(),
+                ..described.clone()
+            },
+        )
+        .collect()
 }

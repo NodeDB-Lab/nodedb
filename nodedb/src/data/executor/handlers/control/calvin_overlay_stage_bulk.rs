@@ -189,7 +189,7 @@ impl CoreLoop {
         let removed = rows.iter().filter(|(_, _, body)| body.is_some()).count();
         let overlay = self.txn_overlay_mut(txn_id);
         for (surrogate, identity, _body) in &rows {
-            overlay.insert_tombstone(coll_key.clone(), *surrogate, identity);
+            overlay.insert_tombstone(coll_key.clone(), *surrogate, identity)?;
         }
         Ok(removed)
     }
@@ -267,6 +267,13 @@ impl CoreLoop {
                 declared_primary_key,
                 storage_key,
             );
+            self.stage_check_row_image(
+                database_id.as_u64(),
+                tid,
+                collection,
+                &identity,
+                &new_body,
+            )?;
             self.stage_admit_write(
                 rls_write_check,
                 &new_body,
@@ -296,7 +303,7 @@ impl CoreLoop {
 
         let updated = post_images.len();
         for (surrogate, identity, new_body) in post_images {
-            self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, new_body)?;
+            self.stage_bulk_put(txn_id, &coll_key, surrogate, &identity, new_body)?;
         }
         Ok(updated)
     }

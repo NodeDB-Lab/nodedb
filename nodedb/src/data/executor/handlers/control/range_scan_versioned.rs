@@ -230,7 +230,11 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate);
+            if let Err(e) =
+                self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate)
+            {
+                return self.response_error(task, e);
+            }
         }
 
         // Both passes above run the same predicate; check the side-channel once,

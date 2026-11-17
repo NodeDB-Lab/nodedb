@@ -408,7 +408,16 @@ mod tests {
         let txn = crate::types::TxnId::new(71);
         let calvin = core.execute_resolve_txn(&home, TID, txn, std::slice::from_ref(&guard));
         assert_eq!(calvin.status, Status::Ok, "{calvin:?}");
-        let session = core.execute_resolve_session_txn(&home, TID, txn, &[guard]);
+        let session = core.execute_resolve_txn_part(
+            &home,
+            TID,
+            crate::data::executor::handlers::transaction::resolve::PartRequest {
+                txn_id: txn,
+                part: 0,
+                max_part_bytes: u64::MAX,
+            },
+            &[guard],
+        );
         assert_eq!(
             session.error_code.as_deref(),
             Some(&ErrorCode::OllpRetryRequired)

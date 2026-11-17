@@ -32,8 +32,9 @@ pub(super) fn ilp_payload(collection: &str, count: usize, start_ts_ns: i64) -> V
 }
 
 /// The `TimeseriesBatch` WAL payload a live ILP ingest of `payload` into
-/// `collection` writes: the six-element tuple `("timeseries", collection,
-/// payload, provenance, format, default_timestamp_ms)`.
+/// `collection` writes: the seven-element tuple `("timeseries", collection,
+/// payload, provenance, format, default_timestamp_ms, rls_write_check)`. No
+/// RLS policy exists on these collections.
 pub(super) fn ilp_wal_payload(collection: &str, payload: Vec<u8>) -> Vec<u8> {
     zerompk::to_msgpack_vec(&(
         "timeseries".to_string(),
@@ -42,6 +43,7 @@ pub(super) fn ilp_wal_payload(collection: &str, payload: Vec<u8>) -> Vec<u8> {
         None::<nodedb_types::sync::wire::SyncProvenance>,
         "ilp".to_string(),
         1_700_000_000_000i64,
+        nodedb_types::RlsWriteCheck::NoPolicyApplies,
     ))
     .unwrap()
 }

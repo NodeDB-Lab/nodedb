@@ -141,12 +141,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         Harness {
@@ -336,8 +338,11 @@ mod tests {
         h.core
             .flush_ts_collection(TenantId::new(TENANT), DatabaseId::DEFAULT, COLLECTION, 0)
             .expect("flush");
+        // A task's deadline starts when it is built, so the scan after the
+        // flush gets its own task.
+        let scan = scan_task(policy_owner_eq("mine"), Vec::new());
         let flushed = h.core.dispatch_timeseries(&scan, &op);
-        assert_eq!(flushed.status, Status::Ok);
+        assert_eq!(flushed.status, Status::Ok, "{:?}", flushed.error_code);
         let rows = decode_rows(flushed.payload.as_bytes());
         assert_eq!(rows.len(), 1, "one flushed row is admitted: {rows:?}");
     }
@@ -474,6 +479,7 @@ mod tests {
         {
             *returning = Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             });
         }
         let PhysicalPlan::Timeseries(op) = task.request.plan.clone() else {

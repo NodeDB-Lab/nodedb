@@ -66,13 +66,29 @@ impl GroupBySpiller {
         self.core.spilled_runs
     }
 
-    /// Feed one document into the accumulator for the given group key.
-    ///
-    /// Triggers a disk spill when the in-memory map is full or governor
-    /// pressure is detected (checked every 10 000 feeds).
+    /// [`Self::feed_keyed`] with no representative key values.
+    #[cfg(test)]
     pub(in crate::data::executor::handlers) fn feed(
         &mut self,
         key: String,
+        aggregates: &[AggregateSpec],
+        doc: &[u8],
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<()> {
+        self.feed_keyed(key, Vec::new(), aggregates, doc, crs)
+    }
+
+    /// Feed one document into the accumulator for the given group key.
+    /// `key_values` are the row's typed key values. A group a row opens keeps
+    /// them as its representative, stamped with the feed order, so the
+    /// earliest row in input order wins across spilled runs.
+    ///
+    /// Triggers a disk spill when the in-memory map is full or governor
+    /// pressure is detected (checked every 10 000 feeds).
+    pub(in crate::data::executor::handlers) fn feed_keyed(
+        &mut self,
+        key: String,
+        key_values: Vec<nodedb_types::Value>,
         aggregates: &[AggregateSpec],
         doc: &[u8],
         crs: &nodedb_crs::CrsContext<'_>,
@@ -90,7 +106,7 @@ impl GroupBySpiller {
                 self.spill_current_run()?;
             }
             let key_len = key.len();
-            let mut state = GroupState::new(aggregates)?;
+            let mut state = GroupState::with_key(aggregates, self.feed_counter, key_values)?;
             state.feed(aggregates, doc, crs)?;
             self.in_mem.insert(key, state);
             self.bytes_estimate = self
@@ -618,5 +634,28 @@ mod tests {
             panic!("expected float");
         };
         assert!((80.0..120.0).contains(&p50), "TDigest p50: got {p50}");
+    }
+
+    /// A group spilled in an early run and reopened in a later one keeps the
+    /// representative of its first row.
+    #[test]
+    fn representative_is_the_first_row_across_spills() {
+        let specs = vec![make_spec("count", "*")];
+        let doc = make_doc_i64("v", 1);
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut spiller = GroupBySpiller::new(temp_spill_dir("representative"), 1, None).unwrap();
+        let decimal = Value::Decimal("5.00".parse().unwrap());
+        spiller
+            .feed_keyed("[5]".into(), vec![decimal.clone()], &specs, &doc, &crs)
+            .unwrap();
+        // A second key forces the first group out to a spill run.
+        spiller
+            .feed_keyed("[6]".into(), vec![Value::Integer(6)], &specs, &doc, &crs)
+            .unwrap();
+        spiller
+            .feed_keyed("[5]".into(), vec![Value::Integer(5)], &specs, &doc, &crs)
+            .unwrap();
+        let groups = spiller.finalize().unwrap();
+        assert_eq!(groups["[5]"].key_values(), Some(&[decimal][..]));
     }
 }

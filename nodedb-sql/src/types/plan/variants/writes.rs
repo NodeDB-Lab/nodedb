@@ -10,6 +10,7 @@ use super::super::row_types::{KvInsertIntent, WriteRoute};
 /// Payload of [`SqlPlan::Insert`](crate::types::SqlPlan::Insert).
 #[derive(Debug, Clone)]
 pub struct InsertPlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     pub engine: EngineType,
     /// The lowering these rows take, chosen by the engine's `EngineRules`.
@@ -42,6 +43,7 @@ pub struct InsertPlan {
 /// Payload of [`SqlPlan::KvInsert`](crate::types::SqlPlan::KvInsert).
 #[derive(Debug, Clone)]
 pub struct KvInsertPlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     pub entries: Vec<(SqlValue, Vec<(String, SqlValue)>)>,
     /// TTL in seconds (0 = no expiry). Extracted from `ttl` column if present.
@@ -68,6 +70,7 @@ pub struct KvInsertPlan {
 /// Payload of [`SqlPlan::Upsert`](crate::types::SqlPlan::Upsert).
 #[derive(Debug, Clone)]
 pub struct UpsertPlan {
+    pub returning: Option<crate::types::ResolvedReturning>,
     pub collection: String,
     pub engine: EngineType,
     /// The lowering these rows take. Mirrors `Insert::route`.

@@ -39,7 +39,9 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
-        self.txn_overlay_mut(txn_id).mark_truncated(coll_key);
-        self.response_with_payload(task, Vec::new())
+        match self.txn_overlay_mut(txn_id).mark_truncated(coll_key) {
+            Ok(()) => self.response_with_payload(task, Vec::new()),
+            Err(e) => self.response_error(task, e),
+        }
     }
 }

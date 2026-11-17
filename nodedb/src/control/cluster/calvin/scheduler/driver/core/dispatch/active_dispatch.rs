@@ -15,6 +15,8 @@ use super::primary_write::{
     plans_have_primary_write, plans_have_returning, plans_raise_write_mark,
     txn_has_non_derived_write,
 };
+use super::static_dispatch::IndexedPlans;
+use crate::control::cluster::calvin::scheduler::driver::staged_returning::StagedReturning;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
 impl Scheduler {
@@ -47,30 +49,32 @@ impl Scheduler {
             Some(manifest) => manifest.user_write,
             None => txn_has_non_derived_write(&plans),
         };
-        let mut plans =
-            match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
-                Ok(p) if !p.is_empty() => p,
-                Ok(_) => {
-                    // Only a vShard the write set names opens a barrier, so an
-                    // active txn dispatched here carries a local write slice. An
-                    // empty local slice means the plans and the write set
-                    // disagree, so it rejects the plans rather than dispatching
-                    // an active task with nothing to apply.
-                    let e = crate::Error::Internal {
-                        detail: format!(
-                            "calvin active txn {epoch}/{position} homes no local write plans \
+        let IndexedPlans {
+            mut plans,
+            indexes: plan_indexes,
+        } = match self.local_calvin_slice(plans, txn.tx_class.database_id, epoch, position) {
+            Ok(p) if !p.plans.is_empty() => p,
+            Ok(_) => {
+                // Only a vShard the write set names opens a barrier, so an
+                // active txn dispatched here carries a local write slice. An
+                // empty local slice means the plans and the write set
+                // disagree, so it rejects the plans rather than dispatching
+                // an active task with nothing to apply.
+                let e = crate::Error::Internal {
+                    detail: format!(
+                        "calvin active txn {epoch}/{position} homes no local write plans \
                          for vshard {}",
-                            self.vshard_id
-                        ),
-                    };
-                    self.reject_plan(txn, txn_id, lock_owner, &e);
-                    return;
-                }
-                Err(e) => {
-                    self.reject_plan(txn, txn_id, lock_owner, &e);
-                    return;
-                }
-            };
+                        self.vshard_id
+                    ),
+                };
+                self.reject_plan(txn, txn_id, lock_owner, &e);
+                return;
+            }
+            Err(e) => {
+                self.reject_plan(txn, txn_id, lock_owner, &e);
+                return;
+            }
+        };
         let Some(identities) =
             self.bind_local_identities(&mut plans, txn.tx_class.database_id, tenant_id, txn_id)
         else {
@@ -104,6 +108,8 @@ impl Scheduler {
         // capacity stays in flight with its locks until the re-send.
         // The leader checks the transaction's collection incarnations.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);
+        let transcripts = self.returning_evals.transcripts_for(txn_id, &txn);
+        let returning = StagedReturning::of_txn_slice(&txn, plan_indexes, transcripts);
         self.pending.insert(
             txn_id,
             super::super::super::types::PendingTxn {
@@ -131,6 +137,7 @@ impl Scheduler {
                 superseded,
                 gates,
                 ungated: false,
+                returning,
             },
         );
 

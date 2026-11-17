@@ -25,6 +25,7 @@ use super::super::columnar_memtable::{ColumnarFlushView, ColumnarSchema};
 use super::codec::encode_column;
 use super::encrypt::encrypt_file;
 use super::error::SegmentError;
+use super::file_names::{column_file_name, symbol_file_name};
 use super::schema::schema_to_json;
 use super::util::dir_size;
 
@@ -85,6 +86,19 @@ impl ColumnarSegmentWriter {
         // stored schema. The repair would be a rename at partition load keyed
         // on `schema.timestamp_idx` — the time column's identity is positional,
         // so the mapping is unambiguous and needs no rewrite.
+        // Column files are named by a hash of the column name; two names that
+        // hash to one file would overwrite each other, so the partition is
+        // refused instead.
+        let mut file_owners: HashMap<String, &str> = HashMap::new();
+        for (col_name, _) in &view.schema.columns {
+            if let Some(other) = file_owners.insert(column_file_name(col_name), col_name.as_str())
+                && other != col_name.as_str()
+            {
+                return Err(SegmentError::Io(format!(
+                    "columns {other:?} and {col_name:?} map to one file name"
+                )));
+            }
+        }
         for (i, (col_name, col_type)) in view.schema.columns.iter().enumerate() {
             let col_data = &view.columns[i];
             let requested_codec = view.schema.codec(i);
@@ -93,7 +107,7 @@ impl ColumnarSegmentWriter {
                 encode_column(col_data, *col_type, requested_codec)?;
 
             let file_bytes = maybe_encrypt(kek, &encoded)?;
-            durable_write(&partition_dir, &format!("{col_name}.col"), &file_bytes)?;
+            durable_write(&partition_dir, &column_file_name(col_name), &file_bytes)?;
 
             // Write the dictionary of every symbol and text column.
             if col_type.is_dictionary()
@@ -102,7 +116,7 @@ impl ColumnarSegmentWriter {
                 let dict_json = sonic_rs::to_vec(dict)
                     .map_err(|e| SegmentError::Io(format!("serialize dict: {e}")))?;
                 let sym_bytes = maybe_encrypt(kek, &dict_json)?;
-                durable_write(&partition_dir, &format!("{col_name}.sym"), &sym_bytes)?;
+                durable_write(&partition_dir, &symbol_file_name(col_name), &sym_bytes)?;
             }
 
             column_stats.insert(col_name.clone(), stats);
@@ -510,11 +524,11 @@ mod tests {
 
         // Each on-disk file must start with SEGT magic.
         for filename in &[
-            "timestamp.col",
-            "value.col",
-            "schema.json",
-            "sparse_index.bin",
-            "partition.meta",
+            column_file_name("timestamp"),
+            column_file_name("value"),
+            "schema.json".to_string(),
+            "sparse_index.bin".to_string(),
+            "partition.meta".to_string(),
         ] {
             let bytes = std::fs::read(part_dir.join(filename)).unwrap();
             assert!(
@@ -534,5 +548,48 @@ mod tests {
         let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, Some(&kek))
             .expect("sparse index must exist");
         assert_eq!(sparse.total_rows(), 100);
+    }
+
+    /// Columns named past the 255-byte file-name limit write and read back,
+    /// data and dictionary both.
+    #[test]
+    fn long_column_names_write_and_read_back() {
+        let tmp = TempDir::new().unwrap();
+        let value = "v".repeat(400);
+        let tag = "t".repeat(400);
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("timestamp".into(), MILLIS),
+                (value.clone(), ColumnType::Float64),
+                (tag.clone(), ColumnType::Symbol),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![ColumnCodec::Auto; 3],
+        };
+        let mut mt = ColumnarMemtable::new(schema, test_config());
+        for i in 0..10 {
+            mt.ingest_row(
+                1,
+                &[
+                    ColumnValue::Timestamp(5000 + i),
+                    ColumnValue::Float64(i as f64),
+                    ColumnValue::Symbol("prod".to_string()),
+                ],
+            )
+            .unwrap();
+        }
+        let drain = mt.drain();
+        ColumnarSegmentWriter::new(tmp.path())
+            .write_partition("long-col", &drain.view(), 86_400_000, 0, None)
+            .unwrap();
+
+        let part_dir = tmp.path().join("long-col");
+        assert!(part_dir.join(column_file_name(&value)).exists());
+        assert!(part_dir.join(symbol_file_name(&tag)).exists());
+        let col = ColumnarSegmentReader::read_column(&part_dir, &value, ColumnType::Float64, None)
+            .unwrap();
+        assert_eq!(col.len(), 10);
+        let dict = ColumnarSegmentReader::read_symbol_dict(&part_dir, &tag, None).unwrap();
+        assert_eq!(dict.len(), 1);
     }
 }

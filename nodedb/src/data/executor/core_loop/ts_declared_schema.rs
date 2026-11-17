@@ -20,7 +20,11 @@
 use nodedb_physical::physical_plan::TimeseriesSchema;
 use nodedb_types::InstantKind;
 
-use crate::engine::timeseries::columnar_memtable::{ColumnType, ColumnarSchema, TimeKind};
+use crate::engine::timeseries::columnar_memtable::{
+    ColumnType, ColumnarSchema, TimeKind, TsDecimalTypmod,
+};
+use crate::engine::timeseries::declared_cell::{declared_cell, is_declared_exact};
+use crate::engine::timeseries::ilp::IlpLine;
 use crate::types::{DatabaseId, TenantId};
 
 use super::state::CoreLoop;
@@ -185,19 +189,85 @@ impl CoreLoop {
                 Some((_, ColumnType::Timestamp(kind))) => *kind,
                 Some((
                     _,
-                    ColumnType::Int64 | ColumnType::Float64 | ColumnType::Symbol | ColumnType::Text,
+                    ColumnType::Int64
+                    | ColumnType::Float64
+                    | ColumnType::Symbol
+                    | ColumnType::Text
+                    | ColumnType::Decimal(_)
+                    | ColumnType::Uuid
+                    | ColumnType::Bool,
                 ))
                 | None => TimeKind::Millis,
             }
         })
         .unwrap_or(TimeKind::Millis)
     }
+
+    /// The declared DECIMAL, UUID and BOOLEAN columns of a timeseries
+    /// collection, as `(column, memtable type)`. Empty for a collection with
+    /// no declared shape: an ILP-inferred collection has none of them.
+    pub(in crate::data::executor) fn declared_ts_exact_columns(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+    ) -> Vec<(String, ColumnType)> {
+        self.declared_ts_memtable_schema(database_id, tid, collection)
+            .map(|schema| {
+                schema
+                    .columns
+                    .into_iter()
+                    .filter(|(_, ty)| is_declared_exact(*ty))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Refuse a batch whose lines carry a value a declared DECIMAL, UUID or
+    /// BOOLEAN column does not take, before any row of it is stored.
+    ///
+    /// The refusal names the column and the value: text that does not parse
+    /// is `22P02` (invalid text representation) and a field of the wrong kind
+    /// is `42804` (datatype mismatch). A collection with no declared shape
+    /// keeps its inferred types and is never refused here.
+    pub(in crate::data::executor) fn admit_declared_ts_values(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+        lines: &[IlpLine<'_>],
+    ) -> crate::Result<()> {
+        let exact = self.declared_ts_exact_columns(database_id, tid, collection);
+        if exact.is_empty() {
+            return Ok(());
+        }
+        for line in lines {
+            for (key, value) in &line.fields {
+                if let Some((column, ty)) = exact.iter().find(|(name, _)| name == key.as_ref()) {
+                    declared_cell(column, *ty, value)?;
+                }
+            }
+            if let Some((key, _)) = line
+                .tags
+                .iter()
+                .find(|(key, _)| exact.iter().any(|(name, _)| name == key.as_ref()))
+            {
+                return Err(crate::Error::DatatypeMismatch {
+                    detail: format!(
+                        "column '{key}': a tag cannot be stored in a DECIMAL, UUID or BOOLEAN \
+                         column"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// How one grouped timeseries column renders in an aggregate result row.
 ///
 /// The grouped scan reduces every key to a string, so emission has to put the
-/// column's own type back. The variants name the four shapes a stored
+/// column's own type back. The variants name the shapes a stored
 /// timeseries column can take on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum TsGroupKeyKind {
@@ -207,6 +277,12 @@ pub(in crate::data::executor) enum TsGroupKeyKind {
     Integer,
     /// A floating-point column.
     Float,
+    /// An exact decimal column.
+    Decimal,
+    /// A UUID column.
+    Uuid,
+    /// A boolean column.
+    Bool,
     /// A symbol tag or a text field, both dictionary strings.
     Text,
 }
@@ -222,6 +298,9 @@ fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
         ColumnType::Int64 | ColumnType::Timestamp(TimeKind::Millis) => TsGroupKeyKind::Integer,
         ColumnType::Float64 => TsGroupKeyKind::Float,
         ColumnType::Symbol | ColumnType::Text => TsGroupKeyKind::Text,
+        ColumnType::Decimal(_) => TsGroupKeyKind::Decimal,
+        ColumnType::Uuid => TsGroupKeyKind::Uuid,
+        ColumnType::Bool => TsGroupKeyKind::Bool,
     }
 }
 
@@ -262,13 +341,14 @@ fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
         _ if is_time_key => ColumnType::Timestamp(TimeKind::Millis),
         _ if declares_symbol(declared_type) => ColumnType::Symbol,
         Some(DeclaredType::Int64) => ColumnType::Int64,
-        // The memtable has no boolean column; ILP ingest widens booleans to
-        // f64, so a declared BOOLEAN lands in the same place.
-        Some(DeclaredType::Float64 | DeclaredType::Bool | DeclaredType::Decimal { .. }) => {
-            ColumnType::Float64
-        }
-        // Everything else (TEXT, UUID, JSON, and any type the memtable
-        // cannot represent natively) is a text field.
+        Some(DeclaredType::Float64) => ColumnType::Float64,
+        // DECIMAL stores the exact decimal, UUID its 16 bytes, BOOLEAN a
+        // bool. None of them rounds through a float or a string.
+        Some(DeclaredType::Decimal(typmod)) => ColumnType::Decimal(typmod.map(TsDecimalTypmod::of)),
+        Some(DeclaredType::Uuid) => ColumnType::Uuid,
+        Some(DeclaredType::Bool) => ColumnType::Bool,
+        // Everything else (TEXT, JSON, and any type the memtable cannot
+        // represent natively) is a text field.
         _ => ColumnType::Text,
     }
 }
@@ -319,6 +399,12 @@ mod tests {
         assert_eq!(kind_of_storage(ColumnType::Float64), TsGroupKeyKind::Float);
         assert_eq!(kind_of_storage(ColumnType::Symbol), TsGroupKeyKind::Text);
         assert_eq!(kind_of_storage(ColumnType::Text), TsGroupKeyKind::Text);
+        assert_eq!(
+            kind_of_storage(ColumnType::Decimal(None)),
+            TsGroupKeyKind::Decimal
+        );
+        assert_eq!(kind_of_storage(ColumnType::Uuid), TsGroupKeyKind::Uuid);
+        assert_eq!(kind_of_storage(ColumnType::Bool), TsGroupKeyKind::Bool);
     }
 
     #[test]
@@ -329,12 +415,23 @@ mod tests {
             ColumnType::Int64
         );
         assert_eq!(memtable_column_type("FLOAT", false), ColumnType::Float64);
-        assert_eq!(memtable_column_type("BOOLEAN", false), ColumnType::Float64);
+        assert_eq!(memtable_column_type("BOOLEAN", false), ColumnType::Bool);
+        assert_eq!(
+            memtable_column_type("DECIMAL", false),
+            ColumnType::Decimal(None)
+        );
+        assert_eq!(
+            memtable_column_type("DECIMAL(10,2)", false),
+            ColumnType::Decimal(Some(TsDecimalTypmod {
+                precision: 10,
+                scale: 2
+            }))
+        );
         assert_eq!(memtable_column_type("TEXT", false), ColumnType::Text);
         assert_eq!(memtable_column_type("VARCHAR", false), ColumnType::Text);
         assert_eq!(memtable_column_type("VARCHAR(64)", false), ColumnType::Text);
         assert_eq!(memtable_column_type("STRING", false), ColumnType::Text);
-        assert_eq!(memtable_column_type("UUID", false), ColumnType::Text);
+        assert_eq!(memtable_column_type("UUID", false), ColumnType::Uuid);
     }
 
     /// Only the `SYMBOL` keyword declares a series dimension, in any case and

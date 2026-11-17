@@ -50,6 +50,20 @@ impl CoreLoop {
         }) {
             return self.response_error(task, refusal);
         }
+        // Every vector holds `dim` floats, so one measure holds the batch to
+        // the row image limit before any vector is inserted.
+        if let Some(surrogate) = surrogates.first()
+            && let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+                collection,
+                || surrogate.as_u32().to_string(),
+                "",
+                dim,
+                &std::collections::HashMap::new(),
+                0,
+            )
+        {
+            return self.response_error(task, e);
+        }
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, "");
         // A committed-redo install seals once the whole record landed.
         let defer_seal = self.recording_redo_undo();
@@ -211,12 +225,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

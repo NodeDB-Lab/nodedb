@@ -302,6 +302,9 @@ fn declared_columns(
 /// Build the `CollectionConfig` a `DocumentOp::Register` will install in
 /// `doc_configs`, straight from the durable catalog — storage mode,
 /// enforcement options, generated columns, and secondary indexes.
+/// `text_fields` is the full-text field set the caller read from the
+/// collection's index records: one collection's records on the live path,
+/// a tenant's records grouped once on the boot path.
 ///
 /// Shared by two callers that must never drift apart:
 /// - [`dispatch_register_from_stored_inner`] (live DDL / applier path):
@@ -316,7 +319,8 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
     tenant_id: crate::types::TenantId,
     coll: &StoredCollection,
     indexes: &[nodedb_physical::physical_plan::RegisteredIndex],
-) -> crate::engine::document::store::CollectionConfig {
+    text_fields: nodedb_physical::physical_plan::TextFieldSet,
+) -> crate::Result<crate::engine::document::store::CollectionConfig> {
     let name = crate::control::planner::sql_plan_convert::convert::db_qualified(
         coll.database_id,
         &coll.name,
@@ -397,7 +401,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         &coll.name,
         &enforcement.type_guards,
     );
-    crate::engine::document::store::CollectionConfig {
+    Ok(crate::engine::document::store::CollectionConfig {
         name,
         type_guards,
         index_paths: indexes
@@ -414,8 +418,9 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         vector_fields: declared_vector_fields(coll),
         declared_columns: declared_columns(coll),
         declared_key: crate::control::planner::catalog_adapter::document_declared_key(coll),
+        text_fields,
         incarnation: coll.incarnation,
-    }
+    })
 }
 
 async fn dispatch_register_from_stored_inner(
@@ -425,7 +430,8 @@ async fn dispatch_register_from_stored_inner(
     indexes: Vec<nodedb_physical::physical_plan::RegisteredIndex>,
 ) -> crate::Result<()> {
     let catalog = state.credentials.catalog();
-    let config = build_doc_config_from_stored(catalog, tenant_id, coll, &indexes);
+    let text_fields = super::text_fields::text_field_set(catalog, coll)?;
+    let config = build_doc_config_from_stored(catalog, tenant_id, coll, &indexes, text_fields)?;
 
     let plan = crate::bridge::envelope::PhysicalPlan::Document(
         nodedb_physical::physical_plan::DocumentOp::Register {
@@ -444,6 +450,7 @@ async fn dispatch_register_from_stored_inner(
             vector_fields: config.vector_fields.clone(),
             declared_columns: config.declared_columns.clone(),
             declared_key: config.declared_key.clone(),
+            text_fields: config.text_fields.clone(),
             incarnation: config.incarnation,
         },
     );
@@ -461,6 +468,7 @@ async fn dispatch_register_from_stored_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_physical::physical_plan::TextFieldSet;
     use nodedb_types::{PrimaryEngine, VectorPrimaryConfig};
 
     /// A catalog with no other collections — enough for the builder, which
@@ -479,6 +487,21 @@ mod tests {
             _database_id: DatabaseId,
             _tenant_id: u64,
         ) -> crate::Result<Vec<StoredCollection>> {
+            Ok(Vec::new())
+        }
+        fn index_records_for_tenant(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+            Ok(Vec::new())
+        }
+        fn index_records_for_collection(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+            _collection: &str,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
             Ok(Vec::new())
         }
     }
@@ -509,7 +532,9 @@ mod tests {
             crate::types::TenantId::new(coll.tenant_id),
             &coll,
             &[],
-        );
+            TextFieldSet::default(),
+        )
+        .expect("build doc config");
         let vp = config
             .vector_primary
             .as_ref()
@@ -528,7 +553,9 @@ mod tests {
             crate::types::TenantId::new(coll.tenant_id),
             &coll,
             &[],
-        );
+            TextFieldSet::default(),
+        )
+        .expect("build doc config");
         assert!(config.vector_primary.is_none());
     }
 
@@ -543,7 +570,9 @@ mod tests {
             crate::types::TenantId::new(coll.tenant_id),
             &coll,
             &[],
-        );
+            TextFieldSet::default(),
+        )
+        .expect("build doc config");
         assert_eq!(config.declared_key.as_deref(), Some("sku"));
 
         let plain = StoredCollection::new(1, "docs", "owner");
@@ -552,7 +581,9 @@ mod tests {
             crate::types::TenantId::new(plain.tenant_id),
             &plain,
             &[],
-        );
+            TextFieldSet::default(),
+        )
+        .expect("build doc config");
         assert_eq!(config.declared_key, None);
     }
 }

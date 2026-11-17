@@ -30,6 +30,11 @@ pub enum GroupCell {
     /// `f64::to_bits` of the cell. `-0.0` and `0.0` group apart.
     Float(u64),
     Text(String),
+    /// A decimal. `1.5` and `1.50` are one key, shown as the first seen.
+    Decimal(DecimalCell),
+    /// A UUID's 16 bytes.
+    Uuid([u8; 16]),
+    Bool(bool),
 }
 
 impl GroupCell {
@@ -61,8 +66,25 @@ impl GroupCell {
             Some(ColumnData::Float64(v)) => {
                 v.get(row).map_or(Self::Null, |x| Self::Float(x.to_bits()))
             }
+            Some(ColumnData::Decimal(v)) => v
+                .get(row)
+                .copied()
+                .flatten()
+                .map_or(Self::Null, Self::decimal),
+            Some(ColumnData::Uuid(v)) => {
+                v.get(row).copied().flatten().map_or(Self::Null, Self::Uuid)
+            }
+            Some(ColumnData::Bool(v)) => {
+                v.get(row).copied().flatten().map_or(Self::Null, Self::Bool)
+            }
             None => Self::Null,
         }
+    }
+
+    /// The key cell of a decimal. Equal decimals of different scales share
+    /// one key, and the cell shows `d` with its own scale.
+    pub fn decimal(d: rust_decimal::Decimal) -> Self {
+        Self::Decimal(DecimalCell::new(d))
     }
 
     /// The cell as a value.
@@ -72,7 +94,62 @@ impl GroupCell {
             Self::Int(i) => Value::Integer(*i),
             Self::Float(bits) => Value::Float(f64::from_bits(*bits)),
             Self::Text(s) => Value::String(s.clone()),
+            Self::Decimal(cell) => Value::Decimal(cell.shown()),
+            Self::Uuid(bytes) => crate::engine::timeseries::row_cells::uuid_value(Some(*bytes)),
+            Self::Bool(b) => Value::Bool(*b),
         }
+    }
+}
+
+/// A decimal GROUP BY cell. Its identity, equality, hash and order, is the
+/// normalized value, so `1.5` and `1.50` are one key. It shows the value it
+/// was made from with that value's scale: a group keeps the scale of its
+/// first-seen key.
+#[derive(Debug, Clone, Copy, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub struct DecimalCell {
+    /// `rust_decimal::Decimal::serialize` of the normalized value.
+    normalized: [u8; 16],
+    /// `rust_decimal::Decimal::serialize` of the value as made.
+    shown: [u8; 16],
+}
+
+impl DecimalCell {
+    pub fn new(d: rust_decimal::Decimal) -> Self {
+        Self {
+            normalized: d.normalize().serialize(),
+            shown: d.serialize(),
+        }
+    }
+
+    /// The value the cell shows, with the scale it was made with.
+    pub fn shown(&self) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::deserialize(self.shown)
+    }
+}
+
+impl PartialEq for DecimalCell {
+    fn eq(&self, other: &Self) -> bool {
+        self.normalized == other.normalized
+    }
+}
+
+impl Eq for DecimalCell {}
+
+impl std::hash::Hash for DecimalCell {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.normalized.hash(state);
+    }
+}
+
+impl PartialOrd for DecimalCell {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DecimalCell {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.normalized.cmp(&other.normalized)
     }
 }
 
@@ -116,5 +193,41 @@ mod tests {
             GroupCell::of(Some(&floats), None, 0).to_value(),
             Value::Float(1.5)
         );
+    }
+
+    /// A decimal key is one group across scales and shows the scale it was
+    /// first seen with.
+    #[test]
+    fn decimal_key_keeps_its_first_seen_scale() {
+        let dec = |t: &str| rust_decimal::Decimal::from_str_exact(t).expect("decimal");
+        let first = GroupCell::decimal(dec("1.50"));
+        let later = GroupCell::decimal(dec("1.5"));
+        assert_eq!(first, later);
+        let hash = |cell: &GroupCell| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            cell.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash(&first), hash(&later));
+        assert_eq!(first.cmp(&later), std::cmp::Ordering::Equal);
+        let mut groups = std::collections::HashMap::new();
+        groups.entry(vec![first.clone()]).or_insert(0u32);
+        *groups.entry(vec![later]).or_insert(0) += 1;
+        assert_eq!(groups.len(), 1);
+        let (key, _) = groups.iter().next().expect("one group");
+        let Value::Decimal(shown) = key[0].to_value() else {
+            panic!("a decimal key shows a Decimal");
+        };
+        assert_eq!(shown.to_string(), "1.50");
+        let column = ColumnData::Decimal(vec![Some(dec("2.500"))]);
+        let Value::Decimal(shown) = GroupCell::of(Some(&column), None, 0).to_value() else {
+            panic!("a decimal key shows a Decimal");
+        };
+        assert_eq!(shown.to_string(), "2.500");
+        let bytes = zerompk::to_msgpack_vec(&first).expect("encode");
+        let back: GroupCell = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(back, first);
+        assert_eq!(back.to_value(), first.to_value());
     }
 }

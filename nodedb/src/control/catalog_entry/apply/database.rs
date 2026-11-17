@@ -48,7 +48,7 @@ pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::R
 
 /// Apply a `DeleteDatabase` entry — remove the descriptor, its
 /// reverse-lookup row, the quota rows of the dropped scope, its mirror cut
-/// state, and its mirror Calvin positions.
+/// state, its mirror Calvin positions, and its collection purge log.
 pub fn delete(db_id: u64, catalog: &SystemCatalog) -> crate::Result<()> {
     let id = DatabaseId::new(db_id);
     catalog
@@ -63,6 +63,11 @@ pub fn delete(db_id: u64, catalog: &SystemCatalog) -> crate::Result<()> {
     catalog
         .mark_mirror_pins_source_dropped(db_id)
         .map_err(|e| catalog_err(&format!("stop mirror pins (database {db_id})"), e))?;
+    // No sync client binds the dropped database again, so its purge log has
+    // no reader.
+    catalog
+        .delete_collection_purge_log(db_id)
+        .map_err(|e| catalog_err(&format!("delete purge log (database {db_id})"), e))?;
     // A stale quota row keeps consuming the sum-of-quotas ceiling.
     super::quota::purge_database_scope(db_id, catalog)
 }

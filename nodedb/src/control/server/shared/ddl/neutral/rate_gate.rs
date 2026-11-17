@@ -587,7 +587,10 @@ mod tests {
             sqlstate::INVALID_TEXT_REPRESENTATION,
             "{err:?}"
         );
-        assert_eq!(err.code, nodedb_types::error::ErrorCode::DATA_EXCEPTION);
+        assert_eq!(
+            err.code,
+            nodedb_types::error::ErrorCode::INVALID_TEXT_REPRESENTATION
+        );
     }
 
     /// The TTL read behind `retry after` propagates a dispatch error instead

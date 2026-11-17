@@ -233,13 +233,13 @@ impl SqlBindingScanner<'_> {
             {
                 let token_end = consume_identifier(self.sql, cursor);
                 if let Some((replacement, end)) = self.qualified_replacement(cursor, token_end) {
-                    output.push_str(&replacement);
+                    push_replacement(&mut output, &replacement);
                     cursor = end;
                     continue;
                 }
                 let token = &self.sql[cursor..token_end];
                 if let Some(replacement) = self.standalone_replacement(token) {
-                    output.push_str(&replacement);
+                    push_replacement(&mut output, &replacement);
                 } else {
                     output.push_str(token);
                 }
@@ -302,6 +302,19 @@ impl SqlBindingScanner<'_> {
             return None;
         };
         Some(Value::String(value.clone()).to_sql_literal())
+    }
+}
+
+/// Append a binding's `replacement` text to `output`. A negative value is
+/// wrapped in parentheses, so it never joins a `-` before it into `--`,
+/// which starts a comment, and stays one value next to any operator.
+fn push_replacement(output: &mut String, replacement: &str) {
+    if replacement.starts_with('-') {
+        output.push('(');
+        output.push_str(replacement);
+        output.push(')');
+    } else {
+        output.push_str(replacement);
     }
 }
 
@@ -461,6 +474,17 @@ mod tests {
             bindings.substitute("i, I, id, ID, é, É"),
             "loop, loop, lower, lower, unicode, unicode"
         );
+    }
+
+    /// A negative field after a `-` never forms `--`, which would turn the
+    /// rest of the line into a comment.
+    #[test]
+    fn a_negative_field_never_forms_a_comment() {
+        let mut row = HashMap::new();
+        row.insert("delta".into(), Value::Integer(-5));
+        let bindings = RowBindings::after_insert("orders", row);
+        let result = bindings.substitute("UPDATE t SET n = n -NEW.delta WHERE id = 1");
+        assert_eq!(result, "UPDATE t SET n = n -(-5) WHERE id = 1");
     }
 
     #[test]

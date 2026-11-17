@@ -9,10 +9,11 @@
 
 use tracing::{info, warn};
 
+use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
 use crate::data::executor::checkpoint_outcome::CheckpointOutcome;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::crdt_checkpoint::{
-    crdt_ckpt_dir, crdt_ckpt_filename, crdt_ckpt_gen_dir, publish_crdt_generation,
+    crdt_ckpt_dir, crdt_ckpt_gen_dir, crdt_ckpt_key, publish_crdt_generation,
     read_crdt_manifest_at, storage_err,
 };
 
@@ -128,12 +129,9 @@ impl CoreLoop {
                 // absent from the engine writes nothing, and that is sound only
                 // because `gen_dir` is FRESH — the manifest swing retires the
                 // previous generation whole.
-                let fname = crdt_ckpt_filename(database_id, tid, &collection);
-                // Raw bytes, not the checkpoint frame: a Loro snapshot carries
-                // its own version and checksum, and the load path reads it back
-                // the same way.
-                nodedb_wal::segment::atomic_write_fsync(gen_dir, &fname, &snapshot)
-                    .map_err(|e| storage_err(&gen_dir.join(&fname), "publish snapshot", &e))?;
+                let key = crdt_ckpt_key(database_id, tid, &collection);
+                write_keyed_checkpoint(gen_dir, &key, &snapshot)
+                    .map_err(|e| storage_err(gen_dir, "publish snapshot", &e))?;
                 files_written += 1;
             }
         }
@@ -190,5 +188,35 @@ mod tests {
             restored.crdt_engines.is_empty(),
             "a collection absent from the published generation must not reload"
         );
+    }
+
+    /// A 255-byte collection name checkpoints under a short file name and
+    /// restores under its full name.
+    #[test]
+    fn long_collection_name_checkpoints_and_restores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = open_core_at(dir.path());
+        let db = DatabaseId::DEFAULT;
+        let tid = TenantId::new(7);
+        let collection = "o".repeat(255);
+
+        core.get_crdt_engine(db, tid)
+            .expect("create CRDT engine")
+            .doc_upsert(&collection, "row-1", &[("qty", LoroValue::I64(2))])
+            .expect("write a CRDT row");
+        let outcome = core
+            .checkpoint_crdt_engines()
+            .expect("a long-named collection must publish");
+        assert_eq!(outcome.files_written, 1);
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        restored.load_crdt_checkpoints().expect("load must succeed");
+        let names = restored
+            .crdt_engines
+            .get(&(db, tid))
+            .map(|engine| engine.collection_names())
+            .unwrap_or_default();
+        assert_eq!(names, vec![collection]);
     }
 }

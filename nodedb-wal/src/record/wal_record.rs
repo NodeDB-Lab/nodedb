@@ -117,6 +117,17 @@ impl WalRecord {
             });
         }
 
+        // The on-disk payload of an encrypted record carries the tag, and
+        // every reader refuses a declared length past the cap.
+        if encryption_key.is_some()
+            && payload.len() > MAX_WAL_PAYLOAD_SIZE - crate::crypto::AUTH_TAG_SIZE
+        {
+            return Err(WalError::PayloadTooLarge {
+                size: payload.len(),
+                max: MAX_WAL_PAYLOAD_SIZE - crate::crypto::AUTH_TAG_SIZE,
+            });
+        }
+
         let (final_payload, encrypted) = if let Some(key) = encryption_key {
             let temp_header = RecordHeader {
                 magic: WAL_MAGIC,
@@ -395,6 +406,27 @@ mod tests {
                 database_id: 0,
                 payload: big_payload,
                 encryption_key: None,
+                preamble_bytes: None,
+            }),
+            Err(WalError::PayloadTooLarge { .. })
+        ));
+    }
+
+    /// An encrypted record whose tag would push its on-disk payload past the
+    /// cap is refused, since every reader refuses that declared length.
+    #[test]
+    fn encrypted_payload_too_large_for_its_tag_rejected() {
+        let key = crate::crypto::WalEncryptionKey::from_bytes(&[7u8; 32]).unwrap();
+        let payload = vec![0u8; MAX_WAL_PAYLOAD_SIZE - crate::crypto::AUTH_TAG_SIZE + 1];
+        assert!(matches!(
+            WalRecord::new(WalRecordArgs {
+                record_type: RecordType::Put as u32,
+                lsn: 1,
+                tenant_id: 0,
+                vshard_id: 0,
+                database_id: 0,
+                payload,
+                encryption_key: Some(&key),
                 preamble_bytes: None,
             }),
             Err(WalError::PayloadTooLarge { .. })

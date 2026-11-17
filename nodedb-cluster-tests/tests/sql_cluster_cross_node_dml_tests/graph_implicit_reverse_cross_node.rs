@@ -104,7 +104,7 @@ async fn implicit_edge_reverse_traverse_reaches_all_sources_from_any_node() {
     // Wait until a 1-hop REVERSE traversal from `hub` reaches all 12 sources
     // from EVERY node — implicit edges extracted on the control plane, dual-homed
     // + replicated, AND each node's routing view converged.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} reverse-reaches all {SOURCES} sources of hub"),
             Duration::from_secs(20),
@@ -113,7 +113,7 @@ async fn implicit_edge_reverse_traverse_reaches_all_sources_from_any_node() {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         let v = query_graph_json(
-                            &cluster.nodes[idx].client,
+                            &node.client,
                             "GRAPH TRAVERSE IN 'graph_impl_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
                         )
                         .await;
@@ -132,9 +132,9 @@ async fn implicit_edge_reverse_traverse_reaches_all_sources_from_any_node() {
         .collect();
 
     // From every node: complete + distinct (no dup, no drop).
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         let v = query_graph_json(
-            &cluster.nodes[idx].client,
+            &node.client,
             "GRAPH TRAVERSE IN 'graph_impl_xnode' FROM 'hub' DEPTH 1 LABEL 'l' DIRECTION in",
         )
         .await;

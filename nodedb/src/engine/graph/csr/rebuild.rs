@@ -205,4 +205,58 @@ mod tests {
         assert!(csr.contains_node("a") && csr.contains_node("b"));
         assert_eq!(csr.node_surrogate("a"), None);
     }
+
+    /// A restart keeps every property's type: the reopened store returns the
+    /// exact typed object, and the rebuilt CSR weighs the edge by its Decimal
+    /// `weight`.
+    #[test]
+    fn a_reopened_store_rebuilds_with_typed_properties_intact() {
+        use nodedb_types::Value;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.redb");
+        let fields = std::collections::HashMap::from([
+            (
+                "weight".to_string(),
+                Value::Decimal("12.50".parse().unwrap()),
+            ),
+            (
+                "id".to_string(),
+                Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            ),
+            (
+                "at".to_string(),
+                Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                    1_700_000_000_000_000,
+                )),
+            ),
+            ("blob".to_string(), Value::Bytes(vec![0, 1, 255])),
+        ]);
+        let image = nodedb_graph::encode_edge_properties(fields.clone()).unwrap();
+        let store = EdgeStore::open(&path).unwrap();
+        store
+            .put_edge_versioned(
+                EdgeRef::new(DB, tenant(), "people", "a", "knows", "b"),
+                &image,
+                100,
+                100,
+                i64::MAX,
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = EdgeStore::open(&path).unwrap();
+        let stored = reopened
+            .get_edge(DB.as_u64(), tenant(), "people", "a", "knows", "b")
+            .unwrap()
+            .expect("the edge survives the restart");
+        assert_eq!(
+            nodedb_graph::decode_edge_properties(&stored).unwrap(),
+            fields
+        );
+        let csr = rebuild_from_store(&reopened).unwrap();
+        assert_eq!(
+            csr.edge_weight_in_collection("a", "knows", "b", "people"),
+            Some(12.5)
+        );
+    }
 }

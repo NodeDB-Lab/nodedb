@@ -126,9 +126,9 @@ const neighbors = await db.sql(
 ### Full-Text Search
 
 ```javascript
-// Create FTS index
+// Create a search index on the body field
 await db.sql("CREATE COLLECTION articles");
-await db.sql("CREATE FTS INDEX idx_articles_body ON articles FIELD body");
+await db.sql("CREATE SEARCH INDEX idx_articles_body ON articles (body)");
 
 // Insert and search
 await db.sql(

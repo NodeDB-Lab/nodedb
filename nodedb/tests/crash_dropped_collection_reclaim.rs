@@ -107,14 +107,17 @@ fn wait_for_any_ckpt_file(root: &std::path::Path, engine: &str) -> std::path::Pa
     }
 }
 
-/// True if any file anywhere under `root` has `needle` in its file name.
-/// Filenames encode the collection name directly, so a substring match on a
-/// distinctive name is unambiguous without knowing the database/tenant id.
-fn any_file_name_contains(root: &std::path::Path, needle: &str) -> Option<std::path::PathBuf> {
+/// The first checkpoint file under `root` whose stored key holds `collection`.
+/// File names are hashes of the key, so the test reads each `*.ckpt` file's
+/// stored key instead. A distinctive collection name makes a byte match on the
+/// key unambiguous without knowing the database or tenant id.
+fn any_ckpt_holding(root: &std::path::Path, collection: &str) -> Option<std::path::PathBuf> {
     walk_files(root).into_iter().find(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.contains(needle))
+        p.extension().and_then(|e| e.to_str()) == Some("ckpt")
+            && nodedb_wal::segment::read_checkpoint_key(p).is_ok_and(|key| {
+                key.windows(collection.len())
+                    .any(|w| w == collection.as_bytes())
+            })
     })
 }
 
@@ -178,15 +181,12 @@ async fn dropped_vector_collection_does_not_resurrect_after_restart() {
     ))
     .await;
 
-    // Vector checkpoint filenames hex-encode the collection key, so no
-    // collection name can escape the generation directory. Match on the same
-    // encoding the writer uses.
-    let needle: String = COLLECTION.bytes().map(|b| format!("{b:02x}")).collect();
-
+    // Vector checkpoint file names are hashes of the key, and each file stores
+    // its key. Match on the stored key.
     let ckpt_root = h.data_dir().join("vector-ckpt");
     let first_ckpt = wait_for_any_ckpt_file(&ckpt_root, "vector");
     assert!(
-        any_file_name_contains(&ckpt_root, &needle).is_some(),
+        any_ckpt_holding(&ckpt_root, COLLECTION).is_some(),
         "a vector checkpoint file exists ({}), but none of them name '{COLLECTION}' — test \
          setup is not exercising the collection under test",
         first_ckpt.display()
@@ -203,7 +203,7 @@ async fn dropped_vector_collection_does_not_resurrect_after_restart() {
     // Same rationale as the spatial test below.
     wait_for_post_restart_checkpoint_cycle(&h).await;
 
-    let leaked = any_file_name_contains(&ckpt_root, &needle);
+    let leaked = any_ckpt_holding(&ckpt_root, COLLECTION);
     assert!(
         leaked.is_none(),
         "vector checkpoint file for dropped collection '{COLLECTION}' is still on disk after \
@@ -242,7 +242,7 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
     let ckpt_root = h.data_dir().join("spatial-ckpt");
     let first_ckpt = wait_for_any_ckpt_file(&ckpt_root, "spatial");
     assert!(
-        any_file_name_contains(&ckpt_root, COLLECTION).is_some(),
+        any_ckpt_holding(&ckpt_root, COLLECTION).is_some(),
         "a spatial checkpoint file exists ({}), but none of them name '{COLLECTION}' — test \
          setup is not exercising the collection under test",
         first_ckpt.display()
@@ -260,7 +260,7 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
     // nothing.
     wait_for_post_restart_checkpoint_cycle(&h).await;
 
-    let leaked = any_file_name_contains(&ckpt_root, COLLECTION);
+    let leaked = any_ckpt_holding(&ckpt_root, COLLECTION);
     assert!(
         leaked.is_none(),
         "spatial checkpoint file for dropped collection '{COLLECTION}' is still on disk after \
@@ -268,12 +268,6 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
         ckpt_root.display(),
         walk_files(&ckpt_root)
     );
-}
-
-/// The columnar checkpoint filename's collection part: the name's bytes as
-/// lowercase hex, as the write path encodes it.
-fn hex_name(collection: &str) -> String {
-    collection.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Same claim, plain columnar engine. The columnar checkpoint is what every
@@ -300,9 +294,8 @@ async fn dropped_columnar_collection_does_not_resurrect_after_restart() {
     }
 
     let ckpt_root = h.data_dir().join("columnar-ckpt");
-    let needle = format!("-coll-{}.ckpt", hex_name(COLLECTION));
     let deadline = Instant::now() + CHECKPOINT_WAIT;
-    while any_file_name_contains(&ckpt_root, &needle).is_none() {
+    while any_ckpt_holding(&ckpt_root, COLLECTION).is_none() {
         assert!(
             Instant::now() < deadline,
             "no columnar checkpoint file named '{COLLECTION}' within {CHECKPOINT_WAIT:?}, so the \
@@ -319,7 +312,7 @@ async fn dropped_columnar_collection_does_not_resurrect_after_restart() {
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
     // Same rationale as the spatial test above.
     wait_for_post_restart_checkpoint_cycle(&h).await;
-    let leaked = any_file_name_contains(&ckpt_root, &needle);
+    let leaked = any_ckpt_holding(&ckpt_root, COLLECTION);
     assert!(
         leaked.is_none(),
         "columnar checkpoint file for dropped collection '{COLLECTION}' is still on disk after \

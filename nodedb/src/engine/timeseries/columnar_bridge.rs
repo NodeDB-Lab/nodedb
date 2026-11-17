@@ -34,8 +34,15 @@ pub fn ts_schema_to_shared(ts_schema: &super::columnar_memtable::ColumnarSchema)
         .iter()
         .map(|(name, ts_type)| {
             let shared_type = ts_column_type_to_shared(*ts_type);
-            // All timeseries columns are non-nullable (metrics always present).
-            ColumnDef::required(name.clone(), shared_type)
+            // A decimal, UUID or boolean field holds NULL cells. Every other
+            // timeseries column is non-nullable: a float NULL is NaN and a
+            // symbol NULL is the NULL symbol id.
+            match ts_type {
+                TsColumnType::Decimal(_) | TsColumnType::Uuid | TsColumnType::Bool => {
+                    ColumnDef::nullable(name.clone(), shared_type)
+                }
+                _ => ColumnDef::required(name.clone(), shared_type),
+            }
         })
         .collect();
 
@@ -65,6 +72,9 @@ fn ts_column_type_to_shared(ts_type: TsColumnType) -> SharedColumnType {
         // Symbol and text columns store u32 dictionary ids, represented as
         // Int64 in the shared format.
         TsColumnType::Symbol | TsColumnType::Text => SharedColumnType::Int64,
+        TsColumnType::Decimal(_) => SharedColumnType::Decimal(None),
+        TsColumnType::Uuid => SharedColumnType::Uuid,
+        TsColumnType::Bool => SharedColumnType::Bool,
     }
 }
 
@@ -118,6 +128,21 @@ fn ts_column_to_shared(
                 valid: None,
             }
         }
+        (TsColumnData::Decimal(cells), TsColumnType::Decimal(_)) => SharedColumnData::Decimal {
+            values: cells
+                .iter()
+                .map(|d| d.map_or([0; 16], |d| d.serialize()))
+                .collect(),
+            valid: Some(cells.iter().map(Option::is_some).collect()),
+        },
+        (TsColumnData::Uuid(cells), TsColumnType::Uuid) => SharedColumnData::Uuid {
+            values: cells.iter().map(|u| u.unwrap_or([0; 16])).collect(),
+            valid: Some(cells.iter().map(Option::is_some).collect()),
+        },
+        (TsColumnData::Bool(cells), TsColumnType::Bool) => SharedColumnData::Bool {
+            values: cells.iter().map(|b| b.unwrap_or(false)).collect(),
+            valid: Some(cells.iter().map(Option::is_some).collect()),
+        },
         // Fallback: shouldn't happen if schema is consistent.
         _ => SharedColumnData::Int64 {
             values: vec![0; row_count],

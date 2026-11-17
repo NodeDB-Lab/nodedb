@@ -123,8 +123,8 @@ pub(super) async fn reissue_database(
     let vector_multi_documents = std::mem::take(&mut snap.vector_multi_documents);
     let vector_history = std::mem::take(&mut snap.vector_versions);
     // Vector-index config re-issues as `VectorOp::SetParams` before the first
-    // vector `Insert`: the Data Plane creates a (collection, field) HNSW index
-    // on its first `Insert`, from whatever params it holds by then.
+    // row: the Data Plane creates a (collection, field) HNSW index on its
+    // first vector write, from whatever params it holds by then.
     let vector_params_snapshots = std::mem::take(&mut snap.vector_params);
     let index_config_snapshots = std::mem::take(&mut snap.index_configs);
     let array_cells = std::mem::take(&mut snap.arrays);
@@ -149,7 +149,10 @@ pub(super) async fn reissue_database(
     // Every surrogate the re-issue binds, checked against this node and each
     // one's home leader before any bind: another key holding one fails the
     // re-issue with nothing bound.
-    let documents = super::super::redo_reissue::prepare_documents(
+    let super::super::redo_reissue::PreparedDocuments {
+        rows: documents,
+        sidecars: vector_sidecars,
+    } = super::super::redo_reissue::prepare_documents(
         state,
         tenant_id,
         target,
@@ -165,8 +168,21 @@ pub(super) async fn reissue_database(
         })
         .chain(documents.iter().flat_map(|rows| rows.carried()))
         .collect();
-    check_carried_binds(state, tenant_id, target.dest, carried).await?;
+    check_carried_binds(state, tenant_id, target.dest, carried.clone()).await?;
     rebind::rebind_surrogates(state, target, &surrogate_binds)?;
+
+    // Vector-index configuration, as `VectorOp::SetParams`, before any row.
+    // A document re-issue indexes the vector fields its collection's params
+    // name, so the first document can materialize the index. A `SetParams`
+    // after that is refused.
+    stats.vector_params_reissued += reissue::reissue_vector_params(
+        state,
+        tenant_id,
+        target,
+        vector_params_snapshots,
+        index_config_snapshots,
+    )
+    .await?;
 
     // Document rows, their versions and graph edges re-issue as committed
     // redo records through each collection's apply log: every replica binds
@@ -189,6 +205,20 @@ pub(super) async fn reissue_database(
     stats.edges_reissued += redo.edges;
     stats.redo_records += redo.records;
 
+    // Stored sync-frame text, each version at its backed-up ordinal, as
+    // Calvin transactions. The rows went first, so a frame of a row with a
+    // restored body is stored and the body keeps the row's text. A frame
+    // row takes the key `carried` names for its surrogate: a bind, or the
+    // identity of a document stored under it.
+    stats.synced_text_reissued += super::super::redo_reissue::reissue_synced_text(
+        state,
+        tenant_id,
+        target,
+        std::mem::take(&mut snap.synced_text),
+        &carried,
+    )
+    .await?;
+
     // Plain-columnar keys, each with every version at its backed-up
     // interval, as Calvin transactions.
     stats.columnar_engines += super::super::redo_reissue::reissue_columnar_keys(
@@ -196,7 +226,7 @@ pub(super) async fn reissue_database(
         tenant_id,
         target,
         columnar_snapshots,
-        &surrogate_binds,
+        &carried,
     )
     .await?;
 
@@ -226,20 +256,9 @@ pub(super) async fn reissue_database(
     stats.kv_reissued +=
         super::super::redo_reissue::reissue_kv_tables(state, tenant_id, target, kv_tables).await?;
 
-    // Vector-index configuration, as `VectorOp::SetParams`. MUST run before
-    // the vector-insert re-issue below — see the `vector_params_snapshots`
-    // drain comment above.
-    stats.vector_params_reissued += reissue::reissue_vector_params(
-        state,
-        tenant_id,
-        target,
-        vector_params_snapshots,
-        index_config_snapshots,
-    )
-    .await?;
-
     // Vector rows, each with every node at its backed-up span, as Calvin
-    // transactions. A multi-vector document's nodes travel together.
+    // transactions. A multi-vector document's nodes travel together. A
+    // vector-primary row's sidecar versions travel with its nodes.
     stats.vectors_reissued += super::super::redo_reissue::reissue_vector_rows(
         state,
         tenant_id,
@@ -248,8 +267,9 @@ pub(super) async fn reissue_database(
             vectors: vector_snapshots,
             history: vector_history,
             multi_documents: vector_multi_documents,
+            sidecars: vector_sidecars,
         },
-        &surrogate_binds,
+        &carried,
     )
     .await?;
 

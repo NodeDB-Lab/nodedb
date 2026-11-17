@@ -77,6 +77,30 @@ impl FrameStreamReader {
         Ok(Self { backend })
     }
 
+    /// Open `path` for streaming frame reads that start at byte `offset`, a
+    /// frame boundary, with a `chunk_size`-byte refill buffer.
+    pub(in crate::data::executor) fn open_at(
+        path: &Path,
+        offset: u64,
+        chunk_size: usize,
+    ) -> crate::Result<Self> {
+        let backend = match UringSeqReader::open_at(path, offset, chunk_size) {
+            Some(r) => FrameBackend::Uring(Box::new(r)),
+            None => {
+                use std::io::Seek as _;
+                let open_error = |e: std::io::Error| crate::Error::Storage {
+                    engine: "grace-repartition".into(),
+                    detail: format!("spill frame reader open {}: {e}", path.display()),
+                };
+                let mut file = std::fs::File::open(path).map_err(open_error)?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .map_err(open_error)?;
+                FrameBackend::Std(BufReader::with_capacity(chunk_size.max(1), file))
+            }
+        };
+        Ok(Self { backend })
+    }
+
     /// Read exactly `dst.len()` bytes. `Ok(true)` = filled; `Ok(false)` = clean
     /// EOF before any byte of `dst` (or partway) was filled; `Err` = io failure.
     /// Bridges the two backends to one uniform contract (mirrors `RunReader`).
@@ -213,7 +237,8 @@ pub(super) fn repartition_side<S: AsRef<str>>(
 /// frame — one row resident at a time), compute each row's sub-partition index
 /// via `partition_hash_seeded(row, keys, seed) % sub_p`, and hand `(sp, value)`
 /// to `sink`. Consumes `src`. The `sp` index is always `< sub_p` (modulo result),
-/// so `sink` can index safely; it returns `Err` only on a genuine I/O failure.
+/// so `sink` can index safely. It returns `Err` on an I/O error or a row that is
+/// not a decodable object.
 fn route_rows<S, F>(
     src: PartitionSource,
     keys: &[S],
@@ -228,14 +253,14 @@ where
     match src {
         PartitionSource::InMemory(rows) => {
             for (_, value) in rows {
-                let sp = (partition_hash_seeded(&value, keys, seed) % sub_p as u64) as usize;
+                let sp = (partition_hash_seeded(&value, keys, seed)? % sub_p as u64) as usize;
                 sink(sp, &value)?;
             }
         }
         PartitionSource::Spilled(path) => {
             let mut reader = FrameStreamReader::open(&path)?;
             while let Some(value) = reader.next_row()? {
-                let sp = (partition_hash_seeded(&value, keys, seed) % sub_p as u64) as usize;
+                let sp = (partition_hash_seeded(&value, keys, seed)? % sub_p as u64) as usize;
                 sink(sp, &value)?;
             }
         }

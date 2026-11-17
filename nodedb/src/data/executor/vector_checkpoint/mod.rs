@@ -7,7 +7,7 @@
 //! ```text
 //! {data_dir}/vector-ckpt/core-{core_id}/
 //!     MANIFEST                        # names the live generation
-//!     gen-{n}/{db}:{tid}:{coll}.ckpt  # one file per live index
+//!     gen-{n}/{hash(key)}.ckpt        # one file per live index, key stored inside
 //! ```
 //!
 //! The per-core directory is required because `data_dir` is shared across cores
@@ -50,7 +50,7 @@ mod write;
 
 pub(crate) use manifest::read_vector_manifest_at;
 pub(crate) use paths::{
-    VECTOR_CKPT_MANIFEST, vector_ckpt_dir, vector_ckpt_gen_dir, vector_ckpt_stem,
+    VECTOR_CKPT_MANIFEST, vector_ckpt_dir, vector_ckpt_gen_dir, vector_ckpt_key, vector_map_key,
 };
 
 #[cfg(test)]

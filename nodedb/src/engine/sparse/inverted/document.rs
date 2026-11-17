@@ -90,7 +90,7 @@ impl InvertedIndex {
 mod tests {
     use std::sync::Arc;
 
-    use redb::{Database, ReadableDatabase as _, ReadableTable as _};
+    use redb::{ReadableDatabase as _, ReadableTable as _};
 
     use nodedb_fts::FtsSearchParams;
     use nodedb_fts::posting::QueryMode;
@@ -108,9 +108,7 @@ mod tests {
     fn open_temp() -> (InvertedIndex, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-inverted.redb");
-        let db = Arc::new(crate::engine::durability_gate::GatedDatabase::new(
-            Database::create(&path).unwrap(),
-        ));
+        let db = Arc::new(crate::engine::durability_gate::GatedDatabase::create(&path).unwrap());
         let idx =
             InvertedIndex::open(db, crate::data::executor::core_loop::test_governor()).unwrap();
         (idx, dir)

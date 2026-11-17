@@ -87,6 +87,7 @@ mod tests {
         let Ok(ShapeOutcome::Rows(shaped)) = shape_payload_no_plan(
             &wrapped,
             PlanKind::MultiRow,
+            crate::data::executor::response_codec::RowContext::Flat,
             None,
             None,
             None,

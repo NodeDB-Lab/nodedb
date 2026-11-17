@@ -104,6 +104,33 @@ impl CoreLoop {
         self.rows_version_ordinal(database_id, tid, collection, std::slice::from_ref(key))
     }
 
+    /// Select a fresh row ordinal above committed and pending versions in its writer.
+    pub(in crate::data::executor) fn row_version_ordinal_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        key: &StorageKey,
+    ) -> crate::Result<i64> {
+        let base = self.bitemporal_ordinal();
+        let newest =
+            self.sparse
+                .versioned_latest_sys_from_in_txn(txn, database_id, tid, collection, key)?;
+        let ordinal = match newest {
+            Some(newest) if newest >= base => newest.checked_add(1).ok_or_else(|| {
+                crate::Error::NumericValueOutOfRange {
+                    detail: format!(
+                        "document version ordinal for '{collection}' cannot advance beyond {newest}"
+                    ),
+                }
+            })?,
+            _ => base,
+        };
+        self.observe_bitemporal_ordinal(ordinal);
+        Ok(ordinal)
+    }
+
     /// The one system-time ordinal every version a bitemporal document
     /// statement writes to `keys` stamps: [`Self::bitemporal_ordinal`] (the
     /// Calvin transaction's, the replicated entry's, or a fresh one), raised
@@ -503,3 +530,7 @@ mod tests {
         assert!(a < b);
     }
 }
+
+#[cfg(test)]
+#[path = "document_ordinal_txn_tests.rs"]
+mod document_ordinal_txn_tests;

@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::{
-    CalvinAppliedLedgers, CalvinInboxes, CalvinReadResults, CaughtUpRegistry, SequencerProposer,
+    CalvinAppliedLedgers, CalvinFrozenReplies, CalvinInboxes, CalvinReadResults, CaughtUpRegistry,
+    SequencerProposer,
 };
 use crate::control::server::shared::write_admission::{AdmissionHolds, AdmissionTickets};
 
@@ -48,10 +49,8 @@ pub struct CalvinLocalState {
     /// participants, and those coalesce without conflict. Cross-node, the rows
     /// travel via the non-Raft routed-submit RPC response instead.
     ///
-    /// Value is [`CalvinApplyResult`]: `Single` for a deposited (possibly
-    /// coalesced) participant, or `Conflict` only when two RETURNING-bearing
-    /// participants deposit for the same `TxnId` — a cross-shard RETURNING
-    /// union, drained as a loud error, never a silent partial.
+    /// Value is [`CalvinApplyResult`]: the coalesced plain answer, and the
+    /// answer of each RETURNING-bearing participant by vShard.
     ///
     /// A replica on a node that does not coordinate the transaction never
     /// drains its deposit, so each deposit expires after the sidecar's TTL.
@@ -106,6 +105,9 @@ pub struct CalvinLocalState {
     /// scheduler: read results and timeouts the data-group apply loop
     /// applied before the scheduler took them.
     pub read_results: CalvinReadResults,
+    /// Wakes each scheduler when the data-group apply loop stores a frozen
+    /// `RETURNING` reply of one of its txns.
+    pub frozen_replies: CalvinFrozenReplies,
     /// vShards whose stored Calvin state waits for a forget. Each scheduler
     /// reconcile forgets those this node does not host and drops the rest.
     pub forget_pending: Mutex<BTreeSet<u32>>,
@@ -140,6 +142,7 @@ impl CalvinLocalState {
             caught_up: CaughtUpRegistry::default(),
             inboxes: CalvinInboxes::default(),
             read_results: CalvinReadResults::default(),
+            frozen_replies: CalvinFrozenReplies::default(),
             forget_pending: Mutex::new(BTreeSet::new()),
         }
     }

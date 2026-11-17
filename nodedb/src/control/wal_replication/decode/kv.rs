@@ -564,6 +564,7 @@ mod tests {
         let vshard = VShardId::new(0);
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
@@ -610,10 +611,11 @@ mod tests {
         let tenant = TenantId::new(1);
         let vshard = VShardId::new(0);
         let spec = ReturningSpec {
-            columns: ReturningColumns::Named(vec![ReturningItem {
+            columns: ReturningColumns::Named(vec![ReturningItem::Column {
                 name: "balance".into(),
                 alias: None,
             }]),
+            precommit: None,
         };
         let plan = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),

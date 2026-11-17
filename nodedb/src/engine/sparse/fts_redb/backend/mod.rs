@@ -2,14 +2,18 @@
 
 mod core;
 mod doc_lengths;
-pub(crate) mod history_rows;
+mod history_rows;
+mod history_store;
 mod meta;
 pub(crate) mod posting_rows;
 mod postings;
 mod purge;
+pub(crate) mod rebuild_copy;
 mod segments;
 mod shared;
 mod stats;
+pub(crate) mod synced_rows;
 
 pub use core::RedbFtsBackend;
+pub(crate) use history_store::{RedbHistoryRead, RedbHistoryTxn};
 pub use segments::CompactCommit;

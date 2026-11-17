@@ -8,7 +8,9 @@
 
 mod array_sync;
 mod audit;
+mod calvin_frozen;
 mod catalog;
+mod change_feed;
 mod columnar;
 mod continuous_agg;
 mod crdt;
@@ -30,6 +32,7 @@ mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
+mod spill;
 mod storage_bytes;
 mod vector;
 mod vector_build;
@@ -42,9 +45,13 @@ pub(in crate::diag) use audit::{
     AuditFlushNotPersisted, AuditPruneNotApplied, AuditWalAppendFailed, AuditWalNotTruncated,
     SecurityBusLagged, SecurityBusRowsNotRecorded,
 };
+pub(in crate::diag) use calvin_frozen::CalvinFrozenReplyStoreFailed;
 pub(in crate::diag) use catalog::{
-    CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,
-    MetadataApplyWedged, SynonymGroupNotApplied,
+    CatalogApplyOrphanRow, ConsumerGroupOffsetsRetained, MetadataApplyWedged,
+    PurgeLogPruneNotProposed, SynonymGroupNotApplied,
+};
+pub(in crate::diag) use change_feed::{
+    ChangeJournalFailed, ChangeJournalHalted, ChangeRunRejected,
 };
 pub(in crate::diag) use columnar::{
     ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,
@@ -68,7 +75,7 @@ pub(in crate::diag) use data_plane::{
 };
 pub(in crate::diag) use event_image::{StrictRowImageUnrendered, TimeseriesRowImageUndecodable};
 pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, RedoEntryMalformed};
-pub(in crate::diag) use index_rebuild::IndexRebuildNotInstalled;
+pub(in crate::diag) use index_rebuild::{IndexRebuildNotInstalled, TextIndexStepOwed};
 pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
 pub(in crate::diag) use kv_expiry::KvReapEntryUnusable;
@@ -89,9 +96,10 @@ pub(in crate::diag) use raft_apply::{
 pub(in crate::diag) use read_cut::OrdinalReservationLeaked;
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
 pub(in crate::diag) use redo_stream::{
-    RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
+    RedoAbandonGivenUp, RedoChangesUnstaged, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
 pub(in crate::diag) use retention::{RetentionAutowireOrphaned, SequenceRestartFailed};
+pub(in crate::diag) use spill::SpillCleanupFailed;
 pub(in crate::diag) use storage_bytes::{
     StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
 };

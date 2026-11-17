@@ -4,13 +4,13 @@
 //! checkpoint file.
 //!
 //! Checkpoint layout:
-//! `{data_dir}/columnar-ckpt/core-{n}/gen-{m}/db-{did}-tenant-{tid}-coll-{hex(coll)}.ckpt`,
-//! with each core's `MANIFEST` naming its live generation. Reclaim walks EVERY
+//! `{data_dir}/columnar-ckpt/core-{n}/gen-{m}/{hash(key)}.ckpt`, with each core's `MANIFEST` naming its live generation. Reclaim walks EVERY
 //! core's directory, because `data_dir` is shared and the dropped collection
 //! can be routed to any of them. Reclaim resolves each core's live
 //! generation through the same manifest reader the load path uses so the two
-//! can never disagree about which files are reachable. The filename is built
-//! by the SAME helper the write path uses ([`columnar_ckpt_filename`]).
+//! can never disagree about which files are reachable. The key comes from the
+//! SAME builder the write path uses ([`columnar_ckpt_key`]), and the file must
+//! store exactly that key before it is unlinked.
 //!
 //! Every columnar-family collection has this file: `columnar`, `timeseries`
 //! on columnar, and `spatial`, whose rows the columnar engine stores. The
@@ -25,11 +25,10 @@
 
 use std::path::Path;
 
-use tracing::debug;
-
+use super::keyed::reclaim_keyed_exact;
 use super::{ReclaimError, ReclaimStats, Result};
 use crate::data::executor::columnar_checkpoint::{
-    columnar_ckpt_filename, columnar_ckpt_gen_dir, read_columnar_manifest_at,
+    columnar_ckpt_gen_dir, columnar_ckpt_key, read_columnar_manifest_at,
 };
 
 /// Unlink the columnar checkpoint file for `(database_id, tenant_id,
@@ -55,8 +54,7 @@ pub fn reclaim_columnar_checkpoints(
         }
     };
 
-    let file_name = columnar_ckpt_filename(database_id, tenant_id, collection);
-    let tmp_name = format!("{file_name}.tmp");
+    let key = columnar_ckpt_key(database_id, tenant_id, collection);
 
     let mut stats = ReclaimStats::default();
     for core_entry in cores {
@@ -84,69 +82,40 @@ pub fn reclaim_columnar_checkpoints(
                 });
             }
         };
-        for name in [&file_name, &tmp_name] {
-            unlink(&gen_dir.join(name), &mut stats)?;
-        }
+        reclaim_keyed_exact("columnar", &gen_dir, &key, &[], &mut stats)?;
     }
     Ok(stats)
-}
-
-/// Unlink `path`. A missing file is a no-op, not an error.
-fn unlink(path: &Path, stats: &mut ReclaimStats) -> Result<()> {
-    let size = match std::fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(ReclaimError::Io {
-                operation: "stat columnar checkpoint",
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    };
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            stats.files_unlinked = stats.files_unlinked.saturating_add(1);
-            stats.bytes_freed = stats.bytes_freed.saturating_add(size);
-            debug!(path = %path.display(), size, "columnar reclaim: unlinked");
-            Ok(())
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ReclaimError::Io {
-            operation: "unlink columnar checkpoint",
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::executor::checkpoint_key::{CheckpointKey, write_keyed_checkpoint};
     use crate::data::executor::columnar_checkpoint::{columnar_ckpt_dir, test_manifest_bytes};
     use tempfile::TempDir;
 
     /// Publish a live generation under `core_id` holding `files`, through the
-    /// same manifest the load path reads.
-    fn publish(data_dir: &Path, core_id: usize, generation: u64, files: &[(&str, &[u8])]) {
+    /// same manifest the load path reads. Returns each file's path.
+    fn publish(
+        data_dir: &Path,
+        core_id: usize,
+        generation: u64,
+        files: &[(CheckpointKey, &[u8])],
+    ) -> Vec<std::path::PathBuf> {
         let ckpt_dir = columnar_ckpt_dir(data_dir, core_id);
         let gen_dir = columnar_ckpt_gen_dir(&ckpt_dir, generation);
         std::fs::create_dir_all(&gen_dir).expect("mkdir");
-        for (name, bytes) in files {
-            std::fs::write(gen_dir.join(name), bytes).expect("write");
-        }
+        let paths = files
+            .iter()
+            .map(|(key, bytes)| write_keyed_checkpoint(&gen_dir, key, bytes).expect("write"))
+            .collect();
         nodedb_wal::segment::write_checkpoint_framed(
             &ckpt_dir,
             "MANIFEST",
             &test_manifest_bytes(generation),
         )
         .expect("manifest");
-    }
-
-    fn live_file(data_dir: &Path, core_id: usize, generation: u64, name: &str) -> bool {
-        columnar_ckpt_gen_dir(&columnar_ckpt_dir(data_dir, core_id), generation)
-            .join(name)
-            .exists()
+        paths
     }
 
     /// The dropped collection's file goes from every core's live generation;
@@ -155,18 +124,20 @@ mod tests {
     fn unlinks_the_collection_across_cores() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        let dropped = columnar_ckpt_filename(0, 1, "places");
-        let kept = columnar_ckpt_filename(0, 1, "places_archive");
-        publish(base, 0, 3, &[(&dropped, b"x"), (&kept, b"keep")]);
-        publish(base, 1, 0, &[(&dropped, b"yy")]);
+        let dropped = columnar_ckpt_key(0, 1, "places");
+        let kept = columnar_ckpt_key(0, 1, "places_archive");
+        let core0 = publish(base, 0, 3, &[(dropped.clone(), b"x"), (kept, b"keep")]);
+        let core1 = publish(base, 1, 0, &[(dropped, b"yy")]);
+        let expected = std::fs::metadata(&core0[0]).expect("meta").len()
+            + std::fs::metadata(&core1[0]).expect("meta").len();
 
         let stats = reclaim_columnar_checkpoints(base, 0, 1, "places").expect("reclaim");
         assert_eq!(stats.files_unlinked, 2);
-        assert_eq!(stats.bytes_freed, 3);
-        assert!(!live_file(base, 0, 3, &dropped));
-        assert!(!live_file(base, 1, 0, &dropped));
+        assert_eq!(stats.bytes_freed, expected);
+        assert!(!core0[0].exists());
+        assert!(!core1[0].exists());
         assert!(
-            live_file(base, 0, 3, &kept),
+            core0[1].exists(),
             "a collection whose name extends the dropped one survives"
         );
     }
@@ -176,14 +147,29 @@ mod tests {
     fn leaves_other_scopes_alone() {
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path();
-        let other_db = columnar_ckpt_filename(1024, 1, "places");
-        let other_tenant = columnar_ckpt_filename(0, 2, "places");
-        publish(base, 0, 1, &[(&other_db, b"a"), (&other_tenant, b"b")]);
+        let paths = publish(
+            base,
+            0,
+            1,
+            &[
+                (columnar_ckpt_key(1024, 1, "places"), b"a"),
+                (columnar_ckpt_key(0, 2, "places"), b"b"),
+            ],
+        );
 
         let stats = reclaim_columnar_checkpoints(base, 0, 1, "places").expect("reclaim");
         assert_eq!(stats.files_unlinked, 0);
-        assert!(live_file(base, 0, 1, &other_db));
-        assert!(live_file(base, 0, 1, &other_tenant));
+        assert!(paths.iter().all(|p| p.exists()));
+    }
+
+    #[test]
+    fn long_collection_name_is_reclaimed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let coll = "c".repeat(255);
+        let paths = publish(tmp.path(), 0, 0, &[(columnar_ckpt_key(0, 1, &coll), b"x")]);
+        let stats = reclaim_columnar_checkpoints(tmp.path(), 0, 1, &coll).expect("reclaim");
+        assert_eq!(stats.files_unlinked, 1);
+        assert!(!paths[0].exists());
     }
 
     /// A missing root, or a core with no manifest, has nothing to reclaim.

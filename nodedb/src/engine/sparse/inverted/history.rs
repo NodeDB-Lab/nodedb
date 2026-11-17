@@ -2,22 +2,18 @@
 
 //! System-time history of the inverted index.
 //!
-//! A write indexes a document's text at its system-time ordinal. An update
-//! or a delete ends the indexed version at the write's ordinal: the
-//! version's analyzed tokens move to the history rows (see
-//! `fts_redb::backend::history_rows`), so a read at an earlier cut still
-//! matches it. A read at a cut sees the index as a transaction sees its
-//! staged writes: the live documents indexed after the cut are hidden, and
-//! the ended versions visible at the cut compete in the ranking from their
-//! tokens. Membership is exact at the cut. BM25 scores use the current
-//! corpus statistics.
+//! The version bookkeeping, the cut view, and the purge live in
+//! `nodedb_fts::history`. This module runs them over the redb history
+//! stores. A text write ends and starts versions inside the document
+//! write's own transaction.
 
 use std::collections::BTreeSet;
 
 use redb::{ReadableDatabase as _, ReadableTable as _, WriteTransaction};
 
-use nodedb_fts::{IndexScope, StagedDoc};
-use nodedb_types::{Surrogate, SurrogateBitmap, TenantId};
+use nodedb_fts::IndexScope;
+use nodedb_fts::history::{self, HistoryDoc, TextCut, TextCutView, UNVERSIONED};
+use nodedb_types::{Surrogate, TenantId};
 
 use super::core::InvertedIndex;
 use super::doc_fields;
@@ -25,20 +21,20 @@ use super::doc_image::tokens_from_postings;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
-use crate::engine::sparse::fts_redb::backend::history_rows::{self, EndedVersion};
-use crate::engine::sparse::fts_redb::tables::{TEXT_ENDED, TEXT_LIVE_BY_FROM};
+use crate::engine::sparse::fts_redb::backend::{RedbHistoryRead, RedbHistoryTxn, synced_rows};
+use crate::engine::sparse::fts_redb::bytes::synced_key_len;
+use crate::engine::sparse::fts_redb::keys::KeyOwner;
+use crate::engine::sparse::fts_redb::tables::{SYNCED_TEXT, TEXT_ENDED};
 use crate::engine::storage_bytes::StorageDelta;
 
-/// The ordinal of a write that changes no history: it records no ended
-/// version and no start. An index rebuild and the unit tests write this way.
-pub const UNVERSIONED: i64 = i64::MIN;
-
-/// The view of one index at a cut: the indexed documents a read at the cut
-/// does not see, and the ended versions it sees in their place.
-#[derive(Debug, Default)]
-pub struct TextCutView {
-    pub hidden: SurrogateBitmap,
-    pub docs: Vec<StagedDoc>,
+/// The history address of `doc` in `index`.
+fn history_doc<'a>(doc: IndexDocScope<'_>, index: IndexScope<'a>) -> HistoryDoc<'a> {
+    HistoryDoc {
+        database_id: doc.database_id,
+        tid: doc.tid.as_u64(),
+        index,
+        surrogate: doc.surrogate,
+    }
 }
 
 impl InvertedIndex {
@@ -54,29 +50,11 @@ impl InvertedIndex {
         doc_len: u32,
         delta: &mut StorageDelta,
     ) -> crate::Result<()> {
-        let t = doc.tid.as_u64();
-        if doc.ordinal == UNVERSIONED {
-            return Ok(());
-        }
-        let live_from = history_rows::live_from(txn, doc.database_id, t, index, doc.surrogate)?;
-        if live_from == Some(doc.ordinal) {
-            return Ok(());
-        }
+        let mut store = RedbHistoryTxn::new(txn, delta);
         // A damaged index errors here. The history never stores a shorter text.
-        let tokens = tokens_from_postings(txn, doc, index, doc_len)?;
-        history_rows::clear_live(txn, doc.database_id, t, index, doc.surrogate, delta)?;
-        history_rows::put_ended(
-            txn,
-            (doc.database_id, t),
-            index,
-            &EndedVersion {
-                surrogate: doc.surrogate,
-                sys_from: live_from.unwrap_or(UNVERSIONED),
-                sys_to: doc.ordinal,
-                tokens,
-            },
-            delta,
-        )
+        history::end_version(&mut store, history_doc(doc, index), doc.ordinal, || {
+            tokens_from_postings(txn, doc, index, doc_len)
+        })
     }
 
     /// Record the version of `doc` the write indexed into `index` as live
@@ -88,17 +66,8 @@ impl InvertedIndex {
         index: IndexScope<'_>,
         delta: &mut StorageDelta,
     ) -> crate::Result<()> {
-        if doc.ordinal == UNVERSIONED {
-            return Ok(());
-        }
-        history_rows::set_live(
-            txn,
-            (doc.database_id, doc.tid.as_u64()),
-            index,
-            doc.surrogate,
-            doc.ordinal,
-            delta,
-        )
+        let mut store = RedbHistoryTxn::new(txn, delta);
+        history::start_version(&mut store, history_doc(doc, index), doc.ordinal)
     }
 
     /// The view of `index` at system-time ordinal `at`.
@@ -111,18 +80,8 @@ impl InvertedIndex {
     ) -> crate::Result<TextCutView> {
         let db = self.inner.backend().db();
         let read = db.begin_read().map_err(|e| inverted_err("read txn", e))?;
-        let live_by_from = read
-            .open_table(TEXT_LIVE_BY_FROM)
-            .map_err(|e| inverted_err("open text live_by_from", e))?;
-        let ended = read
-            .open_table(TEXT_ENDED)
-            .map_err(|e| inverted_err("open text ended", e))?;
-        let rows =
-            history_rows::cut_rows(&live_by_from, &ended, database_id, tid.as_u64(), index, at)?;
-        Ok(TextCutView {
-            hidden: rows.hidden,
-            docs: rows.docs,
-        })
+        let store = RedbHistoryRead::new(&read);
+        history::cut_view(&store, database_id, tid.as_u64(), index, TextCut::at(at))
     }
 
     /// Reverse the text writes of `surrogate` made at system-time ordinal
@@ -159,21 +118,18 @@ impl InvertedIndex {
         let mut delta = StorageDelta::default();
         for field_key in &keys {
             let index = IndexScope::from_key(collection, field_key);
-            if history_rows::live_from(&txn, database_id, t, index, surrogate)? == Some(ordinal) {
+            let step = {
+                let mut store = RedbHistoryTxn::new(&txn, &mut delta);
+                history::undo_at(&mut store, history_doc(doc, index), ordinal)?
+            };
+            if step.started_here {
+                // `doc` writes at UNVERSIONED, so the strip ends no version.
                 self.remove_scope_in_txn(&txn, doc, index, &mut delta)?;
-                history_rows::clear_live(&txn, database_id, t, index, surrogate, &mut delta)?;
                 if !field_key.is_empty() {
                     fields.remove(field_key);
                 }
             }
-            if let Some(version) = history_rows::take_ended_at(
-                &txn,
-                (database_id, t),
-                index,
-                surrogate,
-                ordinal,
-                &mut delta,
-            )? {
+            if let Some(version) = step.restored {
                 let restored = IndexDocScope {
                     ordinal: version.sys_from,
                     ..doc
@@ -200,8 +156,9 @@ impl InvertedIndex {
         self.purge_text_versions_below_by(&|_, _, _| Some(horizon))
     }
 
-    /// Bytes the ended text versions of `collection` hold: each version's
-    /// key and its analyzed tokens.
+    /// Bytes the text history of `collection` holds: each ended version's
+    /// key and its analyzed tokens, plus each stored sync-frame version's
+    /// key and its `(field, text)` pairs.
     pub fn text_history_bytes(
         &self,
         database_id: u64,
@@ -225,20 +182,47 @@ impl InvertedIndex {
                 bytes = bytes.saturating_add((key_bytes + value.value().len()) as u64);
             }
         }
+        let synced = read
+            .open_table(SYNCED_TEXT)
+            .map_err(|e| inverted_err("open synced text", e))?;
+        let owner = KeyOwner::collection(database_id, tid.as_u64(), collection);
+        for entry in synced
+            .range(owner.synced_start()..)
+            .map_err(|e| inverted_err("synced text range", e))?
+        {
+            let (key, value) = entry.map_err(|e| inverted_err("read synced text", e))?;
+            let (d, t, c, ..) = key.value();
+            if !owner.owns(d, t, c, None) {
+                break;
+            }
+            let row_bytes = synced_key_len(c) + value.value().len();
+            bytes = bytes.saturating_add(row_bytes as u64);
+        }
         Ok(bytes)
     }
 
     /// [`Self::purge_text_versions_below`] with a horizon per collection:
     /// `horizon_of(database, tenant, collection)`, `None` to keep the
     /// collection's whole history.
+    ///
+    /// The same transaction drops the stored sync-frame versions below each
+    /// horizon. A rebuild replays those frames, so a kept frame version
+    /// would bring back text history the index purged. The count includes
+    /// the frame versions dropped.
     pub fn purge_text_versions_below_by(
         &self,
         horizon_of: &dyn Fn(u64, u64, &str) -> Option<i64>,
     ) -> crate::Result<usize> {
+        // A rebuild's snapshot still holds the purged versions: its cutover
+        // purges at the same horizon.
+        self.note_history_purge(horizon_of);
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
         let mut delta = StorageDelta::default();
-        let dropped = history_rows::purge_below(&txn, horizon_of, &mut delta)?;
+        let dropped = {
+            let mut store = RedbHistoryTxn::new(&txn, &mut delta);
+            history::purge_below(&mut store, horizon_of)?
+        } + synced_rows::purge_below(&txn, horizon_of, &mut delta)?;
         delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit text purge", e))?;
@@ -295,7 +279,7 @@ mod tests {
     fn open_temp() -> (InvertedIndex, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-inverted.redb");
-        let db = Arc::new(GatedDatabase::new(redb::Database::create(&path).unwrap()));
+        let db = Arc::new(GatedDatabase::create(&path).unwrap());
         let idx =
             InvertedIndex::open(db, crate::data::executor::core_loop::test_governor()).unwrap();
         (idx, dir)
@@ -456,6 +440,42 @@ mod tests {
         assert_eq!(
             audit_hits, 1,
             "the retained collection still reads alpha at 15"
+        );
+    }
+
+    /// The text history bytes of a collection count its stored sync-frame
+    /// versions, tombstones included, and no other collection's frames.
+    #[test]
+    fn the_text_history_bytes_count_stored_frame_versions() {
+        use crate::engine::sparse::fts_redb::bytes::synced_key_len;
+        use crate::engine::sparse::inverted::IndexDocScope;
+
+        let (idx, _dir) = open_temp();
+        assert_eq!(idx.text_history_bytes(DB, T, "docs").unwrap(), 0);
+        let pairs = vec![("body".to_string(), "alpha".to_string())];
+        let txn = idx.inner.backend().db().begin_write().unwrap();
+        for (collection, ordinal, fields) in [
+            ("docs", 10, pairs.clone()),
+            ("docs", 20, Vec::new()),
+            ("other", 10, pairs.clone()),
+        ] {
+            let doc = IndexDocScope {
+                database_id: DB,
+                tid: T,
+                collection,
+                surrogate: Surrogate::new(1),
+                ordinal,
+            };
+            idx.put_synced_text_in_txn(&txn, doc, &fields).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let value_bytes = zerompk::to_msgpack_vec(&pairs).unwrap().len();
+        let expected = 2 * synced_key_len("docs") + value_bytes;
+        assert_eq!(
+            idx.text_history_bytes(DB, T, "docs").unwrap(),
+            expected as u64,
+            "one frame version and one tombstone"
         );
     }
 }

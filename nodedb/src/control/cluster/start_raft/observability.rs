@@ -162,7 +162,6 @@ fn publish_raft_status(
     {
         tracing::warn!("metadata contact fn already set — start_raft appears to have run twice");
     }
-
     // Publish the leadership confirmer so a linearizable read served on this
     // node proves against a quorum that it is still the leader. Holds the
     // same coordinator mutex the loop ticks, and the loop only weakly, to ask

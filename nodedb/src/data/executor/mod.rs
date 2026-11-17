@@ -5,7 +5,7 @@ pub(crate) mod array_checkpoint;
 #[cfg(test)]
 mod cascade_journal_tests;
 pub(crate) mod checkpoint_decode_error;
-pub(crate) mod checkpoint_encoding;
+pub(crate) mod checkpoint_key;
 pub(crate) mod checkpoint_outcome;
 pub(crate) mod columnar_checkpoint;
 pub mod core_loop;
@@ -28,6 +28,9 @@ pub(crate) mod replay_floors;
 mod replay_policy;
 mod replay_task;
 pub mod response_codec;
+pub(crate) mod row_field_names;
+pub(crate) mod row_image_limit;
+pub(crate) mod row_image_native;
 mod row_shape;
 mod scan_normalize;
 mod scan_timeseries;
@@ -59,6 +62,8 @@ mod wal_replay_kv_incr;
 mod wal_replay_kv_index;
 mod wal_replay_kv_insert_conflict;
 mod wal_replay_kv_reap;
+#[cfg(test)]
+mod wal_replay_kv_row_limit_tests;
 mod wal_replay_kv_sorted_index;
 mod wal_replay_kv_transfer;
 mod wal_replay_kv_ttl;
@@ -78,6 +83,7 @@ mod wal_replay_vector_params;
 mod wal_replay_vector_redo;
 mod wal_replay_vector_resolved;
 mod wal_replay_vector_restore;
+mod wal_replay_vector_restore_payload;
 mod wal_replay_vector_sparse;
 mod wal_replay_vector_task;
 #[cfg(test)]

@@ -22,13 +22,22 @@ use super::sparse_body_format::SparseBodyFormatRef;
 /// wrapper only adds the decoded key string its Data-Plane callers also want.
 /// Shared by the materializing scan, the streaming scan, the SQL `SELECT` scan
 /// handler, and the `RETURNING` projection on KV writes.
-pub(in crate::data::executor) fn kv_row_to_doc(key: &[u8], value: &[u8]) -> (String, Vec<u8>) {
+///
+/// # Errors
+///
+/// A native body whose row does not encode back.
+pub(in crate::data::executor) fn kv_row_to_doc(
+    key: &[u8],
+    value: &[u8],
+) -> crate::Result<(String, Vec<u8>)> {
     let key_str = String::from_utf8_lossy(key).to_string();
-    let mp = msgpack_scan::kv_row_msgpack(&key_str, value);
-    (key_str, mp)
+    let mp = msgpack_scan::kv_row_msgpack(&key_str, value)?;
+    Ok((key_str, mp))
 }
 
-/// Normalize one sparse-store row's bytes to a standard msgpack map.
+/// Normalize one sparse-store row's bytes to the row body readers decode: a
+/// plain msgpack map for a strict row and a plain schemaless body, a native
+/// object `[7, {...}]` for a vector sidecar and a native schemaless body.
 ///
 /// THE single decision point for how a sparse body is decoded — every reader of
 /// a sparse row comes through here, from the `SELECT` scan (via
@@ -45,17 +54,21 @@ pub(in crate::data::executor) fn kv_row_to_doc(key: &[u8], value: &[u8]) -> (Str
 /// function exists to own. Call it unconditionally and use the result as
 /// `&[u8]`; take `.into_owned()` only where an owned `Vec` is genuinely
 /// required.
+///
+/// # Errors
+///
+/// A vector sidecar whose native object does not encode.
 pub(in crate::data::executor) fn sparse_body_to_msgpack<'a>(
     raw: &'a [u8],
     format: SparseBodyFormatRef<'_>,
-) -> std::borrow::Cow<'a, [u8]> {
+) -> crate::Result<std::borrow::Cow<'a, [u8]>> {
     match format {
         SparseBodyFormatRef::Strict(schema) => {
-            super::strict_format::binary_tuple_to_msgpack(raw, schema)
+            Ok(super::strict_format::binary_tuple_to_msgpack(raw, schema)
                 .map(std::borrow::Cow::Owned)
-                .unwrap_or_else(|| super::doc_format::json_to_msgpack_cow(raw))
+                .unwrap_or_else(|| super::doc_format::json_to_msgpack_cow(raw)))
         }
-        SparseBodyFormatRef::Document => super::doc_format::json_to_msgpack_cow(raw),
+        SparseBodyFormatRef::Document => Ok(super::doc_format::json_to_msgpack_cow(raw)),
         SparseBodyFormatRef::VectorSidecar => super::doc_format::vector_sidecar_to_msgpack_cow(raw),
     }
 }
@@ -72,12 +85,100 @@ pub(in crate::data::executor) fn sparse_row_to_doc(
     raw: &[u8],
     format: SparseBodyFormatRef<'_>,
     identity_column: &str,
-) -> (String, Vec<u8>) {
-    let mp = sparse_body_to_msgpack(raw, format);
-    (
+) -> crate::Result<(String, Vec<u8>)> {
+    let mp = sparse_body_to_msgpack(raw, format)?;
+    Ok((
         key.to_string(),
         inject_row_identity(&mp, key, identity_column).into_owned(),
-    )
+    ))
+}
+
+/// One sparse row as the relational paths read it: joins, aggregates and
+/// spatial refinement.
+///
+/// A strict row and a vector sidecar row decode to their typed values and
+/// encode as a native tagged object, so a `DECIMAL`, `UUID` or `ULID`
+/// column keeps its type and matches the same value in a schemaless native
+/// row by join key, group key and partition route. The plain encoding would
+/// turn them into text. A schemaless body passes through as stored: a
+/// native body stays native, and a plain body already holds what it was
+/// written with.
+pub(in crate::data::executor) fn sparse_row_to_relational_doc(
+    key: &nodedb_types::StorageKey,
+    raw: &[u8],
+    format: SparseBodyFormatRef<'_>,
+    identity_column: &str,
+) -> crate::Result<(String, Vec<u8>)> {
+    match format {
+        SparseBodyFormatRef::Document => sparse_row_to_doc(key, raw, format, identity_column),
+        SparseBodyFormatRef::Strict(_) | SparseBodyFormatRef::VectorSidecar => {
+            sparse_row_to_native_doc(key, raw, format, identity_column)
+        }
+    }
+}
+
+/// Normalize one source row without passing its fields through a public encoding.
+pub(in crate::data::executor) fn sparse_row_to_native_doc(
+    key: &nodedb_types::StorageKey,
+    raw: &[u8],
+    format: SparseBodyFormatRef<'_>,
+    identity_column: &str,
+) -> crate::Result<(String, Vec<u8>)> {
+    let mut doc = match format {
+        SparseBodyFormatRef::Strict(schema) => {
+            super::strict_format::binary_tuple_to_row_value(raw, schema).ok_or_else(|| {
+                crate::Error::Serialization {
+                    format: "binary_tuple".into(),
+                    detail: format!("source row {key} cannot decode under its strict schema"),
+                }
+            })?
+        }
+        SparseBodyFormatRef::Document => super::doc_format::decode_document_value(raw)?,
+        SparseBodyFormatRef::VectorSidecar => {
+            let fields = zerompk::from_msgpack::<
+                std::collections::HashMap<String, nodedb_types::Value>,
+            >(raw)
+            .map_err(|error| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("source vector sidecar {key} cannot decode: {error}"),
+            })?;
+            nodedb_types::Value::Object(fields)
+        }
+    };
+    if !matches!(doc, nodedb_types::Value::Object(_)) {
+        return Err(crate::Error::Serialization {
+            format: "document".into(),
+            detail: format!("source row {key} is not a document object"),
+        });
+    }
+    attach_sparse_row_identity(&mut doc, key, identity_column);
+    let bytes = zerompk::to_msgpack_vec(&doc).map_err(|error| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("source row {key} cannot encode its native image: {error}"),
+    })?;
+    Ok((key.to_string(), bytes))
+}
+
+/// Give a decoded row its stored identity, preserving an explicit declared key.
+pub(in crate::data::executor) fn attach_sparse_row_identity(
+    doc: &mut nodedb_types::Value,
+    key: &nodedb_types::StorageKey,
+    identity_column: &str,
+) {
+    let nodedb_types::Value::Object(fields) = doc else {
+        return;
+    };
+    if fields.contains_key(identity_column) {
+        return;
+    }
+    let identity = match fields.get(nodedb_types::ROWID_COLUMN) {
+        Some(nodedb_types::Value::Integer(rowid)) => rowid.to_string(),
+        _ => key.to_identity().into_string(),
+    };
+    fields.insert(
+        identity_column.to_owned(),
+        nodedb_types::Value::String(identity),
+    );
 }
 
 /// Give a msgpack row body its identity under `identity_column`.
@@ -96,6 +197,16 @@ pub(in crate::data::executor) fn inject_row_identity<'a>(
     key: &nodedb_types::StorageKey,
     identity_column: &str,
 ) -> std::borrow::Cow<'a, [u8]> {
+    if msgpack_scan::reader::map_header(body, 0).is_none() {
+        let Ok(mut doc) = super::doc_format::decode_document_value(body) else {
+            return std::borrow::Cow::Borrowed(body);
+        };
+        attach_sparse_row_identity(&mut doc, key, identity_column);
+        return match zerompk::to_msgpack_vec(&doc) {
+            Ok(bytes) => std::borrow::Cow::Owned(bytes),
+            Err(_) => std::borrow::Cow::Borrowed(body),
+        };
+    }
     if msgpack_scan::extract_field(body, 0, identity_column).is_some() {
         return std::borrow::Cow::Borrowed(body);
     }
@@ -262,7 +373,7 @@ mod tests {
     /// point rather than only through the shared shaper's own tests.
     #[test]
     fn a_raw_kv_value_is_wrapped_as_a_string_not_appended_verbatim() {
-        let (key, mp) = kv_row_to_doc(b"k1", b"v1");
+        let (key, mp) = kv_row_to_doc(b"k1", b"v1").expect("row");
         assert_eq!(key, "k1");
 
         let doc = crate::data::executor::doc_format::decode_document(&mp)
@@ -297,7 +408,8 @@ mod tests {
             &body(fields),
             SparseBodyFormatRef::Document,
             identity_column,
-        );
+        )
+        .expect("shape a schemaless row");
         let Ok(Value::Object(row)) = nodedb_types::value_from_msgpack(&mp) else {
             panic!("a shaped row decodes as a map");
         };
@@ -341,10 +453,14 @@ mod tests {
         msgpack_scan::write_str(&mut value, "n");
         msgpack_scan::write_str(&mut value, "7");
 
-        let (_key, mp) = kv_row_to_doc(b"k1", &value);
+        let (_key, mp) = kv_row_to_doc(b"k1", &value).expect("row");
         let doc = crate::data::executor::doc_format::decode_document(&mp)
             .expect("the injected row must decode as msgpack");
         assert_eq!(doc.get("n").and_then(|v| v.as_str()), Some("7"));
         assert_eq!(doc.get("key").and_then(|v| v.as_str()), Some("k1"));
     }
 }
+
+#[cfg(test)]
+#[path = "row_shape_native_tests.rs"]
+mod native_tests;

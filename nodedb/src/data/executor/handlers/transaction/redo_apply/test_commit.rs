@@ -55,7 +55,8 @@ impl CoreLoop {
             Err(refusal) => refusal,
         };
         // A session COMMIT releases the overlay once the install answered.
-        self.drop_overlay_entry(TxnId::new(lsn));
+        self.drop_overlay_entry(TxnId::new(lsn))
+            .expect("drop overlay");
         response
     }
 
@@ -77,13 +78,14 @@ impl CoreLoop {
             }
             Err(refusal) => refusal,
         };
-        self.drop_overlay_entry(TxnId::new(lsn));
+        self.drop_overlay_entry(TxnId::new(lsn))
+            .expect("drop overlay");
         response
     }
 
     /// Stage `plans` under the transaction `lsn` names and resolve them into
     /// the encoded redo record. The overlay stays for the caller to release.
-    fn stage_and_resolve_for_test(
+    pub(super) fn stage_and_resolve_for_test(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
@@ -142,6 +144,7 @@ pub(in crate::data::executor) fn failing_install_sub_record() -> RedoSubRecord {
         record_type: RecordType::TimeseriesBatch as u32,
         payload: crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: "refusal_probe",
                 payload: &lines,
                 provenance: None,
@@ -197,6 +200,7 @@ impl CoreLoop {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo");

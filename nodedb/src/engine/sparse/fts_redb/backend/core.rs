@@ -18,8 +18,8 @@ use super::shared::redb_err;
 use crate::engine::durability_gate::GatedDatabase;
 use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::tables::{
-    DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS, TEXT_ENDED,
-    TEXT_LIVE_BY_FROM, TEXT_LIVE_FROM,
+    DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS, SYNCED_TEXT,
+    TEXT_ENDED, TEXT_LIVE_BY_FROM, TEXT_LIVE_FROM,
 };
 use crate::engine::storage_bytes::ensure_storage_bytes_table;
 use crate::storage::quarantine::QuarantineRegistry;
@@ -78,6 +78,9 @@ impl RedbFtsBackend {
             write_txn
                 .open_table(TEXT_ENDED)
                 .map_err(|e| redb_err("create text ended table", e))?;
+            write_txn
+                .open_table(SYNCED_TEXT)
+                .map_err(|e| redb_err("create synced text table", e))?;
         }
         // Read transactions open the stored-bytes counter before any write.
         ensure_storage_bytes_table(&write_txn, SPARSE_COUNTER)?;
@@ -107,17 +110,6 @@ impl RedbFtsBackend {
     /// intact and the maintenance cycle retries on the next pass.
     pub fn compact_commit(&self, params: CompactCommit<'_>) -> crate::Result<()> {
         super::segments::compact_commit(self, params)
-    }
-
-    /// Drop every indexed row of one collection in one write transaction,
-    /// keeping its analyzer, language, and fuzzy configuration.
-    pub fn clear_collection_data(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-    ) -> crate::Result<usize> {
-        super::purge::collection_data(self, database_id, tid, collection)
     }
 
     /// The number of documents holding a posting under `term` in one index.

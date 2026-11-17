@@ -67,6 +67,22 @@ impl From<crate::engine::kv::UnboundKvWrite> for Error {
     }
 }
 
+/// A KV row over the row image limit, refused with SQLSTATE 54000.
+impl From<crate::engine::kv::KvRowTooLarge> for Error {
+    fn from(e: crate::engine::kv::KvRowTooLarge) -> Self {
+        Error::DataPlane(e.into())
+    }
+}
+
+impl From<crate::engine::kv::KvWriteRefusal> for Error {
+    fn from(e: crate::engine::kv::KvWriteRefusal) -> Self {
+        match e {
+            crate::engine::kv::KvWriteRefusal::Unbound(e) => e.into(),
+            crate::engine::kv::KvWriteRefusal::RowTooLarge(e) => e.into(),
+        }
+    }
+}
+
 /// A KV restore whose ended versions overlap the versions the key holds. The
 /// restore is refused as a whole, and nothing of it is written.
 impl From<crate::engine::kv::KvHistoryOverlap> for Error {
@@ -139,6 +155,29 @@ impl From<crate::engine::array::engine::ArrayEngineError> for Error {
             _ => Error::Storage {
                 engine: "array".to_string(),
                 detail: e.to_string(),
+            },
+        }
+    }
+}
+
+impl From<crate::data::executor::handlers::spill::SpillError> for Error {
+    fn from(e: crate::data::executor::handlers::spill::SpillError) -> Self {
+        Error::Storage {
+            engine: "spill".into(),
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl From<crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError> for Error {
+    fn from(
+        e: crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError,
+    ) -> Self {
+        use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeError;
+        match e {
+            ArrayOverlayMergeError::Overlay(e) => e,
+            ArrayOverlayMergeError::Array(e) => Error::Internal {
+                detail: format!("array overlay merge: {e}"),
             },
         }
     }

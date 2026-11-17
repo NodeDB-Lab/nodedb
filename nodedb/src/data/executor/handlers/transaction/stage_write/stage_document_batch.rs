@@ -45,6 +45,8 @@ pub(in crate::data::executor) struct StageBatchInsertParams<'a> {
     pub surrogates: &'a [Surrogate],
     /// `ON CONFLICT DO NOTHING`: a present key skips its row.
     pub if_absent: bool,
+    /// The collection's write policy, decided on each staged row.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 /// The row count a staged point write answered with.
@@ -98,6 +100,7 @@ impl CoreLoop {
             documents,
             surrogates,
             if_absent,
+            rls_write_check,
         } = params;
         // Every overlay slot and every index is keyed by surrogate, so a row
         // without one cannot be staged.
@@ -136,7 +139,7 @@ impl CoreLoop {
             );
             // An earlier row of this page is staged by now, so a key the page
             // names twice is present for the later row.
-            let staged = self.stage_point_insert(&ctx, value, if_absent);
+            let staged = self.stage_point_insert(&ctx, value, if_absent, rls_write_check);
             if staged.status == Status::Error {
                 return staged;
             }
@@ -165,7 +168,10 @@ impl CoreLoop {
                     identity,
                     params.surrogate,
                 );
-                if let Err(e) = self.stage_put_capped(&ctx, body) {
+                if let Err(e) = self.stage_check_ctx_row_image(&ctx, &body) {
+                    return self.response_error(task, e);
+                }
+                if let Err(e) = self.stage_put(&ctx, body) {
                     return self.response_error(task, e);
                 }
                 self.stage_count_response(task, 1)
@@ -405,6 +411,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
         let response = commit(&mut core, &[plan]);
@@ -435,6 +442,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
         let response = commit(&mut core, &[plan]);
@@ -456,6 +464,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 

@@ -9,6 +9,17 @@ NodeDB uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### ⚠️ Breaking changes
+
+- **Long names:** long collection, field and array names no longer break checkpoints. The on-disk layout changed, so start on an empty data directory.
+
+### Fixed
+
+- **Large rows:** updating a row of about 500 KiB or more no longer fails or stops the node from restarting.
+- **WAL recovery:** the first write after a crash no longer overwrites the end of a committed record.
+- **io_uring WAL:** a full disk now reports out of space instead of a generic I/O error.
+- **Row-level security:** write policies now apply to document inserts in transactions and multi-shard writes, and quotas now apply to them too.
+
 ---
 
 ## [0.6.2] - 2026-10-16

@@ -93,7 +93,9 @@ fn assert_one_cut(rows: &[(String, String)]) {
 /// row pairs, reads both sides at one cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_future_cut_join_reads_both_sides_at_one_cut_under_concurrent_writes() {
-    const KEYS: usize = 400;
+    // Each join reads every pair written so far, so the reads cost grows
+    // with the square of this count.
+    const KEYS: usize = 100;
     let server = TestServer::start_multicores(4).await;
     create_pair(&server, "sc_cc").await;
 

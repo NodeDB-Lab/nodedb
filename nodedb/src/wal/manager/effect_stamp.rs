@@ -24,7 +24,7 @@ pub async fn with_effect_stamp<F: Future>(stamp: Option<u64>, apply: F) -> F::Ou
 }
 
 /// The stamp of the metadata entry the current task applies, if any.
-pub(super) fn effect_stamp() -> Option<u64> {
+pub(crate) fn effect_stamp() -> Option<u64> {
     EFFECT_STAMP.try_with(|stamp| *stamp).ok().flatten()
 }
 

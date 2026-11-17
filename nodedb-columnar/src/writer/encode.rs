@@ -49,7 +49,7 @@ pub(super) fn prepend_validity(valid: &[bool], compressed: &[u8]) -> Vec<u8> {
 }
 
 /// Compute a simple schema hash for the footer.
-pub(super) fn compute_schema_hash(schema: &ColumnarSchema) -> u64 {
+pub fn compute_schema_hash(schema: &ColumnarSchema) -> u64 {
     use std::hash::{Hash, Hasher};
     // no-determinism: segment compaction footer hash, not Calvin write path; tracked for switch to xxhash with fixed seed
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

@@ -206,9 +206,9 @@ async fn restored_edges_are_traversable_from_both_endpoints_when_nodes_outnumber
     for idx in 0..target.nodes.len() {
         wait_all_traversals(&target, idx, "target").await;
     }
-    for idx in 0..target.nodes.len() {
+    for (idx, node) in target.nodes.iter().enumerate() {
         for (start, direction, want) in expectations() {
-            let got = reached(&target.nodes[idx].client, &start, direction).await;
+            let got = reached(&node.client, &start, direction).await;
             assert_eq!(
                 got.as_ref(),
                 Some(&want),

@@ -6,6 +6,7 @@ use crate::error::CalvinError;
 
 use super::incarnation::CalvinIncarnation;
 use super::lock_wire::TxnIdWire;
+use super::returning_contract::ReturningContract;
 use super::transaction::TxClass;
 
 impl TxClass {
@@ -27,6 +28,11 @@ impl TxClass {
     /// Set the roles of the identity whose writes the transaction commits.
     pub fn set_user_roles(&mut self, user_roles: Vec<String>) {
         self.user_roles = user_roles;
+    }
+
+    /// Set the response contract of the transaction's `RETURNING` write.
+    pub fn set_returning(&mut self, returning: Option<ReturningContract>) {
+        self.returning = returning;
     }
 
     /// Mark the transaction as the re-issue of RESTORE `restore_id`.

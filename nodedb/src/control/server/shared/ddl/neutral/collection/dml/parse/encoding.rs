@@ -135,18 +135,20 @@ mod tests {
         assert!(sql.contains("\"a\"\"); DROP COLLECTION other; --\""));
     }
 
+    /// A non-finite float is the `FLOAT8` cast of its text, never a bare
+    /// `NaN` or `inf` the planner would read as a column name.
     #[test]
-    fn upsert_sql_canonicalizes_nan_float() {
+    fn upsert_sql_writes_a_nan_float_as_a_float8_cast() {
         let fields = one_field("score", nodedb_types::Value::Float(f64::NAN));
         let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
-        assert!(!sql.contains("NaN"));
+        assert!(sql.ends_with(", 'NaN'::FLOAT8)"), "{sql}");
     }
 
     #[test]
-    fn upsert_sql_canonicalizes_infinity_float() {
+    fn upsert_sql_writes_an_infinite_float_as_a_float8_cast() {
         let fields = one_field("score", nodedb_types::Value::Float(f64::INFINITY));
         let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
-        assert!(!sql.contains("inf"));
+        assert!(sql.ends_with(", 'Infinity'::FLOAT8)"), "{sql}");
     }
 
     #[test]

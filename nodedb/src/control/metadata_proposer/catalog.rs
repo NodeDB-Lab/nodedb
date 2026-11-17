@@ -54,8 +54,9 @@ pub async fn propose_catalog_entry_async(
                 group_id: METADATA_GROUP_ID,
                 through: log_index,
             }],
-            crate::control::server::shared::session::StatementDeadline::of_statement(shared)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(
+                shared,
+            ),
         )
         .await?;
     }
@@ -69,6 +70,9 @@ async fn propose_and_apply_locally(
     shared: &SharedState,
     entry: &CatalogEntry,
 ) -> Result<(ProposeOutcome, Vec<ConstraintTarget>), Error> {
+    // A collection descriptor past a size limit is refused before it is
+    // buffered or proposed.
+    crate::control::catalog_entry::collection_limits::check_collection_limits(entry)?;
     // A refused entry never joins an open transaction, so its COMMIT holds
     // nothing a mirror refuses.
     crate::control::server::shared::write_admission::check_mirror_ddl(
@@ -95,6 +99,12 @@ async fn propose_and_apply_locally(
     let lease = acquire_ddl_prepare_lease_async(shared, handle.as_ref()).await?;
     let mut drains = DrainHolds::new(shared);
     let proposed = async {
+        // Under the lease no other full-text record commits, so a record
+        // that agrees here still agrees when it applies.
+        crate::control::server::shared::ddl::neutral::collection::text_analysis::check_entries(
+            std::iter::once(entry),
+            shared.credentials.catalog(),
+        )?;
         drain_prior_version(shared, entry, &mut drains).await?;
         let (stamped, targets) = stamp(shared, entry)?;
         let audit = crate::control::server::shared::session::audit_context::current();

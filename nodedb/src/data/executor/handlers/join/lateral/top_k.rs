@@ -4,7 +4,7 @@
 
 use tracing::debug;
 
-use crate::bridge::envelope::{PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::bridge::scan_filter::{FilterOp, ScanFilter, decode_scan_filters};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec;
@@ -12,9 +12,7 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::JoinProjection;
 
 use super::inner::{OuterRowJoin, encode_inner_filters};
-use super::shared::{
-    build_scan_plan, correlation_value, flatten_outer_row, strip_filter_qualifiers,
-};
+use super::shared::{build_scan_plan, correlation_value, outer_rows, strip_filter_qualifiers};
 
 /// Parameters for `LateralTopK` execution.
 pub struct LateralTopKParams<'a> {
@@ -47,9 +45,12 @@ impl CoreLoop {
         );
 
         let outer_resp = self.execute_plan(p.task, p.outer_plan);
-        let outer_docs = match response_codec::decode_response_to_docs(&outer_resp) {
-            Some(docs) => docs,
-            None => return outer_resp,
+        if matches!(outer_resp.status, Status::Error) {
+            return outer_resp;
+        }
+        let outer_rows = match outer_rows(outer_resp.payload.as_ref(), p.outer_plan) {
+            Ok(rows) => rows,
+            Err(error) => return self.response_error(p.task, ErrorCode::from(error)),
         };
 
         // A malformed filter payload is an error. Reading it as "no filter"
@@ -63,16 +64,11 @@ impl CoreLoop {
 
         let mut result: Vec<Vec<u8>> = Vec::new();
 
-        for (_outer_id, outer_bytes) in &outer_docs {
-            // Produce a flat outer map that includes wrapper-level fields (e.g.
-            // the primary-key `id`) alongside the document payload fields so
-            // that the merge and projection steps can reference any column.
-            let flat_outer = flatten_outer_row(outer_bytes);
-
+        for outer in &outer_rows {
             let mut corr_filters = base_inner_filters.clone();
             let mut satisfiable = true;
             for (outer_col, inner_col) in p.correlation_keys {
-                match correlation_value(outer_bytes, outer_col) {
+                match correlation_value(outer, outer_col) {
                     Ok(Some(value)) => corr_filters.push(ScanFilter {
                         field: inner_col.clone(),
                         op: FilterOp::Eq,
@@ -108,7 +104,7 @@ impl CoreLoop {
             };
 
             let row = OuterRowJoin {
-                flat_outer: &flat_outer,
+                flat_outer: &outer.body,
                 inner_plan,
                 outer_alias: p.outer_alias,
                 lateral_alias: p.lateral_alias,

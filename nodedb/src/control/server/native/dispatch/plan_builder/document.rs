@@ -6,15 +6,12 @@ use nodedb_types::CollectionType;
 use nodedb_types::QualifiedCollection;
 use nodedb_types::columnar::ColumnarProfile;
 use nodedb_types::protocol::TextFields;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, TimeseriesOp};
 
 use super::super::DispatchCtx;
-use super::document_identity::{
-    identified_body, identified_json_body, identity_column, stores_schemaless_bodies,
-};
+use super::document_identity::{identified_body, identity_column, stores_schemaless_bodies};
 use super::{collection_type, declared_primary_key, require_doc_id};
 
 pub(crate) async fn build_point_get(
@@ -134,6 +131,7 @@ pub(crate) async fn build_point_put(
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             }))
         }
     }
@@ -269,11 +267,6 @@ pub(crate) async fn build_batch_insert(
             detail: "documents array is empty".to_string(),
         });
     }
-    super::generated_gate::refuse_generated_documents(
-        ctx,
-        collection,
-        batch_docs.iter().map(|d| &d.fields),
-    )?;
     // Every row's identity in one batch at the collection's home.
     let pks: Vec<&[u8]> = batch_docs.iter().map(|d| d.id.as_bytes()).collect();
     let surrogates = super::helpers::assign_surrogates(ctx, collection, &pks).await?;
@@ -281,13 +274,26 @@ pub(crate) async fn build_batch_insert(
     let column = identity_column(declared_primary_key(ctx, collection)?);
     let mut documents: Vec<(String, Vec<u8>)> = Vec::with_capacity(batch_docs.len());
     for d in batch_docs {
+        // Each document is a native object, so every field keeps its exact
+        // type into storage.
+        if !matches!(d.fields, nodedb_types::Value::Object(_)) {
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "batch document '{}': fields hold {}, expected an object",
+                    d.id,
+                    d.fields.type_name()
+                ),
+            });
+        }
+        let body = zerompk::to_msgpack_vec(&d.fields).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("batch document '{}': native body encode failed: {e}", d.id),
+        })?;
+        super::generated_gate::refuse_generated_body(ctx, collection, &body)?;
         let value_bytes = if schemaless {
-            identified_json_body(d.fields.clone(), &d.id, &column)?
+            identified_body(&body, &d.id, &column)?
         } else {
-            sonic_rs::to_vec(&d.fields).map_err(|e| crate::Error::Serialization {
-                format: "json".into(),
-                detail: format!("failed to serialize document '{}': {e}", d.id),
-            })?
+            body
         };
         documents.push((d.id.clone(), value_bytes));
     }
@@ -302,6 +308,7 @@ pub(crate) async fn build_batch_insert(
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
     }))
 }
 

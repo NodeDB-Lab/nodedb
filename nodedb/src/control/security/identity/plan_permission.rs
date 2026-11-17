@@ -116,7 +116,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             Permission::Write
         }
 
-        PhysicalPlan::Text(TextOp::SetTextConfig { .. }) => Permission::Alter,
+        PhysicalPlan::Text(TextOp::SetTextConfig { .. } | TextOp::RebuildIndex { .. }) => {
+            Permission::Alter
+        }
 
         PhysicalPlan::Spatial(SpatialOp::Scan { .. }) => Permission::Read,
         PhysicalPlan::Spatial(SpatialOp::Insert { .. } | SpatialOp::Delete { .. }) => {
@@ -300,11 +302,15 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             MetaOp::StageWrite { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::ResolveTxn { .. },
+            | MetaOp::ResolveTxnPart { .. },
         ) => Permission::Write,
 
-        // Mirrors `ResolveTxn`: Calvin scheduler's commit path, treated as Write though it doesn't mutate base state.
+        // Mirrors `ResolveTxnPart`: Calvin scheduler's commit path, treated as Write though it doesn't mutate base state.
         PhysicalPlan::Meta(MetaOp::CalvinResolve { .. }) => Permission::Write,
+
+        // Reads a committed redo's content for the apply that installs it: the
+        // apply loop's own op, judged as the install it serves.
+        PhysicalPlan::Meta(MetaOp::ReadRedoStreamPage { .. }) => Permission::Write,
 
         // Installs a committed transaction's post-images into base state.
         PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { .. }) => Permission::Write,

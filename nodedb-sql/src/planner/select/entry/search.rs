@@ -539,6 +539,71 @@ mod tests {
         ));
     }
 
+    /// The fault of planning `sql`, which must be a `TextColumn` error on
+    /// `collection` and `column`.
+    fn text_index_fault(sql: &str, collection: &str, column: &str) -> TextColumnFault {
+        match try_plan_select_sql(sql) {
+            Err(SqlError::TextColumn {
+                collection: got_collection,
+                column: got_column,
+                fault,
+                ..
+            }) => {
+                assert_eq!(got_collection, collection);
+                assert_eq!(got_column, column);
+                fault
+            }
+            other => panic!("expected a TextColumn error for {sql}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_ready_indexed_field_plans_a_text_search() {
+        let plan = plan_select_sql("SELECT id FROM notes WHERE text_match(body, 'x')");
+        assert_eq!(match_shape(text_plan(&plan)), (Some("body"), None));
+        plan_select_sql("SELECT id FROM notes WHERE text_match(*, 'x')");
+        plan_select_sql("SELECT id, bm25_score(body, 'x') AS s FROM notes");
+    }
+
+    #[test]
+    fn an_unindexed_field_refuses_every_text_read() {
+        for sql in [
+            "SELECT id FROM notes WHERE text_match(summary, 'x')",
+            "SELECT id FROM notes WHERE text_match(summary, '\"a b\"')",
+            "SELECT id FROM notes ORDER BY bm25_score(summary, 'x') DESC LIMIT 5",
+            "SELECT id, bm25_score(summary, 'x') AS s FROM notes",
+        ] {
+            assert_eq!(
+                text_index_fault(sql, "notes", "summary"),
+                TextColumnFault::NotIndexed
+            );
+        }
+    }
+
+    #[test]
+    fn the_whole_document_needs_a_ready_index() {
+        assert_eq!(
+            text_index_fault(
+                "SELECT id FROM unindexed_notes WHERE text_match(*, 'x')",
+                "unindexed_notes",
+                nodedb_types::text_search::WHOLE_DOCUMENT,
+            ),
+            TextColumnFault::NotIndexed
+        );
+    }
+
+    #[test]
+    fn a_building_index_refuses_reads_as_still_building() {
+        assert_eq!(
+            text_index_fault(
+                "SELECT id FROM notes WHERE text_match(title, 'x')",
+                "notes",
+                "title",
+            ),
+            TextColumnFault::IndexBuilding
+        );
+    }
+
     #[test]
     fn a_text_match_with_one_argument_is_an_arity_error() {
         let err = try_plan_select_sql("SELECT id FROM docs WHERE text_match(body)").unwrap_err();

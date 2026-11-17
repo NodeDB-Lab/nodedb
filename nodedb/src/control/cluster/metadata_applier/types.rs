@@ -60,6 +60,47 @@ impl MetadataCommitApplier {
         }
     }
 
+    /// Whether the entry `payload` at `raft_index` owes its post-apply.
+    ///
+    /// The marker is a catalog row, so it survives a restart. The full-log
+    /// replay at boot re-delivers the entry and finds it.
+    pub(super) fn owes_post_apply(
+        &self,
+        raft_index: u64,
+        payload: &[u8],
+    ) -> Result<bool, crate::Error> {
+        Ok(self
+            .credentials
+            .catalog()
+            .load_owed_post_apply()?
+            .is_some_and(|(index, owed)| index == raft_index && owed.as_slice() == payload))
+    }
+
+    /// Record durably that the entry `payload` at `raft_index` owes its
+    /// post-apply. The row lands before the entry's catalog write, so a crash
+    /// between that write and the end of the post-apply leaves it behind.
+    pub(super) fn owe_post_apply(
+        &self,
+        raft_index: u64,
+        payload: &[u8],
+    ) -> Result<(), crate::Error> {
+        self.credentials
+            .catalog()
+            .put_owed_post_apply(raft_index, payload)
+    }
+
+    /// Record durably that the entry `payload` at `raft_index` owes no
+    /// post-apply. A marker of another entry stays.
+    pub(super) fn settle_post_apply(
+        &self,
+        raft_index: u64,
+        payload: &[u8],
+    ) -> Result<(), crate::Error> {
+        self.credentials
+            .catalog()
+            .remove_owed_post_apply(raft_index, payload)
+    }
+
     pub fn install_transport(&self, transport: Arc<nodedb_cluster::NexarTransport>) {
         let _ = self.transport.set(transport);
     }

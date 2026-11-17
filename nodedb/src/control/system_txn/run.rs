@@ -47,6 +47,13 @@ pub enum SystemTxnError {
         code: Option<Box<crate::bridge::envelope::ErrorCode>>,
     },
 
+    /// COMMIT aborted on a serialization conflict: a write committed above
+    /// the transaction's snapshot moved a row it read or writes. The
+    /// transaction applied nothing, and a retry on a new snapshot can
+    /// succeed. Every protocol answers `40001`.
+    #[error("system transaction aborted at commit: {detail}")]
+    Serialization { detail: String },
+
     /// COMMIT aborted on a dispatch or DDL-propose error. The transaction
     /// applied nothing. `source` keeps its own class.
     #[error("system transaction aborted at commit: {source}")]
@@ -66,7 +73,18 @@ impl From<SystemTxnError> for crate::Error {
                 code: Some(code), ..
             } => crate::Error::DataPlane(*code),
             SystemTxnError::Commit { detail, code: None } => crate::Error::Internal { detail },
+            SystemTxnError::Serialization { .. } => {
+                crate::Error::DataPlane(crate::bridge::envelope::ErrorCode::ConflictRetry)
+            }
         }
+    }
+}
+
+impl SystemTxnError {
+    /// Whether COMMIT aborted on a serialization conflict, which a retry on
+    /// a new snapshot can clear.
+    pub fn is_serialization(&self) -> bool {
+        matches!(self, Self::Serialization { .. })
     }
 }
 
@@ -204,8 +222,10 @@ pub(super) fn commit_abort_error(reason: AbortReason) -> SystemTxnError {
         AbortReason::Dispatch(source) | AbortReason::DdlPropose(source) => {
             SystemTxnError::CommitFailed { source }
         }
-        reason @ (AbortReason::Serialization
-        | AbortReason::NoTransaction
+        reason @ AbortReason::Serialization => SystemTxnError::Serialization {
+            detail: describe(&reason),
+        },
+        reason @ (AbortReason::NoTransaction
         | AbortReason::BatchRejected { .. }
         | AbortReason::CalvinCancelled
         | AbortReason::CalvinTimeout

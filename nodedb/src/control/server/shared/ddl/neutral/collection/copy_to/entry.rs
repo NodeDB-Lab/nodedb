@@ -182,6 +182,7 @@ async fn execute_and_collect(
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
 
     for task in tasks {
+        let row_context = crate::bridge::envelope::describe_row_context(&task.plan);
         let emitter =
             crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
         let resp = crate::control::server::shared::clone_write::intercept_authorize_and_dispatch(
@@ -203,8 +204,20 @@ async fn execute_and_collect(
             continue;
         }
 
-        let json = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-        extract_json_rows(&json, &redaction, &state.redaction, &mut all_rows)?;
+        // An export is a client-facing render: rows render as every JSON
+        // text path renders them.
+        let json = crate::data::executor::response_codec::decode_row_payload_to_json(
+            &resp.payload,
+            row_context,
+        )
+        .map_err(|e| DdlError::from_error_in_context("COPY TO: result rows do not decode", &e))?;
+        extract_json_rows(
+            &json,
+            row_context,
+            &redaction,
+            &state.redaction,
+            &mut all_rows,
+        )?;
     }
 
     Ok(all_rows)
@@ -218,8 +231,10 @@ async fn execute_and_collect(
 /// document envelopes, an array of flat column maps (KV / columnar / aggregate
 /// results), or a single object — so redaction is applied to the decoded value
 /// as a whole, before it is split into rows and handed to the serializers.
+/// `context` is the row shape of the producing plan.
 fn extract_json_rows(
     json: &str,
+    context: crate::data::executor::response_codec::RowContext,
     redaction: &QueryRedaction,
     store: &RedactionStore,
     out: &mut Vec<serde_json::Value>,
@@ -229,7 +244,7 @@ fn extract_json_rows(
     }
     let mut parsed: serde_json::Value = sonic_rs::from_str(json)
         .map_err(|e| DdlError::internal(format!("COPY TO: failed to decode result rows: {e}")))?;
-    redact_decoded_value(Some(redaction), store, &mut parsed);
+    redact_decoded_value(Some(redaction), store, context, &mut parsed);
     match parsed {
         serde_json::Value::Array(items) => {
             out.extend(items);
@@ -300,7 +315,8 @@ mod tests {
         store: &RedactionStore,
     ) -> Vec<serde_json::Value> {
         let mut rows = Vec::new();
-        extract_json_rows(json, redaction, store, &mut rows).expect("rows decode");
+        let context = crate::data::executor::response_codec::RowContext::ScanEnvelope;
+        extract_json_rows(json, context, redaction, store, &mut rows).expect("rows decode");
         rows
     }
 

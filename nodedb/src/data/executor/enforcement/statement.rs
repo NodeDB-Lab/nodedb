@@ -29,7 +29,6 @@
 use nodedb_physical::physical_plan::BalancedDef;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::balanced::{self, BalancedEntry};
 use crate::data::executor::enforcement::images::RowImages;
 use crate::types::{DatabaseId, TenantId};
@@ -106,35 +105,6 @@ impl CoreLoop {
             ));
         }
         Ok(entries)
-    }
-
-    /// The entries a statement's DELETEs contribute, from pre-images the caller
-    /// already holds as SUBMITTED (MessagePack) bodies.
-    ///
-    /// A body carrying no readable document holds no column the definition can
-    /// read, so it contributes nothing — the same answer the write-path hook
-    /// gives a submitted body it cannot decode.
-    pub(in crate::data::executor) fn balanced_entries_for_submitted_deletes(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        bodies: &[&[u8]],
-    ) -> Vec<BalancedEntry> {
-        let Some(def) = self.balanced_def(database_id, tid, collection) else {
-            return Vec::new();
-        };
-        let mut entries = Vec::new();
-        for body in bodies {
-            let Ok(doc) = doc_format::decode_document(body) else {
-                continue;
-            };
-            entries.extend(balanced::entries_for(
-                &def,
-                &RowImages::Delete { old_doc: &doc },
-            ));
-        }
-        entries
     }
 
     /// The entries a statement's UPDATEs contribute, from image pairs the

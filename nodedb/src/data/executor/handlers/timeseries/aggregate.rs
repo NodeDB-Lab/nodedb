@@ -193,16 +193,27 @@ impl CoreLoop {
             merged.merge(tiers);
         }
 
+        // The column each aggregate reads, so an extreme over an instant
+        // column renders as an instant and a gap fills with the type its AVG
+        // has. `*` names no column and reads Text.
+        let aggregate_fields: Vec<String> =
+            aggregates.iter().map(|(_, field)| field.clone()).collect();
+        let aggregate_kinds =
+            self.ts_group_key_kinds(task.request.database_id, tid, collection, &aggregate_fields);
+
         // Phase 3: Apply gap-fill if requested (bucketed results only).
         let merged = if !gap_fill.is_empty() && bucket_interval_ms > 0 {
-            super::super::timeseries_gap_fill::apply_gap_fill_to_grouped(
+            match super::super::timeseries_gap_fill::apply_gap_fill_to_grouped(
                 merged,
                 time_range,
                 bucket_interval_ms,
                 gap_fill,
-                group_by,
                 aggregates,
-            )
+                &aggregate_kinds,
+            ) {
+                Ok(filled) => filled,
+                Err(e) => return self.response_error(task, e),
+            }
         } else {
             merged
         };
@@ -212,12 +223,6 @@ impl CoreLoop {
         // encoder is told each key column's declared shape.
         let group_key_kinds =
             self.ts_group_key_kinds(task.request.database_id, tid, collection, group_by);
-        // The column each aggregate reads, so an extreme over an instant
-        // column renders as an instant. `*` names no column and reads Text.
-        let aggregate_fields: Vec<String> =
-            aggregates.iter().map(|(_, field)| field.clone()).collect();
-        let aggregate_kinds =
-            self.ts_group_key_kinds(task.request.database_id, tid, collection, &aggregate_fields);
         let bucket_kind = self.ts_time_key_kind(task.request.database_id, tid, collection);
         let payload = match super::encode::encode_grouped_results(
             &merged,

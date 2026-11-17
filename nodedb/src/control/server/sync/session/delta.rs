@@ -140,12 +140,6 @@ impl SyncSession {
 
         self.mutations_processed += 1;
 
-        // Record subscription so the Origin `CollectionPurged`
-        // broadcast notifies this session on hard-delete of the
-        // collection the client just wrote to.
-        let tenant_u32 = identity.tenant_id.as_u64();
-        self.track_collection(tenant_u32, &msg.collection);
-
         debug!(
             session = %self.session_id,
             collection = %msg.collection,
@@ -324,12 +318,6 @@ mod tests {
         assert!(response.is_some());
         assert_eq!(response.unwrap().msg_type, SyncMessageType::DeltaAck);
         assert_eq!(session.mutations_processed, 1);
-        // The subscription tracker picked up the collection.
-        assert!(
-            session
-                .tracked_collections
-                .contains(&(1, "orders".to_string()))
-        );
     }
 
     #[test]

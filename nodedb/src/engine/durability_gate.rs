@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A redb database whose write transactions can defer their durability.
+//! Deferred redb commits with an irreversible backend write fence.
 //!
-//! A write whose Control Plane journals its write set after apply must not
-//! reach stable storage before its write set does. While the gate defers,
-//! every write transaction begun on the database commits with
-//! [`Durability::None`]: redb keeps the commit visible to later reads, and a
-//! crash rolls it back. The Data Plane core then stores the write set in one
-//! transaction that commits with [`Durability::Immediate`], which persists
-//! every deferred commit before it together with the write set.
-//!
-//! Every write transaction on a gated database begins through
-//! [`GatedDatabase::begin_write`], which shadows `redb::Database::begin_write`
-//! for every holder of the handle. Reads reach the database through `Deref`.
+//! An unresolved journal seals storage before normal close can promote deferred commits.
+//! Outstanding transactions retain the same fence through redb's backend ownership.
 
+#[path = "guarded_backend.rs"]
+mod guarded_backend;
+
+use std::fs::OpenOptions;
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use guarded_backend::{GuardedBackend, WriteFence};
 
 use redb::{Database, Durability, WriteTransaction};
 
@@ -23,23 +21,38 @@ use redb::{Database, Durability, WriteTransaction};
 #[derive(Debug)]
 pub struct GatedDatabase {
     db: Database,
+    fence: WriteFence,
+    unresolved: AtomicBool,
     deferred: AtomicBool,
     /// Whether a transaction began deferred since the last [`Self::persist`].
     pending: AtomicBool,
 }
 
 impl GatedDatabase {
-    pub fn new(db: Database) -> Self {
-        Self {
+    /// Open or create a database with guarded storage mutations.
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, redb::DatabaseError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let fence = WriteFence::default();
+        let backend = GuardedBackend::new(redb::backends::FileBackend::new(file)?, fence.clone());
+        let db = Database::builder().create_with_backend(backend)?;
+        Ok(Self {
             db,
+            fence,
+            unresolved: AtomicBool::new(false),
             deferred: AtomicBool::new(false),
             pending: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Begin a write transaction. While the gate defers, it commits without
     /// persisting.
     pub fn begin_write(&self) -> Result<WriteTransaction, redb::Error> {
+        self.fence.check()?;
         let mut txn = self.db.begin_write()?;
         if self.deferred.load(Ordering::Acquire) {
             txn.set_durability(Durability::None)?;
@@ -51,6 +64,7 @@ impl GatedDatabase {
     /// Begin a write transaction that persists its commit and every deferred
     /// commit before it, whatever the gate says.
     pub fn begin_durable_write(&self) -> Result<WriteTransaction, redb::Error> {
+        self.fence.check()?;
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate)?;
         Ok(txn)
@@ -58,12 +72,23 @@ impl GatedDatabase {
 
     /// Defer the durability of every write transaction begun from now on.
     pub fn defer(&self) {
+        self.unresolved.store(true, Ordering::Release);
         self.deferred.store(true, Ordering::Release);
     }
 
-    /// Stop deferring. Transactions begun from now on persist at commit.
+    /// Stop deferring without resolving the current journal session.
     pub fn resume(&self) {
         self.deferred.store(false, Ordering::Release);
+    }
+
+    /// Mark the journal resolved after its complete healthy finalization.
+    pub fn resolve_journal(&self) {
+        self.unresolved.store(false, Ordering::Release);
+    }
+
+    /// Permanently reject backend mutations, including redb shutdown writes.
+    pub fn seal(&self) {
+        self.fence.seal();
     }
 
     /// Whether the gate defers.
@@ -74,6 +99,7 @@ impl GatedDatabase {
     /// Persist every deferred commit. A database with no transaction begun
     /// deferred since the last persist has nothing to persist.
     pub fn persist(&self) -> Result<(), redb::Error> {
+        self.fence.check()?;
         if !self.pending.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
@@ -84,6 +110,14 @@ impl GatedDatabase {
             self.pending.store(true, Ordering::Release);
         }
         persisted
+    }
+}
+
+impl Drop for GatedDatabase {
+    fn drop(&mut self) {
+        if self.unresolved.load(Ordering::Acquire) {
+            self.seal();
+        }
     }
 }
 
@@ -131,7 +165,7 @@ mod tests {
     fn a_deferred_commit_persists_only_with_a_durable_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gated.redb");
-        let db = GatedDatabase::new(Database::create(&path).unwrap());
+        let db = GatedDatabase::create(&path).unwrap();
         put(&db, 1);
         db.defer();
         put(&db, 2);
@@ -155,6 +189,7 @@ mod tests {
 
         db.persist().unwrap();
         db.resume();
+        db.resolve_journal();
         assert!(!db.is_deferred());
         assert_eq!(
             keys_after_crash(&path, &dir.path().join("crash-2.redb")),
@@ -162,3 +197,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "durability_lifecycle_tests.rs"]
+mod lifecycle_tests;

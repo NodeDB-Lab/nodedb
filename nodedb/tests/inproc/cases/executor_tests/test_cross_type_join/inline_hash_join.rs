@@ -2,8 +2,8 @@
 
 //! Inline hash join test: two pre-computed payloads joined with qualified left-side keys.
 
-use super::super::helpers::{make_ctx, send_ok};
-use nodedb::data::executor::response_codec;
+use super::super::helpers::{make_ctx, rows_json, send_ok};
+use nodedb::data::executor::response_codec::{self, RowContext};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, QueryOp};
 
 use super::basic_scans::build_msgpack_map;
@@ -30,6 +30,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -55,6 +56,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -80,6 +82,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -164,7 +167,8 @@ fn inline_hash_join_honors_qualified_left_keys() {
             post_filters: Vec::new(),
             left_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
-                rows: response_codec::flatten_to_relational_rows(&left_data),
+                rows: response_codec::flatten_rows_in_context(&left_data, RowContext::Flat)
+                    .expect("join rows split"),
                 sources: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
@@ -178,7 +182,11 @@ fn inline_hash_join_honors_qualified_left_keys() {
             }))),
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
-                rows: response_codec::flatten_to_relational_rows(&right_data),
+                rows: response_codec::flatten_rows_in_context(
+                    &right_data,
+                    RowContext::ScanEnvelope,
+                )
+                .expect("document scan rows split"),
                 sources: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
@@ -199,7 +207,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod keys;
+mod prepared;
 mod record;
 pub mod record_stamps;
 #[cfg(test)]

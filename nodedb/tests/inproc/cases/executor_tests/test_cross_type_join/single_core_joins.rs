@@ -2,9 +2,8 @@
 
 //! Single-core hash join and self-join tests.
 
-use super::super::helpers::{doc_surrogate, make_ctx, send_ok};
+use super::super::helpers::{doc_surrogate, make_ctx, rows_json, send_ok};
 use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
-use nodedb::data::executor::response_codec;
 use nodedb_physical::physical_plan::{DocumentOp, JoinProjection, KvOp, PhysicalPlan, QueryOp};
 
 use super::basic_scans::build_msgpack_map;
@@ -36,6 +35,7 @@ fn single_core_cross_type_hash_join() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -103,7 +103,7 @@ fn single_core_cross_type_hash_join() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     eprintln!("hash join result: {json}");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
@@ -155,6 +155,7 @@ fn single_core_left_join_with_nulls() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -214,7 +215,7 @@ fn single_core_left_join_with_nulls() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     eprintln!("left join result: {json}");
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
@@ -257,6 +258,7 @@ fn single_core_self_join_respects_aliases_in_filter_and_projection() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -316,7 +318,7 @@ fn single_core_self_join_respects_aliases_in_filter_and_projection() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 
@@ -355,6 +357,7 @@ fn single_core_self_join_star_keeps_both_sides() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -392,7 +395,7 @@ fn single_core_self_join_star_keeps_both_sides() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 
@@ -453,6 +456,7 @@ fn schemaless_self_join_matches_on_canonicalized_object_fields() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -512,7 +516,7 @@ fn schemaless_self_join_matches_on_canonicalized_object_fields() {
         }),
     );
 
-    let json = response_codec::decode_payload_to_json(&payload);
+    let json = rows_json(&payload);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
 

@@ -143,6 +143,8 @@ pub(crate) async fn execute_cluster_array(
     match compose::shape_payload_no_plan(
         &payload_bytes,
         cluster_plan_kind,
+        // Array cells answer flat rows.
+        crate::data::executor::response_codec::RowContext::Flat,
         projection,
         Some(redaction.ctx(&state.redaction)),
         None,

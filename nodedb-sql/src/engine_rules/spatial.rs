@@ -11,6 +11,7 @@ pub struct SpatialRules;
 impl EngineRules for SpatialRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Insert(InsertPlan {
+            returning: None,
             collection: p.collection,
             engine: EngineType::Spatial,
             route: WriteRoute::ColumnarFamily,
@@ -37,6 +38,7 @@ impl EngineRules for SpatialRules {
 
     fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Upsert(UpsertPlan {
+            returning: None,
             collection: p.collection,
             engine: EngineType::Spatial,
             route: WriteRoute::ColumnarFamily,
@@ -107,6 +109,7 @@ impl EngineRules for SpatialRules {
 
     fn plan_delete(&self, p: DeleteParams) -> Result<Vec<SqlPlan>> {
         Ok(vec![SqlPlan::Delete {
+            returning: None,
             collection: p.collection,
             engine: EngineType::Spatial,
             filters: p.filters,

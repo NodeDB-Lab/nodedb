@@ -27,3 +27,17 @@ pub(super) fn payload_to_rows(payload: &crate::bridge::envelope::Payload) -> Vec
 
     vec![DdlResult::Rows(ShapedRows::text_rows(columns, vec![row]))]
 }
+
+/// Render one typed result object as a single-column `result` row set.
+///
+/// The cell keeps every value's type: a native client reads it as the
+/// object, and pgwire and HTTP render it as JSON.
+pub(super) fn value_to_rows(result: nodedb_types::Value) -> Vec<DdlResult> {
+    let columns = vec!["result".to_string()];
+    let row = std::collections::BTreeMap::from([("result".to_string(), result)]);
+    vec![DdlResult::Rows(ShapedRows::from_rows(
+        columns,
+        ShapedRows::text_types(1),
+        vec![row],
+    ))]
+}

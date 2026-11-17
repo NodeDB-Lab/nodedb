@@ -17,6 +17,16 @@ use super::helpers::*;
 #[test]
 fn fulltext_cross_tenant_index_does_not_contaminate_search() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
+    for tenant in [TENANT_A, TENANT_B] {
+        register_text_fields(
+            &mut core,
+            &mut tx,
+            &mut rx,
+            tenant,
+            "articles",
+            &["body", "title"],
+        );
+    }
 
     // Tenant A indexes 2 documents about "quantum".
     let docs_a = [
@@ -44,6 +54,7 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -75,6 +86,10 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
+    assert_eq!(
+        baseline_count, 2,
+        "Tenant A finds its two quantum documents: {json_baseline}"
+    );
 
     // Tenant B indexes 5 documents all containing "quantum".
     for i in 0..5u32 {
@@ -93,6 +108,7 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }

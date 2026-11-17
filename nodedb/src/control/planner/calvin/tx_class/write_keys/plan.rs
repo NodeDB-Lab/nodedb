@@ -154,7 +154,7 @@ mod tests {
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: qualified(CRDT),
             document_id: id.to_owned(),
-            fields_json: "{}".to_owned(),
+            fields: Vec::new(),
             surrogate: Surrogate::new(41),
             partial: false,
             verb: CrdtWriteVerb::Insert,
@@ -275,6 +275,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -330,6 +331,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         assert!(higher_waits(vec![batch], vec![doc_delete("x", None)]));
     }
@@ -535,5 +537,72 @@ mod tests {
             add_plan_write_keys(&mut keys, &plan),
             Err(crate::Error::BadRequest { .. })
         ));
+    }
+
+    /// A write a Calvin resolve refuses is refused before it is sequenced,
+    /// by the builder of every Calvin transaction. Sequenced, it will reach
+    /// its resolve after the COMMIT verdict, where a refusal halts the
+    /// vShard.
+    #[test]
+    fn a_write_the_resolve_refuses_is_never_sequenced() {
+        use nodedb_physical::physical_plan::{ColumnarInsertIntent, RefreshCut, TimeseriesOp};
+        let refused = [
+            PhysicalPlan::Crdt(CrdtOp::Apply {
+                collection: qualified(CRDT),
+                document_id: "x".to_owned(),
+                delta: vec![1],
+                peer_id: 1,
+                mutation_id: 1,
+                surrogate: Surrogate::new(41),
+                provenance: None,
+                constraint_version_required: 0,
+                expected_frontier_digest: None,
+            }),
+            PhysicalPlan::Timeseries(TimeseriesOp::RefreshAggregate {
+                collection: qualified("metrics"),
+                cut: RefreshCut {
+                    aggregate: "metrics_1m".to_owned(),
+                    incarnation: nodedb_types::Hlc::new(7, 1),
+                    refresh_id: 1,
+                    periodic: false,
+                },
+            }),
+            PhysicalPlan::Columnar(ColumnarOp::Insert {
+                collection: qualified("events"),
+                payload: Vec::new(),
+                format: "msgpack".to_owned(),
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: Vec::new(),
+                surrogates: vec![Surrogate::new(4)],
+                schema_bytes: Vec::new(),
+                provenance: Some(nodedb_types::sync::wire::SyncProvenance {
+                    producer_id: 1,
+                    epoch: 1,
+                    stream_id: 1,
+                    seq: 1,
+                }),
+                wal_lsn: None,
+                system_from: None,
+                restored_versions: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+        ];
+        for plan in refused {
+            let mut keys = WriteKeys::default();
+            assert!(
+                matches!(
+                    add_plan_write_keys(&mut keys, &plan),
+                    Err(crate::Error::BadRequest { .. })
+                ),
+                "{plan:?} has write keys"
+            );
+            let tasks = [task(plan.clone())];
+            assert!(
+                build_single_vshard_tx_class(&tasks, TenantId::new(1), &[]).is_err(),
+                "{plan:?} builds a Calvin transaction"
+            );
+        }
     }
 }

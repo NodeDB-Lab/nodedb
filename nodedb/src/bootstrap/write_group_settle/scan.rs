@@ -133,6 +133,7 @@ mod tests {
         let (t, v, d) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
         let forward = appender.append_put(t, v, d, b"f").expect("forward");
         let group = |group: WriteGroup| WriteGroupRecord {
+            schemas: Vec::new(),
             group,
             ops: Vec::new(),
             redo: None,
@@ -177,11 +178,13 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         let origin = appender
             .append_whole_transaction_redo(t, v, d, &record)
             .expect("append");
         let continuation = |index: u32| WriteGroupRecord {
+            schemas: Vec::new(),
             group: WriteGroup::continuing_closed(origin.as_u64(), index, 2),
             ops: Vec::new(),
             redo: None,

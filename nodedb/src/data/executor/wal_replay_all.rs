@@ -65,6 +65,9 @@ impl CoreLoop {
 
         crate::fail_point!(self.fail_scope, "replay::before_engine_passes");
 
+        // Every arm below installs a logged record.
+        let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, true);
+
         // Every engine-bearing record class — standalone (autocommit) records
         // and the sub-records of committed `TransactionRedo` groups alike —
         // replays here in ONE globally LSN-ordered pass. Splitting the two
@@ -76,6 +79,7 @@ impl CoreLoop {
         // committed transaction that cannot be applied, and continuing would
         // open the database with a hole in the replayed suffix.
         let replayed = self.replay_engines_in_lsn_order(records, num_cores, tombstones);
+        self.apply_scope.journaled = previous_journaled;
         // Replay is over: no arm applies a registered record again.
         self.record_stamps.clear();
         if let Err(e) = replayed {
@@ -232,6 +236,7 @@ mod tests {
         .expect("encode five-element tuple");
         let later = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: "later",
                 payload: b"later value=2i",
                 provenance: None,
@@ -269,6 +274,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         }
         .to_bytes()
         .expect("encode redo")

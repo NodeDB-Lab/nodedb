@@ -227,11 +227,16 @@ fn decode_scan(payload: &[u8], identity: RowIdentityRead<'_>) -> crate::Result<P
     if payload.is_empty() {
         return Ok(PreexecScan::default());
     }
-    let rows =
-        nodedb_types::value_from_msgpack(payload).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("OLLP reconnaissance scan payload: {e}"),
-        })?;
+    // The reconnaissance scan answers `{id, data}` envelopes, plain or
+    // native; each `data` decodes typed.
+    let rows = crate::data::executor::response_codec::decode_row_payload_value(
+        payload,
+        crate::data::executor::response_codec::RowContext::ScanEnvelope,
+    )
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("OLLP reconnaissance scan payload: {e}"),
+    })?;
     Ok(decode_rows(&rows, identity))
 }
 

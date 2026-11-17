@@ -33,6 +33,7 @@ pub(crate) mod test_utils;
 pub mod topic;
 pub mod trigger;
 pub mod types;
+pub mod unrouted;
 pub mod wal_replay;
 pub mod wal_replay_doc_shapes;
 pub mod wal_replay_group;

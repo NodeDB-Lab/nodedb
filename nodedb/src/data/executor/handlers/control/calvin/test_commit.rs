@@ -4,9 +4,7 @@
 //! plans, resolve them into the redo record, and install the record as the
 //! slice's stamped `ApplyTransactionRedo`.
 
-use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinResolved, MetaOp, PhysicalPlan, RedoOrigin,
-};
+use nodedb_physical::physical_plan::{CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin};
 
 use crate::bridge::envelope::{Response, Status};
 use crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets;
@@ -45,6 +43,24 @@ impl CoreLoop {
         epoch_system_ms: i64,
         lsn: u64,
     ) -> Response {
+        let (staged, installed) =
+            self.calvin_commit_staged_for_test(task, tid, plans, (epoch, epoch_system_ms), lsn);
+        installed.unwrap_or(staged)
+    }
+
+    /// Commit `plans` like [`Self::calvin_commit_at_for_test`] at `(epoch,
+    /// epoch_system_ms)`. Returns the stage's answer, which carries the
+    /// slice's `RETURNING` images, beside the first refusal of the resolve or
+    /// the install, else the install's answer. A refused stage answers
+    /// `None` beside it.
+    pub(in crate::data::executor) fn calvin_commit_staged_for_test(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        plans: &[PhysicalPlan],
+        (epoch, epoch_system_ms): (u64, i64),
+        lsn: u64,
+    ) -> (Response, Option<Response>) {
         let ctx = CalvinExecCtx {
             epoch,
             position: 0,
@@ -59,28 +75,31 @@ impl CoreLoop {
             &[],
         );
         if staged.status != Status::Ok {
-            return staged;
+            return (staged, None);
         }
-        let resolved = self.execute_calvin_resolve(task, epoch, 0);
-        if resolved.status != Status::Ok {
-            return resolved;
-        }
-        let answer = match zerompk::from_msgpack::<CalvinResolved>(resolved.payload.as_bytes()) {
+        let installed =
+            self.calvin_install_staged_for_test(task, plans, (epoch, epoch_system_ms), lsn);
+        (staged, Some(installed))
+    }
+
+    /// Resolve the slice staged at `(epoch, 0)` and install its redo record
+    /// at `lsn`. Returns the first refusal, or the install's answer.
+    pub(in crate::data::executor) fn calvin_install_staged_for_test(
+        &mut self,
+        task: &ExecutionTask,
+        plans: &[PhysicalPlan],
+        (epoch, epoch_system_ms): (u64, i64),
+        lsn: u64,
+    ) -> Response {
+        let answer = match self.calvin_resolve_whole(task, epoch, 0) {
             Ok(answer) => answer,
-            Err(error) => {
-                return self.response_error(
-                    task,
-                    crate::bridge::envelope::ErrorCode::Internal {
-                        detail: format!("decode the resolved answer: {error}"),
-                    },
-                );
-            }
+            Err(code) => return self.response_error(task, code),
         };
         let install = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
             redo: answer.redo,
             collections: written_collections(plans),
             sum_targets: redo_sum_targets(plans),
-            origin: RedoOrigin::Commit,
+            origin: RedoOrigin::of_plans(plans),
             calvin: Some(CalvinInstall {
                 epoch,
                 position: 0,

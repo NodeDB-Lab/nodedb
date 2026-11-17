@@ -202,6 +202,11 @@ impl CoreLoop {
                 self.replay_record_unapplied("kv", "incr_identity", record_lsn, &error.to_string());
                 0
             }
+            // Refused the same way on every replica (`replay_policy`).
+            Err(AtomicError::RowTooLarge(error)) => {
+                self.replay_kv_row_too_large("incr", record_lsn, error);
+                0
+            }
         }
     }
 }
@@ -238,12 +243,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

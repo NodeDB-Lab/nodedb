@@ -17,11 +17,18 @@ The SRID type and the `SridResolver` trait live in `nodedb-srid`, which carries 
 
 | Range | Authority | Contents |
 |---|---|---|
-| 1 to 899 999 | EPSG | 5 916 geographic and projected CRSs from EPSG v12.029 |
-| 12287, 25314 to 25322 | EPSG | GDM2020 and its nine state Cassini grids, from EPSG change 2026.081 (`data/epsg_supplement.tsv`) |
+| 4326, 3857, 32601 to 32661, 32701 to 32761 | EPSG | WGS 84, Web Mercator, and the WGS 84 UTM and UPS grids. Always built in (`data/epsg_core.tsv`) |
+| 1 to 899 999 | EPSG | 5 916 geographic and projected CRSs from EPSG v12.029. Needs the `epsg` feature |
+| 12287, 25314 to 25322 | EPSG | GDM2020 and its nine state Cassini grids, from EPSG change 2026.081 (`data/epsg_supplement.tsv`). Needs the `epsg` feature |
 | 910 000 to 989 999 | user | `CREATE SPATIAL_REF_SYS` definitions |
 | 990 001 | NodeDB | MODIS sinusoidal grid (SR-ORG:6842) |
 | 990 002 | NodeDB | Himawari geostationary view, 140.7° E |
+
+## The `epsg` feature
+
+The `epsg` feature is on by default. It embeds the full EPSG table as a zstd frame of about 108 KB, which decodes once on first read to 1.1 MB of heap. A lookup of an always-built-in code never reads it. The decoder is `ruzstd`, in pure Rust. Without the feature the binary carries only the always-built-in rows, about 14 KB. Any other EPSG code then answers `UnknownSrid::Undefined`.
+
+A library crate depends on `nodedb-crs` with `default-features = false`. The final binary enables `epsg` or leaves it off. One dependent with default features turns it on for the whole build.
 
 Projection methods: Transverse Mercator and UTM, Hotine Oblique Mercator (variants A and B), Cassini-Soldner (and hyperbolic), Mercator (variants A and B), Pseudo-Mercator, Lambert Cylindrical Equal Area, Sinusoidal, Geostationary Satellite, Lambert Conic Conformal (1SP and 2SP), Polar and oblique Stereographic, UPS, Albers Equal Area, Lambert Azimuthal Equal Area, Krovak (and modified), Swiss Oblique Mercator, American Polyconic, Equidistant Cylindrical, Equal Earth, Azimuthal Equidistant (and Guam), New Zealand Map Grid, and Laborde Oblique Mercator.
 
@@ -71,7 +78,10 @@ target-cluster/epsg-venv/bin/pip install pyproj==3.8.0
 target-cluster/epsg-venv/bin/python scripts/gen_epsg.py              # write data/epsg.tsv
 target-cluster/epsg-venv/bin/python scripts/gen_epsg.py --fixtures   # also write tests/fixtures/*.tsv
 target-cluster/epsg-venv/bin/python scripts/gen_epsg.py --check      # compare with the committed files
+bash scripts/pack_epsg.sh                                            # write data/epsg_core.tsv and data/epsg.tsv.zst
 ```
+
+`scripts/pack_epsg.sh` needs `zstd` and `awk`, not pyproj. Run it after every change to `data/epsg.tsv`. A unit test fails when `data/epsg.tsv.zst` does not decode to `data/epsg.tsv`.
 
 ## Status
 

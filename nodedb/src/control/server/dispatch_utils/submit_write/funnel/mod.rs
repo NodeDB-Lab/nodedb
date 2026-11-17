@@ -26,6 +26,7 @@
 //!
 //! Split by concern, run in this fixed order by [`driver::submit_write`]:
 //! - [`admission`]: the write-admission gate.
+//! - [`changes`]: the change set a write owes its change feed.
 //! - [`wal_append`]: the array DDL refusal and the WAL redo append/stamp.
 //! - [`dispatch`]: building the wire `Request` and handing it to the Data
 //!   Plane.
@@ -36,6 +37,7 @@
 
 mod admission;
 mod answer;
+mod changes;
 mod dispatch;
 mod driver;
 mod late_parts;

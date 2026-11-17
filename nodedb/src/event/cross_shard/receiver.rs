@@ -19,7 +19,10 @@ use nodedb_cluster::wire::{VShardEnvelope, VShardMessageType, WIRE_VERSION};
 
 use super::dedup::{CrossShardDedup, applied_key_of};
 use super::metrics::CrossShardMetrics;
-use super::types::{CrossShardWriteRequest, CrossShardWriteResponse};
+use super::types::{
+    CrossShardWriteRequest, CrossShardWriteResponse, NotifyAnswer, NotifyBroadcastMsg,
+    NotifyBroadcastReply,
+};
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 use crate::types::TenantId;
@@ -81,7 +84,7 @@ impl CrossShardReceiver {
 
         match envelope.msg_type {
             VShardMessageType::CrossShardEvent => self.handle_write(envelope).await,
-            VShardMessageType::NotifyBroadcast => self.handle_notify_broadcast(envelope),
+            VShardMessageType::NotifyBroadcast => self.handle_notify_broadcast(envelope).await,
             other => self.error_response(
                 envelope.source_node,
                 envelope.vshard_id,
@@ -180,51 +183,90 @@ impl CrossShardReceiver {
         }
     }
 
-    /// Handle a change-stream run a partition's leader forwarded.
+    /// Handle a change-stream run, or a probe, a partition's leader
+    /// forwarded.
     ///
-    /// Deserializes the `NotifyBroadcastMsg` and appends it to the local
-    /// `ChangeStream` before it acks, so the leader's next run for this node
-    /// lands after it.
-    fn handle_notify_broadcast(&self, envelope: VShardEnvelope) -> Vec<u8> {
-        let msg: super::types::NotifyBroadcastMsg = match zerompk::from_msgpack(&envelope.payload) {
+    /// Deserializes the `NotifyBroadcastMsg` and hands it to the local
+    /// `ChangeStream` before it answers, so the leader's next run for this
+    /// node lands after it. The append journals the run, so it runs on the
+    /// blocking pool. The answer is [`NotifyAnswer::Taken`] only once the
+    /// journal holds the run. A run the stream refused, or an append that
+    /// did not finish, answers [`NotifyAnswer::Refused`], and the leader
+    /// sends the stretch again. Every answer that names a partition carries
+    /// this node's position in it.
+    async fn handle_notify_broadcast(&self, envelope: VShardEnvelope) -> Vec<u8> {
+        let (source, vshard_id) = (envelope.source_node, envelope.vshard_id);
+        let rejected = |detail: String| NotifyBroadcastReply {
+            answer: NotifyAnswer::Rejected { detail },
+            through: None,
+        };
+        let msg: NotifyBroadcastMsg = match zerompk::from_msgpack(&envelope.payload) {
             Ok(m) => m,
             Err(e) => {
-                return self.error_response(
-                    envelope.source_node,
-                    envelope.vshard_id,
-                    0,
-                    &format!("deserialize NotifyBroadcast: {e}"),
-                );
+                let reply = rejected(format!("deserialize NotifyBroadcast: {e}"));
+                return self.build_notify_reply(source, vshard_id, &reply);
             }
         };
 
-        // Don't re-deliver our own broadcasts (should not happen, but guard).
+        // A node never feeds itself.
         if msg.source_node == self.node_id {
-            return self.build_ack_response(envelope.source_node, envelope.vshard_id);
+            let reply = rejected("a node does not feed its own change runs to itself".into());
+            return self.build_notify_reply(source, vshard_id, &reply);
         }
 
+        let (source_node, partition_id, changes) =
+            (msg.source_node, msg.partition_id, msg.changes.len());
         // Deliver to local ChangeStream subscribers.
-        self.shared_state.change_stream.deliver_remote_notify(&msg);
-
+        let shared = std::sync::Arc::clone(&self.shared_state);
+        let delivered = tokio::task::spawn_blocking(move || {
+            shared
+                .change_stream
+                .deliver_remote_notify(&msg, &shared.metadata_apply_wedge)
+        })
+        .await;
+        let reply = match delivered {
+            Ok(reply) => reply,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => NotifyBroadcastReply {
+                answer: NotifyAnswer::Refused {
+                    detail: format!("the forwarded change run did not append: {error}"),
+                },
+                through: None,
+            },
+        };
         trace!(
-            source_node = msg.source_node,
-            partition_id = msg.partition_id,
-            changes = msg.changes.len(),
-            "appended a forwarded change-stream run"
+            source_node,
+            partition_id,
+            changes,
+            ?reply,
+            "answered a forwarded change-stream run"
         );
-
-        self.build_ack_response(envelope.source_node, envelope.vshard_id)
+        self.build_notify_reply(source, vshard_id, &reply)
     }
 
-    /// Build a simple ACK response for fire-and-forget messages.
-    fn build_ack_response(&self, target_node: u64, vshard_id: u32) -> Vec<u8> {
+    /// Build the `NotifyBroadcastAck` envelope that carries `reply`.
+    fn build_notify_reply(
+        &self,
+        target_node: u64,
+        vshard_id: u32,
+        reply: &NotifyBroadcastReply,
+    ) -> Vec<u8> {
+        let payload = match zerompk::to_msgpack_vec(reply) {
+            Ok(payload) => payload,
+            // An empty payload does not decode as a reply, and the leader
+            // sends the run again.
+            Err(error) => {
+                warn!(%error, "encoding a change-run reply failed; the leader sends the run again");
+                Vec::new()
+            }
+        };
         let env = VShardEnvelope {
             version: WIRE_VERSION,
             msg_type: VShardMessageType::NotifyBroadcastAck,
             source_node: self.node_id,
             target_node,
             vshard_id,
-            payload: Vec::new(),
+            payload,
         };
         env.to_bytes()
     }
@@ -404,5 +446,146 @@ mod tests {
             zerompk::from_msgpack(&decoded.payload).unwrap();
         assert!(decoded_resp.success);
         assert_eq!(decoded_resp.source_lsn, 1500);
+    }
+
+    /// A receiver over a shared state whose change stream has `journal`.
+    struct NotifyHarness {
+        receiver: CrossShardReceiver,
+        state: Arc<SharedState>,
+        journal: Arc<crate::control::change_stream::ChangeJournal>,
+        _sides: Vec<crate::bridge::dispatch::CoreChannelDataSide>,
+    }
+
+    fn notify_receiver(dir: &std::path::Path) -> NotifyHarness {
+        use crate::control::change_stream::ChangeJournal;
+
+        let wal =
+            Arc::new(crate::wal::WalManager::open_for_testing(&dir.join("wal")).expect("wal"));
+        let (dispatcher, sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("shared state");
+        let journal =
+            Arc::new(ChangeJournal::open(&dir.join("journal"), 1 << 10).expect("open journal"));
+        state
+            .change_stream
+            .attach_journal(Arc::clone(&journal))
+            .expect("attach the journal");
+        let dedup = Arc::new(CrossShardDedup::open(&dir.join("dedup")).expect("open dedup"));
+        let receiver = CrossShardReceiver::new(
+            dedup,
+            Arc::clone(&state),
+            Arc::new(CrossShardMetrics::new()),
+            2,
+        );
+        NotifyHarness {
+            receiver,
+            state,
+            journal,
+            _sides: sides,
+        }
+    }
+
+    /// The envelope of a run of group 3's entry 1 with `events` changes.
+    fn notify_request(partition_kind: u8, events: u64) -> Vec<u8> {
+        use super::super::types::NotifyChange;
+        use crate::event::cdc::CdcOffset;
+
+        let msg = NotifyBroadcastMsg {
+            source_node: 1,
+            partition_kind,
+            partition_id: 3,
+            after: CdcOffset::whole_index(0),
+            through: CdcOffset::whole_index(1),
+            changes: (1..=events)
+                .map(|ordinal| NotifyChange {
+                    position: CdcOffset::data_event(0, 1, ordinal),
+                    tenant_id: 1,
+                    database_id: crate::types::DatabaseId::DEFAULT.as_u64(),
+                    collection: "orders".into(),
+                    document_id: format!("row-{ordinal}"),
+                    operation: "INSERT".into(),
+                    timestamp_ms: 1,
+                    lsn: 1,
+                })
+                .collect(),
+            probe: false,
+        };
+        let payload = zerompk::to_msgpack_vec(&msg).expect("encode the run");
+        VShardEnvelope::new(VShardMessageType::NotifyBroadcast, 1, 2, 0, payload).to_bytes()
+    }
+
+    fn notify_reply_of(bytes: &[u8]) -> NotifyBroadcastReply {
+        let envelope = VShardEnvelope::from_bytes(bytes).expect("a reply envelope");
+        assert_eq!(envelope.msg_type, VShardMessageType::NotifyBroadcastAck);
+        zerompk::from_msgpack(&envelope.payload).expect("a reply")
+    }
+
+    /// A run the journal does not write answers `Refused`, never `Taken`,
+    /// and reports the position the node held before. Failures in a row
+    /// mark the node not ready. The run sent again once the journal
+    /// recovers answers `Taken` with the run's position, and publishes
+    /// once. A third send, as after a lost ack, answers `Taken` and
+    /// publishes nothing. A probe answers the position and takes nothing.
+    #[tokio::test]
+    async fn a_refused_change_run_answers_a_refusal_and_lands_once_when_resent() {
+        use crate::control::change_stream::stream::journal_debt::HALT_FAILURES;
+        use crate::event::cdc::CdcOffset;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let NotifyHarness {
+            receiver,
+            state,
+            journal,
+            _sides,
+        } = notify_receiver(dir.path());
+        let request = notify_request(super::super::types::NOTIFY_PARTITION_GROUP, 3);
+
+        journal.fail_next_persists_for_test(HALT_FAILURES);
+        for _ in 0..HALT_FAILURES {
+            let refused = notify_reply_of(&receiver.handle_envelope(request.clone()).await);
+            assert!(
+                matches!(refused.answer, NotifyAnswer::Refused { .. }),
+                "{refused:?}"
+            );
+            assert_eq!(refused.through, None, "the node holds nothing of the group");
+        }
+        assert!(state.metadata_apply_wedge.is_wedged());
+        assert_eq!(state.change_stream.events_published(), 0);
+
+        let taken = notify_reply_of(&receiver.handle_envelope(request.clone()).await);
+        assert_eq!(taken.answer, NotifyAnswer::Taken);
+        assert_eq!(taken.through, Some(CdcOffset::whole_index(1)));
+        assert!(!state.metadata_apply_wedge.is_wedged());
+        assert_eq!(state.change_stream.events_published(), 3);
+
+        let again = notify_reply_of(&receiver.handle_envelope(request).await);
+        assert_eq!(again, taken);
+        assert_eq!(
+            state.change_stream.events_published(),
+            3,
+            "a resent run publishes once"
+        );
+
+        let probe = NotifyBroadcastMsg::probe(1, crate::control::change_stream::ChangePartition(3));
+        let payload = zerompk::to_msgpack_vec(&probe).expect("encode the probe");
+        let request =
+            VShardEnvelope::new(VShardMessageType::NotifyBroadcast, 1, 2, 0, payload).to_bytes();
+        let answered = notify_reply_of(&receiver.handle_envelope(request).await);
+        assert_eq!(answered, taken, "a probe answers the position");
+    }
+
+    /// A run no node can take answers `Rejected`: an unknown partition kind,
+    /// or a payload that does not decode.
+    #[tokio::test]
+    async fn a_change_run_no_node_can_take_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let harness = notify_receiver(dir.path());
+        let (receiver, state) = (&harness.receiver, &harness.state);
+        let unknown = notify_reply_of(&receiver.handle_envelope(notify_request(9, 1)).await);
+        assert!(matches!(unknown.answer, NotifyAnswer::Rejected { .. }));
+        let garbage =
+            VShardEnvelope::new(VShardMessageType::NotifyBroadcast, 1, 2, 0, vec![0xc1]).to_bytes();
+        let malformed = notify_reply_of(&receiver.handle_envelope(garbage).await);
+        assert!(matches!(malformed.answer, NotifyAnswer::Rejected { .. }));
+        assert_eq!(state.change_stream.events_published(), 0);
     }
 }

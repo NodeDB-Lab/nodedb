@@ -33,20 +33,13 @@
 //! evaluator these tests are meant to exercise — the same path a real
 //! `SELECT ... FROM t WHERE <predicate-referencing-a-column>` query takes.
 //!
-//! ## Why the float-path test divides an integer literal by a float column
+//! ## Why the float column is seeded with exponent literals
 //!
-//! A decimal-point numeric literal (e.g. `1.5`) combined arithmetically with
-//! a stored `FLOAT` column is, independently of this fix, always NULL in
-//! this codebase — confirmed by direct diagnosis: `SELECT 4.0 + fdenom`
-//! (fdenom = 2.0, a perfectly valid addition) already returns NULL with no
-//! error on an unmodified evaluator, while `SELECT 4 + fdenom` (integer
-//! literal) correctly returns `6`. That is a pre-existing, general
-//! decimal-literal/float-column type-coercion gap, unrelated to division or
-//! to zero divisors (it reproduces with `+`), and out of scope for a
-//! division/modulo-by-zero-only fix. `2/fdenom` (integer literal ÷ float
-//! column) sidesteps it while still exercising the f64 arithmetic branch of
-//! `eval_binary_op` (neither operand is `Value::Decimal`, so the Decimal
-//! branch is provably not what's under test here).
+//! A fractional literal such as `2.0` is an exact `DECIMAL` and is stored as
+//! one, so `2/fdenom` over it takes the Decimal branch of `eval_binary_op`.
+//! A literal with an exponent (`2E0`) is a `FLOAT`. The seed writes `fdenom`
+//! that way, so `2/fdenom` (integer literal ÷ float column) runs the f64
+//! branch: neither operand is `Value::Decimal`.
 
 use crate::harness::TestServer;
 
@@ -55,17 +48,17 @@ async fn seed(srv: &TestServer, collection: &str) {
         .await
         .unwrap();
     srv.exec(&format!(
-        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('a', 1, 1.0)"
+        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('a', 1, 1E0)"
     ))
     .await
     .unwrap();
     srv.exec(&format!(
-        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('b', 0, 0.0)"
+        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('b', 0, 0E0)"
     ))
     .await
     .unwrap();
     srv.exec(&format!(
-        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('c', 2, 2.0)"
+        "INSERT INTO {collection} (id, denom, fdenom) VALUES ('c', 2, 2E0)"
     ))
     .await
     .unwrap();
@@ -103,7 +96,7 @@ async fn float_division_by_zero_errors_22012() {
     let rows = srv
         .query_text("SELECT 2/fdenom FROM divzero_float_216 WHERE id = 'c'")
         .await
-        .expect("2 / 2.0 must still succeed");
+        .expect("2 / 2E0 must still succeed");
     assert_eq!(rows, vec!["1".to_string()]);
 }
 

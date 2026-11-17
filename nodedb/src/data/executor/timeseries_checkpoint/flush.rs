@@ -125,12 +125,14 @@ mod tests {
             let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
             let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
             let core = CoreLoop::open(
-                0,
-                req_rx,
-                resp_tx,
-                dir,
-                Arc::new(nodedb_types::OrdinalClock::new()),
-                crate::data::executor::core_loop::test_governor(),
+                crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                    0,
+                    req_rx,
+                    resp_tx,
+                    dir,
+                    Arc::new(nodedb_types::OrdinalClock::new()),
+                    crate::data::executor::core_loop::test_governor(),
+                ),
             )
             .expect("CoreLoop::open");
             Self {
@@ -453,6 +455,7 @@ mod tests {
         let line = ilp_line(host, value, ts_ms);
         let payload = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: COLL,
                 payload: line.as_bytes(),
                 provenance: None,

@@ -29,8 +29,8 @@
 //! ## Why partitioning is correct
 //!
 //! Identical reasoning to `grace_partitioner`: [`partition_hash`] hashes the
-//! SAME extracted key value bytes that [`HashIndex`] memcmp-matches on, with a
-//! fixed seed, so any pair that *could* match co-locates in one partition.
+//! SAME canonical key identity that [`HashIndex`] matches on, with a fixed
+//! seed, so any pair that *could* match co-locates in one partition.
 //! Cross / keyless joins are cartesian products and run as a single partition.
 //!
 //! ## Why the doc id is dropped
@@ -48,9 +48,11 @@
 
 use std::path::PathBuf;
 
+use super::grace_null_aware::NullAwareFacts;
 use super::grace_partitioner::{GraceSpec, partition_hash};
-use super::grace_repartition::{PartitionSource, repartition_side};
-use super::hash::{HashIndex, ProbeParams, probe_hash_index};
+use super::grace_repartition::{FrameStreamReader, PartitionSource, repartition_side};
+use super::hash::{HashIndex, NULL_AWARE_ANTI, ProbeParams, probe_hash_index};
+use super::merge_join_docs_binary;
 use super::spill::SpillPartitionWriter;
 
 /// Maximum recursive re-partition depth before a skewed partition is declared
@@ -140,6 +142,10 @@ pub(super) struct PartitionedSpiller {
     index_collection: String,
     /// Whether unmatched build-side rows are emitted (right/full outer joins).
     emit_unmatched_right: bool,
+    /// Whole-build-side facts for a null-aware anti join (`NOT IN`); `None`
+    /// for every other join type. NULL-key build rows never reach a
+    /// partition, and probe rows are filtered by these facts first.
+    null_aware: Option<NullAwareFacts>,
     build: SideState,
     probe: SideState,
 }
@@ -183,6 +189,7 @@ impl PartitionedSpiller {
             probe_collection: spec.probe_collection.to_string(),
             index_collection: spec.index_collection.to_string(),
             emit_unmatched_right: spec.emit_unmatched_right,
+            null_aware: (spec.join_type == NULL_AWARE_ANTI).then(NullAwareFacts::default),
             build: SideState::new(partitions),
             probe: SideState::new(partitions),
         }
@@ -190,7 +197,12 @@ impl PartitionedSpiller {
 
     /// Feed one build-side (RIGHT / index) row's raw msgpack value bytes.
     pub(super) fn push_build(&mut self, value: &[u8]) -> crate::Result<()> {
-        let p = (partition_hash(value, &self.build_keys) % self.partitions as u64) as usize;
+        if let Some(facts) = self.null_aware.as_mut()
+            && !facts.record_build(value, &self.build_keys)?
+        {
+            return Ok(());
+        }
+        let p = (partition_hash(value, &self.build_keys)? % self.partitions as u64) as usize;
         push_row(
             &mut self.build,
             p,
@@ -201,9 +213,16 @@ impl PartitionedSpiller {
         )
     }
 
-    /// Feed one probe-side (LEFT) row's raw msgpack value bytes.
+    /// Feed one probe-side (LEFT) row's raw msgpack value bytes. Every build
+    /// row must be pushed first: a null-aware anti join filters probe rows by
+    /// the whole build side.
     pub(super) fn push_probe(&mut self, value: &[u8]) -> crate::Result<()> {
-        let p = (partition_hash(value, &self.probe_keys) % self.partitions as u64) as usize;
+        if let Some(facts) = self.null_aware.as_mut()
+            && !facts.admits_probe(value, &self.probe_keys)?
+        {
+            return Ok(());
+        }
+        let p = (partition_hash(value, &self.probe_keys)? % self.partitions as u64) as usize;
         push_row(
             &mut self.probe,
             p,
@@ -241,6 +260,14 @@ impl PartitionedSpiller {
     /// globally unmatched, and the existing per-partition
     /// `probe_hash_index(emit_unmatched_right=..)` emits exactly the right set.
     pub(super) fn finish_and_probe(self) -> crate::Result<Vec<Vec<u8>>> {
+        // `x NOT IN (s)` with a NULL in a non-empty `s` is never true.
+        if self
+            .null_aware
+            .as_ref()
+            .is_some_and(|facts| facts.rejects_every_probe(&self.build_keys))
+        {
+            return Ok(Vec::new());
+        }
         // Destructure self to move all fields out at once — no clones needed.
         let PartitionedSpiller {
             partitions,
@@ -255,6 +282,7 @@ impl PartitionedSpiller {
             probe_collection,
             index_collection,
             emit_unmatched_right,
+            mut null_aware,
             build_keys,
             probe_keys,
             build,
@@ -291,7 +319,23 @@ impl PartitionedSpiller {
             });
         }
 
+        // A composite `NOT IN` holds its NULL-bearing probe rows: one pass over
+        // every partition's build rows decides each before the partitions are
+        // probed and consumed.
+        if let Some(facts) = null_aware.as_mut()
+            && facts.holds_probes()
+        {
+            for item in &queue {
+                for_each_source_row(&item.build, |row| facts.check_build_row(row, &build_keys))?;
+            }
+        }
+
         let mut results: Vec<Vec<u8>> = Vec::new();
+        if let Some(facts) = null_aware {
+            for row in facts.surviving_probes() {
+                results.push(merge_join_docs_binary(&row, None, &probe_collection, "")?);
+            }
+        }
         // `next_repartition_id` names the per-level sub-directory so re-partition
         // outputs from different oversized partitions never collide. All live
         // under `spill_dir`, so `drive_grace_build`'s recursive `remove_dir_all`
@@ -317,7 +361,7 @@ impl PartitionedSpiller {
                 let build_docs = item.build.materialize()?;
                 let probe_docs = item.probe.materialize()?;
 
-                let index = HashIndex::build(&build_docs, &build_key_refs);
+                let index = HashIndex::build(&build_docs, &build_key_refs)?;
                 // `join_filters: None` here: `probe_hash_index` evaluates no
                 // residual predicate on this path, so the `?` never fires.
                 let mut part = probe_hash_index(&ProbeParams {
@@ -387,6 +431,28 @@ impl PartitionedSpiller {
         results.truncate(limit);
         Ok(results)
     }
+}
+
+/// Call `f` on every row of `source` without consuming it: an in-memory
+/// source by reference, a spilled one streamed frame by frame.
+fn for_each_source_row(
+    source: &PartitionSource,
+    mut f: impl FnMut(&[u8]) -> crate::Result<()>,
+) -> crate::Result<()> {
+    match source {
+        PartitionSource::InMemory(rows) => {
+            for (_, row) in rows {
+                f(row)?;
+            }
+        }
+        PartitionSource::Spilled(path) => {
+            let mut reader = FrameStreamReader::open(path)?;
+            while let Some(row) = reader.next_row()? {
+                f(&row)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One unit of join work: a build + probe (sub-)partition pair sharing a hash
@@ -933,6 +999,124 @@ mod tests {
                 other => panic!(
                     "identical-key skew must hit the depth cap with MemoryExhausted, got {other:?}"
                 ),
+            }
+        }
+
+        /// `NOT IN` over a forced spill (every partition spills) matches the
+        /// whole-build-side in-memory result: a NULL in the build side, an
+        /// empty build side, and the plain case, with NULL and missing probe
+        /// keys in every case.
+        #[test]
+        fn null_aware_anti_spilling_matches_in_memory() {
+            let (plain_build, probe) = single_key_fixtures();
+            // `single_key_fixtures` carries a missing-key build row (`b5`).
+            // Drop it for the plain case so only the NULL case holds a NULL.
+            let non_null_build: Vec<(String, Vec<u8>)> = plain_build
+                .iter()
+                .filter(|(id, _)| id != "b5")
+                .cloned()
+                .collect();
+            let mut null_build = non_null_build.clone();
+            null_build.push((
+                "bn".into(),
+                msgpack_row(&[
+                    ("k", serde_json::Value::Null),
+                    ("rv", serde_json::json!("rn")),
+                ]),
+            ));
+            let mut probe = probe;
+            probe.push((
+                "pn".into(),
+                msgpack_row(&[
+                    ("k", serde_json::Value::Null),
+                    ("lv", serde_json::json!("ln")),
+                ]),
+            ));
+            let build_keys = ["k"];
+            let probe_keys = ["k"];
+            let spec = GraceSpec {
+                build_keys: &build_keys,
+                probe_keys: &probe_keys,
+                join_type: NULL_AWARE_ANTI,
+                limit: usize::MAX,
+                probe_collection: "l",
+                index_collection: "r",
+                emit_unmatched_right: true,
+            };
+            let cases: [(&str, DocSet, usize); 4] = [
+                ("plain", non_null_build, 1),
+                ("null in build", null_build, 0),
+                ("missing key in build", plain_build, 0),
+                ("empty build", Vec::new(), probe.len()),
+            ];
+            for (name, build, expected_rows) in cases {
+                let want = as_multiset(
+                    grace_join_in_memory(build.clone(), probe.clone(), 4, &spec).unwrap(),
+                );
+                assert_eq!(want.len(), expected_rows, "{name}: in-memory row count");
+                for p in [1usize, 4, 16] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let got = run_spiller(
+                        &build,
+                        &probe,
+                        p,
+                        /* per_partition_budget */ 1,
+                        /* materialize_cap */ 64 * 1024 * 1024,
+                        dir.path().to_path_buf(),
+                        &spec,
+                    );
+                    assert_eq!(want, as_multiset(got), "{name} partitions={p}");
+                }
+            }
+        }
+
+        /// A composite `NOT IN` over a forced spill matches the in-memory
+        /// row comparison, with NULL-bearing rows on both sides.
+        #[test]
+        fn composite_null_aware_anti_spilling_matches_in_memory() {
+            let tuple = |id: &str, a: serde_json::Value, b: serde_json::Value| {
+                (id.to_owned(), msgpack_row(&[("a", a), ("b", b)]))
+            };
+            use serde_json::{Value::Null, json};
+            let build = vec![
+                tuple("b1", json!(2), Null),
+                tuple("b2", json!(5), json!(6)),
+                tuple("b3", json!(7), json!(8)),
+            ];
+            let probe = vec![
+                tuple("p1", json!(1), json!(1)), // kept: (2,NULL) differs on a
+                tuple("p2", json!(2), json!(9)), // dropped: (2,NULL) unknown
+                tuple("p3", json!(5), Null),     // dropped: (5,6) unknown
+                tuple("p4", json!(9), Null),     // kept
+                tuple("p5", json!(7), json!(8)), // dropped: exact match
+                tuple("p6", Null, Null),         // dropped: unknown against all
+            ];
+            let build_keys = ["a", "b"];
+            let probe_keys = ["a", "b"];
+            let spec = GraceSpec {
+                build_keys: &build_keys,
+                probe_keys: &probe_keys,
+                join_type: NULL_AWARE_ANTI,
+                limit: usize::MAX,
+                probe_collection: "l",
+                index_collection: "r",
+                emit_unmatched_right: true,
+            };
+            let want =
+                as_multiset(grace_join_in_memory(build.clone(), probe.clone(), 4, &spec).unwrap());
+            assert_eq!(want.len(), 2, "p1 and p4");
+            for p in [1usize, 4, 16] {
+                let dir = tempfile::tempdir().unwrap();
+                let got = run_spiller(
+                    &build,
+                    &probe,
+                    p,
+                    /* per_partition_budget */ 1,
+                    /* materialize_cap */ 64 * 1024 * 1024,
+                    dir.path().to_path_buf(),
+                    &spec,
+                );
+                assert_eq!(want, as_multiset(got), "partitions={p}");
             }
         }
     }

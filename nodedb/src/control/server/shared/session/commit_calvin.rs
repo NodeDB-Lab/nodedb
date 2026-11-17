@@ -65,6 +65,14 @@ pub(super) struct CalvinCommit<'a> {
 /// resolve is authoritative. Once the transaction commits, a collection
 /// whose resolve rejected more lines than its statements reported raises a
 /// notice.
+///
+/// Each statement of the transaction answered its own `RETURNING` rows when
+/// it ran, and the COMMIT answers a tag. So no buffered write carries its
+/// `RETURNING` clause into the commit: a contract will evaluate the lists
+/// again and draw their sequences a second time, and an install that
+/// answers rows answers no timeseries counts. The clause matters to the
+/// install only for a timeseries ingest, which takes every line or none, and
+/// the resolve above already held each ingest to that.
 pub(super) async fn run_commit_calvin(
     sessions: &SessionStore,
     session_id: SessionId,
@@ -76,7 +84,9 @@ pub(super) async fn run_commit_calvin(
             Ok(resolved) => resolved,
             Err(e) => return Some(AbortReason::Dispatch(e)),
         };
-    let buffered = resolved.as_deref().unwrap_or(commit.buffered);
+    let mut buffered = resolved.unwrap_or_else(|| commit.buffered.to_vec());
+    strip_returning(&mut buffered);
+    let buffered = buffered.as_slice();
     let ts_committed = match super::commit::ts_rejections::tasks_rejected_by_collection(buffered) {
         Ok(committed) => committed,
         Err(e) => return Some(AbortReason::Dispatch(e)),
@@ -258,6 +268,16 @@ async fn submit_commit_calvin(
     }
 }
 
+/// `tasks` with no `RETURNING` clause: their statements answered their rows
+/// already.
+fn strip_returning(tasks: &mut [PhysicalTask]) {
+    for task in tasks {
+        if let Some(slot) = task.plan.returning_slot_mut() {
+            *slot = None;
+        }
+    }
+}
+
 /// The lines and rows the timeseries installs of `applied` rejected, by
 /// collection. Empty when the answer carries no install counts.
 fn applied_rejections(applied: Option<&crate::bridge::envelope::Response>) -> RejectedByCollection {
@@ -285,4 +305,54 @@ fn body_task_indexes(sessions: &SessionStore, session_id: SessionId) -> Vec<u32>
         .into_iter()
         .filter_map(|index| u32::try_from(index).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{
+        DocumentOp, PhysicalPlan, ReturningColumns, ReturningSpec,
+    };
+    use nodedb_physical::physical_task::PostSetOp;
+    use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate};
+
+    use super::*;
+    use crate::types::{TenantId, VShardId};
+
+    fn task(spec: Option<ReturningSpec>) -> PhysicalTask {
+        PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan: PhysicalPlan::Document(DocumentOp::PointInsert {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
+                document_id: "o1".into(),
+                value: Vec::new(),
+                if_absent: false,
+                surrogate: Surrogate::new(1),
+                returning: spec,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+                rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            }),
+            post_set_op: PostSetOp::None,
+            txn_id: None,
+        }
+    }
+
+    /// A buffered write commits with no `RETURNING` clause. A write with
+    /// no `RETURNING` is unchanged.
+    #[test]
+    fn buffered_writes_commit_with_no_returning() {
+        let mut tasks = vec![
+            task(Some(ReturningSpec {
+                columns: ReturningColumns::Star,
+                precommit: Some(ReturningColumns::Star),
+            })),
+            task(None),
+        ];
+        strip_returning(&mut tasks);
+        assert!(tasks[0].plan.returning_target().is_none());
+        assert!(tasks[1].plan.returning_target().is_none());
+    }
 }

@@ -37,17 +37,17 @@ edition = "2024"
 rust-version = "1.96"
 license = "BUSL-1.1"
 authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
-readme = "README.md"
 repository = "https://github.com/NodeDB-Lab/nodedb"
 homepage = "https://nodedb.dev"
-documentation = "https://docs.rs/nodedb"
 
 [workspace.dependencies]
 # Foundation crates (internal)
 nodedb = { path = "nodedb", version = "0.7.0-dev" }
 nodedb-types = { path = "nodedb-types", version = "0.7.0-dev" }
 nodedb-srid = { path = "nodedb-srid", version = "0.7.0-dev" }
-nodedb-crs = { path = "nodedb-crs", version = "0.7.0-dev" }
+# Default features off: the full EPSG table (`epsg`) is the final binary's
+# choice. A library crate that enables it forces it on every embedder.
+nodedb-crs = { path = "nodedb-crs", version = "0.7.0-dev", default-features = false }
 nodedb-client = { path = "nodedb-client", version = "0.7.0-dev" }
 nodedb-bridge = { path = "nodedb-bridge", version = "0.7.0-dev" }
 nodedb-wal = { path = "nodedb-wal", version = "0.7.0-dev" }
@@ -60,7 +60,6 @@ nodedb-codec = { path = "nodedb-codec", version = "0.7.0-dev" }
 nodedb-spatial = { path = "nodedb-spatial", version = "0.7.0-dev" }
 nodedb-graph = { path = "nodedb-graph", version = "0.7.0-dev" }
 nodedb-vector = { path = "nodedb-vector", version = "0.7.0-dev" }
-nodedb-vector-gpu = { path = "nodedb-vector-gpu", version = "0.7.0-dev" }
 nodedb-fts = { path = "nodedb-fts", version = "0.7.0-dev" }
 nodedb-strict = { path = "nodedb-strict", version = "0.7.0-dev" }
 nodedb-columnar = { path = "nodedb-columnar", version = "0.7.0-dev" }
@@ -244,6 +243,9 @@ unicode-normalization = "0.1"
 # Fast hashing for integer keys (GROUP BY aggregation)
 rustc-hash = "2"
 
+# Hash maps looked up by a borrowed key form (spill-tier hot maps)
+hashbrown = "0.16"
+
 # Fast non-cryptographic hashing (xxHash3 for cluster key partitioning)
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
@@ -267,7 +269,7 @@ nanoid = "0.5"
 web-time = "1"
 
 # Arbitrary-precision decimal
-rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
 
 # QUIC transport
 quinn = "0.11"
@@ -310,7 +312,6 @@ async-stream = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = "0.5"
-tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # TLS
 tokio-rustls = { version = "0.26", default-features = false, features = [
@@ -329,13 +330,13 @@ rcgen = "0.14"
 # systemd readiness notification (Linux service integration)
 sd-notify = "0.5"
 
-# Pure-Rust zstd decoder (wasm builds, where zstd-sys cannot link)
+# Pure-Rust zstd decoder: wasm builds, where zstd-sys cannot link, and the
+# compressed EPSG table of nodedb-crs on every target.
 ruzstd = "0.9"
 
 # CJK / language segmentation (FTS analyzers)
 lindera = "6.2"
 icu_segmenter = "2"
-whatlang = "0.18"
 
 # Hex encoding
 hex = "0.4"
@@ -365,6 +366,19 @@ incremental = false
 
 [profile.dev.package."*"]
 debug = false
+
+# Unoptimised, redb zero-fills each page it allocates one byte at a time, and
+# argon2 hashes the superuser password at every boot. In a test server the two
+# take about 40% of all instructions. Both crates build in seconds at
+# opt-level 3. The `ci` and `debugging` profiles inherit these overrides.
+[profile.dev.package.redb]
+opt-level = 3
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.ci]
 inherits = "dev"

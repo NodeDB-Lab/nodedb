@@ -79,21 +79,15 @@ pub async fn drop_schedule(
         .await
         .map_err(|e| DdlError::from_error_in_context("metadata propose", &e))?;
 
-    // Emit tombstone delta for Lite visibility (removes schedule from Lite catalog).
-    {
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: "_schedules".into(),
-            document_id: format!("{}:{name}", database_id.as_u64()),
-            payload: Vec::new(),
-            op: crate::event::crdt_sync::types::DeltaOp::Delete,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Removal notice for the tenant admins' Lite sessions.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: crate::event::crdt_sync::types::DefinitionFamily::Schedules.collection(),
+        document_id: format!("{}:{name}", database_id.as_u64()),
     }
+    .delete();
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

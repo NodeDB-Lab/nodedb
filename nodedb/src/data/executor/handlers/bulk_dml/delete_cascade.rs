@@ -252,6 +252,12 @@ impl CoreLoop {
         collection: &str,
         pending: &mut PendingText,
     ) -> crate::Result<()> {
+        // A collection with no declared text field and no open rebuild
+        // holds no inverted-index state.
+        if !self.removal_touches_text(database_id, tid, collection) {
+            pending.surrogates.clear();
+            return Ok(());
+        }
         if let Err(e) = self.inverted.remove_documents(
             database_id,
             crate::types::TenantId::new(tid),

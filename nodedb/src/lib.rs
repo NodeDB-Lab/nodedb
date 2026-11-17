@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! NodeDB server core: pgwire / HTTP / native transports, the SQL planner
 //! integration, the SPSC bridge to the Data Plane, all storage engines,
 //! and the Event Plane (triggers / CDC / scheduler).

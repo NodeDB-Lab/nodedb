@@ -280,14 +280,14 @@ mod tests {
         });
 
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert!(pipeline.awaits_mirror());
         assert_eq!(tracker.started_through(GROUP), 0, "nothing starts");
         assert_eq!(state.mirror.cuts.sealed_cut(DB, GROUP), None);
 
         raise(&state, 1, 5);
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
         assert!(!pipeline.awaits_mirror());
         assert_eq!(tracker.started_through(GROUP), 2, "both entries start");
         assert_eq!(state.mirror.cuts.sealed_cut(DB, GROUP), Some(1));

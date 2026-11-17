@@ -16,15 +16,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nodedb_types::StorageKey;
 use nodedb_types::columnar::StrictSchema;
+use nodedb_types::{StorageKey, Value};
 
 use super::convert::{
     parse_target_columns, target_identity_column, target_primary_key, with_target_identity,
 };
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
+use crate::data::executor::doc_format;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::strict_format;
 use crate::data::executor::task::ExecutionTask;
@@ -146,7 +146,7 @@ impl CoreLoop {
             .put_storage_conversion_in_txn(&txn, database_id, tid, collection, &c.record)?;
         let mut current_bodies: Vec<(StorageKey, i64, Vec<u8>)> = Vec::with_capacity(live.len());
         for version in &versions {
-            let msgpack = version_msgpack(&version.body, &c.source_format).ok_or_else(|| {
+            let row = version_row(&version.body, &c.source_format).ok_or_else(|| {
                 strict_format::undecodable_strict_row(
                     collection,
                     version.doc_id.to_identity().as_str(),
@@ -154,14 +154,18 @@ impl CoreLoop {
             })?;
             // `visible` is the row as a read sees it: the text index follows it.
             let (stored, visible) = match target {
-                VersionTarget::Schemaless => (msgpack.clone(), msgpack),
+                VersionTarget::Schemaless => {
+                    let native = encode_native_row(&row)?;
+                    (native.clone(), native)
+                }
                 VersionTarget::Strict {
                     schema,
                     identity_column,
                 } => {
-                    let with_id = with_target_identity(&msgpack, identity_column, &version.doc_id);
+                    let mut with_id = row.clone();
+                    with_target_identity(&mut with_id, identity_column, &version.doc_id);
                     let encoded = if schema.bitemporal {
-                        strict_format::bytes_to_binary_tuple_bitemporal(
+                        strict_format::value_to_binary_tuple_bitemporal(
                             &with_id,
                             schema,
                             version.system_from,
@@ -170,15 +174,10 @@ impl CoreLoop {
                             collection,
                         )
                     } else {
-                        strict_format::bytes_to_binary_tuple(&with_id, schema, collection)
+                        strict_format::value_to_binary_tuple(&with_id, schema, collection)
                     };
                     let tuple = encoded.map_err(|e| {
-                        strict_encode_error(
-                            e,
-                            &msgpack,
-                            target_primary_key(schema),
-                            &version.doc_id,
-                        )
+                        strict_encode_error(e, &row, target_primary_key(schema), &version.doc_id)
                     })?;
                     let visible = strict_format::binary_tuple_to_row_value(&tuple, schema)
                         .and_then(|row| nodedb_types::value_to_msgpack(&row).ok())
@@ -191,6 +190,18 @@ impl CoreLoop {
                     (tuple, visible)
                 }
             };
+            // Every converted version is journalled and read as one row, so
+            // a version past the row image limit refuses the conversion
+            // before its transaction commits.
+            let largest = stored.len().max(visible.len());
+            if largest > nodedb_types::MAX_ROW_IMAGE_BYTES {
+                let identity = nodedb_types::RowIdentity::of_row_value(&row, None, version.doc_id);
+                return Err(crate::data::executor::row_image_limit::row_image_too_large(
+                    collection,
+                    identity.as_str(),
+                    largest,
+                ));
+            }
             self.sparse.versioned_put_in_txn(
                 &txn,
                 VersionedPut {
@@ -291,7 +302,7 @@ fn version_target(
 /// identity a user recognizes, read from the version itself.
 fn strict_encode_error(
     e: crate::Error,
-    msgpack: &[u8],
+    row: &Value,
     declared_primary_key: Option<&str>,
     doc_id: &StorageKey,
 ) -> ErrorCode {
@@ -300,7 +311,7 @@ fn strict_encode_error(
             collection, column, ..
         } => {
             let identity =
-                nodedb_types::RowIdentity::of_stored_row(msgpack, declared_primary_key, *doc_id);
+                nodedb_types::RowIdentity::of_row_value(row, declared_primary_key, *doc_id);
             ErrorCode::DataException {
                 detail: format!(
                     "column \"{column}\" of collection \"{collection}\" does not exist \
@@ -312,16 +323,26 @@ fn strict_encode_error(
     }
 }
 
-/// A source version as MessagePack, without the reserved bitemporal columns
-/// a strict tuple carries. `None` when a strict tuple does not decode.
-fn version_msgpack(body: &[u8], source: &SparseBodyFormat) -> Option<Vec<u8>> {
-    match source {
-        SparseBodyFormat::Strict(schema) => {
-            let row = strict_format::binary_tuple_to_row_value(body, schema)?;
-            nodedb_types::value_to_msgpack(&row).ok()
+/// A source version as a document object, without the reserved bitemporal
+/// columns a strict tuple carries. Field values keep their native types.
+/// `None` when the version does not decode as an object.
+fn version_row(body: &[u8], source: &SparseBodyFormat) -> Option<Value> {
+    let row = match source {
+        SparseBodyFormat::Strict(schema) => strict_format::binary_tuple_to_row_value(body, schema)?,
+        SparseBodyFormat::Document => doc_format::decode_document_value(body).ok()?,
+        SparseBodyFormat::VectorSidecar => {
+            Value::Object(zerompk::from_msgpack::<HashMap<String, Value>>(body).ok()?)
         }
-        SparseBodyFormat::Document | SparseBodyFormat::VectorSidecar => {
-            Some(sparse_body_to_msgpack(body, source.as_format_ref()).into_owned())
-        }
-    }
+    };
+    matches!(row, Value::Object(_)).then_some(row)
+}
+
+/// The native tagged object a schemaless target stores for `row`.
+fn encode_native_row(row: &Value) -> Result<Vec<u8>, ErrorCode> {
+    zerompk::to_msgpack_vec(row).map_err(|error| {
+        ErrorCode::from(crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("converted row cannot encode its native image: {error}"),
+        })
+    })
 }

@@ -10,6 +10,7 @@ pub mod owner;
 pub mod result;
 pub mod schema_validation;
 pub mod sql_parse;
+pub mod sql_split;
 pub mod sqlstate;
 pub mod static_sqlstate;
 pub mod sync_dispatch;

@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::enforcement::write_hook;
+use crate::data::executor::enforcement::{append_only, retention, write_hook};
 use crate::data::executor::handlers::partial_refusal::refusal_after_rows;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
@@ -134,6 +134,24 @@ impl CoreLoop {
                 StorageMode::Schemaless => None,
             });
 
+        // Append-only and legal hold refuse the statement outright, as they
+        // refuse a point delete, before any row is removed.
+        if let Some(config) = self.doc_configs.get(&config_key) {
+            if let Err(code) = append_only::check_point_delete(collection, &config.enforcement) {
+                return self.response_error(task, code);
+            }
+            if config.enforcement.has_legal_hold
+                && let Err(code) =
+                    retention::check_delete_allowed(collection, &config.enforcement, None, 0)
+            {
+                return self.response_error(task, code);
+            }
+        }
+        let retention_config = self
+            .doc_configs
+            .get(&config_key)
+            .filter(|config| config.enforcement.retention.is_some());
+
         // Gate every matched row on the collection's write policy BEFORE any
         // removal, so a rejected row cannot leave the rows ahead of it already
         // deleted. The pre-deletion image is the only image a delete has. A row
@@ -151,7 +169,7 @@ impl CoreLoop {
             .doc_configs
             .get(&config_key)
             .and_then(|config| config.enforcement.period_lock.as_ref());
-        if gate_policy || period_lock.is_some() {
+        if gate_policy || period_lock.is_some() || retention_config.is_some() {
             for key in &apply_ids {
                 let stored = match self.current_row_body(database_id, tid, collection, key) {
                     Ok(Some(bytes)) => bytes,
@@ -173,6 +191,16 @@ impl CoreLoop {
                     )
                 {
                     return self.response_error(task, e);
+                }
+                if let Some(config) = retention_config
+                    && let Err(code) = retention::check_delete_allowed(
+                        collection,
+                        &config.enforcement,
+                        retention::extract_created_at_secs(&stored),
+                        self.enforcement_instant_ms(),
+                    )
+                {
+                    return self.response_error(task, code);
                 }
                 if let Some(lock) = period_lock
                     && let Err(e) = self.check_period_lock_at(
@@ -319,6 +347,7 @@ impl CoreLoop {
                     self,
                     &row_txn,
                     &write_hook::HookCtx {
+                        target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Row,
                         database_id,
                         tid,
                         collection,
@@ -549,6 +578,82 @@ mod tests {
                 )
                 .expect("read row");
             assert!(stored.is_some(), "row {surrogate} must remain");
+        }
+    }
+
+    fn delete_all(core: &mut CoreLoop, task: &ExecutionTask) -> Response {
+        core.execute_bulk_delete(
+            task,
+            TID,
+            BulkDeleteParams {
+                collection: COLLECTION,
+                filter_bytes: &[],
+                returning: None,
+                rls_filters: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: &[],
+                ollp: OllpPrediction {
+                    surrogates: None,
+                    edges: None,
+                },
+                declared_primary_key: None,
+            },
+        )
+    }
+
+    /// Append-only and legal hold refuse a predicate delete as they refuse a
+    /// point delete, and no matched row is removed.
+    #[test]
+    fn append_only_and_legal_hold_refuse_a_predicate_delete() {
+        for legal_hold in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+            let task = make_default_task();
+            let database_id = task.request.database_id.as_u64();
+            let mut config = CollectionConfig::new(COLLECTION);
+            if legal_hold {
+                config.enforcement.has_legal_hold = true;
+            } else {
+                config.enforcement.append_only = true;
+            }
+            core.doc_configs.insert(
+                (
+                    DatabaseId::new(database_id),
+                    TenantId::new(TID),
+                    COLLECTION.to_string(),
+                ),
+                config,
+            );
+            seed(&mut core, database_id, 1, serde_json::json!({"amount": 1}));
+            seed(&mut core, database_id, 2, serde_json::json!({"amount": 2}));
+
+            let response = delete_all(&mut core, &task);
+
+            assert_eq!(response.status, Status::Error);
+            let expected = if legal_hold {
+                matches!(
+                    response.error_code.as_deref(),
+                    Some(ErrorCode::LegalHoldActive { .. })
+                )
+            } else {
+                matches!(
+                    response.error_code.as_deref(),
+                    Some(ErrorCode::AppendOnlyViolation { .. })
+                )
+            };
+            assert!(expected, "got {:?}", response.error_code);
+            for surrogate in [1, 2] {
+                let stored = core
+                    .sparse
+                    .get(
+                        database_id,
+                        TID,
+                        COLLECTION,
+                        &StorageKey::for_surrogate(Surrogate(surrogate)),
+                    )
+                    .expect("read row");
+                assert!(stored.is_some(), "row {surrogate} must remain");
+            }
         }
     }
 }

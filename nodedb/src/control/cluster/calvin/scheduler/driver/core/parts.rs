@@ -807,6 +807,8 @@ mod tests {
             .expect("assembles");
             let local = plan_wire::decode_batch(txn.plans()).expect("decode");
             assert_eq!(local, vec![plans[at].clone()], "home {home}");
+            let task = u32::try_from(at).expect("a small index");
+            assert_eq!(txn.task_index(0), Some(task), "home {home}");
         }
 
         let broken = part_tasks(&[

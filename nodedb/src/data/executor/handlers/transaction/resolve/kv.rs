@@ -35,20 +35,21 @@
 //!
 //! ## Determinism
 //!
-//! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
-//! into a `BTreeMap` keyed by the row's identity (`kv_row_identity` of the KV
-//! key) before emitting. Two replicas resolving the same transaction produce
-//! byte-identical redo ops.
+//! Entries emit in the overlay's merged identity order: the key-byte order
+//! of each row's encoded identity (`kv_row_identity` of the KV key). The
+//! order is a function of the staged rows alone, so two replicas resolving
+//! the same transaction produce byte-identical redo ops, and the resolve
+//! holds no row it has emitted.
 
-use std::collections::BTreeMap;
-
-use nodedb_types::RowIdentity;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch_kv::encode::{
     encode_kv_expire, encode_kv_persist, encode_kv_put, encode_kv_truncate,
 };
-use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl, TxnOverlay};
+use crate::data::executor::handlers::transaction::overlay::{
+    Staged, StagedSlot, StagedTtl, TxnOverlay,
+};
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoSubRecord;
@@ -61,10 +62,7 @@ const RESOLVE_TTL_MS: u64 = 0;
 /// Append the `kv_truncate` redo sub-record for a collection a staged
 /// TRUNCATE wipes at COMMIT — the same record the autocommit KV truncate
 /// appends.
-pub(super) fn serialize_kv_truncate(
-    collection: &str,
-    ops: &mut Vec<RedoSubRecord>,
-) -> crate::Result<()> {
+pub(super) fn serialize_kv_truncate(collection: &str, ops: &mut dyn OpSink) -> crate::Result<()> {
     let payload = encode_kv_truncate(collection)?;
     ops.push(RedoSubRecord {
         record_type: RecordType::Delete as u32,
@@ -73,14 +71,8 @@ pub(super) fn serialize_kv_truncate(
     Ok(())
 }
 
-/// One staged KV row: a value or tombstone, or a TTL delta on a base row.
-enum KvSlot<'a> {
-    Staged(&'a Staged),
-    TtlOnly(StagedTtl),
-}
-
 /// Append the redo sub-records for every KV post-image staged in `overlay`
-/// for `coll_key` to `ops`, in deterministic doc-id order.
+/// for `coll_key` to `ops`, in the overlay's identity order.
 ///
 /// An `EXPIRE` or `PERSIST` of a row the transaction did not otherwise
 /// write resolves to a `kv_expire` or `kv_persist` sub-record, the shapes
@@ -91,26 +83,18 @@ pub(super) fn serialize_kv_collection(
     overlay: &TxnOverlay,
     coll_key: &(DatabaseId, TenantId, String),
     collection: &str,
-    ops: &mut Vec<RedoSubRecord>,
+    ops: &mut dyn OpSink,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<&RowIdentity, KvSlot<'_>> = BTreeMap::new();
-    for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        entries.insert(doc_id, KvSlot::Staged(staged));
-    }
     // A staged TRUNCATE hides every base row, so no TTL delta can target one.
-    if !overlay.is_truncated(coll_key) {
-        for (doc_id, ttl) in overlay.iter_ttl_only_for_collection(coll_key) {
-            entries.insert(doc_id, KvSlot::TtlOnly(ttl));
-        }
-    }
-
-    for (doc_id, slot) in entries {
+    let ttl_only = !overlay.is_truncated(coll_key);
+    for item in overlay.iter_slots_for_collection(coll_key, ttl_only) {
+        let (doc_id, slot) = item?;
         let key = unhex_key(doc_id.as_str()).ok_or_else(|| crate::Error::Internal {
             detail: format!("kv resolve: overlay doc-id '{doc_id}' is not valid hex"),
         })?;
-        let staged = match slot {
-            KvSlot::Staged(staged) => staged,
-            KvSlot::TtlOnly(ttl) => {
+        let (surrogate, staged) = match slot {
+            StagedSlot::Written { surrogate, staged } => (surrogate, staged),
+            StagedSlot::TtlOnly(ttl) => {
                 let payload = match ttl {
                     StagedTtl::ExpireAt(ms) => {
                         encode_kv_expire(collection, &key, RESOLVE_TTL_MS, ms)?
@@ -124,25 +108,16 @@ pub(super) fn serialize_kv_collection(
                 continue;
             }
         };
-        match staged {
+        match &*staged {
             Staged::Put(value) => {
-                let expire_at_ms = match overlay.get_ttl_by_doc_id(coll_key, doc_id) {
+                let expire_at_ms = match overlay.get_ttl_by_doc_id(coll_key, &doc_id)? {
                     Some(StagedTtl::ExpireAt(ms)) => Some(ms),
                     Some(StagedTtl::Persist) | None => None,
                 };
                 // The overlay keys every staged row by surrogate and holds the
                 // doc-id → surrogate map, so the redo record carries the same
-                // identity the live write bound. A staged row always has one;
-                // absence would mean the overlay lost the mapping it iterated
-                // this entry through, which is not a shape to paper over.
-                let surrogate =
-                    overlay
-                        .surrogate_for_doc_id(coll_key, doc_id)
-                        .ok_or_else(|| crate::Error::Internal {
-                            detail: format!(
-                                "kv resolve: overlay has no surrogate for staged doc-id '{doc_id}'"
-                            ),
-                        })?;
+                // identity the live write bound: the binding this entry was
+                // read through.
                 let payload = encode_kv_put(
                     collection,
                     &key,
@@ -170,4 +145,96 @@ pub(super) fn serialize_kv_collection(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::handlers::spill::tiered::SpillSpace;
+    use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
+
+    fn coll_key() -> (DatabaseId, TenantId, String) {
+        (DatabaseId::new(1), TenantId::new(1), "cache".to_string())
+    }
+
+    /// Stage the same writes into `overlay`: puts, overwrites, tombstones,
+    /// a TTL on a put, and TTL-only rows.
+    fn stage(overlay: &mut TxnOverlay) {
+        let coll = coll_key();
+        for n in 0..120u32 {
+            let key = format!("k{n:03}");
+            overlay
+                .insert_put(
+                    coll.clone(),
+                    n + 1,
+                    &kv_row_identity(key.as_bytes()),
+                    vec![n as u8; 40],
+                )
+                .unwrap();
+        }
+        for n in (0..120u32).step_by(7) {
+            let key = format!("k{n:03}");
+            overlay
+                .insert_put(
+                    coll.clone(),
+                    n + 1,
+                    &kv_row_identity(key.as_bytes()),
+                    vec![0xee; 12],
+                )
+                .unwrap();
+        }
+        for n in (3..120u32).step_by(11) {
+            let key = format!("k{n:03}");
+            overlay
+                .insert_tombstone(coll.clone(), n + 1, &kv_row_identity(key.as_bytes()))
+                .unwrap();
+        }
+        overlay
+            .set_ttl(
+                coll.clone(),
+                9,
+                &kv_row_identity(b"k008"),
+                StagedTtl::ExpireAt(5_000),
+            )
+            .unwrap();
+        overlay
+            .set_ttl(
+                coll.clone(),
+                900,
+                &kv_row_identity(b"base-only"),
+                StagedTtl::Persist,
+            )
+            .unwrap();
+        overlay
+            .set_ttl(
+                coll,
+                901,
+                &kv_row_identity(b"base-ttl"),
+                StagedTtl::ExpireAt(7_000),
+            )
+            .unwrap();
+    }
+
+    fn resolve(overlay: &TxnOverlay) -> Vec<RedoSubRecord> {
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
+        serialize_kv_collection(overlay, &coll_key(), "cache", &mut ops).unwrap();
+        ops
+    }
+
+    /// An overlay that spilled after every write resolves to the same redo
+    /// ops, in the same order, as one that held every write in RAM.
+    #[test]
+    fn a_spilled_overlay_resolves_like_an_in_memory_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hot = TxnOverlay::new();
+        let mut spilled = TxnOverlay::with_spill(SpillSpace::new(dir.path().join("t"), "doc", 0));
+        stage(&mut hot);
+        stage(&mut spilled);
+        assert!(spilled.spilled_heap_bytes() > 0);
+        assert_eq!(hot.spilled_heap_bytes(), 0);
+
+        let expected = resolve(&hot);
+        assert_eq!(expected.len(), 122, "120 rows plus two TTL-only rows");
+        assert_eq!(resolve(&spilled), expected);
+    }
 }

@@ -144,6 +144,7 @@ mod tests {
 
     fn timeseries_ingest(rows: usize) -> Vec<SqlPlan> {
         vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
+            returning: None,
             collection: "metrics".to_string(),
             rows: vec![vec![("value".to_string(), SqlValue::Int(1))]; rows],
             volatile_defaults: false,
@@ -290,7 +291,7 @@ mod tests {
             assignments: vec![("v".to_string(), SqlExpr::Literal(SqlValue::Int(1)))],
             filters: Vec::new(),
             target_keys: vec![SqlValue::String("k1".to_string())],
-            returning: false,
+            returning: None,
         }];
 
         let refused = convert_bound(&plans, TENANT, &mut ctx).await;
@@ -329,7 +330,7 @@ mod tests {
                 SqlValue::String("k1".to_string()),
                 SqlValue::String("k2".to_string()),
             ],
-            returning: false,
+            returning: None,
         }];
 
         let tasks = convert_resolving_misses(&plans, TENANT, &mut ctx)

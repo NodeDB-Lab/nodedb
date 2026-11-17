@@ -42,6 +42,7 @@ use crate::control::planner::calvin::{
     build_single_vshard_tx_class, dispatch_dependent_edge_recon, is_dependent_predicate,
     submit_calvin_routed,
 };
+use crate::control::server::shared::returning::plan_carries_returning_contract;
 use crate::control::state::SharedState;
 use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
@@ -105,6 +106,12 @@ pub fn route_write_to_calvin<'a>(
     user_roles: Vec<String>,
 ) -> Pin<Box<dyn Future<Output = crate::Result<Option<Response>>> + Send + 'a>> {
     Box::pin(async move {
+        // The write keeps its `RETURNING` list, so its submit fixes a
+        // contract: its participant evaluates the list before it votes, and
+        // an error in it refuses the write. The participant answers the
+        // frozen rows, framed so the caller's shaping answers them as they
+        // are.
+        let contract = plan_carries_returning_contract(&plan);
         let task = PhysicalTask {
             tenant_id,
             vshard_id,
@@ -130,7 +137,7 @@ pub fn route_write_to_calvin<'a>(
                 user_roles,
             )
             .await?;
-            return Ok(recon.apply_result);
+            return framed_answer(recon.apply_result, contract);
         }
 
         // A static write set: build a static TxClass and submit it.
@@ -147,6 +154,24 @@ pub fn route_write_to_calvin<'a>(
             build_single_vshard_tx_class(std::slice::from_ref(&task), tenant_id, &[])?;
         tx_class.set_event_source(event_source.wal_code());
         tx_class.set_user_roles(user_roles);
-        submit_calvin_routed(shared, tx_class).await
+        framed_answer(submit_calvin_routed(shared, tx_class).await?, contract)
     })
+}
+
+/// `answer`, its payload framed as a frozen answer when the write carries a
+/// `RETURNING` contract: its participant answered the frozen rows.
+fn framed_answer(answer: Option<Response>, contract: bool) -> crate::Result<Option<Response>> {
+    match answer {
+        Some(mut response)
+            if contract && response.status == crate::bridge::envelope::Status::Ok =>
+        {
+            response.payload = crate::bridge::envelope::Payload::from_vec(
+                crate::control::server::response_shape::frozen_answer::frame(
+                    response.payload.as_bytes(),
+                )?,
+            );
+            Ok(Some(response))
+        }
+        answer => Ok(answer),
+    }
 }

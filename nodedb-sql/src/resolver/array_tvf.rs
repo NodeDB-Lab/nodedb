@@ -90,6 +90,7 @@ pub(super) fn resolve_array_tvf(
         vector_primary: None,
         partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
         open_schema: false,
+        text_indexes: None,
     };
     Ok(Some(ResolvedTable {
         name: view.name,

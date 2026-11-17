@@ -24,7 +24,7 @@ use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 use crate::types::RequestId;
 
-use super::row_emit::{emit_partition_row, extract_timestamp, row_admitted};
+use super::row_form::TsRowForm;
 
 /// The read path the corruption report names.
 const SITE: &str = "timeseries_raw_scan";
@@ -75,11 +75,11 @@ impl ScanDeadline<'_> {
 /// `Err` when a partition is corrupt, a stored time cell cannot be read as
 /// its column's instant, a predicate expression divides by zero, or the
 /// request's deadline passes.
-pub(super) fn scan_partitions(
+pub(super) fn scan_partitions<R: TsRowForm>(
     partition_dirs: &[std::path::PathBuf],
     scan: &PartitionScan<'_>,
     crs: &CrsContext<'_>,
-) -> crate::Result<Vec<rmpv::Value>> {
+) -> crate::Result<Vec<R>> {
     let limit = scan.limit;
     let mut results = Vec::new();
     for dir in partition_dirs {
@@ -104,23 +104,23 @@ pub(super) fn scan_partitions(
         results.extend(rows);
     }
     if partition_dirs.len() > 1 {
-        results.sort_by_key(extract_timestamp);
+        results.sort_by_key(R::sort_timestamp);
     }
     Ok(results)
 }
 
-/// Scan a single disk partition, returning rmpv rows.
+/// Scan a single disk partition, returning its rows in form `R`.
 ///
 /// The WHERE predicates run on the typed columns when the evaluator can
 /// lower them and per row otherwise. The read policy runs per row after
 /// them, before the row counts toward `limit`. `Err` when a stored time
 /// cell cannot be read as its column's instant or a predicate expression
 /// divides by zero.
-fn scan_one_partition(
+fn scan_one_partition<R: TsRowForm>(
     part_dir: &std::path::Path,
     scan: &PartitionScan<'_>,
     crs: &CrsContext<'_>,
-) -> crate::Result<Vec<rmpv::Value>> {
+) -> crate::Result<Vec<R>> {
     let PartitionScan {
         time_range,
         limit,
@@ -204,8 +204,8 @@ fn scan_one_partition(
         {
             return Err(deadline.exceeded());
         }
-        let row = emit_partition_row(part_dir, &schema_vec, &col_data, &sym_dicts, idx as usize)?;
-        if !row_admitted(&row, row_filters, rls_predicates, crs)? {
+        let row = R::from_partition(part_dir, &schema_vec, &col_data, &sym_dicts, idx as usize)?;
+        if !row.admitted(row_filters, rls_predicates, crs)? {
             continue;
         }
         rows.push(row);
@@ -221,7 +221,9 @@ fn scan_one_partition(
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use super::super::row_emit::extract_timestamp;
     use super::*;
+    use crate::engine::timeseries::columnar_segment::column_file_name;
     use crate::engine::timeseries::columnar_segment::test_partition::write_metric_partition as write_partition;
 
     fn scan_of(limit: usize) -> PartitionScan<'static> {
@@ -291,7 +293,7 @@ mod tests {
             ..scan_of(10)
         };
 
-        let result = scan_partitions(&dirs, &scan, &CrsContext::builtin_only());
+        let result = scan_partitions::<rmpv::Value>(&dirs, &scan, &CrsContext::builtin_only());
 
         assert!(matches!(result, Err(crate::Error::DeadlineExceeded { .. })));
     }
@@ -324,7 +326,8 @@ mod tests {
             ..scan_of(10)
         };
 
-        let rows = scan_partitions(&dirs, &scan, &CrsContext::builtin_only()).expect("scan");
+        let rows = scan_partitions::<rmpv::Value>(&dirs, &scan, &CrsContext::builtin_only())
+            .expect("scan");
 
         assert_eq!(rows.len(), 2);
     }
@@ -340,13 +343,14 @@ mod tests {
         ];
         let crs = CrsContext::builtin_only();
 
-        let rows = scan_partitions(&dirs, &scan_of(10), &crs).expect("scan");
+        let rows = scan_partitions::<rmpv::Value>(&dirs, &scan_of(10), &crs).expect("scan");
         let times: Vec<i64> = rows.iter().map(extract_timestamp).collect();
         assert_eq!(times, vec![100, 200, 300, 400]);
 
         let unread = dir.path().join("ts-missing");
         let limited = vec![dirs[0].clone(), unread];
-        let rows = scan_partitions(&limited, &scan_of(2), &crs).expect("the limit ends the scan");
+        let rows = scan_partitions::<rmpv::Value>(&limited, &scan_of(2), &crs)
+            .expect("the limit ends the scan");
         assert_eq!(rows.len(), 2);
     }
 
@@ -357,10 +361,14 @@ mod tests {
         let good = write_partition(dir.path(), "ts-a", &[100]);
         let full = write_partition(dir.path(), "ts-b", &[200, 201, 202]);
         let short = write_partition(dir.path(), "ts-c", &[300]);
-        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        std::fs::copy(
+            short.join(column_file_name("value")),
+            full.join(column_file_name("value")),
+        )
+        .expect("swap column");
         let crs = CrsContext::builtin_only();
 
-        let result = scan_partitions(&[good, full], &scan_of(10), &crs);
+        let result = scan_partitions::<rmpv::Value>(&[good, full], &scan_of(10), &crs);
 
         assert!(matches!(result, Err(crate::Error::SegmentCorrupted { .. })));
     }

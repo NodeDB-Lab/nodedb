@@ -59,10 +59,20 @@ impl Interest {
     }
 
     /// Whether the set holds `collection` of `database_id`.
+    ///
+    /// The registries add bare catalog names. Callers ask with the name as
+    /// storage keys it, the form a plan and a write event carry: qualified
+    /// outside the default database. The qualifier is checked against
+    /// `database_id` and dropped. A name not qualified for `database_id` is
+    /// never held.
     pub fn contains(&self, database_id: DatabaseId, collection: &str) -> bool {
+        let Ok(key) = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)
+        else {
+            return false;
+        };
         self.by_database
             .get(&database_id)
-            .is_some_and(|database| database.every || database.names.contains(collection))
+            .is_some_and(|database| database.every || database.names.contains(key.name()))
     }
 }
 
@@ -91,7 +101,8 @@ impl InterestSlice {
         self.current.store(Arc::new(interest));
     }
 
-    /// Whether the registry consumes `collection` of `database_id`.
+    /// Whether the registry consumes `collection` of `database_id`, named as
+    /// storage keys it.
     pub fn contains(&self, database_id: DatabaseId, collection: &str) -> bool {
         self.current.load().contains(database_id, collection)
     }
@@ -182,6 +193,21 @@ mod tests {
         assert!(interest.consumes(DB, "metrics"));
         assert!(!interest.consumes(DB, "other"));
         assert!(!interest.consumes(DatabaseId::new(7), "metrics"));
+    }
+
+    /// Outside the default database a core asks with the qualified name, as
+    /// its plan carries it, and the registry holds the bare catalog name.
+    #[test]
+    fn a_qualified_name_matches_its_bare_registration() {
+        let db = DatabaseId::new(7);
+        let interest = EventInterest::new();
+        interest.install(InterestSources {
+            triggers: slice_with(db, "metrics"),
+            ..InterestSources::default()
+        });
+        assert!(interest.consumes(db, "7/metrics"));
+        assert!(!interest.consumes(db, "metrics"));
+        assert!(!interest.consumes(db, "8/metrics"));
     }
 
     #[test]

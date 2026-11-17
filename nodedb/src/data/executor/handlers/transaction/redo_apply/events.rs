@@ -188,16 +188,24 @@ impl CoreLoop {
             .filter(|write| write.emits_event)
             .map(|write| {
                 let id = write.identity.as_str();
-                let new_value = write.new_body.as_deref().map(|body| {
-                    self.body_event_image(database_id, tid, &write.collection, id, body)
-                });
-                // A stored strict row that does not decode has no image: the
-                // event names the fault instead.
-                let old_image = write.old_value.as_deref().map(|stored| {
-                    self.stored_event_image(database_id, tid, &write.collection, id, stored)
-                });
-                let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(_))));
-                let old_value = old_image.and_then(Result::ok);
+                let (new_value, old_value, image_fault, op) = match write.event {
+                    Some(event) => {
+                        let op = if event.old_value.is_some() {
+                            WriteOp::Update
+                        } else {
+                            WriteOp::Insert
+                        };
+                        (Some(event.new_value), event.old_value, None, op)
+                    }
+                    None => {
+                        // A deleted strict row that does not decode names its image fault.
+                        let old_image = write.old_value.as_deref().map(|stored| {
+                            self.stored_event_image(database_id, tid, &write.collection, id, stored)
+                        });
+                        let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(_))));
+                        (None, old_image.and_then(Result::ok), image_fault, write.op)
+                    }
+                };
                 let source =
                     committed_source(rows, record_source, document_source, &write.collection, id);
                 DeferredWrite {
@@ -206,7 +214,7 @@ impl CoreLoop {
                     image_fault,
                     source,
                     collection: write.collection,
-                    op: write.op,
+                    op,
                     identity: write.identity,
                 }
             })
@@ -257,6 +265,43 @@ impl CoreLoop {
                     image_fault: None,
                 },
             );
+        }
+    }
+
+    /// Send the events the install's handlers raised and held back.
+    ///
+    /// Every one names the record's LSN `lsn`: the install held the
+    /// watermark back. A handler stamped each with the record's source: it
+    /// takes the committed source of its kind of row, or its row-source
+    /// group's. A handler that ran under a replay task stamped no commit HLC
+    /// or author: each takes the record's.
+    pub(super) fn send_held_events(
+        &mut self,
+        task: &ExecutionTask,
+        events: Vec<crate::event::WriteEvent>,
+        rows: &RowSourceIndex,
+        lsn: crate::types::Lsn,
+    ) {
+        let record_source = task.request.event_source;
+        for mut event in events {
+            event.lsn = lsn;
+            if event.commit_hlc.is_none() {
+                event.commit_hlc = task.request.commit_hlc;
+            }
+            if event.user_id.is_none() {
+                event.user_id = task.request.user_id.clone();
+            }
+            if event.statement_digest.is_none() {
+                event.statement_digest = task.request.statement_digest.clone();
+            }
+            event.source = committed_source(
+                rows,
+                record_source,
+                record_source.committed_other_source(),
+                &event.collection,
+                event.row_id.as_str(),
+            );
+            self.send_write_event(event);
         }
     }
 }

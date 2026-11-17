@@ -27,6 +27,7 @@ pub use sequencer::{
     validate_batch,
 };
 pub use types::{
-    CutBarrierWire, CutCaptureWire, EngineKeySet, EpochBatch, HomedPair, ReadWriteSet,
-    SequencedTxn, SortedVec, TxClass,
+    CutBarrierWire, CutCaptureWire, EngineKeySet, EpochBatch, HomedPair, PlanReturning,
+    ReadWriteSet, ReturningContract, ReturningContractLimits, SequenceValue, SequencedTxn,
+    SortedVec, TxClass,
 };

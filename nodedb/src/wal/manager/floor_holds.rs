@@ -6,8 +6,14 @@
 //! at the lowest LSN it needs. [`super::WalManager::truncate_before`] never
 //! deletes a segment holding a record at or above the lowest held LSN. A
 //! hold lasts until its guard drops.
+//!
+//! A checkpoint hold ([`WalFloorHolds::hold_until_checkpoint`]) has no
+//! guard. It keeps its floor until a truncation's checkpoint passes the LSN
+//! it names. An installed chunked redo takes one: its marker record reads
+//! the chunk records back at every boot until every engine holds what the
+//! marker installed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,6 +30,9 @@ struct HoldsInner {
     next_id: AtomicU64,
     /// Hold id to the LSN it holds.
     held: Mutex<BTreeMap<u64, u64>>,
+    /// Checkpoint holds: the held LSN and the LSN a checkpoint must pass to
+    /// release it.
+    until_checkpoint: Mutex<BTreeSet<(u64, u64)>>,
 }
 
 /// One held floor. Dropping it releases the floor.
@@ -58,19 +67,47 @@ impl WalFloorHolds {
         }
     }
 
+    /// Hold truncation below `lsn` until a truncation's checkpoint passes
+    /// `past`: every record at or below `past` is then in every engine's
+    /// checkpoint. A second hold of the same pair adds nothing.
+    pub fn hold_until_checkpoint(&self, lsn: Lsn, past: Lsn) {
+        self.inner
+            .until_checkpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((lsn.as_u64(), past.as_u64()));
+    }
+
     /// The lowest held LSN, or `None` when nothing is held.
     pub fn lowest(&self) -> Option<Lsn> {
-        self.inner
+        let guarded = self
+            .inner
             .held
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .values()
             .min()
-            .map(|lsn| Lsn::new(*lsn))
+            .copied();
+        let checkpointed = self
+            .inner
+            .until_checkpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(lsn, _)| *lsn)
+            .min();
+        guarded.into_iter().chain(checkpointed).min().map(Lsn::new)
     }
 
-    /// `lsn`, lowered to the lowest held LSN.
+    /// `lsn`, the checkpoint a truncation runs at, lowered to the lowest held
+    /// LSN. A checkpoint hold whose named LSN the checkpoint passed is
+    /// released first.
     pub fn clamp(&self, lsn: Lsn) -> Lsn {
+        self.inner
+            .until_checkpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(_, past)| *past >= lsn.as_u64());
         match self.lowest() {
             Some(held) if held < lsn => held,
             _ => lsn,
@@ -110,6 +147,20 @@ mod tests {
         drop(low);
         assert_eq!(holds.clamp(Lsn::new(50)), Lsn::new(30));
         drop(high);
+        assert_eq!(holds.lowest(), None);
+    }
+
+    /// A checkpoint hold keeps its floor until a checkpoint passes the LSN
+    /// it names, and only then.
+    #[test]
+    fn a_checkpoint_hold_releases_once_a_checkpoint_passes_its_lsn() {
+        let holds = WalFloorHolds::default();
+        holds.hold_until_checkpoint(Lsn::new(10), Lsn::new(40));
+        holds.hold_until_checkpoint(Lsn::new(10), Lsn::new(40));
+        assert_eq!(holds.clamp(Lsn::new(30)), Lsn::new(10));
+        assert_eq!(holds.clamp(Lsn::new(40)), Lsn::new(10));
+        assert_eq!(holds.lowest(), Some(Lsn::new(10)));
+        assert_eq!(holds.clamp(Lsn::new(41)), Lsn::new(41));
         assert_eq!(holds.lowest(), None);
     }
 }

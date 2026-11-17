@@ -31,12 +31,13 @@ CANONICAL_CALL_RE = re.compile(
     r"::\s*nodedb_types\s*::\s*(?:quote_ident|quote_literal|Value\s*::\s*to_sql_literal)\s*\("
 )
 PATH_CANONICAL_HELPERS = {
-    "control/server/shared/check_constraint/subquery.rs": {
+    "control/server/shared/check_constraint/subquery_match.rs": {
         "canonical_check_expr_sql",
         "canonical_check_from_sql",
     },
     "control/server/shared/ddl/neutral/materialized_view/refresh.rs": {
         "json_value_to_sql_literal",
+        "value_to_sql_literal",
     },
     "control/event_trigger.rs": {"canonical_trigger_template_sql"},
 }

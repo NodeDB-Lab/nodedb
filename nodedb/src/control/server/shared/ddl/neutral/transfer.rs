@@ -28,7 +28,9 @@ use nodedb_physical::physical_plan::{KvOp, PhysicalPlan, TransferAmount};
 use rust_decimal::Decimal;
 
 use super::super::result::{DdlError, DdlResult};
-use super::kv_atomic::{KvAtomicDispatch, dispatch_and_respond, parse_function_args, unquote};
+use super::kv_atomic::{
+    KvAtomicDispatch, dispatch_and_respond, name_arg, parse_function_args, unquote,
+};
 
 /// Handle `SELECT TRANSFER(collection, source_key, dest_key, field, amount)`
 pub async fn transfer(
@@ -47,8 +49,9 @@ pub async fn transfer(
     }
 
     // A string literal is data: the collection name resolves exactly as
-    // written, with no case folding.
-    let collection = unquote(&args[0]);
+    // written, with no case folding. A bare or double-quoted name follows
+    // the SQL identifier rule.
+    let collection = name_arg(&args[0])?;
     let source_key = unquote(&args[1]);
     let dest_key = unquote(&args[2]);
     let field = unquote(&args[3]);
@@ -135,9 +138,10 @@ pub async fn transfer_item(
     }
 
     // A string literal is data: each collection name resolves exactly as
-    // written, with no case folding.
-    let source_collection = unquote(&args[0]);
-    let dest_collection = unquote(&args[1]);
+    // written, with no case folding. A bare or double-quoted name follows
+    // the SQL identifier rule.
+    let source_collection = name_arg(&args[0])?;
+    let dest_collection = name_arg(&args[1])?;
     let item_id = unquote(&args[2]);
     let source_owner = unquote(&args[3]);
     let dest_owner = unquote(&args[4]);

@@ -102,9 +102,9 @@ mod tests {
         let interest = cache.interest();
         let db = DatabaseId::new(3);
         cache.set(db, AuditDmlMode::Writes);
-        assert!(interest.contains(db, "metrics"));
+        assert!(interest.contains(db, "3/metrics"));
         assert!(!interest.contains(DatabaseId::DEFAULT, "metrics"));
         cache.set(db, AuditDmlMode::None);
-        assert!(!interest.contains(db, "metrics"));
+        assert!(!interest.contains(db, "3/metrics"));
     }
 }

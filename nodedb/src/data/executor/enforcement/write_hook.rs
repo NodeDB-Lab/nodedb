@@ -4,22 +4,14 @@
 //! image-folding enforcement.
 //!
 //! [`funnel::run_write_enforcement`] takes decoded documents. Every handler
-//! that reaches it holds bytes instead, in one of two encodings that decode
-//! differently and fail differently:
+//! that reaches it holds bytes instead. A **stored** body is whatever the
+//! collection actually persists, so it needs the collection's own format, and
+//! one that will not decode is corruption: treating an unreadable pre-image as
+//! "no pre-image" turns an UPDATE into an INSERT and credits a target with the
+//! row's whole new value on top of the contribution it already holds.
 //!
-//! * a **submitted** body is MessagePack for every storage mode (a strict
-//!   collection encodes its Binary Tuple on the way to disk), and a body with
-//!   no readable fields carries no column any binding can read — so it folds to
-//!   nothing rather than failing the write;
-//! * a **stored** body is whatever the collection actually persists, so it
-//!   needs the collection's own format, and one that will not decode is
-//!   corruption: treating an unreadable pre-image as "no pre-image" turns an
-//!   UPDATE into an INSERT and credits a target with the row's whole new value
-//!   on top of the contribution it already holds.
-//!
-//! Encoding the distinction in [`ImageBody`] is what keeps each handler from
-//! re-deciding it, and keeps the "which of these is a hard error" answer in one
-//! place instead of eight.
+//! [`ImageBody`] keeps each handler from re-deciding that, and keeps the
+//! "which of these is a hard error" answer in one place instead of eight.
 //!
 //! # Nothing is decoded for a collection that declares nothing
 //!
@@ -35,7 +27,6 @@ use redb::WriteTransaction;
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::funnel::{self, WriteEnforcementOutcome};
 use crate::data::executor::enforcement::images::{EnforcementCtx, RowImages};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
@@ -44,8 +35,6 @@ use crate::types::{DatabaseId, Lsn, TenantId};
 
 /// Where one image's bytes came from, which is what decides how they decode.
 pub(in crate::data::executor) enum ImageBody<'a> {
-    /// The body the caller SUBMITTED — MessagePack for every storage mode.
-    Submitted(&'a [u8]),
     /// The body as STORED — a Binary Tuple on a strict collection.
     Stored(&'a [u8]),
 }
@@ -92,6 +81,8 @@ pub(in crate::data::executor) struct HookCtx<'a> {
     /// carries no deferral slot.
     pub deferred_sum_targets: &'a [String],
     pub wal_lsn: Option<Lsn>,
+    /// Who checks the actual final UNIQUE claims of derived target rows.
+    pub target_unique: crate::data::executor::enforcement::unique::UniqueJudge,
 }
 
 impl HookCtx<'_> {
@@ -164,6 +155,7 @@ pub(in crate::data::executor) fn run(
         core,
         txn,
         EnforcementCtx {
+            target_unique: ctx.target_unique,
             database_id: ctx.database_id,
             tid: ctx.tid,
             collection: ctx.collection,
@@ -193,11 +185,11 @@ pub(in crate::data::executor) fn target_write_set(
     targets
         .iter()
         .map(|target| {
-            crate::data::executor::core_loop::redo_image::submitted_row_image(
+            crate::bridge::envelope::WriteSetEntry::installed_put(
                 target.surrogate.as_u32(),
                 target.identity.clone(),
-                target.body.clone(),
-                target.outcome.version_sys_from,
+                target.outcome.installed.clone(),
+                target.event.clone(),
             )
             .in_collection(target.collection.clone())
         })
@@ -211,9 +203,6 @@ fn decode(
     body: ImageBody<'_>,
 ) -> crate::Result<Option<serde_json::Value>> {
     match body {
-        // Unreadable means "no column to fold", not a failure: the incoming
-        // body may legitimately carry no document at all.
-        ImageBody::Submitted(bytes) => Ok(doc_format::decode_document(bytes).ok()),
         // Here the collection HAS declared constraints over its columns, so a
         // stored row that will not decode is corruption. Failing is the only
         // outcome that does not silently mis-account the write.

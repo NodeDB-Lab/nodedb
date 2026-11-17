@@ -41,6 +41,9 @@ pub(in crate::data::executor) struct RegisterDocumentCollectionParams<'a> {
     /// The collection's declared key column. `None` when rows key by the
     /// implicit `id` or `_rowid`.
     pub declared_key: Option<&'a str>,
+    /// The top-level fields the full-text inverted index writes and reads.
+    /// Empty when the collection declares no full-text index.
+    pub text_fields: &'a nodedb_physical::physical_plan::TextFieldSet,
     /// The collection's catalog incarnation, which its CRDT document's Loro
     /// peer id derives from.
     pub incarnation: nodedb_types::Hlc,
@@ -71,6 +74,7 @@ impl CoreLoop {
             vector_fields,
             declared_columns,
             declared_key,
+            text_fields,
             incarnation,
         } = params;
         let mode_label = match storage_mode {
@@ -119,6 +123,7 @@ impl CoreLoop {
             vector_fields: vector_fields.to_vec(),
             declared_columns: declared_columns.to_vec(),
             declared_key: declared_key.map(str::to_string),
+            text_fields: text_fields.clone(),
             type_guards:
                 crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
                     user_collection,
@@ -126,6 +131,24 @@ impl CoreLoop {
                 ),
             incarnation,
         };
+
+        // The analyzer and fuzzy default the collection's full-text records
+        // name. Every tokenization of its text on this core reads them from
+        // the inverted-index metadata, so they land before the config does.
+        if let Err(e) = self.install_text_analysis(
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection,
+            text_fields,
+        ) {
+            warn!(
+                core = self.core_id,
+                %collection,
+                error = %e,
+                "full-text analysis did not install on register"
+            );
+            return self.response_error(task, ErrorCode::from(e));
+        }
 
         // Rehydrate the durable CRDT conflict-resolution policy (if any) into
         // this core's `PolicyRegistry`. Runs on every `Register` — live DDL
@@ -278,6 +301,7 @@ mod tests {
                 vector_fields: &[],
                 declared_columns: &[],
                 declared_key: None,
+                text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::new(hlc, 0),
             },
         )

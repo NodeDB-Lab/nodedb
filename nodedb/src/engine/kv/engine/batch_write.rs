@@ -2,7 +2,8 @@
 
 use super::KvEngine;
 use crate::engine::kv::batch_put::KvBatchPutParams;
-use crate::engine::kv::engine_write::{KvPutParams, UnboundKvWrite, require_bound};
+use crate::engine::kv::engine_write::{KvPutParams, UnboundKvWrite};
+use crate::engine::kv::write_refusal::KvWriteRefusal;
 
 impl KvEngine {
     /// BATCH PUT: insert/update multiple pairs. Returns count of new keys.
@@ -10,10 +11,11 @@ impl KvEngine {
     /// `surrogates` carries each entry's bound cross-engine identity, same
     /// order and length as `entries` -- assigned by the CP-side
     /// `SurrogateAssigner` from `(collection, key)`, same mechanism as a
-    /// single-key `put`. A batch with a missing or `Surrogate::ZERO` surrogate
-    /// is refused whole with [`UnboundKvWrite`] before any entry is written.
-    pub fn batch_put(&mut self, params: KvBatchPutParams<'_>) -> Result<usize, UnboundKvWrite> {
-        require_bound_batch(&params)?;
+    /// single-key `put`. A batch with a missing or `Surrogate::ZERO`
+    /// surrogate, or with an entry over the row limit, is refused whole with
+    /// [`KvWriteRefusal`] before any entry is written.
+    pub fn batch_put(&mut self, params: KvBatchPutParams<'_>) -> Result<usize, KvWriteRefusal> {
+        check_batch(&params)?;
         let KvBatchPutParams {
             database_id,
             tenant_id,
@@ -57,8 +59,8 @@ impl KvEngine {
         &mut self,
         params: KvBatchPutParams<'_>,
         expire_at_ms: u64,
-    ) -> Result<usize, UnboundKvWrite> {
-        require_bound_batch(&params)?;
+    ) -> Result<usize, KvWriteRefusal> {
+        check_batch(&params)?;
         let KvBatchPutParams {
             database_id,
             tenant_id,
@@ -97,8 +99,8 @@ impl KvEngine {
 /// Fold one row's put into the batch's running result: count a new row, or
 /// keep the refusal. Returns whether the batch continues.
 fn count_new_row(
-    written: &mut Result<usize, UnboundKvWrite>,
-    put: Result<Option<Vec<u8>>, UnboundKvWrite>,
+    written: &mut Result<usize, KvWriteRefusal>,
+    put: Result<Option<Vec<u8>>, KvWriteRefusal>,
 ) -> bool {
     match put {
         Err(refusal) => {
@@ -117,15 +119,20 @@ fn count_new_row(
     }
 }
 
-/// The refusal of a batch that does not carry one bound surrogate per entry.
-fn require_bound_batch(params: &KvBatchPutParams<'_>) -> Result<(), UnboundKvWrite> {
+/// The refusal of a batch that does not carry one bound surrogate per entry,
+/// or that holds an entry over the row limit.
+fn check_batch(params: &KvBatchPutParams<'_>) -> Result<(), KvWriteRefusal> {
     if params.surrogates.len() != params.entries.len() {
         return Err(UnboundKvWrite {
             collection: params.collection.to_owned(),
-        });
+        }
+        .into());
     }
     params
-        .surrogates
+        .entries
         .iter()
-        .try_for_each(|&surrogate| require_bound(params.collection, surrogate))
+        .zip(params.surrogates)
+        .try_for_each(|((key, value), &surrogate)| {
+            KvWriteRefusal::check(params.collection, key, value, surrogate)
+        })
 }

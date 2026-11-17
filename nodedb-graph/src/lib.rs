@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Graph engine primitives shared by Origin, Lite, and WASM: CSR adjacency
 //! index, traversal algorithms (PageRank, WCC, LabelPropagation, LCC, SSSP,
 //! Betweenness, Closeness, Harmonic, Degree, Louvain, Triangles, Diameter,
@@ -17,6 +20,7 @@ pub mod overlay_delta;
 pub mod params;
 pub mod path_overlay;
 pub mod path_params;
+pub mod properties;
 pub mod sharded;
 #[cfg(test)]
 mod test_support;
@@ -33,6 +37,7 @@ pub use error::{GraphError, MAX_EDGE_LABELS, MAX_NODES_PER_CSR};
 pub use overlay_delta::GraphOverlayDelta;
 pub use params::{AlgoColumnType, AlgoParams, GraphAlgorithm};
 pub use path_params::ShortestPathParams;
+pub use properties::{decode_edge_properties, encode_edge_properties, property_weight};
 pub use sharded::ShardedCsrIndex;
 pub use traversal_options::{GraphTraversalOptions, MAX_GRAPH_TRAVERSAL_DEPTH};
 pub use traversal_surrogate::{SurrogateBfsParams, SurrogateHops};

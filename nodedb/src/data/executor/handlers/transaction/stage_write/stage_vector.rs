@@ -66,10 +66,13 @@ pub(super) struct StageVectorInsertParams<'a> {
 
 /// The client identity of a vector-primary row, read from its sidecar by
 /// the rule INSERT mints it with. A sidecar with no identity column yields
-/// the decimal surrogate.
-pub(super) fn staged_vector_row_identity(sidecar: &[u8], key: StorageKey) -> RowIdentity {
-    let normalized = sparse_body_to_msgpack(sidecar, SparseBodyFormatRef::VectorSidecar);
-    RowIdentity::of_stored_row(&normalized, None, key)
+/// the decimal surrogate. A sidecar that does not normalize is an error.
+pub(super) fn staged_vector_row_identity(
+    sidecar: &[u8],
+    key: StorageKey,
+) -> crate::Result<RowIdentity> {
+    let normalized = sparse_body_to_msgpack(sidecar, SparseBodyFormatRef::VectorSidecar)?;
+    Ok(RowIdentity::of_stored_row(&normalized, None, key))
 }
 
 /// The staged body for `vector` and `fields`: the sidecar encoded exactly
@@ -302,13 +305,12 @@ impl CoreLoop {
         surrogate: Surrogate,
     ) -> Result<Option<VectorCurrentRow>, ErrorCode> {
         let staged = self
-            .txn_overlays
-            .get(&scope.txn_id)
-            .and_then(|o| o.get(&scope.coll_key, surrogate.0));
+            .staged_row(scope.txn_id, &scope.coll_key, surrogate.0)
+            .map_err(ErrorCode::from)?;
         match staged {
             Some(Staged::Tombstone) => return Ok(None),
             Some(Staged::Put(body)) => {
-                let row = StagedVectorRow::from_bytes(body).map_err(ErrorCode::from)?;
+                let row = StagedVectorRow::from_bytes(&body).map_err(ErrorCode::from)?;
                 let fields =
                     decode_payload_lowercased(&row.sidecar).map_err(|e| ErrorCode::Internal {
                         detail: format!(
@@ -455,11 +457,23 @@ impl CoreLoop {
             | VectorDirectWriteIntent::Upsert => {}
         }
 
-        let (staged, _sidecar) = match encode_staged_vector_row(vector, &fields) {
+        let (staged, sidecar) = match encode_staged_vector_row(vector, &fields) {
             Ok(encoded) => encoded,
             Err(e) => return self.response_error(task, e),
         };
-        if let Err(e) = self.stage_put_capped(&ctx, staged) {
+        // The commit install journals the staged row, so its native image is
+        // held to the row image limit before it stages, as a live write's is.
+        if let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+            collection,
+            || ctx.document_id.as_str().to_string(),
+            field,
+            vector.len(),
+            &fields,
+            sidecar.len(),
+        ) {
+            return self.response_error(task, e);
+        }
+        if let Err(e) = self.stage_put(&ctx, staged) {
             return self.response_error(task, e);
         }
         if !on_conflict_updates.is_empty() {
@@ -697,14 +711,10 @@ mod tests {
         );
         assert_eq!(affected(&up), 1);
         let coll_key = (DatabaseId::DEFAULT, TenantId::new(1), COLL.to_string());
-        let Some(Staged::Put(body)) = core
-            .txn_overlays
-            .get(&txn_id)
-            .and_then(|o| o.get(&coll_key, 3))
-        else {
+        let Some(Staged::Put(body)) = core.staged_row(txn_id, &coll_key, 3).expect("read") else {
             panic!("the upsert must leave a staged put");
         };
-        let row = StagedVectorRow::from_bytes(body).expect("decode");
+        let row = StagedVectorRow::from_bytes(&body).expect("decode");
         assert_eq!(row.vector, vec![0.0, 1.0]);
         let fields = decode_payload_lowercased(&row.sidecar).expect("sidecar");
         assert_eq!(fields.get("owner"), Some(&Value::String("bob".into())));

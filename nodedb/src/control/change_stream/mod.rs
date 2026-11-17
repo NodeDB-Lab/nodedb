@@ -3,6 +3,7 @@
 pub mod journal;
 pub mod live_set;
 pub mod stream;
+pub mod unjournaled;
 
 pub use journal::ChangeJournal;
 pub use live_set::LiveSubscriptionSet;

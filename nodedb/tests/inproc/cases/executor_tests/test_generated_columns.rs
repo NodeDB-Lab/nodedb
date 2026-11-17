@@ -47,6 +47,7 @@ fn register_with_generated(
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
             incarnation: nodedb_types::Hlc::ZERO,
         }),
     );
@@ -124,6 +125,7 @@ fn insert_materializes_generated_column() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -170,6 +172,7 @@ fn insert_materializes_concat() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -218,6 +221,7 @@ fn update_recomputes_generated_column() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -287,6 +291,7 @@ fn update_generated_column_directly_rejected() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -367,6 +372,7 @@ fn chained_generated_columns() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 

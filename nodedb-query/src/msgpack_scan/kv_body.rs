@@ -2,9 +2,10 @@
 
 //! Shape-preserving decode / encode of a KV row body for read-modify-write.
 //!
-//! A KV body is stored in one of two shapes (see [`super::kv_row_msgpack`]):
-//! a msgpack map for typed columns, or raw scalar bytes for the single-`value`
-//! SQL form and RESP `SET`. A merge decodes the body into the same row object
+//! A KV body is stored in one of three shapes (see [`super::kv_row_msgpack`]):
+//! a plain msgpack map for typed columns, a native tagged `Value::Object`
+//! for typed columns that keep their native types, or raw scalar bytes for
+//! the single-`value` SQL form and RESP `SET`. A merge decodes the body into the same row object
 //! reads present, mutates it, and re-encodes into the shape it came from.
 //! Decoding raw bytes as msgpack instead either fails (multi-byte value) or
 //! reads the first byte as a fixint and discards the rest.
@@ -22,6 +23,9 @@ pub enum KvBodyShape {
     Raw,
     /// A msgpack map of typed columns.
     Map,
+    /// A native tagged `Value::Object` of typed columns: `DECIMAL`, `UUID`
+    /// and every other typed value keep their types.
+    Native,
 }
 
 /// A merged row cannot be encoded back into its body shape.
@@ -48,18 +52,58 @@ pub enum KvBodyError {
     /// A raw body holds a scalar; the merged `value` is not one.
     #[error("KV raw body `value`: {0}")]
     RawNotScalar(#[from] NotScalar),
-    /// The merged map row does not encode.
-    #[error("KV map body encode: {0}")]
+    /// The merged or presented row does not encode.
+    #[error("KV body encode: {0}")]
     Encode(zerompk::Error),
 }
 
-/// The shape of a stored body: a msgpack map header marks a map, anything
-/// else (an empty body included) is raw scalar bytes.
+/// The shape of a stored body: a msgpack map header marks a map, a body
+/// that decodes in full as a native tagged object is native, and anything
+/// else (an empty body included) is raw scalar bytes. A map with a key that
+/// is not a string at any depth is raw: KV values are opaque bytes, and a
+/// field name is text.
 pub fn kv_body_shape(body: &[u8]) -> KvBodyShape {
-    if map_header(body, 0).is_some() {
-        KvBodyShape::Map
-    } else {
-        KvBodyShape::Raw
+    classify_body(body).shape()
+}
+
+/// A stored body with its native object already decoded. The one rule
+/// [`kv_body_shape`], [`kv_body_to_row`], [`kv_row_to_body_fields`] and
+/// [`super::kv_row_msgpack`] share, so a body is native exactly when its
+/// object decodes as native.
+pub(crate) enum ClassifiedBody {
+    Raw,
+    Map,
+    Native(HashMap<String, Value>),
+}
+
+impl ClassifiedBody {
+    pub(crate) fn shape(&self) -> KvBodyShape {
+        match self {
+            Self::Raw => KvBodyShape::Raw,
+            Self::Map => KvBodyShape::Map,
+            Self::Native(_) => KvBodyShape::Native,
+        }
+    }
+}
+
+/// Classify `body`. A native object body validates and decodes in full,
+/// header to the last byte, so scalar bytes that merely start with an array
+/// header stay raw.
+pub(crate) fn classify_body(body: &[u8]) -> ClassifiedBody {
+    // RESP `SET` and a raw value column store any bytes. Bytes that only
+    // look like a map, with a key that is not text, stay opaque.
+    if map_header(body, 0).is_some() && nodedb_types::find_non_string_key(body).is_none() {
+        return ClassifiedBody::Map;
+    }
+    let Ok(view) = nodedb_types::ObjectView::new(body) else {
+        return ClassifiedBody::Raw;
+    };
+    if view.format() != nodedb_types::ObjectFormat::Native {
+        return ClassifiedBody::Raw;
+    }
+    match view.decode() {
+        Ok(Value::Object(fields)) => ClassifiedBody::Native(fields),
+        _ => ClassifiedBody::Raw,
     }
 }
 
@@ -70,8 +114,12 @@ pub fn kv_body_shape(body: &[u8]) -> KvBodyShape {
 /// lossy view there too). An empty body is a raw empty string. Returns the
 /// shape so the writer re-encodes in the same one.
 pub fn kv_body_to_row(body: &[u8]) -> Result<(Value, KvBodyShape), MsgpackError> {
-    if kv_body_shape(body) == KvBodyShape::Map {
-        return Ok((nodedb_types::value_from_msgpack(body)?, KvBodyShape::Map));
+    match classify_body(body) {
+        ClassifiedBody::Map => {
+            return Ok((nodedb_types::value_from_msgpack(body)?, KvBodyShape::Map));
+        }
+        ClassifiedBody::Native(fields) => return Ok((Value::Object(fields), KvBodyShape::Native)),
+        ClassifiedBody::Raw => {}
     }
     let mut row = std::collections::HashMap::with_capacity(1);
     row.insert(
@@ -108,6 +156,9 @@ pub fn row_to_kv_body(row: &Value, shape: KvBodyShape) -> Result<Vec<u8>, KvBody
             }
             Ok(buf)
         }
+        // The tagged encoder writes object fields in key order, so the same
+        // row encodes to the same bytes on every node and on replay.
+        KvBodyShape::Native => zerompk::to_msgpack_vec(row).map_err(KvBodyError::Encode),
         KvBodyShape::Raw => {
             let mut extra: Vec<&str> = map
                 .keys()
@@ -132,6 +183,7 @@ pub fn row_to_kv_body(row: &Value, shape: KvBodyShape) -> Result<Vec<u8>, KvBody
 /// A `key` field equal to it is the injected primary key and is dropped. A
 /// `key` field that differs is a stored column and is kept. The remaining
 /// fields pick the shape the SQL lowering picks for a fresh insert:
+/// - a native tagged row: [`KvBodyShape::Native`], which keeps its types;
 /// - `value` alone: [`KvBodyShape::Raw`];
 /// - any other field set: [`KvBodyShape::Map`].
 ///
@@ -141,7 +193,12 @@ pub fn kv_row_to_body_fields(
     key: &str,
     row: &[u8],
 ) -> Result<(HashMap<String, Value>, KvBodyShape), KvBodyError> {
-    let row = nodedb_types::value_from_msgpack(row)?;
+    let (row, native) = match classify_body(row) {
+        ClassifiedBody::Native(fields) => (Value::Object(fields), true),
+        ClassifiedBody::Map | ClassifiedBody::Raw => {
+            (nodedb_types::value_from_msgpack(row)?, false)
+        }
+    };
     let Value::Object(mut fields) = row else {
         return Err(KvBodyError::RowNotObject {
             kind: row.type_name(),
@@ -150,8 +207,10 @@ pub fn kv_row_to_body_fields(
     if matches!(fields.get("key"), Some(Value::String(stored)) if stored == key) {
         fields.remove("key");
     }
-    let shape = if fields.len() == 1 && fields.contains_key("value") {
+    let shape = if fields.len() == 1 && fields.contains_key("value") && !native {
         KvBodyShape::Raw
+    } else if native {
+        KvBodyShape::Native
     } else {
         KvBodyShape::Map
     };
@@ -170,7 +229,7 @@ mod tests {
     #[test]
     fn a_raw_body_round_trips_through_its_row() {
         for body in [b"v1".to_vec(), b"1".to_vec(), Vec::new()] {
-            let row = crate::msgpack_scan::kv_row_msgpack("k1", &body);
+            let row = crate::msgpack_scan::kv_row_msgpack("k1", &body).expect("row");
             assert_eq!(body_from_row("k1", &row), body);
         }
     }
@@ -181,7 +240,7 @@ mod tests {
         fields.insert("n".to_string(), Value::Integer(7));
         fields.insert("s".to_string(), Value::String("x".into()));
         let body = row_to_kv_body(&Value::Object(fields), KvBodyShape::Map).unwrap();
-        let row = crate::msgpack_scan::kv_row_msgpack("k2", &body);
+        let row = crate::msgpack_scan::kv_row_msgpack("k2", &body).expect("row");
         assert_eq!(body_from_row("k2", &row), body);
     }
 
@@ -191,7 +250,7 @@ mod tests {
         fields.insert("key".to_string(), Value::String("stored".into()));
         fields.insert("n".to_string(), Value::Integer(1));
         let body = row_to_kv_body(&Value::Object(fields), KvBodyShape::Map).unwrap();
-        let row = crate::msgpack_scan::kv_row_msgpack("slot", &body);
+        let row = crate::msgpack_scan::kv_row_msgpack("slot", &body).expect("row");
         assert_eq!(body_from_row("slot", &row), body);
     }
 
@@ -319,5 +378,22 @@ mod tests {
     fn corrupt_map_body_is_a_decode_error() {
         // fixmap header claiming one entry, then nothing.
         assert!(kv_body_to_row(&[0x81]).is_err());
+    }
+
+    /// An opaque value that parses as a map with an integer key reads as
+    /// its raw bytes, not as fields.
+    #[test]
+    fn a_map_with_a_key_that_is_not_text_is_raw() {
+        // {1: "a"}
+        let body = [0x81, 0x01, 0xa1, b'a'];
+        assert_eq!(kv_body_shape(&body), KvBodyShape::Raw);
+        let (row, shape) = kv_body_to_row(&body).expect("row");
+        assert_eq!(shape, KvBodyShape::Raw);
+        let Value::Object(fields) = row else {
+            panic!("a row");
+        };
+        assert!(fields.contains_key("value") && fields.len() == 1);
+        // {"n": 1} stays a map.
+        assert_eq!(kv_body_shape(&[0x81, 0xa1, b'n', 0x01]), KvBodyShape::Map);
     }
 }

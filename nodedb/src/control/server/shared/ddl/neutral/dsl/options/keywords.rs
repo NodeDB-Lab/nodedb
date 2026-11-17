@@ -192,12 +192,14 @@ fn read_value(tok: &Tok, spec: &OptionSpec, context: &str) -> Result<OptionValue
         }
         OptionKind::Ident => match tok {
             Tok::Word(w) => Ok(OptionValue::Text(w.clone())),
-            Tok::Quoted(s) => Ok(OptionValue::Text(s.clone())),
+            Tok::Quoted(s) | Tok::QuotedIdent(s) => Ok(OptionValue::Text(s.clone())),
             _ => Err(invalid("a name")),
         },
         OptionKind::QuotedStr => match tok {
-            Tok::Quoted(s) if !s.trim().is_empty() => Ok(OptionValue::Text(s.trim().to_string())),
-            Tok::Quoted(_) => Err(invalid("a non-empty quoted string")),
+            Tok::Quoted(s) | Tok::QuotedIdent(s) if !s.trim().is_empty() => {
+                Ok(OptionValue::Text(s.trim().to_string()))
+            }
+            Tok::Quoted(_) | Tok::QuotedIdent(_) => Err(invalid("a non-empty quoted string")),
             _ => Err(invalid("a quoted string")),
         },
         OptionKind::Bool => {

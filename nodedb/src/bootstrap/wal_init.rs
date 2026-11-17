@@ -9,22 +9,29 @@ use tracing::info;
 use crate::ServerConfig;
 use crate::wal::WalManager;
 
+/// The WAL boot opened and settled, and what replay needs from it.
+pub struct RecoveredWal {
+    pub wal: Arc<WalManager>,
+    /// The settled stream every core replays.
+    pub records: Arc<[nodedb_wal::WalRecord]>,
+    pub tombstones: nodedb_wal::TombstoneSet,
+    /// The committed records replay folds: their installs never became
+    /// durable.
+    pub never_durable: crate::wal::NeverDurableRedos,
+}
+
 /// Open, validate, and replay the WAL. Load the tombstone set from redb + WAL.
 ///
 /// `wal_key` is the key `[encryption]` names, loaded by
 /// [`crate::control::security::keystore::load_wal_key`]; `None` when the
 /// section is absent.
 ///
-/// Returns `(wal, wal_records, tombstones)`. Exits the process on unrecoverable
-/// corruption — a dirty WAL cannot be safely replayed.
+/// Exits the process on unrecoverable corruption — a dirty WAL cannot be
+/// safely replayed.
 pub fn init_wal(
     config: &ServerConfig,
     wal_key: Option<nodedb_wal::crypto::WalEncryptionKey>,
-) -> anyhow::Result<(
-    Arc<WalManager>,
-    Arc<[nodedb_wal::WalRecord]>,
-    nodedb_wal::TombstoneSet,
-)> {
+) -> anyhow::Result<RecoveredWal> {
     let wal_segment_target = config.checkpoint.wal_segment_target_bytes();
     let wal_dir = config.wal_dir();
 
@@ -72,28 +79,30 @@ pub fn init_wal(
 
     // Settle every record group a crash left broken before any replay, then
     // read the stream the settle completed.
-    let wal_records = match crate::bootstrap::write_group_settle::settle_write_groups(
-        &wal,
-        &config.server.data_dir,
-        &wal_records,
-    )
-    .and_then(|appended| {
-        if appended {
-            wal.replay()
-                .map(|records| Arc::from(records.into_boxed_slice()))
-        } else {
-            Ok(wal_records)
-        }
-    }) {
-        Ok(records) => records,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "StartupError: settling the write groups a crash left broken failed"
-            );
-            std::process::exit(1);
-        }
-    };
+    let (wal_records, never_durable) =
+        match crate::bootstrap::write_group_settle::settle_write_groups(
+            &wal,
+            &config.server.data_dir,
+            &wal_records,
+        )
+        .and_then(|outcome| {
+            let records: Arc<[nodedb_wal::WalRecord]> = if outcome.appended {
+                wal.replay()
+                    .map(|records| Arc::from(records.into_boxed_slice()))?
+            } else {
+                wal_records
+            };
+            Ok((records, outcome.never_durable))
+        }) {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "StartupError: settling the write groups a crash left broken failed"
+                );
+                std::process::exit(1);
+            }
+        };
 
     tracing::warn!(
         catalog = %config.catalog_path().display(),
@@ -101,8 +110,20 @@ pub fn init_wal(
          for at-rest catalog encryption"
     );
 
+    if !never_durable.is_empty() {
+        info!(
+            records = never_durable.len(),
+            "committed records whose install never became durable: replay folds them"
+        );
+    }
+
     let tombstones = load_tombstones(config, &wal_records)?;
-    Ok((wal, wal_records, tombstones))
+    Ok(RecoveredWal {
+        wal,
+        records: wal_records,
+        tombstones,
+        never_durable,
+    })
 }
 
 /// Translate a WAL open failure into a startup error.

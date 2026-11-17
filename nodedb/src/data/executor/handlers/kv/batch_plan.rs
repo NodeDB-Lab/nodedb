@@ -53,7 +53,7 @@ pub(in crate::data::executor) fn plan_kv_batch<'a>(
     intent: &KvBatchIntent,
     declared: &[DeclaredColumn],
     crs: &nodedb_crs::CrsContext<'_>,
-    mut read: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    mut read: impl FnMut(&[u8]) -> crate::Result<Option<Vec<u8>>>,
 ) -> crate::Result<Vec<PlannedKvRow<'a>>> {
     // The latest planned row of each key the batch has written.
     let mut latest: HashMap<&'a [u8], usize> = HashMap::with_capacity(entries.len());
@@ -62,7 +62,7 @@ pub(in crate::data::executor) fn plan_kv_batch<'a>(
         let key = key.as_slice();
         let prior = match latest.get(key) {
             Some(&row) => rows.get(row).map(|earlier| earlier.stored.to_vec()),
-            None => read(key),
+            None => read(key)?,
         };
         // An entry stores its body re-typed to the declared columns, the
         // body the point write stores. Borrowed when no value changes.

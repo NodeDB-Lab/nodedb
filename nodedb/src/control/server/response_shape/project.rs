@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use nodedb_types::Value;
 
 use super::types::ShapedRow;
+use crate::data::executor::response_codec::RowContext;
 
 /// Flatten a decoded Data-Plane value into typed row objects.
 ///
@@ -20,21 +21,27 @@ use super::types::ShapedRow;
 /// by construction.
 /// A value that fails `StorageKey::parse` is surfaced as `Err`, never accommodated.
 ///
+/// `context` is the row shape of the payload's producer, from its plan. Only
+/// a [`RowContext::ScanEnvelope`] row is unwrapped: a flat row whose columns
+/// are `id` and `data` is a user row and stays as it is.
+///
 /// `identity_column` is the column a scan row's identity renders under: the
 /// scanned collection's declared key, else the implicit `id`.
 pub fn push_flat_rows(
     value: Value,
+    context: RowContext,
     identity_column: &str,
     out: &mut Vec<ShapedRow>,
 ) -> crate::Result<()> {
     match value {
         Value::Array(items) => {
             for item in items {
-                push_flat_rows(item, identity_column, out)?;
+                push_flat_rows(item, context, identity_column, out)?;
             }
         }
         Value::Object(mut map) => {
-            if is_scan_wrapper(&map)
+            if context == RowContext::ScanEnvelope
+                && is_scan_wrapper(&map)
                 && let Some(Value::Object(inner)) = map.remove("data")
             {
                 let mut inner: ShapedRow = inner.into_iter().collect();
@@ -89,6 +96,30 @@ pub fn push_flat_rows(
         _ => {}
     }
     Ok(())
+}
+
+/// Push each row's body: under [`RowContext::ScanEnvelope`] the `data`
+/// object of a `{id, data}` envelope, else the row itself. Unlike
+/// [`push_flat_rows`] no identity column is added. A scalar is not a row.
+pub fn push_row_bodies(value: Value, context: RowContext, out: &mut Vec<ShapedRow>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                push_row_bodies(item, context, out);
+            }
+        }
+        Value::Object(mut map) => {
+            if context == RowContext::ScanEnvelope
+                && is_scan_wrapper(&map)
+                && let Some(Value::Object(inner)) = map.remove("data")
+            {
+                out.push(inner.into_iter().collect());
+                return;
+            }
+            out.push(map.into_iter().collect());
+        }
+        _ => {}
+    }
 }
 
 /// The Data Plane's raw document-scan codec emits objects with exactly
@@ -146,7 +177,7 @@ pub fn cell_keys(columns: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, cell_keys, push_flat_rows};
+    use super::{RowContext, Value, cell_keys, push_flat_rows};
 
     /// A scan envelope around `fields`, keyed by surrogate 7.
     fn envelope(fields: &[(&str, &str)]) -> Value {
@@ -167,7 +198,8 @@ mod tests {
 
     fn flat(value: Value, identity_column: &str) -> Vec<(String, Value)> {
         let mut rows = Vec::new();
-        push_flat_rows(value, identity_column, &mut rows).expect("a well-formed envelope");
+        push_flat_rows(value, RowContext::ScanEnvelope, identity_column, &mut rows)
+            .expect("a well-formed envelope");
         assert_eq!(rows.len(), 1);
         rows.remove(0).into_iter().collect()
     }
@@ -219,5 +251,18 @@ mod tests {
     #[test]
     fn cell_keys_skips_candidates_that_shadow_real_columns() {
         assert_eq!(keys(&["id", "id", "id_1"]), ["id", "id_2", "id_1"]);
+    }
+
+    /// A flat row whose columns are `id` and `data` is a user row: it is
+    /// never unwrapped, whatever `data` holds.
+    #[test]
+    fn a_flat_id_data_row_is_never_unwrapped() {
+        let row = envelope(&[("k", "v")]);
+        let mut rows = Vec::new();
+        push_flat_rows(row.clone(), RowContext::Flat, "id", &mut rows).expect("flat row");
+        let Value::Object(fields) = row else {
+            panic!("row is an object");
+        };
+        assert_eq!(rows, vec![fields.into_iter().collect()]);
     }
 }

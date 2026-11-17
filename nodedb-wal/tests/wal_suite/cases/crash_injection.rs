@@ -80,6 +80,44 @@ fn out_of_space_on_sync_retains_the_batch_for_retry() {
     assert_eq!(info.last_lsn, 4);
 }
 
+/// A record larger than the write buffer that meets a full device leaves the
+/// LSN sequence untouched, and its retry writes it under the same LSN.
+#[test]
+fn out_of_space_on_an_oversize_append_does_not_burn_an_lsn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("enospc_oversize.wal");
+    let mut writer = WalWriter::open(
+        &path,
+        WalWriterConfig {
+            write_buffer_size: 64 * 1024,
+            use_direct_io: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    writer
+        .append(RecordType::Put as u32, 1, 0, 0, b"small")
+        .unwrap();
+
+    let large = vec![b'y'; 3 * 64 * 1024];
+    {
+        let _g = FailGuard::fail("wal::flush_out_of_space", "device full");
+        assert!(matches!(
+            writer.append(RecordType::Put as u32, 1, 0, 0, &large),
+            Err(WalError::OutOfSpace { .. })
+        ));
+        assert_eq!(writer.next_lsn(), 2, "a rejected append consumed an LSN");
+    }
+
+    let lsn = writer
+        .append(RecordType::Put as u32, 1, 0, 0, &large)
+        .unwrap();
+    assert_eq!(lsn, 2);
+    writer.sync().unwrap();
+    drop(writer);
+    assert_eq!(read_lsns(&path), vec![1, 2]);
+}
+
 #[test]
 fn out_of_space_on_append_does_not_burn_an_lsn() {
     let dir = tempfile::tempdir().unwrap();
@@ -278,4 +316,30 @@ fn crash_mid_truncate_leaves_a_replayable_log() {
     wal.truncate_before(checkpoint_lsn).unwrap();
     let after = wal.replay().unwrap();
     assert!(after.iter().any(|r| r.header.lsn == u64::from(total)));
+}
+
+/// The io_uring writer reports a full device as `OutOfSpace`, keeps the batch
+/// and its LSNs, and writes it once space is back.
+#[cfg(all(feature = "io-uring", target_os = "linux"))]
+#[test]
+fn uring_out_of_space_is_reported_and_the_batch_is_retried() {
+    use nodedb_wal::uring_writer::UringWriter;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("uring_enospc.wal");
+    let mut writer = UringWriter::open_without_direct_io(&path).unwrap();
+    writer
+        .append(RecordType::Put as u32, 1, 0, 0, b"first")
+        .unwrap();
+    {
+        let _g = FailGuard::fail("wal::flush_out_of_space", "device full");
+        assert!(matches!(
+            writer.submit_and_sync(),
+            Err(WalError::OutOfSpace { .. })
+        ));
+    }
+    assert_eq!(writer.next_lsn(), 2);
+    writer.submit_and_sync().unwrap();
+    drop(writer);
+    assert_eq!(read_lsns(&path), vec![1]);
 }

@@ -10,7 +10,7 @@ use crate::block::CompactPosting;
 use crate::codec::smallfloat;
 
 /// Postings, stats, and fieldnorms of one `(database, tenant, index)`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ScopeState {
     /// term → list of compact postings.
     pub(super) postings: HashMap<String, Vec<CompactPosting>>,

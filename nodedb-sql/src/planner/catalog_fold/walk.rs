@@ -200,11 +200,13 @@ fn walk_plan(
         }
 
         SqlPlan::InsertSelect {
+            returning,
             target,
             source,
             column_map,
             source_columns,
         } => SqlPlan::InsertSelect {
+            returning,
             target,
             source: Box::new(walk_plan(*source, catalog, database_id, tenant_id)),
             column_map,

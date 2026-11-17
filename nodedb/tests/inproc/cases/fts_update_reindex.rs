@@ -31,6 +31,14 @@ async fn text_ids_on(
     ids
 }
 
+/// Create a search index on the comma-separated `fields` of `collection`.
+async fn search_index(server: &TestServer, collection: &str, fields: &str) {
+    server
+        .exec(&format!("CREATE SEARCH INDEX ON {collection} ({fields})"))
+        .await
+        .unwrap();
+}
+
 async fn seeded(server: &TestServer, collection: &str) {
     server
         .exec(&format!(
@@ -38,6 +46,7 @@ async fn seeded(server: &TestServer, collection: &str) {
         ))
         .await
         .unwrap();
+    search_index(server, collection, "body").await;
     for (id, body) in [("u1", "alpha first"), ("u2", "alpha second")] {
         server
             .exec(&format!(
@@ -72,6 +81,7 @@ async fn update_across_fields_keeps_field_scopes_after_restart() {
         .exec("CREATE COLLECTION fu_fields WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    search_index(&server, "fu_fields", "title, body").await;
     server
         .exec("INSERT INTO fu_fields { id: 'f1', title: 'delta heading', body: 'plain body' }")
         .await
@@ -128,6 +138,7 @@ async fn update_from_join_moves_the_row_to_its_new_terms() {
         )
         .await
         .unwrap();
+    search_index(&server, "fu_join_target", "body").await;
     server
         .exec(
             "CREATE COLLECTION fu_join_source (\
@@ -171,6 +182,7 @@ async fn convert_collection_to_a_full_schema_keeps_every_fields_words() {
         .exec("CREATE COLLECTION fu_convert_full WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    search_index(&server, "fu_convert_full", "title, notes").await;
     server
         .exec("INSERT INTO fu_convert_full { id: 'c1', title: 'alpha kept', notes: 'beta kept' }")
         .await
@@ -206,6 +218,7 @@ async fn convert_collection_to_a_partial_schema_is_refused_and_leaves_the_collec
         .exec("CREATE COLLECTION fu_convert_partial WITH (engine='document_schemaless')")
         .await
         .unwrap();
+    search_index(&server, "fu_convert_partial", "title, notes").await;
     server
         .exec(
             "INSERT INTO fu_convert_partial \

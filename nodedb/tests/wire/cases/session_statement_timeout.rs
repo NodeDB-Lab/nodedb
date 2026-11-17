@@ -194,3 +194,41 @@ async fn statement_timeout_rejects_an_unparsable_value() {
         vec!["0".to_string()]
     );
 }
+
+/// Each statement of a multi-statement message runs under its own budget,
+/// as in PostgreSQL 13 and later. A `SET statement_timeout = 0` that leads a
+/// message lifts the spent budget the message arrived under, so the scan
+/// after it returns every row. A deadline pinned once per message keeps the
+/// spent budget and refuses the scan.
+#[tokio::test]
+async fn each_statement_of_a_message_takes_its_own_budget() {
+    let srv = seeded_server().await;
+    srv.exec(&format!("SET statement_timeout = '{UNMEETABLE_BUDGET}'"))
+        .await
+        .unwrap();
+
+    let rows = srv
+        .query_rows(&format!("SET statement_timeout = 0; {SLOW_QUERY}"))
+        .await
+        .expect("the scan runs under the budget the SET before it gave");
+    assert_eq!(rows.len(), ROWS, "every seeded row must come back");
+}
+
+/// A `SET statement_timeout` inside a message bounds the statements after
+/// it in the same message.
+#[tokio::test]
+async fn a_set_inside_a_message_bounds_the_statements_after_it() {
+    let srv = seeded_server().await;
+    match srv
+        .query_rows(&format!(
+            "SET statement_timeout = '{UNMEETABLE_BUDGET}'; {SLOW_QUERY}"
+        ))
+        .await
+    {
+        Ok(rows) => panic!("expected an error, got {} rows", rows.len()),
+        Err(error) => assert!(
+            error.contains(QUERY_CANCELED),
+            "expected SQLSTATE {QUERY_CANCELED}, got {error}"
+        ),
+    }
+}

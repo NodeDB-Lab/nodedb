@@ -24,6 +24,7 @@ pub mod helpers;
 pub(crate) mod hop;
 pub mod keyed_read;
 pub mod match_broadcast;
+pub(crate) mod match_finish;
 pub mod match_scatter;
 pub(crate) mod neighbor_rows;
 pub(crate) mod presence;
@@ -45,6 +46,7 @@ pub use keyed_read::{VShardRead, read_on_key_owner, read_on_vshard};
 pub use match_broadcast::{
     GraphRead, MatchBroadcastOutcome, broadcast_match_to_all_cores, unwrap_match_envelope,
 };
+pub(crate) use match_finish::{decode_match_rows, finish_match_payload};
 pub use match_scatter::{MatchScatterOutcome, scatter_match};
 pub use rag_fusion::serve_rag_plan;
 pub use read_groups::{confirm_graph_read, graph_read_groups};

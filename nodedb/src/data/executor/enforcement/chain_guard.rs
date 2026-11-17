@@ -229,6 +229,47 @@ impl ChainGuard {
         Ok(())
     }
 
+    /// Settle one installed row and capture the exact head this operation selected.
+    pub(in crate::data::executor) fn settle_installed(
+        &mut self,
+        core: &mut CoreLoop,
+        surrogate: Surrogate,
+        image: &mut crate::types::SharedInstalledDocument,
+    ) -> crate::Result<()> {
+        self.settle(core, surrogate, &image.stored)?;
+        image.chain_head = self.capture_installed_head(core)?;
+        Ok(())
+    }
+
+    /// Capture the settled head before another operation changes this collection.
+    pub(in crate::data::executor) fn capture_installed_head(
+        &self,
+        core: &CoreLoop,
+    ) -> crate::Result<Option<ChainHead>> {
+        if !self.pending.is_empty() {
+            return Err(crate::Error::Internal {
+                detail: format!(
+                    "hash-chain collection '{}' has unsettled row intents",
+                    self.key.2
+                ),
+            });
+        }
+        if !self.mutated {
+            return Ok(None);
+        }
+        core.chain
+            .heads
+            .get(&self.key)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| crate::Error::Internal {
+                detail: format!(
+                    "hash-chain collection '{}' lost its installed head",
+                    self.key.2
+                ),
+            })
+    }
+
     fn set_intent(&mut self, core: &mut CoreLoop, surrogate: Surrogate, intent: ChainIntent) {
         core.chain
             .intents
@@ -247,10 +288,7 @@ impl ChainGuard {
         core: &CoreLoop,
         txn: &WriteTransaction,
     ) -> crate::Result<()> {
-        if !self.mutated {
-            return Ok(());
-        }
-        let Some(head) = core.chain.heads.get(&self.key).cloned() else {
+        let Some(head) = self.capture_installed_head(core)? else {
             return Ok(());
         };
         core.sparse.put_chain_head_in_txn(
@@ -475,6 +513,7 @@ mod tests {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 

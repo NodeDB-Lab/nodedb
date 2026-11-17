@@ -43,9 +43,9 @@ pub(super) struct PendingTxn {
     /// primary write that changes a tenant row. A schema install raises none.
     pub raises_write_mark: bool,
     /// Whether this vShard's slice carries a RETURNING-bearing write (a plan
-    /// whose applied response is DATA-ROWs, not a bare affected-count). Two
-    /// returning-bearing participants for one txn are an unsupported
-    /// cross-shard RETURNING union.
+    /// whose applied response is DATA-ROWs, not a bare affected-count). Its
+    /// deposit keeps its own place, so the coordinator answers the rows of
+    /// every such participant.
     pub has_returning: bool,
     /// Commit-resolution state of the txn.
     pub commit_state: CommitState,
@@ -85,6 +85,10 @@ pub(super) struct PendingTxn {
     /// A halt released `gates` while the txn waited. Its proposal checks the
     /// incarnations again and takes the gates back first.
     pub ungated: bool,
+    /// The `RETURNING` images this leader's stage answered with, keyed by
+    /// plan index. The leader evaluates the response from them before it
+    /// votes.
+    pub returning: super::staged_returning::StagedReturning,
 }
 
 /// What this vShard's slice of a transaction writes: derived once from its
@@ -150,19 +154,12 @@ impl SliceScope {
 /// The origin of a Calvin slice's redo record: a RESTORE when its local
 /// plans install a RESTORE batch, a commit otherwise. A RESTORE's rows
 /// passed their collection's rules when they were first written, so the
-/// install runs only the checks a RESTORE runs.
+/// install runs only the checks a RESTORE runs. The stage reads the same
+/// origin from the same plans, so it runs the checks the install runs.
 fn redo_origin(
     plans: &[nodedb_physical::physical_plan::PhysicalPlan],
 ) -> nodedb_physical::physical_plan::RedoOrigin {
-    use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan, RedoOrigin};
-    if plans
-        .iter()
-        .any(|plan| matches!(plan, PhysicalPlan::Meta(MetaOp::RestoreRedo(_))))
-    {
-        RedoOrigin::Restore
-    } else {
-        RedoOrigin::Commit
-    }
+    nodedb_physical::physical_plan::RedoOrigin::of_plans(plans)
 }
 
 /// Whether the resolve of `plan` reads a whole collection's stored state.

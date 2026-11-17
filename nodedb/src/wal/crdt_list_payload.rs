@@ -59,8 +59,9 @@ pub(crate) enum CrdtListOpWalRecord {
         surrogate: u32,
         list_path: String,
         index: u64,
-        /// JSON-encoded field map for the inserted block.
-        fields_json: String,
+        /// The inserted block's fields: a native object body, see
+        /// `nodedb_physical::physical_plan::crdt::fields_body`.
+        fields: Vec<u8>,
     },
     Delete {
         collection: String,
@@ -93,7 +94,13 @@ mod tests {
             surrogate: 7,
             list_path: "blocks".to_string(),
             index: 2,
-            fields_json: r#"{"type":"text"}"#.to_string(),
+            fields: nodedb_physical::physical_plan::crdt::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "type".to_string(),
+                    nodedb_types::Value::String("text".into()),
+                )]),
+            )
+            .expect("block fields encode"),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: CrdtListOpWalRecord = zerompk::from_msgpack(&bytes).expect("decode");

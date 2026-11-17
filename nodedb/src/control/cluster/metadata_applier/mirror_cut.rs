@@ -160,7 +160,7 @@ mod tests {
     use nodedb_cluster::{MetadataApplier, encode_entry};
     use nodedb_types::MirrorGroupPosition;
 
-    use super::super::test_fixture::applier_with_shared_at;
+    use super::super::test_fixture::applier_with_core_at;
     use super::*;
     use crate::control::mirror::MirrorVerdict;
     use crate::control::mirror::test_fixture::mirror_descriptor;
@@ -206,7 +206,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let (applier, state) = applier_with_shared_at(tmp.path(), "test.wal");
+        let (applier, state) = applier_with_core_at(tmp.path(), "test.wal");
         let put = ddl(&CatalogEntry::PutDatabase(Box::new(descriptor(
             MirrorStatus::Following,
         ))));
@@ -241,7 +241,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bootstrap_image_installs_a_row_at_its_source_version() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let (applier, state) = applier_with_shared_at(tmp.path(), "test.wal");
+        let (applier, state) = applier_with_core_at(tmp.path(), "test.wal");
         let put = ddl(&CatalogEntry::PutDatabase(Box::new(descriptor(
             MirrorStatus::Bootstrapping {
                 bytes_done: 0,
@@ -415,7 +415,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_database_that_follows_nothing_takes_no_row() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let (applier, state) = applier_with_shared_at(tmp.path(), "test.wal");
+        let (applier, state) = applier_with_core_at(tmp.path(), "test.wal");
         assert_eq!(applier.apply(&[(1, cut(1, 1, Vec::new()))]).await, 1);
         assert!(
             state

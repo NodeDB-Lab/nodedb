@@ -13,6 +13,8 @@
 //! cell write locks it. A restored columnar key locks its row surrogate,
 //! which every columnar writer's whole-collection lock covers. A restored
 //! vector row locks its surrogate, as every vector point writer locks it.
+//! A restored row's sync-frame text locks the row's surrogate, as every
+//! point writer of the row locks it.
 //! Restored timeseries rows lock their collection whole, as every
 //! timeseries writer locks it: a timeseries row has no key.
 
@@ -31,11 +33,12 @@ pub(super) fn add_keys(keys: &mut WriteKeys, batch: &RestoredRedo) -> crate::Res
         && batch.arrays.is_empty()
         && batch.columnar_keys.is_empty()
         && batch.vector_rows.is_empty()
+        && batch.synced_text.is_empty()
         && batch.timeseries.is_empty()
     {
         return Err(unsequenced(
             "a RESTORE batch carries no row, no KV key, no edge, no node label, no array cell, \
-             no columnar key, no vector row and no timeseries row",
+             no columnar key, no vector row, no synced text and no timeseries row",
         ));
     }
     for row in &batch.rows {
@@ -50,6 +53,9 @@ pub(super) fn add_keys(keys: &mut WriteKeys, batch: &RestoredRedo) -> crate::Res
     }
     for row in &batch.vector_rows {
         keys.vector_rows(&row.collection, [row.surrogate]);
+    }
+    for row in &batch.synced_text {
+        keys.rows(&row.collection, [row.surrogate]);
     }
     for collection in &batch.timeseries {
         keys.whole_collection(collection);

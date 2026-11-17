@@ -91,10 +91,10 @@ pub async fn ddl_ok_in(
     let result = ddl::dispatch(state, identity, sql, database_id, &scope.ctx())
         .await
         .map(|result| ddl_encode::ddl_results_to_pgwire(result, &TEXT_RESULTS));
-    assert!(result.is_some(), "DDL not recognized: {sql}");
-    result
-        .unwrap()
-        .unwrap_or_else(|e| panic!("DDL failed: {sql}: {e}"));
+    let Some(result) = result else {
+        panic!("DDL not recognized: {sql}");
+    };
+    result.unwrap_or_else(|e| panic!("DDL failed: {sql}: {e}"));
 }
 
 /// Run DDL, expect error; return the error string for assertions.
@@ -109,8 +109,10 @@ pub async fn ddl_err(state: &SharedState, identity: &AuthenticatedIdentity, sql:
     )
     .await
     .map(|result| ddl_encode::ddl_results_to_pgwire(result, &TEXT_RESULTS));
-    assert!(result.is_some(), "DDL not recognized: {sql}");
-    let err = result.unwrap().unwrap_err();
+    let Some(result) = result else {
+        panic!("DDL not recognized: {sql}");
+    };
+    let err = result.expect_err("DDL must fail");
     err.to_string()
 }
 

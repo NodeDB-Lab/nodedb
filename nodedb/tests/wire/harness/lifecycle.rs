@@ -32,6 +32,44 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_multicores`] with `[tuning.network] max_returning_rows`
+    /// lowered to `rows`.
+    pub async fn start_multicores_with_max_returning_rows(cores: usize, rows: u64) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_returning_rows(rows),
+            cores,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// A server with no `RETURNING` response limit: every limit is the
+    /// largest value a config file holds.
+    pub async fn start_with_unlimited_returning() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::unlimited_returning(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// A server whose `[tuning.query] max_txn_overlay_bytes` is `bytes`.
+    pub async fn start_with_max_txn_overlay_bytes(bytes: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_txn_overlay_bytes(bytes),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
     /// test whose collections must land on different cores.
     #[cfg(feature = "failpoints")]
@@ -199,6 +237,42 @@ impl TestServer {
             AuthMode::Trust,
             TuningOverrides::max_redo_entry_bytes(bytes),
             1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// [`Self::start_with_max_redo_entry_bytes`] with a staging overlay that
+    /// spills past `overlay_bytes`, so a large commit resolves a spilled
+    /// overlay into a chunked redo.
+    pub async fn start_with_redo_and_overlay_bytes(
+        redo_bytes: usize,
+        overlay_bytes: usize,
+    ) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides {
+                max_redo_entry_bytes: Some(redo_bytes),
+                max_txn_overlay_bytes: Some(overlay_bytes),
+                ..TuningOverrides::default()
+            },
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// [`Self::start_with_max_redo_entry_bytes`] with `NODEDB_FAILPOINTS=spec`
+    /// set on the server (see [`Self::start_with_failpoints`]).
+    #[cfg(feature = "failpoints")]
+    pub async fn start_with_max_redo_entry_bytes_and_failpoints(bytes: usize, spec: &str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn_with_failpoints(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_redo_entry_bytes(bytes),
+            1,
+            Some(spec),
         );
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }

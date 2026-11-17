@@ -32,6 +32,16 @@ use crate::types::TxnId;
 
 use super::array_staged::ArrayTxnOverlay;
 
+/// An error of the array overlay merge: a tile rewrite, or a spilled
+/// overlay tier that cannot be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ArrayOverlayMergeError {
+    #[error(transparent)]
+    Array(#[from] ArrayError),
+    #[error(transparent)]
+    Overlay(#[from] crate::Error),
+}
+
 /// Inputs for [`CoreLoop::merge_array_overlay_tiles`].
 pub(in crate::data::executor) struct ArrayOverlayMergeParams<'a> {
     /// The read's transaction, from `task.request.txn_id`. `None` (autocommit)
@@ -54,7 +64,7 @@ impl CoreLoop {
         &self,
         p: ArrayOverlayMergeParams<'_>,
         tiles: &mut Vec<(u64, SparseTile)>,
-    ) -> Result<(), ArrayError> {
+    ) -> Result<(), ArrayOverlayMergeError> {
         let Some(txn_id) = p.txn_id else {
             return Ok(());
         };
@@ -75,13 +85,20 @@ fn merge_overlay(
     schema: &ArraySchema,
     valid_at_ms: Option<i64>,
     tiles: &mut Vec<(u64, SparseTile)>,
-) -> Result<(), ArrayError> {
+) -> Result<(), ArrayOverlayMergeError> {
     // Every coordinate this transaction wrote shadows its base cell: a
-    // tombstone hides it, a staged put replaces it.
-    let shadowed: HashSet<&[CoordValue]> = overlay
-        .tombstoned_coords(array_id)
-        .chain(overlay.staged_cells(array_id).map(|(coord, _)| coord))
-        .collect();
+    // tombstone hides it, a staged put replaces it. The staged cells are the
+    // read's own result rows, so they are held for the merge.
+    let mut shadowed: HashSet<Vec<CoordValue>> = HashSet::new();
+    for coord in overlay.tombstoned_coords(array_id) {
+        shadowed.insert(coord?);
+    }
+    let mut puts = Vec::new();
+    for cell in overlay.staged_cells(array_id) {
+        let (coord, put) = cell?;
+        shadowed.insert(coord.clone());
+        puts.push((coord, put));
+    }
     if !shadowed.is_empty() {
         for (_, tile) in tiles.iter_mut() {
             if tile_has_coord(tile, &shadowed) {
@@ -94,7 +111,7 @@ fn merge_overlay(
     // Staged puts, grouped by the tile key each would land in so a shard
     // bucket filter treats them like base tiles.
     let mut by_prefix: HashMap<u64, SparseTileBuilder<'_>> = HashMap::new();
-    for (coord, put) in overlay.staged_cells(array_id) {
+    for (coord, put) in &puts {
         if let Some(vt) = valid_at_ms
             && !(put.valid_from_ms <= vt && vt < put.valid_until_ms)
         {
@@ -143,7 +160,7 @@ fn row_coord(tile: &SparseTile, row: usize) -> Result<Vec<CoordValue>, ArrayErro
         .collect()
 }
 
-fn tile_has_coord(tile: &SparseTile, coords: &HashSet<&[CoordValue]>) -> bool {
+fn tile_has_coord(tile: &SparseTile, coords: &HashSet<Vec<CoordValue>>) -> bool {
     (0..tile.row_count())
         .any(|row| row_coord(tile, row).is_ok_and(|coord| coords.contains(coord.as_slice())))
 }
@@ -293,7 +310,7 @@ mod tests {
     fn tombstone_drops_base_row_and_keeps_siblings() {
         let schema = schema();
         let mut overlay = ArrayTxnOverlay::new();
-        overlay.stage_cell_delete(aid(), coord(1));
+        overlay.stage_cell_delete(aid(), coord(1)).unwrap();
         let mut tiles = vec![(0u64, base_tile(&schema, &[(1, 10), (2, 20)]))];
         merge_overlay(&overlay, &aid(), &schema, None, &mut tiles).unwrap();
         assert_eq!(cells_of(&tiles), vec![(2, 20)]);
@@ -303,8 +320,8 @@ mod tests {
     fn staged_put_shadows_base_row_and_appends() {
         let schema = schema();
         let mut overlay = ArrayTxnOverlay::new();
-        overlay.stage_cell_put(aid(), coord(1), put(99));
-        overlay.stage_cell_put(aid(), coord(9), put(9));
+        overlay.stage_cell_put(aid(), coord(1), put(99)).unwrap();
+        overlay.stage_cell_put(aid(), coord(9), put(9)).unwrap();
         let mut tiles = vec![(0u64, base_tile(&schema, &[(1, 10), (2, 20)]))];
         merge_overlay(&overlay, &aid(), &schema, None, &mut tiles).unwrap();
         assert_eq!(cells_of(&tiles), vec![(1, 99), (2, 20), (9, 9)]);
@@ -314,7 +331,7 @@ mod tests {
     fn empty_base_tile_is_dropped_after_tombstoning() {
         let schema = schema();
         let mut overlay = ArrayTxnOverlay::new();
-        overlay.stage_cell_delete(aid(), coord(1));
+        overlay.stage_cell_delete(aid(), coord(1)).unwrap();
         let mut tiles = vec![(0u64, base_tile(&schema, &[(1, 10)]))];
         merge_overlay(&overlay, &aid(), &schema, None, &mut tiles).unwrap();
         assert!(tiles.is_empty());
@@ -324,15 +341,17 @@ mod tests {
     fn valid_at_filters_staged_puts() {
         let schema = schema();
         let mut overlay = ArrayTxnOverlay::new();
-        overlay.stage_cell_put(
-            aid(),
-            coord(1),
-            StagedCellPut {
-                valid_from_ms: 100,
-                valid_until_ms: 200,
-                ..put(1)
-            },
-        );
+        overlay
+            .stage_cell_put(
+                aid(),
+                coord(1),
+                StagedCellPut {
+                    valid_from_ms: 100,
+                    valid_until_ms: 200,
+                    ..put(1)
+                },
+            )
+            .unwrap();
         let mut tiles = Vec::new();
         merge_overlay(&overlay, &aid(), &schema, Some(50), &mut tiles).unwrap();
         assert!(tiles.is_empty());
@@ -344,7 +363,9 @@ mod tests {
     fn other_array_is_untouched() {
         let schema = schema();
         let mut overlay = ArrayTxnOverlay::new();
-        overlay.stage_cell_put(ArrayId::new(TenantId::new(1), "b"), coord(1), put(1));
+        overlay
+            .stage_cell_put(ArrayId::new(TenantId::new(1), "b"), coord(1), put(1))
+            .unwrap();
         let mut tiles = vec![(0u64, base_tile(&schema, &[(1, 10)]))];
         merge_overlay(&overlay, &aid(), &schema, None, &mut tiles).unwrap();
         assert_eq!(cells_of(&tiles), vec![(1, 10)]);

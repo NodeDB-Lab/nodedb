@@ -14,6 +14,14 @@
 //!
 //! A stream keeps its chunks from index `0` up to the first chunk with a
 //! missing piece. That chunk's entry never concluded, so it applies again.
+//! The store holds each kept chunk's position, length and checksum, never
+//! its bytes.
+//!
+//! Every installed stream marker whose chunks the WAL still holds keeps them
+//! until a checkpoint passes the marker: its readers rebuild the marker's
+//! rows from them at every boot. The rebuild takes that hold.
+//! The change stream keeps the marker's entry too, while its change events
+//! can stage again from those chunks (see `change_stream::unjournaled`).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -21,7 +29,9 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use crate::types::Lsn;
-use crate::wal::{CalvinPositionId, RedoChunkHeader, RedoChunkRecord, RedoRecord, RedoStreamId};
+use crate::wal::{
+    CalvinPositionId, RedoChunkHeader, RedoChunkRecord, RedoChunkRef, RedoRecord, RedoStreamId,
+};
 
 use super::store::RedoChunkStore;
 use super::stream::OpenStream;
@@ -40,6 +50,7 @@ struct ChunkPieces {
     pieces: u32,
     got: BTreeMap<u32, Vec<u8>>,
     first: u64,
+    last: u64,
 }
 
 /// One stream read so far.
@@ -60,9 +71,10 @@ impl Building {
         }
     }
 
-    /// The whole chunks from index `0`, the first record's LSN, and the
-    /// bytes they hold. `None` when chunk `0` is not whole.
-    fn whole_prefix(self) -> Option<(Vec<Vec<u8>>, u64, u64)> {
+    /// The references of the whole chunks from index `0`, the first
+    /// record's LSN, and the bytes they hold. `None` when chunk `0` is not
+    /// whole.
+    fn whole_prefix(self) -> Option<(Vec<RedoChunkRef>, u64, u64)> {
         let mut chunks = Vec::new();
         let mut first = u64::MAX;
         let mut held = 0u64;
@@ -74,9 +86,20 @@ impl Building {
                 break;
             }
             first = first.min(chunk.first);
-            let bytes: Vec<u8> = chunk.got.into_values().flatten().collect();
-            held += bytes.len() as u64;
-            chunks.push(bytes);
+            let mut crc = 0u32;
+            let mut len = 0u64;
+            for bytes in chunk.got.values() {
+                crc = crc32c::crc32c_append(crc, bytes);
+                len += bytes.len() as u64;
+            }
+            held += len;
+            chunks.push(RedoChunkRef {
+                index,
+                first_lsn: chunk.first,
+                last_lsn: chunk.last,
+                len,
+                crc,
+            });
         }
         (!chunks.is_empty()).then_some((chunks, first, held))
     }
@@ -89,6 +112,7 @@ impl RedoChunkStore {
         let mut building: BTreeMap<RedoStreamId, Building> = BTreeMap::new();
         let mut keys: HashSet<u64> = HashSet::new();
         let mut redo_records: Vec<&WalRecord> = Vec::new();
+        let mut chunk_lsns: HashSet<u64> = HashSet::new();
         let mut closed = 0usize;
         for record in records {
             let key = record.apply_key();
@@ -97,6 +121,7 @@ impl RedoChunkStore {
             }
             match RecordType::from_raw(record.logical_record_type()) {
                 Some(RecordType::RedoChunk) => {
+                    chunk_lsns.insert(record.header.lsn);
                     match RedoChunkRecord::from_bytes(&record.payload)? {
                         RedoChunkRecord::Piece(piece) => {
                             let stream = building
@@ -110,8 +135,10 @@ impl RedoChunkStore {
                                         pieces: piece.pieces,
                                         got: BTreeMap::new(),
                                         first: record.header.lsn,
+                                        last: record.header.lsn,
                                     });
                             chunk.first = chunk.first.min(record.header.lsn);
+                            chunk.last = chunk.last.max(record.header.lsn);
                             chunk.got.insert(piece.piece, piece.bytes);
                         }
                         RedoChunkRecord::Closed { stream } => {
@@ -129,6 +156,15 @@ impl RedoChunkStore {
                 }
                 Some(RecordType::TransactionRedo) => redo_records.push(record),
                 _ => {}
+            }
+        }
+        for (marker, reference) in crate::wal::redo::markers_in(records)? {
+            if let Some(first) = reference.first_lsn()
+                && chunk_lsns.contains(&first)
+            {
+                self.wal
+                    .floor_holds()
+                    .hold_until_checkpoint(Lsn::new(first), Lsn::new(marker));
             }
         }
         let applied_positions = if building
@@ -196,7 +232,7 @@ fn stamped_positions(records: &[&WalRecord]) -> crate::Result<HashSet<CalvinPosi
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::tests::{chunk, session, wal};
+    use super::super::store::tests::{chunk, read_back, session, wal};
     use super::super::store::{RedoChunkLimits, RedoChunkStore};
     use super::*;
 
@@ -245,9 +281,59 @@ mod tests {
             .expect("rebuild");
         assert_eq!(stats, RebuildStats { open: 1, closed: 2 });
         let stream = rebuilt.take_for_final(&open).expect("open stream rebuilt");
-        assert_eq!(stream.assemble(2, 5).expect("assembles"), b"abcde".to_vec());
+        assert_eq!(
+            read_back(&wal, &stream, 2, 5).expect("whole"),
+            b"abcde".to_vec()
+        );
+        // The rebuilt stream names the same records the live one did.
+        let live_open = live.take_for_final(&open).expect("live stream");
+        assert_eq!(
+            stream.stream_ref(2, 5).expect("ref"),
+            live_open.stream_ref(2, 5).expect("ref")
+        );
         assert!(rebuilt.take_for_final(&finished).is_none());
         assert!(rebuilt.take_for_final(&abandoned).is_none());
+    }
+
+    /// A stream whose final entry installed leaves a marker. The rebuild
+    /// keeps the marker's chunks until a checkpoint passes it, and drops the
+    /// stream from the open set.
+    #[tokio::test]
+    async fn boot_keeps_an_installed_markers_chunks_until_a_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = wal(&dir);
+        let live = RedoChunkStore::new(std::sync::Arc::clone(&wal), limits());
+        let stream = session(61);
+        live.apply_chunk(chunk(stream, 0, 2, b"ab"))
+            .await
+            .expect("chunk");
+        let open = live.take_for_final(&stream).expect("open stream");
+        let reference = open.stream_ref(1, 2).expect("ref");
+        let marker = wal
+            .appender(61)
+            .with_event_source(crate::event::EventSource::User)
+            .append_transaction_redo(
+                crate::types::TenantId::new(1),
+                crate::types::VShardId::new(2),
+                crate::types::DatabaseId::DEFAULT,
+                &reference.marker(None, None, Vec::new()).expect("marker"),
+            )
+            .expect("marker record");
+        drop(open);
+        wal.sync().expect("sync");
+
+        let rebuilt = RedoChunkStore::new(std::sync::Arc::clone(&wal), limits());
+        rebuilt
+            .rebuild(&wal.replay().expect("replay"))
+            .expect("rebuild");
+        assert!(rebuilt.take_for_final(&stream).is_none());
+        assert_eq!(
+            wal.floor_holds().lowest().map(|lsn| lsn.as_u64()),
+            reference.first_lsn()
+        );
+        wal.truncate_before(Lsn::new(marker.as_u64() + 1))
+            .expect("truncate");
+        assert_eq!(wal.floor_holds().lowest(), None);
     }
 
     #[tokio::test]

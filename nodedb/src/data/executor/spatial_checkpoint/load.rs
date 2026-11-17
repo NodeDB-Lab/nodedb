@@ -9,8 +9,13 @@ use nodedb_types::DatabaseId;
 use tracing::info;
 
 use super::manifest::{read_spatial_manifest_at, storage_err};
-use super::paths::{parse_spatial_key, spatial_ckpt_dir, spatial_ckpt_gen_dir};
+use super::paths::{
+    SPATIAL_DOCMAP_EXTENSION, spatial_ckpt_dir, spatial_ckpt_gen_dir, spatial_map_key,
+};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{
+    is_keyed_checkpoint_path, read_keyed_checkpoint, read_keyed_checkpoint_expecting,
+};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::spatial::RTree;
 use crate::types::{Lsn, TenantId};
@@ -38,8 +43,8 @@ impl CoreLoop {
     /// When `spatial_checkpoint_kek` is set, plaintext checkpoint files are
     /// rejected and encrypted files are decrypted before loading.
     ///
-    /// A corrupt or unreadable generation (bad framing, bad CRC, an unparseable
-    /// filename, a rejected R-tree decode, or a missing/corrupt docmap
+    /// A corrupt or unreadable generation (bad framing, bad CRC, a stored key
+    /// that does not match its file name, a rejected R-tree decode, or a missing/corrupt docmap
     /// companion) is fail-stop: its `Err` propagates out of boot so the core
     /// refuses to come up, rather than silently loading a partial index once the
     /// WAL below the generation's LSN is already truncated. An absent checkpoint
@@ -97,22 +102,19 @@ impl CoreLoop {
         for entry in dir_entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
 
             // This directory is engine-private (only this module's write path
-            // creates `.ckpt` files here), so a `.ckpt` whose stem does not
-            // parse is a corrupted real checkpoint, not a foreign file to skip.
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let key = parse_spatial_key(&stem)
-                .ok_or_else(|| CheckpointDecodeError::UnparseableFilename { stem: stem.clone() })?;
-
-            let bytes = nodedb_wal::segment::read_checkpoint_framed(&path)?;
+            // creates `.ckpt` files here), so a stored key that is not a
+            // spatial key is a corrupted real checkpoint, not a foreign file.
+            let (stored, bytes) = read_keyed_checkpoint(&path)?;
+            let key = spatial_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
+                path: path.clone(),
+                stored: stored.to_string(),
+                expected: "spatial",
+            })?;
             let kek = self.segment_keks.spatial_checkpoint_kek.as_ref();
             let memory = nodedb_mem::ScopedMemory::new(
                 self.governor.clone(),
@@ -127,8 +129,9 @@ impl CoreLoop {
             // or undecodable one here means the R-tree's entries would resolve
             // to no document at all — an inconsistent generation, not a
             // legitimate absence.
-            let map_path = gen_dir.join(format!("{stem}.docmap"));
-            let map_bytes = nodedb_wal::segment::read_checkpoint_framed(&map_path)?;
+            let map_path =
+                gen_dir.join(format!("{}.{SPATIAL_DOCMAP_EXTENSION}", stored.file_stem()));
+            let map_bytes = read_keyed_checkpoint_expecting(&map_path, &stored)?;
             let doc_entries: Vec<(u64, String)> =
                 zerompk::from_msgpack(&map_bytes).map_err(|source| {
                     CheckpointDecodeError::MsgpackDecode {
@@ -150,12 +153,15 @@ mod tests {
     use super::super::format::{
         SPATIAL_CKPT_FORMAT_VERSION, SpatialCheckpointManifest, test_manifest_bytes,
     };
-    use super::super::paths::{SPATIAL_CKPT_MANIFEST, checkpoint_stem};
+    use super::super::paths::{SPATIAL_CKPT_MANIFEST, spatial_ckpt_key};
     use super::super::test_support::open_core_at;
     use super::*;
+    use crate::data::executor::checkpoint_key::{
+        write_keyed_checkpoint, write_keyed_checkpoint_as,
+    };
     use crate::engine::spatial::RTreeEntry;
 
-    /// Publish `stem`'s files into generation 0 and swing the manifest, so the
+    /// Publish the files `write_files` writes into generation 0 and swing the manifest, so the
     /// load path sees exactly what a real flush would have made reachable.
     fn publish(ckpt_dir: &std::path::Path, write_files: impl FnOnce(&std::path::Path)) {
         let gen_dir = spatial_ckpt_gen_dir(ckpt_dir, 0);
@@ -204,13 +210,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = open_core_at(dir.path());
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
-        let stem = checkpoint_stem(DatabaseId::new(0), TenantId::new(7), "pts", "geom");
+        let name = spatial_ckpt_key(0, 7, "pts", "geom").file_name();
         publish(&ckpt_dir, |gen_dir| {
-            std::fs::write(
-                gen_dir.join(format!("{stem}.ckpt")),
-                b"not a valid checkpoint frame",
-            )
-            .expect("write garbage checkpoint");
+            std::fs::write(gen_dir.join(name), b"not a valid checkpoint frame")
+                .expect("write garbage checkpoint");
         });
         drop(core);
 
@@ -220,24 +223,56 @@ mod tests {
             .expect_err("a corrupt R-tree checkpoint frame must fail the load, not skip it");
     }
 
-    /// A `.ckpt` filename whose stem does not parse is a corrupted real
-    /// checkpoint, not a foreign file to ignore — this directory is
-    /// engine-private and only ever holds files this module wrote.
+    /// A `.ckpt` holding a key other than the one its name is for is refused,
+    /// naming the stored key.
     #[test]
-    fn unparseable_stem_fails_the_load() {
+    fn misnamed_checkpoint_fails_the_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = open_core_at(dir.path());
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
         publish(&ckpt_dir, |gen_dir| {
-            std::fs::write(gen_dir.join("not_a_valid_stem.ckpt"), b"irrelevant")
-                .expect("write file with bad stem");
+            let written = write_keyed_checkpoint(
+                gen_dir,
+                &spatial_ckpt_key(0, 7, "pts", "geom"),
+                &one_entry_rtree_bytes(),
+            )
+            .expect("publish checkpoint");
+            let other = spatial_ckpt_key(0, 7, "other", "geom").file_name();
+            std::fs::rename(written, gen_dir.join(other)).expect("rename");
+        });
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        let err = restored
+            .load_spatial_checkpoints()
+            .expect_err("a misnamed checkpoint must fail the load, not skip it");
+        assert!(err.to_string().contains("pts"), "{err}");
+    }
+
+    /// A doc_map holding another index's key is refused: pairing it would give
+    /// this R-tree's entries another index's document ids.
+    #[test]
+    fn docmap_with_another_key_fails_the_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let core = open_core_at(dir.path());
+        let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
+        let key = spatial_ckpt_key(0, 7, "pts", "geom");
+        publish(&ckpt_dir, |gen_dir| {
+            write_keyed_checkpoint(gen_dir, &key, &one_entry_rtree_bytes())
+                .expect("publish checkpoint");
+            let map_bytes = zerompk::to_msgpack_vec(&Vec::<(u64, String)>::new()).expect("encode");
+            let other = spatial_ckpt_key(0, 7, "other", "geom");
+            let written = write_keyed_checkpoint_as(gen_dir, &other, "docmap", &map_bytes)
+                .expect("publish docmap");
+            std::fs::rename(written, gen_dir.join(format!("{}.docmap", key.file_stem())))
+                .expect("rename");
         });
         drop(core);
 
         let mut restored = open_core_at(dir.path());
         restored
             .load_spatial_checkpoints()
-            .expect_err("an unparseable checkpoint filename must fail the load, not skip it");
+            .expect_err("a docmap holding another key must fail the load");
     }
 
     /// A valid R-tree whose companion `.docmap` is missing is an inconsistent
@@ -248,10 +283,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = open_core_at(dir.path());
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
-        let stem = checkpoint_stem(DatabaseId::new(0), TenantId::new(7), "pts", "geom");
+        let key = spatial_ckpt_key(0, 7, "pts", "geom");
         publish(&ckpt_dir, |gen_dir| {
-            let bytes = one_entry_rtree_bytes();
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &format!("{stem}.ckpt"), &bytes)
+            write_keyed_checkpoint(gen_dir, &key, &one_entry_rtree_bytes())
                 .expect("publish checkpoint");
             // Deliberately do NOT write the `.docmap` companion.
         });
@@ -270,18 +304,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let core = open_core_at(dir.path());
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
-        let stem = checkpoint_stem(DatabaseId::new(0), TenantId::new(7), "pts", "geom");
+        let key = spatial_ckpt_key(0, 7, "pts", "geom");
         publish(&ckpt_dir, |gen_dir| {
-            let bytes = one_entry_rtree_bytes();
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &format!("{stem}.ckpt"), &bytes)
+            write_keyed_checkpoint(gen_dir, &key, &one_entry_rtree_bytes())
                 .expect("publish checkpoint");
             // Frame is valid, but the payload is not MessagePack.
-            nodedb_wal::segment::write_checkpoint_framed(
-                gen_dir,
-                &format!("{stem}.docmap"),
-                b"not msgpack",
-            )
-            .expect("publish garbage docmap");
+            write_keyed_checkpoint_as(gen_dir, &key, "docmap", b"not msgpack")
+                .expect("publish garbage docmap");
         });
         drop(core);
 
@@ -332,8 +361,9 @@ mod tests {
             .expect_err("a manifest this build cannot read must fail the load");
     }
 
-    /// The happy path end to end: a published pair restores both the index and
-    /// the entry-id-to-document-id mapping.
+    /// The happy path end to end, on a 255-byte collection with a 200-byte
+    /// field: a published pair restores both the index and the
+    /// entry-id-to-document-id mapping.
     #[test]
     fn valid_checkpoint_and_docmap_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -341,20 +371,17 @@ mod tests {
         let ckpt_dir = spatial_ckpt_dir(&core.data_dir, core.core_id);
         let db = DatabaseId::new(0);
         let tid = TenantId::new(7);
-        let stem = checkpoint_stem(db, tid, "pts", "geom");
+        let coll = "p".repeat(255);
+        let field = "g".repeat(200);
+        let ckpt_key = spatial_ckpt_key(0, 7, &coll, &field);
         publish(&ckpt_dir, |gen_dir| {
-            let bytes = one_entry_rtree_bytes();
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &format!("{stem}.ckpt"), &bytes)
+            write_keyed_checkpoint(gen_dir, &ckpt_key, &one_entry_rtree_bytes())
                 .expect("publish checkpoint");
 
             let doc_entries: Vec<(u64, String)> = vec![(1, "doc-1".to_string())];
             let map_bytes = zerompk::to_msgpack_vec(&doc_entries).expect("encode docmap");
-            nodedb_wal::segment::write_checkpoint_framed(
-                gen_dir,
-                &format!("{stem}.docmap"),
-                &map_bytes,
-            )
-            .expect("publish docmap");
+            write_keyed_checkpoint_as(gen_dir, &ckpt_key, "docmap", &map_bytes)
+                .expect("publish docmap");
         });
         drop(core);
 
@@ -363,12 +390,12 @@ mod tests {
             .load_spatial_checkpoints()
             .expect("a valid checkpoint and docmap must load cleanly");
 
-        let key = (db, tid, "pts".to_string(), "geom".to_string());
+        let key = (db, tid, coll.clone(), field.clone());
         assert_eq!(restored.spatial_indexes.get(&key).map(|r| r.len()), Some(1));
         assert_eq!(
             restored
                 .spatial_doc_map
-                .get(&(db, tid, "pts".to_string(), "geom".to_string(), 1))
+                .get(&(db, tid, coll, field, 1))
                 .map(String::as_str),
             Some("doc-1")
         );

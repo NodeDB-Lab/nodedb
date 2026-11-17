@@ -22,11 +22,13 @@ pub fn metadata_apply_wedged(
 ) {
     let kind = entry_kind(entry);
     let class = error_class(err);
+    let objects = catalog_objects(entry);
     let ctx = context::MetadataApplyWedged {
         raft_index,
         last_applied_watermark,
         entry_kind: &kind,
         error_class: &class,
+        catalog_objects: &objects,
         permanent,
     };
     let _ = Capture::new(
@@ -37,6 +39,37 @@ pub fn metadata_apply_wedged(
     .domain(&ctx)
     .with_backtrace()
     .emit();
+}
+
+/// The catalog objects `entry` writes, as `<kind> <name>` labels. An index
+/// record also names its collection. A batch lists the objects of every
+/// sub-entry. An undecodable payload names no object.
+fn catalog_objects(entry: &MetadataEntry) -> Vec<String> {
+    use crate::control::catalog_entry::{self, CatalogEntry};
+
+    match entry {
+        MetadataEntry::CatalogDdl { payload }
+        | MetadataEntry::CatalogDdlAudited { payload, .. } => {
+            let Ok(decoded) = catalog_entry::decode(payload) else {
+                return Vec::new();
+            };
+            let kind = decoded.kind();
+            let (name, _, _) = crate::control::cluster::metadata_applier::describe_entry(&decoded);
+            let label = match &decoded {
+                CatalogEntry::PutIndexRecord(record) => {
+                    format!("{kind} {name} on {}", record.collection)
+                }
+                CatalogEntry::DeleteIndexRecord { collection, .. } => {
+                    format!("{kind} {name} on {collection}")
+                }
+                _ => format!("{kind} {name}"),
+            };
+            vec![label]
+        }
+        MetadataEntry::Batch { entries } => entries.iter().flat_map(catalog_objects).collect(),
+        MetadataEntry::DdlPrepared { entry, .. } => catalog_objects(entry),
+        _ => Vec::new(),
+    }
 }
 
 /// Report a `catalog_entry::apply_to` call that left redb with an orphaned
@@ -51,23 +84,6 @@ pub fn catalog_apply_orphan_row(entry_kind: &str, orphan_kind: &str, orphan_coun
     let _ = Capture::new(
         EventKind::InvariantViolation,
         "catalog_entry::apply_to left an orphaned parent-replicated catalog row",
-    )
-    .domain(&ctx)
-    .with_backtrace()
-    .emit();
-}
-
-/// Report a collection purge that found no catalog row to deactivate.
-/// Called only from `apply::collection::prepare_purge_checked`.
-pub fn collection_purge_row_missing(database_id: u64, tenant_id: u64, name: &str) {
-    let ctx = context::CollectionPurgeRowMissing {
-        database_id,
-        tenant_id,
-        name,
-    };
-    let _ = Capture::new(
-        EventKind::InvariantViolation,
-        "collection purge found no catalog row to deactivate",
     )
     .domain(&ctx)
     .with_backtrace()
@@ -126,6 +142,24 @@ pub fn synonym_group_not_applied(
         EventKind::InvariantViolation,
         "synonym group post-apply: the committed group change never reached this node's \
          FTS backend",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
+/// Report a collection purge-log prune this node could not decide on: the
+/// log did not read. Called from the collection-GC sweep, which retries on
+/// its next tick. Rows past retention stay on record until a prune lands.
+pub fn purge_log_prune_not_proposed(err: &crate::Error) {
+    let class = error_class(err);
+    let ctx = context::PurgeLogPruneNotProposed {
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "collection-gc: the collection purge log did not read, so no prune was proposed",
     )
     .error_chain(error_chain_of(err))
     .domain(&ctx)

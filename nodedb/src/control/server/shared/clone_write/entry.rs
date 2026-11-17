@@ -211,6 +211,16 @@ fn refuse_unsupported_clone_write(
     // protocol, not that the engine lacks support. Columnar (plain,
     // timeseries, spatial) has no CoW module at all. Exhaustive: a third
     // `CollectionType` forces a decision here too.
+    // A vector-primary collection stores its rows in a document sidecar, but
+    // its writes are vector writes, which have no CoW module.
+    if matches!(desc.primary, nodedb_types::PrimaryEngine::Vector) {
+        return Err(crate::Error::CloneWriteRequiresMaterialize {
+            collection: coll_name.to_string(),
+            engine: "vector".to_string(),
+            database,
+            reason: "has no copy-on-write support",
+        });
+    }
     let reason = match desc.collection_type {
         CollectionType::Document(_) | CollectionType::KeyValue(_) => {
             "supports copy-on-write for point writes only; this write's shape is outside that protocol"

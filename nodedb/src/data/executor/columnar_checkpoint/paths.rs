@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Filesystem naming for columnar checkpoints: directories, per-collection
-//! filenames, and the inverse parse.
+//! Filesystem naming for columnar checkpoints: directories and the
+//! per-collection checkpoint key.
 //!
 //! Both the write path (`write.rs`) and the load path (`load.rs`) build every
 //! path through these helpers so the two can never drift. A path divergence
 //! between writer and reader is silent, and its symptom is indistinguishable
 //! from data loss.
+
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 
 /// Filename of the manifest that names the live generation.
 pub(crate) const COLUMNAR_CKPT_MANIFEST: &str = "MANIFEST";
@@ -31,35 +33,35 @@ pub(crate) fn columnar_ckpt_gen_dir(
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// Per-collection checkpoint filename:
-/// `db-{did}-tenant-{tid}-coll-{hex(collection)}.ckpt`.
+/// The checkpoint key for one collection.
 ///
-/// The database id is part of the name because `columnar_engines` is keyed by
+/// The database id is part of the key because `columnar_engines` is keyed by
 /// `(DatabaseId, TenantId, String)` and the id cannot be recovered from the
 /// collection name — restoring under the wrong database id would hide every
-/// restored row from the queries that look for it.
-///
-/// The collection is hex-encoded so the filename is filesystem-safe (collection
-/// names may contain `/`, `:` or `-`) and unambiguously parseable: hex contains
-/// only `[0-9a-f]`, so the `-coll-` separator never collides with the encoded
-/// name and the numeric ids never collide with the encoding.
-pub(crate) fn columnar_ckpt_filename(database_id: u64, tenant_id: u64, collection: &str) -> String {
-    format!(
-        "db-{database_id}-tenant-{tenant_id}-coll-{}.ckpt",
-        hex::encode(collection)
+/// restored row from the queries that look for it. The file name is a
+/// fixed-length hash of the key, and the file stores the key.
+pub(crate) fn columnar_ckpt_key(
+    database_id: u64,
+    tenant_id: u64,
+    collection: &str,
+) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::Columnar,
+        database_id,
+        tenant_id,
+        vec![collection.to_string()],
     )
 }
 
-/// Parse a checkpoint file stem (no extension) back into `(database_id,
-/// tenant_id, collection)`. Returns `None` for any unparseable stem.
-pub(crate) fn parse_columnar_ckpt_stem(stem: &str) -> Option<(u64, u64, String)> {
-    let rest = stem.strip_prefix("db-")?;
-    let (did_str, rest) = rest.split_once("-tenant-")?;
-    let database_id = did_str.parse::<u64>().ok()?;
-    let (tid_str, encoded) = rest.split_once("-coll-")?;
-    let tenant_id = tid_str.parse::<u64>().ok()?;
-    let collection = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
-    Some((database_id, tenant_id, collection))
+/// The `(database_id, tenant_id, collection)` a stored key restores under, or
+/// `None` when the key is not a columnar key.
+pub(super) fn columnar_map_key(key: &CheckpointKey) -> Option<(u64, u64, String)> {
+    match (key.engine, key.parts.as_slice()) {
+        (CheckpointEngine::Columnar, [collection]) => {
+            Some((key.database_id, key.tenant_id, collection.clone()))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -87,55 +89,29 @@ mod tests {
         );
     }
 
-    /// Filenames must round-trip collection names containing exactly the
-    /// separators the hex encoding exists to neutralise.
     #[test]
-    fn filename_roundtrips_through_parse() {
-        for coll in [
-            "events",
-            "2/orders",
-            "a-coll-b",
-            "weird:name",
-            "-coll-",
-            "db-1-tenant-2",
-        ] {
-            let fname = columnar_ckpt_filename(7, 42, coll);
-            let stem = fname.strip_suffix(".ckpt").expect("ckpt extension");
-            let (did, tid, parsed) = parse_columnar_ckpt_stem(stem).expect("stem must parse");
-            assert_eq!(did, 7);
-            assert_eq!(tid, 42);
+    fn key_roundtrips_through_map_key() {
+        for coll in ["events", "2/orders", "a-coll-b", "weird:name", "-coll-"] {
+            let (did, tid, parsed) =
+                columnar_map_key(&columnar_ckpt_key(7, 42, coll)).expect("columnar key");
+            assert_eq!((did, tid), (7, 42));
             assert_eq!(parsed, coll);
         }
     }
 
-    /// Two collections differing only by database id must not share a file —
-    /// otherwise one silently overwrites the other's rows within a generation.
+    /// The database id is part of the key, so two databases' same-name
+    /// collections get distinct files.
     #[test]
-    fn database_id_separates_filenames() {
+    fn database_id_distinguishes_names() {
         assert_ne!(
-            columnar_ckpt_filename(1, 42, "events"),
-            columnar_ckpt_filename(2, 42, "events")
+            columnar_ckpt_key(1, 42, "events").file_name(),
+            columnar_ckpt_key(2, 42, "events").file_name()
         );
     }
 
     #[test]
-    fn unparseable_stems_are_rejected() {
-        assert!(
-            parse_columnar_ckpt_stem("db-x-tenant-1-coll-6162").is_none(),
-            "non-numeric database id"
-        );
-        assert!(
-            parse_columnar_ckpt_stem("db-1-tenant-abc-coll-6162").is_none(),
-            "non-numeric tenant"
-        );
-        assert!(
-            parse_columnar_ckpt_stem("db-1-tenant-1-coll-616").is_none(),
-            "odd hex length"
-        );
-        assert!(
-            parse_columnar_ckpt_stem("db-1-tenant-1-coll-zz").is_none(),
-            "non-hex digits"
-        );
-        assert!(parse_columnar_ckpt_stem("garbage").is_none(), "no prefix");
+    fn max_length_collection_name_fits() {
+        let name = columnar_ckpt_key(0, 1, &"c".repeat(255)).file_name();
+        assert!(name.len() < 64, "{name}");
     }
 }

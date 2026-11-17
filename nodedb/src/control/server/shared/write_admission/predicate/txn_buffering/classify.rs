@@ -297,7 +297,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | TextOp::PhraseSearch { .. }
             | TextOp::HybridSearch { .. }
             | TextOp::HybridSearchTriple { .. }
-            | TextOp::SetTextConfig { .. },
+            | TextOp::SetTextConfig { .. }
+            | TextOp::RebuildIndex { .. },
         ) => false,
 
         // ---- Spatial: encoded (buffered) ----
@@ -378,7 +379,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::RollbackToSavepoint { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
-            | MetaOp::ResolveTxn { .. }
+            | MetaOp::ReadRedoStreamPage { .. }
+            | MetaOp::ResolveTxnPart { .. }
             | MetaOp::ApplyTransactionRedo { .. }
             | MetaOp::RestoreRedo(_),
         ) => false,
@@ -590,6 +592,7 @@ mod tests {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -601,6 +604,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -659,6 +663,7 @@ mod tests {
                 vector_fields: Vec::new(),
                 declared_columns: Vec::new(),
                 declared_key: None,
+                text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::ZERO,
             }),
             PhysicalPlan::Document(DocumentOp::IndexLookup {
@@ -770,6 +775,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         ];
         for p in &plans {
@@ -1093,7 +1099,7 @@ mod tests {
                 document_id: "d".into(),
                 list_path: "$.l".into(),
                 index: 0,
-                fields_json: "{}".into(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
             }),
             PhysicalPlan::Crdt(CrdtOp::ListDelete {
@@ -1124,7 +1130,7 @@ mod tests {
             PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 document_id: "d".into(),
-                fields_json: "{}".into(),
+                fields: Vec::new(),
                 surrogate: Surrogate::new(1),
                 partial: false,
                 verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
@@ -1762,6 +1768,12 @@ mod tests {
                 analyzer_name: Some("standard".into()),
                 fuzzy_default: None,
             }),
+            PhysicalPlan::Text(TextOp::RebuildIndex {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                text_fields: vec!["body".into()],
+                analyzer: None,
+                fuzzy_default: false,
+            }),
         ];
         for p in &plans {
             assert_matches_oracle(p);
@@ -2141,9 +2153,11 @@ mod tests {
                 epoch: 0,
                 position: 0,
             }),
-            PhysicalPlan::Meta(MetaOp::ResolveTxn {
+            PhysicalPlan::Meta(MetaOp::ResolveTxnPart {
                 txn_id: TxnId::new(1),
                 plans: Vec::new(),
+                part: 0,
+                max_part_bytes: 1024,
             }),
         ];
         for p in &plans {
@@ -2291,6 +2305,8 @@ mod tests {
                 source: nodedb_physical::physical_plan::RowSource::whole_collection(
                     QualifiedCollection::new(DatabaseId::DEFAULT, "s"),
                 ),
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Document(DocumentOp::Merge {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),

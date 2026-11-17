@@ -22,6 +22,7 @@
 use std::sync::LazyLock;
 
 use nodedb_crs::CrsContext;
+use nodedb_query::numeric_div::{numeric_div, numeric_rem};
 use nodedb_types::Value;
 use sonic_rs;
 
@@ -100,9 +101,11 @@ pub fn fold_constant_scoped(
             op: UnaryOp::Neg,
             expr,
         } => Ok(match fold_constant_scoped(expr, registry, scope, crs)? {
-            // `checked_neg` so negating `i64::MIN` declines to fold rather
-            // than wrapping (release) or panicking (debug).
-            Some(SqlValue::Int(i)) => i.checked_neg().map(SqlValue::Int),
+            // `-i64::MIN` is past the range, as at run time.
+            Some(SqlValue::Int(i)) => Some(SqlValue::Int(
+                i.checked_neg()
+                    .ok_or_else(|| overflowed(BIGINT_OUT_OF_RANGE))?,
+            )),
             Some(SqlValue::Float(f)) => Some(SqlValue::Float(-f)),
             // `9223372036854775808` is past `i64::MAX`, so its literal is a
             // `Decimal`. Negated it is `i64::MIN`, an integer like every
@@ -127,8 +130,12 @@ pub fn fold_constant_scoped(
         SqlExpr::Function { name, args, .. } => {
             fold_function_call_scoped(name, args, registry, scope, crs)
         }
-        SqlExpr::Cast { expr, to_type } => Ok(fold_constant_scoped(expr, registry, scope, crs)?
-            .and_then(|inner| fold_cast(inner, to_type))),
+        SqlExpr::Cast { expr, to_type } => {
+            match fold_constant_scoped(expr, registry, scope, crs)? {
+                Some(inner) => fold_cast(inner, to_type),
+                None => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -136,7 +143,13 @@ pub fn fold_constant_scoped(
 /// Fold a CAST at plan time. Only applies when the inner expression is already
 /// a constant. The `to_type` string comes from sqlparser's `format!("{data_type}")`
 /// output, so parameterised types like `NUMERIC(5,1)` must be matched by prefix.
-fn fold_cast(inner: SqlValue, to_type: &str) -> Option<SqlValue> {
+///
+/// A cast to an integer, float, text, boolean or numeric type runs the
+/// row-scope cast ([`nodedb_query::cast::eval_cast`]), so a folded cast and
+/// a run-time cast give one answer and fail with one error.
+fn fold_cast(inner: SqlValue, to_type: &str) -> FoldResult {
+    use nodedb_query::CastType;
+
     let upper = to_type.to_uppercase();
     // Strip any precision/scale suffix: "NUMERIC(5,1)" → "NUMERIC".
     let base = upper
@@ -148,65 +161,12 @@ fn fold_cast(inner: SqlValue, to_type: &str) -> Option<SqlValue> {
     match base {
         // REGCLASS needs the session catalog. Keep the cast intact for the
         // contextual catalog-fold pass rather than erasing it to a string.
-        "REGCLASS" => None,
-        "NUMERIC" | "DECIMAL" => match inner {
-            SqlValue::Decimal(d) => Some(SqlValue::Decimal(d)),
-            SqlValue::Int(i) => Some(SqlValue::Decimal(rust_decimal::Decimal::from(i))),
-            SqlValue::Float(f) => rust_decimal::Decimal::try_from(f)
-                .ok()
-                .map(SqlValue::Decimal),
-            SqlValue::String(s) => rust_decimal::Decimal::from_str_exact(&s)
-                .ok()
-                .map(SqlValue::Decimal),
-            _ => None,
-        },
-        "INTEGER" | "INT" | "BIGINT" | "SMALLINT" | "INT2" | "INT4" | "INT8" => match inner {
-            SqlValue::Int(i) => Some(SqlValue::Int(i)),
-            SqlValue::Decimal(d) => {
-                rust_decimal::prelude::ToPrimitive::to_i64(&d).map(SqlValue::Int)
-            }
-            SqlValue::Float(f) => {
-                if f.is_finite() {
-                    Some(SqlValue::Int(f as i64))
-                } else {
-                    None
-                }
-            }
-            SqlValue::String(s) => s.parse::<i64>().ok().map(SqlValue::Int),
-            _ => None,
-        },
-        "FLOAT" | "DOUBLE" | "REAL" | "FLOAT4" | "FLOAT8" | "DOUBLE PRECISION" => match inner {
-            SqlValue::Float(f) => Some(SqlValue::Float(f)),
-            SqlValue::Int(i) => Some(SqlValue::Float(i as f64)),
-            SqlValue::Decimal(d) => {
-                rust_decimal::prelude::ToPrimitive::to_f64(&d).map(SqlValue::Float)
-            }
-            SqlValue::String(s) => s.parse::<f64>().ok().map(SqlValue::Float),
-            _ => None,
-        },
-        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "CHARACTER" | "BPCHAR" => match inner {
-            SqlValue::String(s) => Some(SqlValue::String(s)),
-            SqlValue::Int(i) => Some(SqlValue::String(i.to_string())),
-            SqlValue::Float(f) => Some(SqlValue::String(f.to_string())),
-            SqlValue::Decimal(d) => Some(SqlValue::String(d.to_string())),
-            SqlValue::Bool(b) => Some(SqlValue::String(b.to_string())),
-            _ => None,
-        },
-        "BOOL" | "BOOLEAN" => match inner {
-            SqlValue::Bool(b) => Some(SqlValue::Bool(b)),
-            SqlValue::Int(i) => Some(SqlValue::Bool(i != 0)),
-            SqlValue::String(s) => match s.to_lowercase().as_str() {
-                "true" | "t" | "yes" | "1" | "on" => Some(SqlValue::Bool(true)),
-                "false" | "f" | "no" | "0" | "off" => Some(SqlValue::Bool(false)),
-                _ => None,
-            },
-            _ => None,
-        },
+        "REGCLASS" => Ok(None),
         // `JSON` / `JSONB` — JSON values live internally as their text form
         // in `SqlValue::String`; the write path parses JSON-looking strings
         // into document structure. The cast elides to the inner value's JSON
         // text (mirrors the `::tsvector` / `::tsquery` elision in the resolver).
-        "JSON" | "JSONB" => match inner {
+        "JSON" | "JSONB" => Ok(match inner {
             SqlValue::String(s) => Some(SqlValue::String(s)),
             SqlValue::Int(i) => Some(SqlValue::String(i.to_string())),
             SqlValue::Float(f) => Some(SqlValue::String(f.to_string())),
@@ -214,8 +174,29 @@ fn fold_cast(inner: SqlValue, to_type: &str) -> Option<SqlValue> {
             SqlValue::Bool(b) => Some(SqlValue::String(b.to_string())),
             SqlValue::Null => Some(SqlValue::Null),
             _ => None,
-        },
-        _ => None,
+        }),
+        _ => {
+            let cast_type = if base == "BPCHAR" {
+                Some(CastType::String)
+            } else {
+                CastType::from_type_name(to_type)
+            };
+            match cast_type {
+                Some(
+                    cast_type @ (CastType::Int
+                    | CastType::Int2
+                    | CastType::Int4
+                    | CastType::Float
+                    | CastType::String
+                    | CastType::Bool
+                    | CastType::Decimal(_)),
+                ) => match nodedb_query::cast::eval_cast(&sql_to_ndb_value(inner), &cast_type) {
+                    Ok(value) => Ok(Some(ndb_to_sql_value(value))),
+                    Err(e) => eval_failure(e),
+                },
+                _ => Ok(None),
+            }
+        }
     }
 }
 
@@ -232,6 +213,12 @@ fn is_zero(v: &SqlValue) -> bool {
     }
 }
 
+/// PostgreSQL's message for a `bigint` result past the `i64` range.
+const BIGINT_OUT_OF_RANGE: &str = "bigint out of range";
+
+/// PostgreSQL's message for a numeric result past the `Decimal` range.
+const NUMERIC_OUT_OF_RANGE: &str = "value overflows numeric format";
+
 fn overflowed(detail: &str) -> SqlError {
     SqlError::ConstantOverflow {
         detail: detail.to_owned(),
@@ -244,27 +231,28 @@ fn fold_binary(l: SqlValue, op: BinaryOp, r: SqlValue) -> FoldResult {
     }
     Ok(Some(match (l, op, r) {
         // Int × Int arithmetic.
-        (SqlValue::Int(a), BinaryOp::Add, SqlValue::Int(b)) => {
-            SqlValue::Int(a.checked_add(b).ok_or_else(|| overflowed("integer add"))?)
-        }
+        (SqlValue::Int(a), BinaryOp::Add, SqlValue::Int(b)) => SqlValue::Int(
+            a.checked_add(b)
+                .ok_or_else(|| overflowed(BIGINT_OUT_OF_RANGE))?,
+        ),
         (SqlValue::Int(a), BinaryOp::Sub, SqlValue::Int(b)) => SqlValue::Int(
             a.checked_sub(b)
-                .ok_or_else(|| overflowed("integer subtract"))?,
+                .ok_or_else(|| overflowed(BIGINT_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Mul, SqlValue::Int(b)) => SqlValue::Int(
             a.checked_mul(b)
-                .ok_or_else(|| overflowed("integer multiply"))?,
+                .ok_or_else(|| overflowed(BIGINT_OUT_OF_RANGE))?,
         ),
         // Int division and modulo. The zero divisor is already refused above,
-        // so `None` here is `i64::MIN / -1`, which overflows.
+        // so `None` here is `i64::MIN / -1`, which overflows, and
+        // `i64::MIN % -1`, whose remainder is 0.
         (SqlValue::Int(a), BinaryOp::Div, SqlValue::Int(b)) => SqlValue::Int(
             a.checked_div(b)
-                .ok_or_else(|| overflowed("integer divide"))?,
+                .ok_or_else(|| overflowed(BIGINT_OUT_OF_RANGE))?,
         ),
-        (SqlValue::Int(a), BinaryOp::Mod, SqlValue::Int(b)) => SqlValue::Int(
-            a.checked_rem(b)
-                .ok_or_else(|| overflowed("integer modulo"))?,
-        ),
+        (SqlValue::Int(a), BinaryOp::Mod, SqlValue::Int(b)) => {
+            SqlValue::Int(a.checked_rem(b).unwrap_or(0))
+        }
         // Float × Float arithmetic.
         (SqlValue::Float(a), BinaryOp::Add, SqlValue::Float(b)) => SqlValue::Float(a + b),
         (SqlValue::Float(a), BinaryOp::Sub, SqlValue::Float(b)) => SqlValue::Float(a - b),
@@ -272,70 +260,68 @@ fn fold_binary(l: SqlValue, op: BinaryOp, r: SqlValue) -> FoldResult {
         (SqlValue::Float(a), BinaryOp::Div, SqlValue::Float(b)) => SqlValue::Float(a / b),
         (SqlValue::Float(a), BinaryOp::Mod, SqlValue::Float(b)) => SqlValue::Float(a % b),
         // Decimal × Decimal arithmetic.
-        (SqlValue::Decimal(a), BinaryOp::Add, SqlValue::Decimal(b)) => {
-            SqlValue::Decimal(a.checked_add(b).ok_or_else(|| overflowed("decimal add"))?)
-        }
+        (SqlValue::Decimal(a), BinaryOp::Add, SqlValue::Decimal(b)) => SqlValue::Decimal(
+            a.checked_add(b)
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
+        ),
         (SqlValue::Decimal(a), BinaryOp::Sub, SqlValue::Decimal(b)) => SqlValue::Decimal(
             a.checked_sub(b)
-                .ok_or_else(|| overflowed("decimal subtract"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Decimal(a), BinaryOp::Mul, SqlValue::Decimal(b)) => SqlValue::Decimal(
             a.checked_mul(b)
-                .ok_or_else(|| overflowed("decimal multiply"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
-        (SqlValue::Decimal(a), BinaryOp::Div, SqlValue::Decimal(b)) => SqlValue::Decimal(
-            a.checked_div(b)
-                .ok_or_else(|| overflowed("decimal divide"))?,
-        ),
-        (SqlValue::Decimal(a), BinaryOp::Mod, SqlValue::Decimal(b)) => SqlValue::Decimal(
-            a.checked_rem(b)
-                .ok_or_else(|| overflowed("decimal modulo"))?,
-        ),
+        // Numeric division takes PostgreSQL's result scale.
+        (SqlValue::Decimal(a), BinaryOp::Div, SqlValue::Decimal(b)) => {
+            SqlValue::Decimal(numeric_div(a, b).ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?)
+        }
+        (SqlValue::Decimal(a), BinaryOp::Mod, SqlValue::Decimal(b)) => {
+            SqlValue::Decimal(numeric_rem(a, b).ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?)
+        }
         // Decimal × Int widening (Int promotes to Decimal).
         (SqlValue::Decimal(a), BinaryOp::Add, SqlValue::Int(b)) => SqlValue::Decimal(
             a.checked_add(rust_decimal::Decimal::from(b))
-                .ok_or_else(|| overflowed("decimal add"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Add, SqlValue::Decimal(b)) => SqlValue::Decimal(
             rust_decimal::Decimal::from(a)
                 .checked_add(b)
-                .ok_or_else(|| overflowed("decimal add"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Decimal(a), BinaryOp::Sub, SqlValue::Int(b)) => SqlValue::Decimal(
             a.checked_sub(rust_decimal::Decimal::from(b))
-                .ok_or_else(|| overflowed("decimal subtract"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Sub, SqlValue::Decimal(b)) => SqlValue::Decimal(
             rust_decimal::Decimal::from(a)
                 .checked_sub(b)
-                .ok_or_else(|| overflowed("decimal subtract"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Decimal(a), BinaryOp::Mul, SqlValue::Int(b)) => SqlValue::Decimal(
             a.checked_mul(rust_decimal::Decimal::from(b))
-                .ok_or_else(|| overflowed("decimal multiply"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Mul, SqlValue::Decimal(b)) => SqlValue::Decimal(
             rust_decimal::Decimal::from(a)
                 .checked_mul(b)
-                .ok_or_else(|| overflowed("decimal multiply"))?,
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Decimal(a), BinaryOp::Div, SqlValue::Int(b)) => SqlValue::Decimal(
-            a.checked_div(rust_decimal::Decimal::from(b))
-                .ok_or_else(|| overflowed("decimal divide"))?,
+            numeric_div(a, rust_decimal::Decimal::from(b))
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Div, SqlValue::Decimal(b)) => SqlValue::Decimal(
-            rust_decimal::Decimal::from(a)
-                .checked_div(b)
-                .ok_or_else(|| overflowed("decimal divide"))?,
+            numeric_div(rust_decimal::Decimal::from(a), b)
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Decimal(a), BinaryOp::Mod, SqlValue::Int(b)) => SqlValue::Decimal(
-            a.checked_rem(rust_decimal::Decimal::from(b))
-                .ok_or_else(|| overflowed("decimal modulo"))?,
+            numeric_rem(a, rust_decimal::Decimal::from(b))
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         (SqlValue::Int(a), BinaryOp::Mod, SqlValue::Decimal(b)) => SqlValue::Decimal(
-            rust_decimal::Decimal::from(a)
-                .checked_rem(b)
-                .ok_or_else(|| overflowed("decimal modulo"))?,
+            numeric_rem(rust_decimal::Decimal::from(a), b)
+                .ok_or_else(|| overflowed(NUMERIC_OUT_OF_RANGE))?,
         ),
         // String concat.
         (SqlValue::String(a), BinaryOp::Concat, SqlValue::String(b)) => {
@@ -405,28 +391,45 @@ pub fn fold_function_call_scoped(
     // here, so a failure is the answer — not a reason to defer. Deferring it
     // reached the row-scope evaluator only when the statement had a FROM
     // clause; `SELECT mod(5, 0)` has no row scope and became NULL.
-    // Exhaustive on purpose: a new `EvalError` variant must be classified
-    // here rather than defaulting to "defer to a runtime that may not exist".
     match nodedb_query::functions::eval_function(&name_lower, &folded_args, crs) {
         Ok(result) => Ok(Some(ndb_to_sql_value(result))),
-        Err(nodedb_query::EvalError::DivisionByZero) => Err(SqlError::DivisionByZero),
-        Err(
-            e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
-            | nodedb_query::EvalError::ArgumentType { .. }
-            | nodedb_query::EvalError::InvalidJsonPath { .. }
-            | nodedb_query::EvalError::NumericOverflow { .. }
-            | nodedb_query::EvalError::Crs { .. }
-            | nodedb_query::EvalError::MixedSrid { .. }
-            | nodedb_query::EvalError::Transform { .. }
-            | nodedb_query::EvalError::Geometry { .. }
-            | nodedb_query::EvalError::ArgumentValue { .. }),
-        ) => Err(SqlError::DataException {
+        Err(e) => eval_failure(e),
+    }
+}
+
+/// The fold outcome of a constant evaluation that failed. Exhaustive on
+/// purpose: a new `EvalError` variant must be classified here rather than
+/// defaulting to "defer to a runtime that may not exist".
+fn eval_failure(e: nodedb_query::EvalError) -> FoldResult {
+    match e {
+        nodedb_query::EvalError::DivisionByZero => Err(SqlError::DivisionByZero),
+        e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
+        | nodedb_query::EvalError::ArgumentType { .. }
+        | nodedb_query::EvalError::InvalidJsonPath { .. }
+        | nodedb_query::EvalError::NumericOverflow { .. }
+        | nodedb_query::EvalError::Crs { .. }
+        | nodedb_query::EvalError::MixedSrid { .. }
+        | nodedb_query::EvalError::Transform { .. }
+        | nodedb_query::EvalError::Geometry { .. }
+        | nodedb_query::EvalError::ArgumentValue { .. }) => Err(SqlError::DataException {
             detail: e.to_string(),
         }),
+        nodedb_query::EvalError::MathDomain(fault) => Err(SqlError::MathDomain(fault)),
         // A registered name some other evaluator owns (a search score):
         // not foldable here. Its search plan serves it, or the plan-time
         // search-scope pass refuses it.
-        Err(nodedb_query::EvalError::UnknownFunction { .. }) => Ok(None),
+        nodedb_query::EvalError::UnknownFunction { .. } => Ok(None),
+        nodedb_query::EvalError::InvalidTextRepresentation { type_name, text } => {
+            Err(SqlError::InvalidTextRepresentation { type_name, text })
+        }
+        nodedb_query::EvalError::InvalidDatetimeFormat { type_name, text } => {
+            Err(SqlError::InvalidDatetimeFormat { type_name, text })
+        }
+        e @ (nodedb_query::EvalError::NumericFieldOverflow { .. }
+        | nodedb_query::EvalError::OutOfRange(_)
+        | nodedb_query::EvalError::NumericSpecialValue { .. }) => Err(SqlError::ConstantOverflow {
+            detail: e.to_string(),
+        }),
     }
 }
 
@@ -439,10 +442,18 @@ fn sql_to_ndb_value(v: SqlValue) -> Value {
         SqlValue::Decimal(d) => Value::Decimal(d),
         SqlValue::String(s) => Value::String(s),
         SqlValue::Bytes(b) => Value::Bytes(b),
+        SqlValue::Uuid(u) => Value::Uuid(u),
         SqlValue::Array(a) => Value::Array(a.into_iter().map(sql_to_ndb_value).collect()),
+        SqlValue::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, sql_to_ndb_value(value)))
+                .collect(),
+        ),
         SqlValue::Timestamp(dt) => Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => Value::DateTime(dt),
         SqlValue::Geometry(g) => Value::Geometry(g),
+        SqlValue::Duration(d) => Value::Duration(d),
     }
 }
 
@@ -458,7 +469,8 @@ fn ndb_to_sql_value(v: Value) -> SqlValue {
         // TZ-aware DateTime → Timestamptz; naive → Timestamp.
         Value::DateTime(dt) => SqlValue::Timestamptz(dt),
         Value::NaiveDateTime(dt) => SqlValue::Timestamp(dt),
-        Value::Uuid(s) | Value::Ulid(s) | Value::Regex(s) => SqlValue::String(s),
+        Value::Uuid(u) => SqlValue::Uuid(u),
+        Value::Ulid(s) | Value::Regex(s) => SqlValue::String(s),
         Value::Duration(d) => SqlValue::String(d.to_human()),
         Value::Decimal(d) => SqlValue::Decimal(d),
         // A geometry keeps its SRID, Z and M through the fold.
@@ -550,6 +562,30 @@ mod tests {
         assert!(
             matches!(&err, SqlError::DataException { detail } if detail.contains("invalid JSONPath")),
             "{err:?}"
+        );
+    }
+
+    /// A constant `sqrt` or `ln` outside its domain keeps the fault, so the
+    /// statement fails with the subclass PostgreSQL gives it.
+    #[test]
+    fn fold_of_a_math_domain_fault_keeps_its_class() {
+        let registry = FunctionRegistry::new();
+        let call = |name: &str, arg: i64| SqlExpr::Function {
+            name: name.into(),
+            args: vec![SqlExpr::Literal(SqlValue::Int(arg))],
+            distinct: false,
+        };
+        assert_eq!(
+            fold_constant(&call("sqrt", -1), &registry, &crs()),
+            Err(SqlError::MathDomain(
+                nodedb_query::expr::MathDomain::SqrtOfNegative
+            ))
+        );
+        assert_eq!(
+            fold_constant(&call("ln", 0), &registry, &crs()),
+            Err(SqlError::MathDomain(
+                nodedb_query::expr::MathDomain::LogOfZero
+            ))
         );
     }
 
@@ -659,6 +695,23 @@ mod tests {
         );
     }
 
+    /// A constant numeric division folds at PostgreSQL's result scale.
+    #[test]
+    fn fold_decimal_division_takes_the_postgres_scale() {
+        let registry = FunctionRegistry::new();
+        let expr = SqlExpr::BinaryOp {
+            left: Box::new(SqlExpr::Literal(SqlValue::Int(2))),
+            op: BinaryOp::Div,
+            right: Box::new(SqlExpr::Literal(SqlValue::Decimal(
+                rust_decimal::Decimal::new(20, 1),
+            ))),
+        };
+        let Ok(Some(SqlValue::Decimal(quotient))) = fold_constant(&expr, &registry, &crs()) else {
+            panic!("2 / 2.0 folds to a Decimal");
+        };
+        assert_eq!(quotient.to_string(), "1.00000000000000000000");
+    }
+
     #[test]
     fn fold_decimal_negation() {
         use rust_decimal::Decimal;
@@ -736,5 +789,96 @@ mod tests {
             fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Decimal(expected)))
         );
+    }
+
+    fn int_op(a: i64, op: BinaryOp, b: i64) -> FoldResult {
+        let expr = SqlExpr::BinaryOp {
+            left: Box::new(SqlExpr::Literal(SqlValue::Int(a))),
+            op,
+            right: Box::new(SqlExpr::Literal(SqlValue::Int(b))),
+        };
+        fold_constant(&expr, &FunctionRegistry::new(), &crs())
+    }
+
+    /// `i64::MIN % -1` is 0 and `i64::MIN / -1` is out of range, as in
+    /// PostgreSQL and at run time.
+    #[test]
+    fn fold_integer_minimum_by_minus_one() {
+        assert_eq!(
+            int_op(i64::MIN, BinaryOp::Mod, -1),
+            Ok(Some(SqlValue::Int(0)))
+        );
+        let err = int_op(i64::MIN, BinaryOp::Div, -1).unwrap_err();
+        assert!(matches!(err, SqlError::ConstantOverflow { .. }));
+        assert_eq!(err.to_string(), "bigint out of range");
+        let err = int_op(i64::MAX, BinaryOp::Add, 1).unwrap_err();
+        assert_eq!(err.to_string(), "bigint out of range");
+        let negate = SqlExpr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr: Box::new(SqlExpr::Literal(SqlValue::Int(i64::MIN))),
+        };
+        assert!(matches!(
+            fold_constant(&negate, &FunctionRegistry::new(), &crs()),
+            Err(SqlError::ConstantOverflow { .. })
+        ));
+    }
+
+    fn cast(inner: SqlValue, to_type: &str) -> FoldResult {
+        let expr = SqlExpr::Cast {
+            expr: Box::new(SqlExpr::Literal(inner)),
+            to_type: to_type.into(),
+        };
+        fold_constant(&expr, &FunctionRegistry::new(), &crs())
+    }
+
+    /// A folded cast gives the run-time cast's answer and error.
+    #[test]
+    fn fold_cast_matches_the_runtime_cast() {
+        let dec = |t: &str| SqlValue::Decimal(rust_decimal::Decimal::from_str_exact(t).unwrap());
+        assert_eq!(cast(dec("2.5"), "BIGINT"), Ok(Some(SqlValue::Int(3))));
+        assert_eq!(
+            cast(SqlValue::Float(2.5), "INT"),
+            Ok(Some(SqlValue::Int(2)))
+        );
+        assert_eq!(cast(SqlValue::Null, "TEXT"), Ok(Some(SqlValue::Null)));
+        assert_eq!(cast(SqlValue::Null, "BOOLEAN"), Ok(Some(SqlValue::Null)));
+        assert_eq!(
+            cast(SqlValue::String("tr".into()), "BOOL"),
+            Ok(Some(SqlValue::Bool(true)))
+        );
+        assert_eq!(
+            cast(SqlValue::String("1e5".into()), "NUMERIC"),
+            Ok(Some(dec("100000")))
+        );
+        assert_eq!(cast(dec("12.345"), "NUMERIC(5,2)"), Ok(Some(dec("12.35"))));
+        assert!(matches!(
+            cast(SqlValue::String("3.5".into()), "BIGINT"),
+            Err(SqlError::InvalidTextRepresentation {
+                type_name: "bigint",
+                ..
+            })
+        ));
+        assert!(matches!(
+            cast(SqlValue::String("maybe".into()), "BOOLEAN"),
+            Err(SqlError::InvalidTextRepresentation {
+                type_name: "boolean",
+                ..
+            })
+        ));
+        let err = cast(SqlValue::Float(f64::NAN), "NUMERIC").unwrap_err();
+        assert!(matches!(err, SqlError::ConstantOverflow { .. }));
+        assert_eq!(err.to_string(), "cannot convert NaN to numeric");
+        assert!(matches!(
+            cast(SqlValue::Float(1e300), "BIGINT"),
+            Err(SqlError::ConstantOverflow { .. })
+        ));
+        assert_eq!(
+            cast(SqlValue::Int(32767), "SMALLINT"),
+            Ok(Some(SqlValue::Int(32767)))
+        );
+        let err = cast(SqlValue::Int(32768), "SMALLINT").unwrap_err();
+        assert_eq!(err.to_string(), "smallint out of range");
+        let err = cast(SqlValue::Int(1 << 31), "INTEGER").unwrap_err();
+        assert_eq!(err.to_string(), "integer out of range");
     }
 }

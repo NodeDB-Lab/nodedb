@@ -32,7 +32,9 @@ pub struct ClusterReadyGates {
 pub async fn await_cluster_ready(
     shared: &Arc<SharedState>,
     mut raft_ready_rx: tokio::sync::watch::Receiver<bool>,
-    data_plane_replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<()>>>,
+    data_plane_replay_done: Vec<
+        tokio::sync::oneshot::Receiver<crate::Result<crate::wal::ReplayedCaptures>>,
+    >,
     gates: ClusterReadyGates,
     raft_ready_timeout: RaftReadyTimeout,
     data_group_recovery_timeout: DataGroupRecoveryTimeout,
@@ -52,7 +54,15 @@ pub async fn await_cluster_ready(
     // its WAL replay first: a core drains no request until its replay ends,
     // and a request's deadline runs from its dispatch. Metadata post-apply
     // hooks wait on the phase this fires (`DataPlaneReplay`).
-    await_data_plane_replay(data_plane_replay_done, &data_plane_replay_gate).await?;
+    let captures = await_data_plane_replay(data_plane_replay_done, &data_plane_replay_gate).await?;
+    if let Err(error) = close_replayed_groups(shared, captures).await {
+        data_plane_replay_gate.fail(format!(
+            "journalling the fold rows WAL replay stored failed: {error}"
+        ));
+        return Err(anyhow::anyhow!(
+            "journalling the fold rows WAL replay stored failed: {error}"
+        ));
+    }
     data_plane_replay_gate.fire();
 
     // Boot-time readiness gate: wait until the metadata raft group has
@@ -219,6 +229,13 @@ pub async fn await_cluster_ready(
     data_groups_gate.fire();
     transport_gate.fire();
 
+    // A full-text index build or drop that a crash or an error interrupted
+    // is still owed. Its rebuild reads every stored row, so it runs once the
+    // data groups replayed. It runs in the background: the node serves
+    // meanwhile, a search on a building field fails with 55000, and a
+    // dropping record declares no field.
+    crate::bootstrap::text_index_reconcile::spawn_text_index_reconcile(Arc::clone(shared));
+
     // Warm the QUIC peer cache so the first replicated request
     // after boot doesn't pay a cold dial.
     if let (Some(transport), Some(topology)) = (
@@ -286,10 +303,14 @@ pub async fn await_cluster_ready(
 /// stopped short of the WAL. Both fail closed. The wait has no time bound: a
 /// replay ends in one of those signals, and its length grows with the WAL
 /// tail, so a fixed bound refuses every boot of a node whose tail outgrew it.
+///
+/// Returns the write sets every core's replay stored for the never-durable
+/// records it folded.
 async fn await_data_plane_replay(
-    replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<()>>>,
+    replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<crate::wal::ReplayedCaptures>>>,
     gate: &ReadyGate,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::wal::ReplayedCaptures> {
+    let mut captures = Vec::new();
     for rx in replay_done {
         let replayed = match rx.await {
             Ok(replayed) => replayed,
@@ -299,14 +320,55 @@ async fn await_data_plane_replay(
                 return Err(anyhow::anyhow!(reason));
             }
         };
-        if let Err(error) = replayed {
-            gate.fail(format!("data plane WAL replay failed: {error}"));
-            return Err(anyhow::anyhow!(
-                "data plane core WAL replay failed: {error}"
-            ));
+        match replayed {
+            Ok(stored) => captures.extend(stored),
+            Err(error) => {
+                gate.fail(format!("data plane WAL replay failed: {error}"));
+                return Err(anyhow::anyhow!(
+                    "data plane core WAL replay failed: {error}"
+                ));
+            }
         }
     }
     info!("all data plane cores completed WAL replay");
+    Ok(captures)
+}
+
+/// Journal the fold rows replay stored for each never-durable record as the
+/// parts of its group, durably, then tell each record's core its write set
+/// is settled. Runs before the node serves, so no point-in-time restore of
+/// the archived WAL sees such a group open. The WAL appends and the sync run
+/// on a blocking thread.
+async fn close_replayed_groups(
+    shared: &Arc<SharedState>,
+    captures: crate::wal::ReplayedCaptures,
+) -> crate::Result<()> {
+    if captures.is_empty() {
+        return Ok(());
+    }
+    let wal = Arc::clone(&shared.wal);
+    let captures = tokio::task::spawn_blocking(move || {
+        crate::bootstrap::write_group_settle::close_replayed_groups(&wal, &captures)
+            .map(|_| captures)
+    })
+    .await
+    .map_err(|error| crate::Error::Internal {
+        detail: format!("the task journalling replayed fold rows ended abnormally: {error}"),
+    })??;
+    let mut dispatcher = shared
+        .dispatcher
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for capture in &captures {
+        dispatcher.note_write_set_settled(
+            crate::types::VShardId::new(capture.vshard_id),
+            crate::types::Lsn::new(capture.origin),
+        );
+    }
+    info!(
+        records = captures.len(),
+        "journalled the fold rows of the records WAL replay folded"
+    );
     Ok(())
 }
 

@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 
 use nodedb_physical::physical_plan::{UpdateValue, VectorWriteTargets};
-use nodedb_types::{RlsWriteCheck, StorageKey, Surrogate, Value};
+use nodedb_types::{RlsWriteCheck, RowIdentity, StorageKey, Surrogate, Value};
 
 use super::context::{StageCtx, StageScope};
 use super::stage_vector::{VectorCurrentRow, encode_staged_vector_row, staged_vector_row_identity};
@@ -106,8 +106,10 @@ impl CoreLoop {
                     scope.collection,
                     &filters,
                 )? {
-                    let superseded =
-                        overlay.is_some_and(|o| o.get(&scope.coll_key, surrogate.0).is_some());
+                    let superseded = match overlay {
+                        Some(o) => o.get(&scope.coll_key, surrogate.0)?.is_some(),
+                        None => false,
+                    };
                     if superseded {
                         continue;
                     }
@@ -120,8 +122,9 @@ impl CoreLoop {
                 if let Some(overlay) = overlay {
                     let identity_column =
                         self.identity_column(scope.database_id, scope.tid, scope.collection);
-                    for (surrogate, staged) in overlay.iter_for_collection(&scope.coll_key) {
-                        let Staged::Put(_) = staged else {
+                    for item in overlay.iter_for_collection(&scope.coll_key) {
+                        let (surrogate, staged) = item?;
+                        let Staged::Put(_) = &*staged else {
                             continue;
                         };
                         let surrogate = Surrogate::new(surrogate);
@@ -187,15 +190,25 @@ impl CoreLoop {
             }
         }
 
-        let count = rows.len();
+        // Every identity is read before the first tombstone is staged, so a
+        // sidecar that does not read leaves the statement without effect.
+        let mut doomed = Vec::with_capacity(rows.len());
         for (surrogate, row) in rows {
             let key = StorageKey::for_surrogate(surrogate);
-            let identity = staged_vector_row_identity(&row.sidecar.bytes, key);
-            self.txn_overlay_mut(txn_id).insert_tombstone(
+            match staged_vector_row_identity(&row.sidecar.bytes, key) {
+                Ok(identity) => doomed.push((surrogate, identity)),
+                Err(e) => return self.response_error(task, e),
+            }
+        }
+        let count = doomed.len();
+        for (surrogate, identity) in doomed {
+            if let Err(e) = self.txn_overlay_mut(txn_id).insert_tombstone(
                 scope.coll_key.clone(),
                 surrogate.0,
                 &identity,
-            );
+            ) {
+                return self.response_error(task, e);
+            }
         }
         self.stage_count_response(task, count)
     }
@@ -251,8 +264,8 @@ impl CoreLoop {
             payload_patch,
             rls_write_check,
         };
-        // Per row: its surrogate, the staged body, and the sidecar it carries.
-        let mut planned: Vec<(Surrogate, Vec<u8>, Vec<u8>)> = Vec::with_capacity(rows.len());
+        // Per row: its surrogate, the staged body, and its client identity.
+        let mut planned: Vec<(Surrogate, Vec<u8>, RowIdentity)> = Vec::with_capacity(rows.len());
         for (surrogate, row) in rows {
             let VectorCurrentRow { vector, sidecar } = row;
             let merged = match merge_vector_direct_update_row(
@@ -269,21 +282,30 @@ impl CoreLoop {
                 Ok(encoded) => encoded,
                 Err(e) => return self.response_error(task, e),
             };
-            planned.push((surrogate, staged, sidecar));
+            let identity =
+                match staged_vector_row_identity(&sidecar, StorageKey::for_surrogate(surrogate)) {
+                    Ok(identity) => identity,
+                    Err(e) => return self.response_error(task, e),
+                };
+            // One row over the row image limit refuses the statement before
+            // any row stages.
+            if let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+                collection,
+                || identity.as_str().to_string(),
+                field,
+                vector.len(),
+                &merged.fields,
+                sidecar.len(),
+            ) {
+                return self.response_error(task, e);
+            }
+            planned.push((surrogate, staged, identity));
         }
 
         let count = planned.len();
-        for (surrogate, staged, sidecar) in planned {
-            let key = StorageKey::for_surrogate(surrogate);
-            let row_ctx = StageCtx::new(
-                task,
-                tid,
-                txn_id,
-                collection,
-                staged_vector_row_identity(&sidecar, key),
-                surrogate,
-            );
-            if let Err(e) = self.stage_put_capped(&row_ctx, staged) {
+        for (surrogate, staged, identity) in planned {
+            let row_ctx = StageCtx::new(task, tid, txn_id, collection, identity, surrogate);
+            if let Err(e) = self.stage_put(&row_ctx, staged) {
                 return self.response_error(task, e);
             }
         }

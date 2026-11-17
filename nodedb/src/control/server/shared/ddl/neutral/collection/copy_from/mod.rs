@@ -20,12 +20,14 @@
 //! pass checks every row, so an unparsable row writes nothing. The second
 //! pass inserts.
 //!
-//! Transactions: outside a transaction block each document row and each
-//! array chunk commits on its own, so a refused insert stops the load and
-//! leaves the rows before it committed. An array load streams, so its
-//! memory stays at a few chunks whatever the input size. Inside a block
-//! every row and chunk stages into the transaction, and a refusal aborts
-//! the block, so the load commits or rolls back whole. Inside a block an
+//! Transactions: a row load is one statement, so it commits whole or not at
+//! all. Outside a transaction block it runs in an implicit transaction, and
+//! a refused row stores no row of the load. Outside a block each array chunk
+//! commits on its own, so a refused chunk stops the load and leaves the
+//! chunks before it committed. An array load streams, so its memory stays at
+//! a few chunks whatever the input size. Inside a block every row and chunk
+//! stages into the transaction, and a refusal aborts the block, so the load
+//! commits or rolls back whole. Inside a block an
 //! array chunk that takes the staged redo past the 64 MiB WAL record cap is
 //! refused with `54000` before it stages.
 
@@ -34,6 +36,7 @@ mod csv_import;
 mod entry;
 mod import_ctx;
 mod json_import;
+mod row_load_txn;
 mod row_memory;
 mod source_file;
 

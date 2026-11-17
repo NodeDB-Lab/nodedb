@@ -2,8 +2,12 @@
 
 //! WAL replay arm for the Document engine.
 //!
-//! Every stored document row has a WAL record carrying its post-image, and
-//! this arm applies them all in LSN order: the standalone records of
+//! Installed-document records carry exact stored bytes, canonical fields,
+//! version bounds, schema witnesses, and chain heads. Their replay bypasses
+//! defaults, generated expressions, and chain derivation. Submitted transaction
+//! origins retain their existing execution path until their outcomes migrate.
+//!
+//! This arm applies document records in LSN order: the standalone records of
 //! autocommit writes, and the sub-records of committed `TransactionRedo`
 //! records and of `WriteGroup` records alike. A point write's pre-dispatch
 //! record carries the row its plan names. The parts of a write's
@@ -18,8 +22,7 @@
 //!
 //! ## Record payload shape
 //!
-//! One encoding serves every producer (`wal_dispatch::document`) and this
-//! decoder:
+//! Submitted origins use these tuple encodings (`wal_dispatch::document`):
 //!
 //! * PUT — `(collection, document_id, value, Option<SyncProvenance>, surrogate)`.
 //!   The trailing `surrogate` is the stable identity `apply_point_put` keys on,
@@ -72,12 +75,15 @@
 //! BELOW the enforcement funnel, so no materialized-sum delta is folded here —
 //! and that is the correct behaviour, not an omission. A delta is a RELATIVE
 //! change to a target row's stored total, so re-applying one over a target row
-//! that is already durable double-counts it. Document rows are
-//! redb-synchronous-durable: by the time this replay runs, the target balance
-//! the original write produced is already on disk, and the derived target write
-//! carries its own redo record naming the target collection. Folding again on
-//! replay would add the same amount a second time. A Calvin record is the
-//! exception: see "Calvin records in restart replay" below.
+//! that is already durable double-counts it. A write's fold rows are durable
+//! once its stored write set is, and the parts of its group journal them, so
+//! replay installs the target rows from the parts. Folding again on replay
+//! would add the same amount a second time.
+//!
+//! The exception is a committed record whose install never became durable:
+//! boot found no stored write set and no part for it. Its folds were
+//! reverted with it, so replay folds its writes once (see
+//! `handlers::transaction::redo_apply::replay_fold`).
 //!
 //! ### Why Raft replication does the opposite
 //!
@@ -104,8 +110,8 @@
 //! A replica applying a committed `TransactionRedo` Raft entry drives this arm
 //! with a redo-apply scope open. The source rows it writes then fold into
 //! their targets and link their hash chain, exactly as replication does (see
-//! `handlers::transaction::redo_apply`). With no scope open this arm is plain
-//! restart replay.
+//! `handlers::transaction::redo_apply`). With no scope open this arm is
+//! restart replay, which folds only a never-durable record.
 
 use nodedb_types::Surrogate;
 use nodedb_wal::WalRecord;
@@ -136,6 +142,8 @@ impl CoreLoop {
         let mut deletes = 0usize;
 
         for record in records {
+            // A never-durable record's writes fold, as its install did.
+            self.step_replay_fold(record, num_cores);
             if self.replay_halted() {
                 break;
             }
@@ -161,6 +169,69 @@ impl CoreLoop {
             let record_lsn = record.header.lsn;
 
             if is_put {
+                let installed = match crate::wal::redo::installed_document::InstalledDocumentRedo::<
+                    nodedb_physical::physical_plan::StorageMode,
+                >::decode(&record.payload)
+                {
+                    Ok(installed) => installed,
+                    Err(error) => {
+                        self.replay_record_unapplied(
+                            "document",
+                            "installed_decode",
+                            record_lsn,
+                            &error.to_string(),
+                        );
+                        continue;
+                    }
+                };
+                if let Some(installed) = installed {
+                    if tombstones.is_tombstoned(
+                        database_id,
+                        tenant_id,
+                        &installed.collection,
+                        record_lsn,
+                    ) {
+                        continue;
+                    }
+                    if installed.surrogate == Surrogate::ZERO.as_u32() {
+                        self.replay_record_unapplied(
+                            "document",
+                            "installed_identity",
+                            record_lsn,
+                            "installed document carries no surrogate",
+                        );
+                        continue;
+                    }
+                    if self.claim_for_validation() {
+                        continue;
+                    }
+                    let collection = installed.collection.clone();
+                    let surrogate = installed.surrogate;
+                    match self.replay_installed_document(
+                        database_id,
+                        tenant_id,
+                        record_lsn,
+                        installed,
+                    ) {
+                        Ok(()) => {
+                            puts += 1;
+                            self.note_replay_write(
+                                database_id,
+                                tenant_id,
+                                &collection,
+                                Some(KeyRepr::Surrogate(surrogate)),
+                                record_lsn,
+                            );
+                        }
+                        Err(error) => self.replay_record_unapplied(
+                            "document",
+                            "installed_put",
+                            record_lsn,
+                            &error.to_string(),
+                        ),
+                    }
+                    continue;
+                }
                 // A KV value must never be read as a document body.
                 if is_kv_put_record(&record.payload) {
                     continue;
@@ -245,7 +316,7 @@ impl CoreLoop {
                     self.observe_bitemporal_ordinal(s.sys_from);
                     self.apply_scope.bitemporal_stamps.insert(surrogate_u32, s);
                 }
-                let folds = self.redo_folds();
+                let folds = self.redo_folds(record_lsn);
                 let applied = if folds {
                     self.apply_committed_document_put(
                         CommittedDocWrite {
@@ -339,7 +410,7 @@ impl CoreLoop {
                         },
                     );
                 }
-                let folds = self.redo_folds();
+                let folds = self.redo_folds(record_lsn);
                 let removed = if folds {
                     self.apply_committed_document_delete(CommittedDocWrite {
                         database_id,
@@ -374,6 +445,7 @@ impl CoreLoop {
                 }
             }
         }
+        self.end_replay_fold();
 
         if puts > 0 || deletes > 0 {
             tracing::info!(
@@ -383,37 +455,6 @@ impl CoreLoop {
                 "WAL document redo replay complete"
             );
         }
-    }
-
-    /// Settle an unstamped document `kind` record (`put` or `delete`).
-    /// Restart replay skips it: it is a point write's pre-dispatch record,
-    /// whose stamped image carries the row. A committed-redo install refuses
-    /// it: no producer writes an unstamped row into a redo.
-    fn unstamped_document_record(
-        &mut self,
-        kind: &str,
-        record_lsn: u64,
-        collection: &str,
-        document_id: &str,
-    ) {
-        if self.applying_committed_redo() {
-            self.replay_record_unapplied(
-                "document",
-                "unstamped_version",
-                record_lsn,
-                &format!(
-                    "document {kind} of '{document_id}' in '{collection}' carries no version \
-                     stamp"
-                ),
-            );
-        }
-    }
-
-    /// Whether a document write runs the committed path, which folds
-    /// materialized sums: only under a committed-redo apply. Restart replay
-    /// applies the fold target rows from the parts the apply journalled.
-    fn redo_folds(&self) -> bool {
-        self.redo_apply.scope.is_some()
     }
 }
 
@@ -463,12 +504,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {
@@ -547,6 +590,7 @@ mod tests {
             publishes: Vec::new(),
             row_changes: Vec::new(),
             user_roles: Vec::new(),
+            sum_targets: Vec::new(),
         };
         WalRecord::new(WalRecordArgs {
             record_type: RecordType::TransactionRedo as u32,
@@ -894,6 +938,7 @@ mod tests {
                 publishes: Vec::new(),
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
+                sum_targets: Vec::new(),
             }
             .to_bytes()
             .expect("encode redo record"),

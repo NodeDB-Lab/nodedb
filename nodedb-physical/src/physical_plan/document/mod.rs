@@ -11,6 +11,7 @@ pub mod op;
 pub mod resolved_mutation;
 pub mod row_source;
 pub mod sum_target;
+pub mod text_field_set;
 pub mod timeseries_schema;
 pub mod types;
 pub mod update_value;
@@ -26,6 +27,7 @@ pub use op::DocumentOp;
 pub use resolved_mutation::{DocumentResolveOutcome, DocumentResolvedMutation};
 pub use row_source::{DocumentPageSource, QuerySource, RowSource};
 pub use sum_target::{RedoSumTargets, ResolvedSumTarget, SumTargetKey, resolved_sum_surrogate};
+pub use text_field_set::TextFieldSet;
 pub use timeseries_schema::TimeseriesSchema;
 pub use types::{
     BalancedDef, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding, PeriodLockConfig,

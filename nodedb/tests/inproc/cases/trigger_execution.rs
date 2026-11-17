@@ -139,6 +139,7 @@ fn classify_point_put_as_insert() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     let info = classify_dml_write(&plan).unwrap();
     assert_eq!(info.collection, "orders");
@@ -691,6 +692,7 @@ fn classify_point_put_deserializes_json_value() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();
@@ -722,6 +724,7 @@ fn classify_point_put_deserializes_msgpack_value() {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();

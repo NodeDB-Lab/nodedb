@@ -134,10 +134,14 @@ async fn scan_source(
     )
     .await?;
     reject_data_plane_error(&response)?;
-    Ok(
-        crate::data::executor::response_codec::decode_raw_scan_to_docs(response.payload.as_bytes())
-            .into_iter()
-            .filter_map(|(_, body)| nodedb_types::json_from_msgpack(&body).ok())
-            .collect(),
-    )
+    // A document scan answers `{id, data}` envelopes.
+    Ok(crate::data::executor::response_codec::scan_rows_in_context(
+        response.payload.as_bytes(),
+        crate::data::executor::response_codec::RowContext::ScanEnvelope,
+    )?
+    .into_iter()
+    .filter_map(|(_, body)| {
+        crate::data::executor::response_codec::decode_body_plain_json(&body).ok()
+    })
+    .collect())
 }

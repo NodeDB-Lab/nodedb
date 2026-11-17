@@ -77,13 +77,15 @@ pub(crate) fn encode_text_op_record(op: &TextOp) -> crate::Result<Option<(Record
                 payload.to_bytes().map_err(crate::Error::Wal)?,
             ))
         }
-        // Reads / scans / analyzer config: no durable effect.
+        // Reads / scans / analyzer config: no durable effect. A rebuild
+        // re-derives postings from the stored rows, which are durable.
         TextOp::Search { .. }
         | TextOp::BM25ScoreScan { .. }
         | TextOp::PhraseSearch { .. }
         | TextOp::HybridSearch { .. }
         | TextOp::HybridSearchTriple { .. }
-        | TextOp::SetTextConfig { .. } => None,
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => None,
     };
     Ok(encoded)
 }

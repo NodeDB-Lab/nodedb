@@ -16,8 +16,9 @@ use super::helpers::*;
 #[test]
 fn document_indexes_consistent_after_simulated_crash() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
+    register_text_fields(&mut core, &mut tx, &mut rx, 1, "articles", &["title"]);
 
-    // Insert documents — auto-indexes text fields in inverted index.
+    // Insert documents — each indexes its declared `title` text.
     send_ok(
         &mut core,
         &mut tx,
@@ -38,6 +39,7 @@ fn document_indexes_consistent_after_simulated_crash() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -61,6 +63,7 @@ fn document_indexes_consistent_after_simulated_crash() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 

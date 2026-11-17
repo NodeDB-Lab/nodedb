@@ -56,6 +56,20 @@ pub struct NetworkTuning {
     /// filling Control-Plane RAM.
     #[serde(default = "default_max_query_result_bytes")]
     pub max_query_result_bytes: u64,
+    /// Most rows a write's `RETURNING` response holds. A write whose
+    /// response exceeds this fails with a typed `ExecutionLimitExceeded`
+    /// before its source commits. Set via `[tuning.network]
+    /// max_returning_rows`.
+    #[serde(default = "default_max_returning_rows")]
+    pub max_returning_rows: u64,
+    /// Most columns a write's `RETURNING` response holds. Set via
+    /// `[tuning.network] max_returning_columns`.
+    #[serde(default = "default_max_returning_columns")]
+    pub max_returning_columns: u64,
+    /// Most cells (rows times columns) a write's `RETURNING` response holds.
+    /// Set via `[tuning.network] max_returning_cells`.
+    #[serde(default = "default_max_returning_cells")]
+    pub max_returning_cells: u64,
     /// The oldest snapshot, in seconds, a transaction block reads at. A
     /// statement of a block whose snapshot is older fails with SQLSTATE
     /// `40001`, and the client retries the block. The cleanup horizon also
@@ -93,6 +107,9 @@ impl Default for NetworkTuning {
             drain_timeout_secs: default_drain_timeout_secs(),
             max_frame_size: default_max_frame_size(),
             max_query_result_bytes: default_max_query_result_bytes(),
+            max_returning_rows: default_max_returning_rows(),
+            max_returning_columns: default_max_returning_columns(),
+            max_returning_cells: default_max_returning_cells(),
             txn_snapshot_max_age_secs: default_txn_snapshot_max_age_secs(),
         }
     }
@@ -127,6 +144,26 @@ fn default_max_query_result_bytes() -> u64 {
     // preventing an unbounded result-set from pinning Control-Plane
     // RAM. Configurable via `[tuning.network] max_query_result_bytes`.
     1024 * 1024 * 1024
+}
+
+fn default_max_returning_rows() -> u64 {
+    // A RETURNING response is built in Control-Plane RAM before the source
+    // commits, and the build holds several copies of the rows. The row cap
+    // sits well below the 1 GiB byte cap for that reason. Configurable via
+    // `[tuning.network] max_returning_rows`.
+    100_000
+}
+
+fn default_max_returning_columns() -> u64 {
+    // A response past this width is a mistake, not a report. Configurable
+    // via `[tuning.network] max_returning_columns`.
+    1_024
+}
+
+fn default_max_returning_cells() -> u64 {
+    // Keeps the cell count in step with the 1 GiB result byte cap.
+    // Configurable via `[tuning.network] max_returning_cells`.
+    10_000_000
 }
 
 fn default_txn_snapshot_max_age_secs() -> u64 {

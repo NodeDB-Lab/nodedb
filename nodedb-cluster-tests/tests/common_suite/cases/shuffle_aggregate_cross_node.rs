@@ -76,7 +76,8 @@ fn msgpack_array(rows: &[&Row]) -> Vec<u8> {
 /// The partition a row's group key routes to:
 /// `partition_hash(row, ["k"]) % NUM_PARTS`.
 fn expected_part(row: &Row) -> u32 {
-    (nodedb_query::partition_hash(&row.bytes, &["k"]) % NUM_PARTS as u64) as u32
+    let hash = nodedb_query::partition_hash(&row.bytes, &["k"]).expect("test row is an object");
+    (hash % NUM_PARTS as u64) as u32
 }
 
 /// The aggregate spec the producer accumulates and the consumer finalizes:
@@ -133,7 +134,8 @@ fn producer_plan(rows: &[&Row]) -> Vec<u8> {
 struct AggRef {
     cnt: i64,
     sum: i64,
-    avg: f64,
+    /// PostgreSQL's numeric `avg` text.
+    avg: String,
     min: i64,
     max: i64,
 }
@@ -148,7 +150,15 @@ fn reference(rows: &[&Row]) -> HashMap<i64, AggRef> {
         .map(|(k, vs)| {
             let cnt = vs.len() as i64;
             let sum: i64 = vs.iter().sum();
-            let avg = sum as f64 / cnt as f64;
+            // PostgreSQL's avg over integers is numeric at `select_div_scale`.
+            // Every fixture total is one base-10000 digit above the count, so
+            // the quotient weight is 0 and the scale is 16. Each quotient is
+            // exact in f64 at that scale.
+            assert!(
+                sum > cnt && sum < 10_000,
+                "fixture outside the scale-16 case"
+            );
+            let avg = format!("{:.16}", sum as f64 / cnt as f64);
             let min = *vs.iter().min().expect("non-empty group");
             let max = *vs.iter().max().expect("non-empty group");
             (
@@ -241,13 +251,16 @@ async fn aggregate_part(
 }
 
 /// Decode a `ShuffleAggregateConsumeResponse.rows` payload (a msgpack array of
-/// result-row maps) into `(group_key_k, fields)` pairs. An empty payload is zero
-/// rows.
+/// native tagged rows) into each row's fields. An empty payload is zero rows.
 fn decode_rows(bytes: &[u8]) -> Vec<HashMap<String, Value>> {
     if bytes.is_empty() {
         return Vec::new();
     }
-    let val = nodedb_types::value_from_msgpack(bytes).expect("decode result rows");
+    let val = nodedb::data::executor::response_codec::decode_row_payload_value(
+        bytes,
+        nodedb::data::executor::response_codec::RowContext::Flat,
+    )
+    .expect("decode result rows");
     let arr = match val {
         Value::Array(a) => a,
         other => panic!("expected result rows array, got {other:?}"),
@@ -269,12 +282,13 @@ fn as_i64(m: &HashMap<String, Value>, key: &str) -> i64 {
     }
 }
 
-/// Read a field as f64 (accepts float or integer).
-fn as_f64(m: &HashMap<String, Value>, key: &str) -> f64 {
+/// Read a numeric field as its text: a typed decimal, or the text a plain
+/// row carries a decimal as.
+fn numeric_text(m: &HashMap<String, Value>, key: &str) -> String {
     match m.get(key) {
-        Some(Value::Float(f)) => *f,
-        Some(Value::Integer(i)) => *i as f64,
-        other => panic!("field `{key}` not a number: {other:?}"),
+        Some(Value::Decimal(d)) => d.to_string(),
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("field `{key}` not a numeric: {other:?}"),
     }
 }
 
@@ -396,11 +410,10 @@ async fn shuffle_aggregate_merges_staged_parts_across_nodes() {
             .unwrap_or_else(|| panic!("result missing group {k}"));
         assert_eq!(as_i64(m, "cnt"), exp.cnt, "count(*) mismatch for group {k}");
         assert_eq!(as_i64(m, "sm"), exp.sum, "sum(v) mismatch for group {k}");
-        assert!(
-            (as_f64(m, "av") - exp.avg).abs() < 1e-9,
-            "avg(v) mismatch for group {k}: got {}, expected {}",
-            as_f64(m, "av"),
-            exp.avg
+        assert_eq!(
+            numeric_text(m, "av"),
+            exp.avg,
+            "avg(v) mismatch for group {k}"
         );
         assert_eq!(as_i64(m, "mn"), exp.min, "min(v) mismatch for group {k}");
         assert_eq!(as_i64(m, "mx"), exp.max, "max(v) mismatch for group {k}");

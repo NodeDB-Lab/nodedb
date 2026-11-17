@@ -346,6 +346,10 @@ pub enum CatalogEntry {
         /// Not needed to locate the record. It lets post-apply invalidate exactly
         /// the cached plans still holding an `IndexLookup` on the dropped index.
         collection: String,
+        /// Not needed to locate the record. Post-apply re-registers
+        /// `collection` when a full-text index drops, so its declared text
+        /// fields shrink on every node.
+        kind: crate::control::security::catalog::IndexKind,
     },
 
     // ── Object ownership ───────────────────────────────────────────
@@ -393,6 +397,16 @@ pub enum CatalogEntry {
         tenant_id: u64,
         collection: String,
         purge_lsn: u64,
+    },
+
+    // ── Collection purge log ───────────────────────────────────────
+    /// Prunes every collection purge-log row purged before `cutoff_ms`, and
+    /// raises each scope's retention floor to the highest position it
+    /// pruned. The proposer computes the cutoff from its own retention
+    /// setting, and every node prunes at that cutoff, so every node keeps
+    /// the same rows and floors. Idempotent and monotone.
+    PruneCollectionPurgeLog {
+        cutoff_ms: u64,
     },
 
     // ── Clone lifecycle ────────────────────────────────────────────

@@ -15,8 +15,8 @@
 //! the completion path.
 //!
 //! The same path evaluates a RETURNING expression as the direct path does: a
-//! shaping error keeps its own SQLSTATE and native code, and `nextval` reads
-//! the session's sequences.
+//! shaping error keeps its own SQLSTATE and native code, `nextval` reads the
+//! session's sequences, and `setval` sets the session's `currval`.
 //!
 //! File name contains "calvin" within the cluster-tests crate so nextest applies
 //! the cluster test-group serialization.
@@ -275,6 +275,72 @@ async fn calvin_returning_nextval_evaluates() {
         rows[0].get("n"),
         Some("1"),
         "the first nextval of a fresh sequence is 1"
+    );
+
+    node.shutdown().await;
+}
+
+/// The value of the one-row, one-column query `sql` on `node`'s session.
+async fn scalar(node: &TestClusterNode, sql: &str) -> String {
+    let msgs = node
+        .client
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|e| panic!("`{sql}`: {e}"));
+    msgs.iter()
+        .find_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{sql}` returns a value"))
+}
+
+/// A RETURNING `setval` on the Calvin path sets the session's `currval`, as
+/// PostgreSQL's two-argument `setval` does, and positions the next `nextval`.
+/// The coordinator answers the frozen value and draws no value of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn calvin_returning_setval_sets_currval() {
+    let coll = "sncalvin_ret_setval";
+    let node = calvin_edge_collection(coll).await;
+    node.client
+        .simple_query("CREATE SEQUENCE sncalvin_setval_seq")
+        .await
+        .expect("CREATE SEQUENCE");
+
+    let admitted_before = sequencer_admitted(&node);
+    let msgs = node
+        .client
+        .simple_query(&format!(
+            "DELETE FROM {coll} WHERE id = 'edge_4' \
+             RETURNING id, setval('sncalvin_setval_seq', 41) AS s"
+        ))
+        .await
+        .expect("a RETURNING setval routed through Calvin must complete");
+    assert_admitted_since(&node, admitted_before, "the RETURNING setval delete");
+    let rows: Vec<&tokio_postgres::SimpleQueryRow> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "the delete returns its one row");
+    assert_eq!(rows[0].get("id"), Some("edge_4"));
+    assert_eq!(rows[0].get("s"), Some("41"), "setval answers its value");
+
+    assert_eq!(
+        scalar(&node, "SELECT currval('sncalvin_setval_seq')").await,
+        "41",
+        "the setval value is this session's currval"
+    );
+    assert_eq!(
+        scalar(&node, "SELECT nextval('sncalvin_setval_seq')").await,
+        "42",
+        "the next nextval follows the setval value"
+    );
+    assert_eq!(
+        scalar(&node, "SELECT currval('sncalvin_setval_seq')").await,
+        "42"
     );
 
     node.shutdown().await;

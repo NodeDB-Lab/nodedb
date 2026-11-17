@@ -612,44 +612,80 @@ pub enum MetaOp {
     /// mutation, no side effects. Absent key is an idempotent no-op.
     CalvinDrop { epoch: u64, position: u32 },
 
-    /// Resolve a committing transaction's staged writes into ONE replayable
-    /// redo record, WITHOUT mutating base.
+    /// Read one part of a committing transaction's resolved redo, WITHOUT
+    /// mutating base.
     ///
-    /// The Data Plane handler reads the per-transaction staging overlay
-    /// (`CoreLoop::txn_overlays`) by shared reference and, for every staged
-    /// post-image, emits the engine-native WAL sub-record shape that engine's
-    /// autocommit path already produces. The encoded `RedoRecord` bytes are
-    /// returned in the response payload; the Control Plane appends them as a
-    /// single `RecordType::TransactionRedo` WAL record and a later install phase
-    /// replays them. No base engine is touched during resolve — a crash before
-    /// install loses only an unacknowledged commit.
+    /// Part `0` checks the transaction's guards, resolves its staged writes
+    /// into the engine-native WAL sub-record shapes the autocommit paths
+    /// produce, and opens a resolve cursor on the owning core. Every part
+    /// holds whole redo frames of at most `max_part_bytes`, or one frame
+    /// past that bound alone. A later request names the next part. The
+    /// cursor closes with its last part, and when the transaction's overlay
+    /// drops on commit, rollback or reap. A repeated part `0` resolves again
+    /// and replaces the cursor.
     ///
-    /// `plans` is the transaction's buffered write set: it is walked to classify
-    /// every op and to discover which collections' overlay entries to serialize.
-    /// An op class whose resolve serializer is not yet built raises a typed
-    /// error rather than being silently omitted (a dropped op class would lose
-    /// those rows on install).
-    ResolveTxn {
+    /// The response payload is a zerompk-encoded [`super::ResolvedTxnPart`].
+    ///
+    /// `plans` is the transaction's buffered write set. Only part `0` reads
+    /// it: the walk classifies every op and names the collections whose
+    /// overlay entries serialize. An op class with no resolve serializer
+    /// raises a typed error, so no op class drops from the redo.
+    ResolveTxnPart {
         txn_id: nodedb_types::id::TxnId,
         plans: Vec<super::PhysicalPlan>,
+        part: u32,
+        max_part_bytes: u64,
     },
 
-    /// Resolve a staged Calvin transaction's write plans into ONE replayable
-    /// redo record, WITHOUT mutating base.
+    /// Read one part of a staged Calvin slice's resolved redo, WITHOUT
+    /// mutating base.
     ///
-    /// Mirrors `ResolveTxn` exactly, but reads Calvin's own staging state
-    /// instead of a session transaction's: the plans buffered in the core's
-    /// `commit_pending` under `(epoch, position, vshard)` and the per-core
-    /// staging overlay written under the corresponding synthetic `TxnId`
-    /// (see `calvin_synthetic_txn_id`). Dispatched by the scheduler once the
-    /// global verdict is commit. The scheduler proposes the record this op
-    /// returns as a stamped `TransactionRedo` entry, and
-    /// `ApplyTransactionRedo` installs it. No base engine is touched during
-    /// resolve.
+    /// The resolve of `ResolveTxnPart`, sourced from Calvin's own staging
+    /// state instead of a session transaction's: the plans buffered in the
+    /// core's `commit_pending` under `(epoch, position, vshard)` and the
+    /// per-core staging overlay written under the corresponding synthetic
+    /// `TxnId` (see `calvin_synthetic_txn_id`). Dispatched by the scheduler
+    /// once the global verdict is commit. Part `0` resolves the slice into
+    /// its resolve spill file and opens its cursor. A later request names
+    /// the next part. A repeated part `0` resolves again: the staged state
+    /// stays until the install consumes it, and the resolve is deterministic,
+    /// so every attempt reads the same parts. The scheduler proposes the
+    /// parts as a stamped `TransactionRedo` stream, and
+    /// `ApplyTransactionRedo` installs it.
     ///
-    /// The response payload is a zerompk-encoded [`super::CalvinResolved`]:
-    /// the redo record and the reply the staged plans decided.
-    CalvinResolve { epoch: u64, position: u32 },
+    /// The response payload is a zerompk-encoded
+    /// [`super::CalvinResolvedPart`].
+    CalvinResolve {
+        epoch: u64,
+        position: u32,
+        part: u32,
+        max_part_bytes: u64,
+    },
+
+    /// Read one page of a committed chunked redo's content back from this
+    /// node's WAL, WITHOUT mutating anything.
+    ///
+    /// `stream` is the server's encoding of the redo's stream reference: the
+    /// WAL position, length and checksum of each chunk. The core reads the
+    /// chunks through its own WAL reader from content offset `from`, a
+    /// record boundary: `0`, or the `next` of the previous page. It returns
+    /// the records of `section` it meets, at most `max_page_bytes` of them,
+    /// or one record past that bound alone. It also stops after reading
+    /// `max_page_bytes` of other records, so one page reads a bounded
+    /// stretch of the content.
+    ///
+    /// The Control Plane binds a chunked redo's identities from the
+    /// `Identities` pages before the redo installs, and stages its change
+    /// events from the `RowChanges` pages once it installed.
+    ///
+    /// The response payload is a zerompk-encoded
+    /// [`super::RedoStreamPage`].
+    ReadRedoStreamPage {
+        stream: Vec<u8>,
+        section: super::RedoStreamSection,
+        from: u64,
+        max_page_bytes: u64,
+    },
 
     /// Apply one committed transaction's resolved redo record on the core that
     /// owns its vShard.

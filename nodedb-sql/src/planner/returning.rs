@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resolution of a DML `RETURNING` item list against the write's target.
-//!
-//! The clause is a projection over the target collection, so it converts
-//! through the same path a top-level SELECT list does. A bare column and a
-//! star pass through. Every other item resolves to
-//! [`Projection::CpComputed`]: the Data Plane returns the base columns the
-//! expression reads and the Control Plane evaluates it once per returned
-//! row. A sequence accessor is allowed here exactly as in a top-level SELECT
-//! list.
+//! Resolve each DML output list and compile its native response projection.
 
 use sqlparser::ast;
 
@@ -21,18 +13,23 @@ use crate::planner::select::helpers::convert_projection;
 use crate::resolver::columns::{ResolvedTable, TableScope};
 use crate::types::{Projection, SqlCatalog};
 
-/// Resolve a RETURNING item list against the DML target collection.
-///
-/// `items_sql` is the text after the `RETURNING` keyword. Every non-column
-/// item resolves to `Projection::CpComputed`: the Data Plane returns the base
-/// columns the expression reads and the Control Plane evaluates it per
-/// returned row.
+/// Resolve an output list against its write target.
 pub fn resolve_returning_items(
     items_sql: &str,
     target: &str,
     catalog: &dyn SqlCatalog,
 ) -> Result<Vec<Projection>> {
     let items = parse_items(items_sql)?;
+    resolve_returning_ast(&items, target, None, catalog)
+}
+
+/// Resolve AST items while preserving the statement's target alias.
+pub fn resolve_returning_ast(
+    items: &[ast::SelectItem],
+    target: &str,
+    alias: Option<&str>,
+    catalog: &dyn SqlCatalog,
+) -> Result<Vec<Projection>> {
     let info = catalog
         .get_collection(DatabaseId::DEFAULT, target)?
         .ok_or_else(|| SqlError::UnknownTable {
@@ -40,13 +37,88 @@ pub fn resolve_returning_items(
         })?;
     let scope = TableScope::single(ResolvedTable {
         name: target.to_string(),
-        alias: None,
+        alias: alias.map(str::to_owned),
         info,
     })?
     .as_statement_output()
     .allowing_cp_functions();
-    let projection = convert_projection(&items, &scope)?;
-    Ok(projection.into_iter().map(to_cp_computed).collect())
+    let projection = convert_projection(items, &scope)?;
+    let mut projection: Vec<_> = projection.into_iter().map(to_cp_computed).collect();
+    super::catalog_plan_shapes::validate_projection(&projection, catalog, DatabaseId::DEFAULT, 0)?;
+    super::catalog_plan_shapes::fold_projection(&mut projection, catalog, DatabaseId::DEFAULT, 0);
+    Ok(projection)
+}
+
+/// Attach one statement's resolved clause to its routed write plans.
+pub(crate) fn attach_returning(
+    mut plans: Vec<crate::types::SqlPlan>,
+    items: Option<&[ast::SelectItem]>,
+    alias: Option<&str>,
+    catalog: &dyn SqlCatalog,
+) -> Result<Vec<crate::types::SqlPlan>> {
+    let Some(items) = items else { return Ok(plans) };
+    for plan in &mut plans {
+        let target = plan
+            .returning_target()
+            .ok_or_else(|| SqlError::Unsupported {
+                detail: format!("RETURNING is not supported on {}", plan.variant_name()),
+            })?;
+        let projection = resolve_returning_ast(items, target, alias, catalog)?;
+        let spec = returning_spec(&projection)?;
+        if let Some(slot) = plan.returning_slot_mut() {
+            *slot = Some(crate::types::ResolvedReturning { projection, spec });
+        }
+    }
+    Ok(plans)
+}
+
+/// Compile ordered fields and expressions for precommit response evaluation.
+pub fn returning_spec(projection: &[Projection]) -> Result<nodedb_types::ReturningSpec> {
+    use nodedb_types::{ReturningColumns, ReturningItem, ReturningSpec};
+    if matches!(
+        projection,
+        [Projection::Star] | [Projection::QualifiedStar(_)]
+    ) {
+        return Ok(ReturningSpec {
+            columns: ReturningColumns::Star,
+            precommit: None,
+        });
+    }
+    let mut items = Vec::with_capacity(projection.len());
+    for item in projection {
+        match item {
+            Projection::Column(name) => items.push(ReturningItem::Column {
+                name: name.rsplit('.').next().unwrap_or(name).to_owned(),
+                alias: None,
+            }),
+            Projection::Computed {
+                expr: crate::types::SqlExpr::Column { name, .. },
+                alias,
+            } => {
+                items.push(ReturningItem::Column {
+                    name: name.clone(),
+                    alias: Some(alias.clone()),
+                });
+            }
+            Projection::Computed { expr, alias } | Projection::CpComputed { expr, alias } => {
+                let expression = crate::query_expr::convert_sql_expr(expr)?;
+                let expression = zerompk::to_msgpack_vec(&expression).map_err(|error| {
+                    SqlError::Unsupported {
+                        detail: format!("encode RETURNING expression '{alias}': {error}"),
+                    }
+                })?;
+                items.push(ReturningItem::Computed {
+                    expression,
+                    name: alias.clone(),
+                });
+            }
+            Projection::Star | Projection::QualifiedStar(_) => items.push(ReturningItem::Star),
+        }
+    }
+    Ok(ReturningSpec {
+        columns: ReturningColumns::Named(items),
+        precommit: None,
+    })
 }
 
 /// The SELECT items of `SELECT <items_sql>`.
@@ -128,6 +200,7 @@ mod tests {
                 vector_primary: None,
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+                text_indexes: None,
             }))
         }
     }
@@ -221,5 +294,71 @@ mod tests {
         assert!(resolve("id ORDER BY id").is_err());
         assert!(resolve("id; SELECT 1").is_err());
         assert!(resolve("").is_err());
+    }
+    #[test]
+    fn each_statement_retains_its_own_response_clause() {
+        let plans = crate::plan_sql(
+            "INSERT INTO items (id, score) VALUES ('a', 3) RETURNING id AS inserted; DELETE FROM items WHERE id = 'a' RETURNING score AS removed",
+            &ItemsCatalog,
+        ).expect("plan statements");
+        assert_eq!(plans.len(), 2);
+        assert_eq!(
+            plans[0]
+                .returning()
+                .expect("insert clause")
+                .spec
+                .output_names(),
+            Some(vec!["inserted".into()])
+        );
+        assert_eq!(
+            plans[1]
+                .returning()
+                .expect("delete clause")
+                .spec
+                .output_names(),
+            Some(vec!["removed".into()])
+        );
+    }
+
+    #[test]
+    fn target_alias_and_computed_labels_reach_native_projection() {
+        let plans = crate::plan_sql(
+            "UPDATE items AS target SET score = 4 RETURNING target.id AS renamed, target.score * 2 AS doubled",
+            &ItemsCatalog,
+        ).expect("plan update");
+        let clause = plans[0].returning().expect("response clause");
+        assert_eq!(
+            clause.spec.output_names(),
+            Some(vec!["renamed".into(), "doubled".into()])
+        );
+        let nodedb_types::ReturningColumns::Named(items) = &clause.spec.columns else {
+            panic!("named output")
+        };
+        let nodedb_types::ReturningItem::Computed { expression, .. } = &items[1] else {
+            panic!("computed output")
+        };
+        let expr: nodedb_query::expr::SqlExpr =
+            zerompk::from_msgpack(expression).expect("decode expression");
+        let row = nodedb_types::Value::Object(std::collections::HashMap::from([(
+            "score".into(),
+            nodedb_types::Value::Integer(4),
+        )]));
+        assert_eq!(
+            expr.eval(&row, &nodedb_crs::CrsContext::builtin_only())
+                .expect("evaluate"),
+            nodedb_types::Value::Integer(8)
+        );
+    }
+
+    #[test]
+    fn mixed_star_keeps_projection_order() {
+        let projection = resolve("score AS first, *, id AS last").expect("resolve");
+        let spec = returning_spec(&projection).expect("compile");
+        let nodedb_types::ReturningColumns::Named(items) = spec.columns else {
+            panic!("ordered output")
+        };
+        assert_eq!(items[0].output_name(), "first");
+        assert!(matches!(items[1], nodedb_types::ReturningItem::Star));
+        assert_eq!(items[2].output_name(), "last");
     }
 }

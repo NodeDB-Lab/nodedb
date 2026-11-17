@@ -16,6 +16,8 @@ mod cut;
 mod databases;
 mod durable;
 pub(crate) mod guard;
+mod index_apply;
+mod index_records;
 mod orchestrate;
 mod quorum;
 mod redo_reissue;
@@ -24,6 +26,7 @@ mod surrogate_floor;
 mod target;
 pub mod timeseries_partition;
 pub mod timeseries_reissue;
+mod unchanged;
 mod validate;
 pub mod vector_reissue;
 

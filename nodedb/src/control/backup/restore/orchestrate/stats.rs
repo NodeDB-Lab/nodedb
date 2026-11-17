@@ -46,6 +46,8 @@ pub struct RestoreStats {
     pub documents_reissued: usize,
     /// Edge versions re-issued.
     pub edges_reissued: usize,
+    /// Stored sync-frame text versions re-issued, tombstones included.
+    pub synced_text_reissued: usize,
     /// Redo records the document and edge re-issue committed.
     pub redo_records: usize,
     /// Array catalog rows created or applied to an existing array.
@@ -117,6 +119,7 @@ impl RestoreStats {
             surrogate_pk,
             documents_reissued,
             edges_reissued,
+            synced_text_reissued,
             redo_records,
             arrays,
             array_cells_reissued,
@@ -144,6 +147,7 @@ impl RestoreStats {
         self.surrogate_pk += surrogate_pk;
         self.documents_reissued += documents_reissued;
         self.edges_reissued += edges_reissued;
+        self.synced_text_reissued += synced_text_reissued;
         self.redo_records += redo_records;
         self.arrays += arrays;
         self.array_cells_reissued += array_cells_reissued;

@@ -26,7 +26,7 @@ pub(in crate::data::executor) const TID: u64 = 1;
 /// on this core.
 pub(in crate::data::executor) const SOURCE: &str = "local_charges";
 pub(in crate::data::executor) const TARGET: &str = "local_balances";
-const ACCOUNT: &str = "a1";
+pub(in crate::data::executor) const ACCOUNT: &str = "a1";
 pub(super) const TARGET_SURROGATE: Surrogate = Surrogate(4242);
 const LSN: u64 = 70;
 
@@ -105,6 +105,7 @@ pub(in crate::data::executor) fn calvin_redo() -> Vec<u8> {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo")
@@ -184,8 +185,9 @@ fn restart_replay_applies_the_journalled_fold_rows_not_the_stamp() {
     .expect("plan parts");
     let count = parts.count().expect("part count");
     let mut records = vec![wal_record(RecordType::TransactionRedo, LSN, redo.clone())];
-    for (part, (_, ops)) in (1..=count).zip(parts.runs) {
+    for (part, (_, ops, schemas)) in (1..=count).zip(parts.runs) {
         let group = WriteGroupRecord {
+            schemas,
             group: WriteGroup::part_of(LSN, part, count),
             ops,
             redo: None,

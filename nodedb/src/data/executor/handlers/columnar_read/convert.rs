@@ -124,6 +124,13 @@ pub(in crate::data::executor) fn emit_column_value(
         TsCell::Float(_) | TsCell::Null => nodedb_query::msgpack_scan::write_null(buf),
         TsCell::Symbol(s) => nodedb_query::msgpack_scan::write_str(buf, s),
         TsCell::Int(n) => nodedb_query::msgpack_scan::write_i64(buf, n),
+        // A plain row carries a decimal and a UUID as their text, the form
+        // `nodedb_types::value_to_msgpack` writes them in.
+        TsCell::Decimal(d) => nodedb_query::msgpack_scan::write_str(buf, &d.to_string()),
+        TsCell::Uuid(bytes) => {
+            nodedb_query::msgpack_scan::write_str(buf, &uuid::Uuid::from_bytes(bytes).to_string())
+        }
+        TsCell::Bool(b) => nodedb_query::msgpack_scan::write_bool(buf, b),
     }
     Ok(())
 }

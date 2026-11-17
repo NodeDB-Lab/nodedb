@@ -205,7 +205,6 @@ async fn a_body_plan_carries_only_stageable_forms() {
                 TenantId::new(1),
                 DatabaseId::DEFAULT,
                 &security.context(&state),
-                None,
             )
             .await
             .unwrap_or_else(|e| panic!("plan {sql}: {e}"));

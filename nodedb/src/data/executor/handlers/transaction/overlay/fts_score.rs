@@ -20,7 +20,8 @@ impl CoreLoop {
     /// collection's analyzer.
     ///
     /// `Ok(None)` means the document holds no text in `index`: the
-    /// collection is unregistered, the index's text is empty (which the
+    /// collection is unregistered or declares no text field, the index's
+    /// text is empty (which the
     /// forward indexer never indexes either), or the analyzer produced no
     /// tokens. An undecodable body or an analyzer resolution error is `Err`:
     /// a staged row that silently drops out of the read is the opposite of
@@ -32,10 +33,16 @@ impl CoreLoop {
         index: IndexScope<'_>,
         body: &[u8],
     ) -> crate::Result<Option<Vec<String>>> {
+        // A staged body holds exactly the text its commit will index: the
+        // declared text fields. None declared means no text.
+        let text_fields = self.declared_text_fields_of(config_key);
+        if text_fields.is_empty() {
+            return Ok(None);
+        }
         let Some(doc) = self.decode_indexed_body(config_key, body)? else {
             return Ok(None);
         };
-        let fields = extract_fts_fields(&doc);
+        let fields = extract_fts_fields(&doc, text_fields);
         let text = fields.text_of(index);
         if text.is_empty() {
             return Ok(None);

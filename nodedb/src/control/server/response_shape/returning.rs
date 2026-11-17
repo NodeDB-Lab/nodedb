@@ -193,7 +193,7 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[ShapedRow]) -> ShapedRo
 /// numeric and bool encoders render such text verbatim; a timestamp column
 /// refuses it, because a cell under a timestamp column renders only from an
 /// instant.
-fn retype_cell(ct: DdlColType, cell: &mut Value) {
+pub(crate) fn retype_cell(ct: DdlColType, cell: &mut Value) {
     let Value::String(text) = cell else {
         return;
     };

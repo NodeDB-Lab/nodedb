@@ -22,5 +22,5 @@ pub struct MergePlan {
     pub source_alias: String,
     /// WHEN arms in declaration order.
     pub clauses: Vec<MergePlanClause>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
 }

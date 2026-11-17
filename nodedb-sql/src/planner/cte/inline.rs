@@ -118,11 +118,13 @@ pub fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> SqlPlan
 
         // INSERT ... SELECT referencing CTE → inline into the source subquery.
         SqlPlan::InsertSelect {
+            returning,
             target,
             source,
             column_map,
             source_columns,
         } => SqlPlan::InsertSelect {
+            returning: returning.clone(),
             target: target.clone(),
             source: Box::new(inline_cte(source, cte_name, cte_plan)),
             column_map: column_map.clone(),
@@ -151,7 +153,7 @@ pub fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> SqlPlan
             source_join_col: source_join_col.clone(),
             assignments: assignments.clone(),
             target_filters: target_filters.clone(),
-            returning: *returning,
+            returning: returning.clone(),
         },
         SqlPlan::Merge(merge) => {
             let mut merge = merge.clone();
@@ -737,6 +739,7 @@ mod tests {
         SqlPlan::ConstantResult {
             columns: vec!["x".to_string()],
             values: vec![SqlValue::Int(1)],
+            cast_types: vec![None],
             volatile: false,
         }
     }

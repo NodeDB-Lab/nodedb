@@ -21,11 +21,11 @@ use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoSubRecord};
 
 const TID: u64 = 1;
-const COLL: &str = "codes";
+pub(super) const COLL: &str = "codes";
 
 /// A core whose `codes` collection declares a UNIQUE index on `code`, with
 /// its bridge ends kept alive.
-fn unique_core(
+pub(super) fn unique_core(
     dir: &std::path::Path,
 ) -> (CoreLoop, Box<dyn std::any::Any>, Box<dyn std::any::Any>) {
     let (mut core, req, resp) = make_core_with_dir(dir);
@@ -41,7 +41,7 @@ fn unique_core(
     (core, Box::new(req), Box::new(resp))
 }
 
-fn body(code: &str) -> Vec<u8> {
+pub(super) fn body(code: &str) -> Vec<u8> {
     let mut obj = std::collections::HashMap::new();
     obj.insert("code".to_string(), Value::String(code.to_string()));
     // A document body is a standard MessagePack map, as the write path stores
@@ -50,7 +50,7 @@ fn body(code: &str) -> Vec<u8> {
     nodedb_types::value_to_msgpack(&Value::Object(obj)).expect("encode body")
 }
 
-fn put(surrogate: u32, code: &str) -> RedoSubRecord {
+pub(super) fn put(surrogate: u32, code: &str) -> RedoSubRecord {
     doc_put_sub_record(COLL, &format!("r{surrogate}"), &body(code), surrogate)
 }
 
@@ -64,6 +64,7 @@ fn install(core: &mut CoreLoop, lsn: u64, ops: Vec<RedoSubRecord>) -> Response {
         publishes: Vec::new(),
         row_changes: Vec::new(),
         user_roles: Vec::new(),
+        sum_targets: Vec::new(),
     }
     .to_bytes()
     .expect("encode redo");
@@ -108,7 +109,9 @@ fn assert_unique_violation(response: &Response) {
     );
 }
 
-fn seeded(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>, Box<dyn std::any::Any>) {
+pub(super) fn seeded(
+    dir: &std::path::Path,
+) -> (CoreLoop, Box<dyn std::any::Any>, Box<dyn std::any::Any>) {
     let (mut core, req, resp) = unique_core(dir);
     assert_ok(&install(&mut core, 10, vec![put(1, "A"), put(2, "B")]));
     (core, req, resp)
@@ -188,6 +191,7 @@ fn a_staged_insert_claims_a_value_the_transaction_released() {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     ];
     let task = make_default_task();

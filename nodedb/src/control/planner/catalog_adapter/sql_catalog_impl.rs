@@ -68,23 +68,11 @@ impl SqlCatalog for OriginCatalog {
         if !stored.is_active {
             // Soft-deleted: surface a distinct error so the pgwire
             // handler renders the UNDROP hint instead of "unknown
-            // table". Retention window uses the default config —
-            // per-tenant override resolution is tracked as its own
-            // checklist item.
-            let retention = crate::config::server::RetentionSettings::default()
-                .retention_window()
-                .as_nanos() as u64;
-            // `deactivated_at_ns == 0` means the drop time is unknown (a
-            // pre-upgrade row the GC sweeper has not yet adopted a time
-            // for — see `event::collection_gc::policy::PurgeDecision`,
-            // which never purges such a row). Report `u64::MAX` rather
-            // than `0 + retention`, which will falsely tell the caller
-            // the row is already past its window.
-            let retention_expires_at_ns = if stored.deactivated_at_ns == 0 {
-                u64::MAX
-            } else {
-                stored.deactivated_at_ns.saturating_add(retention)
-            };
+            // table". The window uses the default retention.
+            let retention_expires_at_ns =
+                crate::control::server::exchange::full_scan::deactivated_retention_expires_at_ns(
+                    &stored,
+                );
             return Err(SqlCatalogError::CollectionDeactivated {
                 name: name.to_string(),
                 retention_expires_at_ns,
@@ -170,6 +158,22 @@ impl SqlCatalog for OriginCatalog {
                 predicate: i.predicate.clone(),
             })
             .collect();
+        // The overlay-aware listing makes a full-text index created earlier
+        // in the same transaction visible here.
+        let index_records = catalog
+            .list_index_records_for_collection(
+                self.database_id.as_u64(),
+                self.tenant_id,
+                &stored.name,
+            )
+            .map_err(|e| SqlCatalogError::Unreadable {
+                relation: name.to_string(),
+                detail: e.to_string(),
+            })?;
+        let text_indexes = Some(super::text_index_fields::text_index_fields(
+            &index_records,
+            &stored.name,
+        ));
 
         Ok(Some(CollectionInfo {
             name: stored.name,
@@ -183,6 +187,7 @@ impl SqlCatalog for OriginCatalog {
             vector_primary: stored.vector_primary,
             partition_strategy: stored.partition_strategy,
             open_schema: CollectionInfo::open_schema_for(engine),
+            text_indexes,
         }))
     }
 

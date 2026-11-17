@@ -100,9 +100,7 @@ impl CoreLoop {
         let tenant_id = TenantId::new(p.tid);
         let database_id = task.request.database_id.as_u64();
         let cut = super::search_cut::SearchCut::of(p.system_time)?;
-        let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
-            return Ok(Vec::new());
-        };
+        let index = self.text_index(task, p.tid, p.collection, p.field)?;
         let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,
@@ -233,7 +231,7 @@ impl CoreLoop {
             {
                 return Ok(ControlFlow::Continue(()));
             }
-            let image = text_row_image(key, bytes, format.as_format_ref(), &identity_column);
+            let image = text_row_image(key, bytes, format.as_format_ref(), &identity_column)?;
             let value = decode_scanned_row(bytes, Some(image.as_slice()), format.as_format_ref())?;
             sink.push(
                 key.surrogate(),
@@ -246,8 +244,11 @@ impl CoreLoop {
 
         let mut stopped = false;
         // A row the transaction staged is emitted from its staged body.
-        let staged_row = |key: &StorageKey| {
-            overlay.is_some_and(|o| o.get(&coll_key, key.surrogate().as_u32()).is_some())
+        let staged_row = |key: &StorageKey| -> crate::Result<bool> {
+            Ok(match overlay {
+                Some(o) => o.get(&coll_key, key.surrogate().as_u32())?.is_some(),
+                None => false,
+            })
         };
         if overlay.is_none_or(|o| o.base_visible(&coll_key)) {
             match cut.at {
@@ -257,7 +258,7 @@ impl CoreLoop {
                         p.tid,
                         p.collection,
                         |key, bytes| {
-                            if staged_row(key) {
+                            if staged_row(key)? {
                                 return Ok(ControlFlow::Continue(()));
                             }
                             let flow = emit(key, bytes)?;
@@ -281,7 +282,7 @@ impl CoreLoop {
                         &|| false,
                     )?;
                     for (key, bytes) in &rows {
-                        if staged_row(key) {
+                        if staged_row(key)? {
                             continue;
                         }
                         if emit(key, bytes)?.is_break() {
@@ -295,8 +296,9 @@ impl CoreLoop {
         if let Some(overlay) = overlay
             && !stopped
         {
-            for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
-                if let Staged::Put(body) = staged
+            for item in overlay.iter_for_collection(&coll_key) {
+                let (surrogate, staged) = item?;
+                if let Staged::Put(body) = &*staged
                     && emit(&StorageKey::for_surrogate(Surrogate::new(surrogate)), body)?.is_break()
                 {
                     break;

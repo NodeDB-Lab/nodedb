@@ -16,13 +16,24 @@ use super::primary_write::{
     plans_have_primary_write, plans_have_returning, plans_raise_write_mark,
     txn_has_non_derived_write,
 };
+use crate::control::cluster::calvin::scheduler::driver::staged_returning::StagedReturning;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::types::DatabaseId;
+
+/// The plans of a transaction that home to this vShard, each beside its
+/// index in the transaction's plans.
+#[derive(Debug, Default)]
+pub(in crate::control::cluster::calvin::scheduler::driver::core) struct IndexedPlans {
+    pub plans: Vec<PhysicalPlan>,
+    pub indexes: Vec<u32>,
+}
 
 /// This vShard's slice of a transaction's write plans, with the indexes into
 /// it of the plans a trigger body buffered.
 struct LocalSlice {
     plans: Vec<PhysicalPlan>,
+    /// The index in the transaction's plans of each of `plans`.
+    plan_indexes: Vec<u32>,
     body_plans: Vec<u32>,
     /// Every local plan is a body's, and a client plan homes elsewhere.
     body_only: bool,
@@ -47,12 +58,31 @@ impl Scheduler {
         epoch: u64,
         position: u32,
     ) -> crate::Result<Vec<PhysicalPlan>> {
-        let mut local = Vec::new();
-        for plan in plans {
+        self.local_calvin_slice(plans, database_id, epoch, position)
+            .map(|slice| slice.plans)
+    }
+
+    /// [`Self::local_calvin_plans`], with the index in `plans` of each local
+    /// plan beside it.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn local_calvin_slice(
+        &self,
+        plans: Vec<PhysicalPlan>,
+        database_id: DatabaseId,
+        epoch: u64,
+        position: u32,
+    ) -> crate::Result<IndexedPlans> {
+        let mut local = IndexedPlans::default();
+        for (index, plan) in plans.into_iter().enumerate() {
             match super::super::routing::plan_vshard_in_database(&plan, database_id) {
                 PlanRouting::Vshards(vshards) => {
                     if vshards.iter().any(|v| v.as_u32() == self.vshard_id) {
-                        local.push(plan);
+                        let index = u32::try_from(index).map_err(|_| crate::Error::Internal {
+                            detail: format!(
+                                "calvin txn {epoch}/{position} carries more than u32 plans"
+                            ),
+                        })?;
+                        local.plans.push(plan);
+                        local.indexes.push(index);
                     }
                 }
                 PlanRouting::ControlPlaneOnly => {
@@ -124,14 +154,16 @@ impl Scheduler {
                 })
             }),
         };
-        let mut local =
-            match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
-                Ok(p) => p,
-                Err(e) => {
-                    self.reject_plan(txn, txn_id, lock_owner, &e);
-                    return;
-                }
-            };
+        let IndexedPlans {
+            plans: mut local,
+            indexes: plan_indexes,
+        } = match self.local_calvin_slice(plans, txn.tx_class.database_id, epoch, position) {
+            Ok(p) => p,
+            Err(e) => {
+                self.reject_plan(txn, txn_id, lock_owner, &e);
+                return;
+            }
+        };
         let Some(identities) =
             self.bind_local_identities(&mut local, txn.tx_class.database_id, tenant_id, txn_id)
         else {
@@ -174,6 +206,7 @@ impl Scheduler {
             tenant_id,
             LocalSlice {
                 plans: local,
+                plan_indexes,
                 body_plans: local_body_plans,
                 body_only,
                 identities,
@@ -237,6 +270,7 @@ impl Scheduler {
     ) {
         let LocalSlice {
             plans,
+            plan_indexes,
             body_plans,
             body_only,
             identities,
@@ -279,6 +313,8 @@ impl Scheduler {
 
         // The leader checks the transaction's collection incarnations.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);
+        let transcripts = self.returning_evals.transcripts_for(txn_id, &txn);
+        let returning = StagedReturning::of_txn_slice(&txn, plan_indexes, transcripts);
         self.pending.insert(
             txn_id,
             super::super::super::types::PendingTxn {
@@ -303,6 +339,7 @@ impl Scheduler {
                 superseded,
                 gates,
                 ungated: false,
+                returning,
             },
         );
 

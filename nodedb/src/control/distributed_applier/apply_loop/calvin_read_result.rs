@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Fold a committed `CalvinReadResult` or `CalvinReadTimeout` entry into the
-//! barrier log of its txn on its target vShard.
+//! Fold a committed `CalvinReadResult`, `CalvinSequenceEffects` or
+//! `CalvinReadTimeout` entry into the barrier log of its txn on its target
+//! vShard.
 //!
 //! The event lands in the txn's stored row first (see
 //! [`crate::control::cluster::calvin::scheduler::barrier_store`]), then in
@@ -24,6 +25,7 @@ use crate::control::cluster::calvin::BarrierEvent;
 use crate::control::cluster::calvin::scheduler::barrier_store;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::distributed_applier::propose_tracker::AppliedWrite;
+use crate::control::wal_replication::types::PlanSequenceEffects;
 
 use super::context::ApplyContext;
 use super::proposal_gate::EntryOutcome;
@@ -35,15 +37,29 @@ pub(super) struct CalvinReadResultFields<'a> {
     pub position: u32,
     pub passive_vshard: u32,
     pub values: &'a [u8],
+    /// The passive read failed: the entry carries no values.
+    pub refused: bool,
 }
 
-/// Decode `fields.values` and fold the read result into the barrier log of
-/// its txn on `fields.target_vshard`, then complete the propose waiter.
+/// Decode `fields.values` and fold the read result, or the refusal of a
+/// failed read, into the barrier log of its txn on `fields.target_vshard`,
+/// then complete the propose waiter.
 pub(super) fn forward_calvin_read_result(
     ctx: ApplyContext<'_>,
     pos: AppliedPosition,
     fields: CalvinReadResultFields<'_>,
 ) -> EntryOutcome {
+    if fields.refused {
+        return fold_barrier_event(
+            ctx,
+            pos,
+            fields.target_vshard,
+            TxnId::new(fields.epoch, fields.position),
+            BarrierEvent::ReadRefused {
+                passive_vshard: fields.passive_vshard,
+            },
+        );
+    }
     let values: Vec<(
         nodedb_physical::physical_plan::meta::PassiveReadKeyId,
         nodedb_types::Value,
@@ -87,6 +103,30 @@ pub(super) fn forward_calvin_read_result(
     )
 }
 
+/// Fold a `CalvinSequenceEffects` entry of txn `(epoch, position)`, the
+/// changes `plans` of `source_vshard`, into its barrier log on
+/// `target_vshard`, then complete the propose waiter. The event's stored row
+/// is its durable effect, as for a read result.
+pub(super) fn forward_calvin_sequence_effects(
+    ctx: ApplyContext<'_>,
+    pos: AppliedPosition,
+    target_vshard: u32,
+    (epoch, position): (u64, u32),
+    source_vshard: u32,
+    plans: &[PlanSequenceEffects],
+) -> EntryOutcome {
+    fold_barrier_event(
+        ctx,
+        pos,
+        target_vshard,
+        TxnId::new(epoch, position),
+        BarrierEvent::Sequences {
+            source_vshard,
+            plans: plans.to_vec(),
+        },
+    )
+}
+
 /// Fold a `CalvinReadTimeout` entry for txn `(epoch, position)` into its
 /// barrier log on `target_vshard`, then complete the propose waiter.
 pub(super) fn forward_calvin_read_timeout(
@@ -115,7 +155,10 @@ fn fold_barrier_event(
     txn: TxnId,
     event: BarrierEvent,
 ) -> EntryOutcome {
-    if matches!(event, BarrierEvent::Read { .. }) {
+    if matches!(
+        event,
+        BarrierEvent::Read { .. } | BarrierEvent::ReadRefused { .. }
+    ) {
         ctx.state
             .calvin
             .read_results
@@ -195,6 +238,18 @@ pub(super) fn prefold_barrier_entry(
             epoch,
             position,
             passive_vshard,
+            refused: true,
+            ..
+        } => (
+            TxnId::new(*epoch, *position),
+            BarrierEvent::ReadRefused {
+                passive_vshard: *passive_vshard,
+            },
+        ),
+        ReplicatedWrite::CalvinReadResult {
+            epoch,
+            position,
+            passive_vshard,
             values,
             ..
         } => {
@@ -210,6 +265,19 @@ pub(super) fn prefold_barrier_entry(
                 },
             )
         }
+        ReplicatedWrite::CalvinSequenceEffects {
+            epoch,
+            position,
+            source_vshard,
+            plans,
+            ..
+        } => (
+            TxnId::new(*epoch, *position),
+            BarrierEvent::Sequences {
+                source_vshard: *source_vshard,
+                plans: plans.clone(),
+            },
+        ),
         ReplicatedWrite::CalvinReadTimeout {
             epoch, position, ..
         } => (TxnId::new(*epoch, *position), BarrierEvent::Timeout),
@@ -367,6 +435,7 @@ mod tests {
                 position: 0,
                 passive_vshard: 9,
                 values: &bytes,
+                refused: false,
             },
         );
         assert!(matches!(
@@ -419,6 +488,7 @@ mod tests {
                 passive_vshard: 9,
                 tenant_id: 1,
                 values: bytes.clone(),
+                refused: false,
             },
         );
         prefold_barrier_entry(ctx, 2, 12, &entry);
@@ -438,6 +508,7 @@ mod tests {
                 position: 0,
                 passive_vshard: 9,
                 values: &bytes,
+                refused: false,
             },
         );
         assert!(matches!(
@@ -455,6 +526,115 @@ mod tests {
         );
         let events = buffer.take(TxnId::new(5, 0)).expect("buffered events");
         assert_eq!(events.memory, stored);
+    }
+
+    /// A refused read folds into the txn's row and buffer, ahead of the
+    /// lane and at the conclusion alike, and counts once. It decodes no
+    /// values.
+    #[test]
+    fn a_refused_read_folds_into_the_barrier_log() {
+        let (state, _dir) = state();
+        let tracker = Arc::new(ProposeTracker::new());
+        let ctx = ApplyContext {
+            state: &state,
+            tracker: &tracker,
+        };
+        let entry = crate::control::wal_replication::ReplicatedEntry::new(
+            1,
+            0,
+            VSHARD,
+            crate::control::wal_replication::ReplicatedWrite::CalvinReadResult {
+                epoch: 7,
+                position: 0,
+                passive_vshard: 9,
+                tenant_id: 1,
+                values: Vec::new(),
+                refused: true,
+            },
+        );
+        prefold_barrier_entry(ctx, 2, 14, &entry);
+        let outcome = forward_calvin_read_result(
+            ctx,
+            pos(14),
+            CalvinReadResultFields {
+                target_vshard: VSHARD,
+                epoch: 7,
+                position: 0,
+                passive_vshard: 9,
+                values: &[],
+                refused: true,
+            },
+        );
+        assert!(matches!(
+            outcome,
+            EntryOutcome::Applied {
+                durable: true,
+                result: None
+            }
+        ));
+        let stored = barrier_store::load_log(state.credentials.catalog(), VSHARD, TxnId::new(7, 0))
+            .expect("load the row");
+        assert_eq!(stored.event_count(), 1, "the refusal counts once");
+        assert_eq!(
+            stored.outcome(&[9].into_iter().collect()),
+            crate::control::cluster::calvin::scheduler::BarrierOutcome::Refused
+        );
+    }
+
+    /// A participant's sequence changes fold into the txn's row and buffer
+    /// as a read result does, ahead of the lane and at the conclusion
+    /// alike, and count once.
+    #[test]
+    fn sequence_changes_fold_into_the_barrier_log() {
+        use crate::control::wal_replication::types::FrozenSequenceEffect;
+        let (state, _dir) = state();
+        let tracker = Arc::new(ProposeTracker::new());
+        let ctx = ApplyContext {
+            state: &state,
+            tracker: &tracker,
+        };
+        let plans = vec![PlanSequenceEffects {
+            plan_index: 0,
+            effects: vec![FrozenSequenceEffect::Nextval {
+                name: "s".into(),
+                value: 7,
+            }],
+            refused: false,
+        }];
+        let entry = crate::control::wal_replication::ReplicatedEntry::new(
+            1,
+            0,
+            VSHARD,
+            crate::control::wal_replication::ReplicatedWrite::CalvinSequenceEffects {
+                epoch: 6,
+                position: 0,
+                source_vshard: 9,
+                tenant_id: 1,
+                plans: plans.clone(),
+            },
+        );
+        prefold_barrier_entry(ctx, 2, 13, &entry);
+        let outcome = forward_calvin_sequence_effects(ctx, pos(13), VSHARD, (6, 0), 9, &plans);
+        assert!(matches!(
+            outcome,
+            EntryOutcome::Applied {
+                durable: true,
+                result: None
+            }
+        ));
+        let stored = barrier_store::load_log(state.credentials.catalog(), VSHARD, TxnId::new(6, 0))
+            .expect("load the row");
+        assert_eq!(stored.event_count(), 1, "one plan's changes count once");
+        assert_eq!(
+            stored.sequence_effects(0, 9),
+            Some(
+                [FrozenSequenceEffect::Nextval {
+                    name: "s".into(),
+                    value: 7,
+                }]
+                .as_slice()
+            )
+        );
     }
 
     /// An event for a position the vShard's ledger holds is dropped: the

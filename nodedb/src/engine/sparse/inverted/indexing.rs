@@ -85,6 +85,23 @@ impl InvertedIndex {
             .set_collection_analyzer(database_id, tid.as_u64(), collection, analyzer_name)
     }
 
+    /// The analyzer and fuzzy default this core holds for `collection`. An
+    /// unset analyzer reads as `None`, an unset fuzzy default as `false`.
+    pub fn collection_analysis(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        collection: &str,
+    ) -> crate::Result<(Option<String>, bool)> {
+        let analyzer = self
+            .inner
+            .get_collection_analyzer(database_id, tid.as_u64(), collection)?;
+        let fuzzy = self
+            .inner
+            .get_collection_fuzzy(database_id, tid.as_u64(), collection)?;
+        Ok((analyzer, fuzzy))
+    }
+
     /// Bind whether searches over `collection` fall back to fuzzy matching by
     /// default, persisted to backend metadata. `FtsIndex::search` ORs it into
     /// every query's own fuzzy flag.
@@ -344,8 +361,6 @@ pub(super) fn prior_doc_length(
 mod tests {
     use std::sync::Arc;
 
-    use redb::Database;
-
     use nodedb_fts::FtsSearchParams;
     use nodedb_fts::posting::QueryMode;
 
@@ -358,9 +373,7 @@ mod tests {
     fn open_temp() -> (InvertedIndex, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-inverted.redb");
-        let db = Arc::new(crate::engine::durability_gate::GatedDatabase::new(
-            Database::create(&path).unwrap(),
-        ));
+        let db = Arc::new(crate::engine::durability_gate::GatedDatabase::create(&path).unwrap());
         let idx =
             InvertedIndex::open(db, crate::data::executor::core_loop::test_governor()).unwrap();
         (idx, dir)

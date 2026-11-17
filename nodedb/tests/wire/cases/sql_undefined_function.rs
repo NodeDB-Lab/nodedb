@@ -103,7 +103,8 @@ async fn registry_completeness_smoke_math_sqrt() {
         .query_text("SELECT sqrt(16.0)")
         .await
         .expect("sqrt(16.0) must succeed now that math.rs registers it");
-    assert_eq!(rows, vec!["4".to_string()]);
+    // `16.0` is numeric, so the root is numeric at PostgreSQL's scale.
+    assert_eq!(rows, vec!["4.000000000000000".to_string()]);
 }
 
 #[tokio::test]

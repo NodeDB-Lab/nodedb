@@ -75,26 +75,29 @@ pub(in crate::data::executor) fn encode_json_vec_as_msgpack(
     })
 }
 
-/// Encode a slice of `nodedb_types::Value` as a msgpack array.
+/// Encode relational rows as one msgpack array of native objects
+/// `[7, {field: <tagged value>}]`.
 ///
-/// No JSON intermediary — values are serialized directly to standard msgpack.
-pub(in crate::data::executor) fn encode_value_vec(
-    values: &[nodedb_types::Value],
-) -> crate::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(values.len() * 64);
-    let n = values.len();
-    if n <= 15 {
-        buf.push(0x90 | n as u8);
-    } else if n <= 0xFFFF {
-        buf.push(0xDC);
-        buf.extend_from_slice(&(n as u16).to_be_bytes());
-    } else {
-        buf.push(0xDD);
-        buf.extend_from_slice(&(n as u32).to_be_bytes());
-    }
-    for val in values {
-        let encoded = nodedb_types::value_to_msgpack(val).map_err(|e| crate::Error::Codec {
-            detail: format!("value serialization: {e}"),
+/// The row transport of every engine scan and relational operator. Every
+/// value keeps its type, so a Decimal or a UUID key a later join, GROUP BY
+/// or partition hash reads matches the same value read from a native stored
+/// row. The public response
+/// boundary renders these rows through the row-context renderers
+/// (`rows::decode_row_payload_to_json`, `rows::decode_row_payload_value`).
+///
+/// Every row must be a `Value::Object`. Any other value is a `Codec` error,
+/// never a row.
+pub(crate) fn encode_native_rows(rows: &[nodedb_types::Value]) -> crate::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(rows.len() * 64);
+    nodedb_query::msgpack_scan::write_array_header(&mut buf, rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if !matches!(row, nodedb_types::Value::Object(_)) {
+            return Err(crate::Error::Codec {
+                detail: format!("native row encoding: row {index} is not an object"),
+            });
+        }
+        let encoded = zerompk::to_msgpack_vec(row).map_err(|e| crate::Error::Codec {
+            detail: format!("native row encoding: row {index}: {e}"),
         })?;
         buf.extend_from_slice(&encoded);
     }
@@ -205,7 +208,7 @@ pub fn decode_payload_value(payload: &[u8]) -> crate::Result<nodedb_types::Value
 /// True when `first` can open JSON text: an array, object, string, number or
 /// one of the `true` / `false` / `null` literals. No msgpack marker for a map
 /// or array shares these bytes.
-fn looks_like_json(first: u8) -> bool {
+pub(super) fn looks_like_json(first: u8) -> bool {
     first == b'['
         || first == b'{'
         || first == b'"'

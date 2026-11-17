@@ -2,20 +2,23 @@
 
 //! Join-key extraction from a planned document body.
 //!
-//! The body a write op carries is standard MessagePack at plan time (the strict
-//! Binary-Tuple encoding happens in the Data Plane), so one decode reaches every
-//! binding's `join_column` regardless of the collection's storage mode.
+//! The body a write op carries is MessagePack at plan time (the strict
+//! Binary-Tuple encoding happens in the Data Plane): a plain map, or a native
+//! object `[7, {field: <tagged value>}]`. A native body reads as the plain
+//! body of the same values, so one decode reaches every binding's
+//! `join_column` regardless of the collection's storage mode.
 
 use memchr::memmem;
 
-/// Read `join_column` out of a standard-msgpack document `value` and render it
-/// as the target collection's primary-key STRING — the same rendering
-/// `extract_doc_id` applies to an inserted row's key, so the bytes hash to the
-/// binding the target row was created under.
+/// Read `join_column` out of a document `value` and render it as the target
+/// collection's primary-key STRING — the rendering
+/// [`nodedb_types::extract_pk_value`] gives an inserted row's key, so the
+/// bytes hash to the binding the target row was created under.
 ///
-/// Returns `None` when the field is absent or null: the row simply does not
-/// participate in this binding. A present-but-empty string IS a join value and
-/// is returned as one — the emptiness is the caller's to judge.
+/// Returns `None` when the field is absent or null, or the body does not
+/// decode: the row simply does not participate in this binding. A
+/// present-but-empty string IS a join value and is returned as one — the
+/// emptiness is the caller's to judge. A non-scalar value is not a key.
 ///
 /// A repeated key resolves to its last entry.
 ///
@@ -23,37 +26,7 @@ use memchr::memmem;
 /// in the body at all.
 pub fn join_value_from_body(value: &[u8], join_column: &str) -> Option<String> {
     memmem::find(value, join_column.as_bytes())?;
-
-    let decoded = crate::util::bounded_msgpack::read_value(value).ok()?;
-    let rmpv::Value::Map(entries) = decoded else {
-        return None;
-    };
-
-    // A repeated key resolves to its last entry, the same rule the Data Plane
-    // decoder applies.
-    let last = entries.iter().rev().find_map(|(k, v)| match k {
-        rmpv::Value::String(s) if s.as_str() == Some(join_column) => Some(v),
-        _ => None,
-    })?;
-    render_key(last)
-}
-
-/// Render a msgpack scalar the way the document engine renders a primary key.
-/// Non-scalar values (maps, arrays, binary) are not primary keys and yield
-/// `None` rather than a lossy debug string that could collide with a real key.
-fn render_key(v: &rmpv::Value) -> Option<String> {
-    match v {
-        rmpv::Value::String(s) => s.as_str().map(str::to_string),
-        rmpv::Value::Integer(i) => Some(i.to_string()),
-        rmpv::Value::F32(f) => Some(f.to_string()),
-        rmpv::Value::F64(f) => Some(f.to_string()),
-        rmpv::Value::Boolean(b) => Some(b.to_string()),
-        rmpv::Value::Nil
-        | rmpv::Value::Binary(_)
-        | rmpv::Value::Array(_)
-        | rmpv::Value::Map(_)
-        | rmpv::Value::Ext(_, _) => None,
-    }
+    nodedb_types::extract_pk_value(value, join_column)
 }
 
 #[cfg(test)]
@@ -103,6 +76,30 @@ mod tests {
     fn null_join_value_yields_none() {
         let v = doc(&[("account_id", rmpv::Value::Nil)]);
         assert!(join_value_from_body(&v, "account_id").is_none());
+    }
+
+    /// A native object body yields the join value its plain body yields.
+    #[test]
+    fn native_join_value_reads_as_its_plain_body() {
+        use nodedb_types::Value;
+        let object = Value::Object(
+            [
+                ("account_id".to_string(), Value::String("acc-1".into())),
+                ("amount".to_string(), Value::Integer(10)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let native = zerompk::to_msgpack_vec(&object).expect("native body");
+        let plain = nodedb_types::value_to_msgpack(&object).expect("plain body");
+        assert_eq!(
+            join_value_from_body(&native, "account_id"),
+            Some("acc-1".to_string())
+        );
+        assert_eq!(
+            join_value_from_body(&native, "account_id"),
+            join_value_from_body(&plain, "account_id")
+        );
     }
 
     #[test]

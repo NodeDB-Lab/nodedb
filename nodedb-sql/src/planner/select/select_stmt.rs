@@ -83,8 +83,24 @@ pub(super) fn plan_select(
         let projection = convert_projection(&select.projection, &scope)?;
         let mut columns = Vec::new();
         let mut values = Vec::new();
+        let mut cast_types = Vec::new();
         let mut volatile = false;
         for (i, proj) in projection.iter().enumerate() {
+            cast_types.push(match proj {
+                Projection::Computed {
+                    expr: SqlExpr::Cast { to_type, .. },
+                    ..
+                } => Some(to_type.clone()),
+                // An integer expression folds to an `i64`. Its PostgreSQL
+                // width types the column: `SELECT 1` is `integer`, and
+                // `SELECT 1::INT8 * 2` is `bigint`.
+                Projection::Computed { expr, .. } => crate::resolver::expr::int_width_of(
+                    expr,
+                    &crate::resolver::ColumnScope::Relations(&scope),
+                )
+                .map(|width| width.type_name().to_ascii_uppercase()),
+                _ => None,
+            });
             match proj {
                 Projection::Computed { expr, alias } => {
                     columns.push(alias.clone());
@@ -107,6 +123,7 @@ pub(super) fn plan_select(
             plan: SqlPlan::ConstantResult {
                 columns,
                 values,
+                cast_types,
                 volatile,
             },
             scope,
@@ -245,6 +262,7 @@ pub(super) fn plan_select(
                 Box::new(SqlPlan::ConstantResult {
                     columns: Vec::new(),
                     values: Vec::new(),
+                    cast_types: Vec::new(),
                     volatile: false,
                 }),
             );

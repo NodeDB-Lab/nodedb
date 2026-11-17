@@ -20,6 +20,7 @@ pub mod schema_rehydrate;
 pub mod signal;
 pub mod stall_clock;
 pub mod state_wiring;
+pub mod text_index_reconcile;
 pub mod tls;
 pub mod tracing_init;
 pub mod wal_init;

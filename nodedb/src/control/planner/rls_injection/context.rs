@@ -24,7 +24,7 @@ pub(super) struct RlsCtx<'a> {
     /// Database bare op-carried collection names (e.g.
     /// `AlgoParams.collection`) must be qualified against before a lookup.
     pub(super) database_id: nodedb_types::DatabaseId,
-    /// The catalog a write image's identity column resolves against.
+    /// Catalog definitions used by spatial predicates.
     pub(super) catalog: &'a SystemCatalog,
 }
 
@@ -121,65 +121,9 @@ impl RlsCtx<'_> {
         )
     }
 
-    /// Admit a document write, injecting the row's client-visible identity
-    /// under the collection's identity column.
-    ///
-    /// A row that lacks its identity column carries its identity only in its
-    /// storage key, never in `image`. The caller decides the encoding: a
-    /// minted key renders as the surrogate's decimal string, never the hex
-    /// storage key, matching what the read paths inject via
-    /// `sparse_row_to_doc` — a policy judges the write against the row a
-    /// later read returns. A declared-key image holds its key and gains no
-    /// `id`. `inject_str_field` is a no-op when `image` already carries the
-    /// column.
-    pub(super) fn admit_document_write_image(
-        &self,
-        collection: &nodedb_types::QualifiedCollection,
-        identity: &crate::engine::document::store::RowIdentity,
-        image: &[u8],
-    ) -> crate::Result<()> {
-        let check = get_rls_write(self.store, self.tenant_id, collection.as_str(), self.auth)?;
-        if check.is_empty() {
-            return Ok(());
-        }
-        let identity_column = self.identity_column(collection)?;
-        let with_id = nodedb_query::msgpack_scan::inject_str_field(
-            image,
-            &identity_column,
-            identity.as_str(),
-        );
-        crate::control::security::rls::admit_compiled_write_image(
-            &check,
-            &with_id,
-            self.tenant_id,
-            collection.as_str(),
-            &self.crs(),
-        )
-    }
-
-    /// The column `collection`'s rows render their identity under: its
-    /// declared key, per `document_declared_key`, else `id`. The register
-    /// config the Data Plane reads comes from the same function, so a write
-    /// image and a read row name the identity alike. An unknown collection
-    /// has no declared key.
-    fn identity_column(
-        &self,
-        collection: &nodedb_types::QualifiedCollection,
-    ) -> crate::Result<String> {
-        let name =
-            nodedb_types::CollectionKey::from_qualified(self.database_id, collection)?.name();
-        let declared_key = self
-            .catalog
-            .get_collection(self.database_id, self.tenant_id, name)?
-            .and_then(|stored| {
-                crate::control::planner::catalog_adapter::document_declared_key(&stored)
-            });
-        Ok(declared_key.unwrap_or_else(|| nodedb_types::DEFAULT_IDENTITY_COLUMN.to_string()))
-    }
-
-    /// Admit a write whose post-image is a plain-MessagePack property map (a
-    /// graph edge's `PROPERTIES`). Non-map bytes, including an empty
-    /// `PROPERTIES`, deny rather than admit by omission.
+    /// Admit a write whose post-image is a stored property object (a graph
+    /// edge's `PROPERTIES`, a native tagged object). Non-object bytes,
+    /// including an empty `PROPERTIES`, deny rather than admit by omission.
     pub(super) fn admit_write_property_image(
         &self,
         collection: &nodedb_types::QualifiedCollection,
@@ -189,7 +133,8 @@ impl RlsCtx<'_> {
         if check.is_empty() {
             return Ok(());
         }
-        let decoded = nodedb_types::json_msgpack::value_from_msgpack(image).ok();
+        // The image is a row body, plain or native.
+        let decoded = crate::data::executor::response_codec::decode_row_body(image).ok();
         let Some(nodedb_types::Value::Object(_)) = decoded else {
             return Err(crate::Error::RejectedAuthz {
                 tenant_id: crate::types::TenantId::new(self.tenant_id),
@@ -265,7 +210,11 @@ impl RlsCtx<'_> {
             *rls_write_check = nodedb_types::RlsWriteCheck::NoPolicyApplies;
             return Ok(());
         }
-        let rows = match nodedb_types::value_from_msgpack(payload) {
+        // The payload holds flat row bodies, plain or native.
+        let rows = match crate::data::executor::response_codec::decode_row_payload_value(
+            payload,
+            crate::data::executor::response_codec::RowContext::Flat,
+        ) {
             Ok(nodedb_types::Value::Array(rows)) => rows,
             Ok(row @ nodedb_types::Value::Object(_)) => vec![row],
             _ => {

@@ -13,6 +13,7 @@ use nodedb_types::Value;
 use nodedb_types::columnar::schema::is_reserved_bitemporal_column;
 
 use crate::control::sequence::SequenceAccess;
+use crate::data::executor::response_codec::RowContext;
 
 use super::super::project::push_flat_rows;
 use super::super::redaction::RedactionCtx;
@@ -31,11 +32,15 @@ use super::super::types::{DdlColType, ShapedRow, ShapedRows};
 /// or vector-translate but still needs the same envelope-unwrap + projection
 /// logic applied per batch, so streaming callers call this directly.
 ///
+/// `context` is the row shape of the payload's producer: only
+/// [`RowContext::ScanEnvelope`] rows are unwrapped.
+///
 /// `sequences` resolves the sequence accessors of the projection's
 /// Control-Plane computed columns (`cp_computed`). An accessor call with
 /// `None` is an error: the alias would otherwise project as NULL.
 pub fn shape_decoded_rows(
     decoded: Value,
+    context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
@@ -44,6 +49,7 @@ pub fn shape_decoded_rows(
     let mut rows = Vec::new();
     push_flat_rows(
         decoded,
+        context,
         OutputSchema::identity_column(projection),
         &mut rows,
     )?;
@@ -80,7 +86,7 @@ pub fn shape_decoded_rows(
             // columns to the last value. Encoders re-derive the same keys via
             // `cell_keys` when reading cells.
             let keys = super::super::project::cell_keys(&display_names);
-            let projected_rows = rows
+            let mut projected_rows: Vec<ShapedRow> = rows
                 .iter()
                 .map(|row| project_row(row, &lookup_keys, &display_names, &keys))
                 .collect();
@@ -90,6 +96,9 @@ pub fn shape_decoded_rows(
             // each cell in that type's PostgreSQL text form; native/http
             // ignore column types entirely.
             let column_types: Vec<DdlColType> = s.columns.iter().map(|c| c.ty).collect();
+            // An integer cell is checked at the width its column announces:
+            // a `SUM` over `integer` past `i64` is "bigint out of range".
+            super::super::int_fit::fit_integer_cells(&keys, &column_types, &mut projected_rows)?;
             Ok(ShapedRows::from_rows(
                 display_names,
                 column_types,
@@ -357,6 +366,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -383,6 +393,7 @@ mod tests {
 
         let baseline = shape_decoded_rows(
             decoded.clone(),
+            RowContext::Flat,
             None,
             None,
             None,
@@ -391,6 +402,7 @@ mod tests {
         .expect("shape rows");
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -418,6 +430,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -448,6 +461,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -475,6 +489,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             None,
             Some(ctx(&store, &roles, &sources)),
             None,
@@ -513,6 +528,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,
@@ -615,6 +631,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             Some(&access),
@@ -632,6 +649,7 @@ mod tests {
 
         let err = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,
@@ -662,6 +680,7 @@ mod tests {
 
         let shaped = shape_decoded_rows(
             decoded,
+            RowContext::Flat,
             Some(&projection),
             None,
             None,

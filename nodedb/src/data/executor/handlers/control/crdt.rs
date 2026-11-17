@@ -243,6 +243,14 @@ impl CoreLoop {
                     },
                 )
             }
+            // A row the snapshot writes holds a value no reader can decode.
+            // The import ran on a detached candidate, so nothing was applied.
+            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::UndecodableValue {
+                error,
+            } => {
+                warn!(core = self.core_id, %error, "crdt snapshot import holds an undecodable value");
+                self.response_error(task, ErrorCode::from(&error))
+            }
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::PendingDependencies => {
                 // A snapshot restore must apply in full: operations left
                 // causally pending mean the collection was NOT restored, so

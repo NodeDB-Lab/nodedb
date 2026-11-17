@@ -168,7 +168,10 @@ impl CoreLoop {
             );
             let doc_id = kv_row_identity(key);
             if let Some(overlay) = self.txn_overlays.get(&txn_id) {
-                let staged_value = overlay.get_by_doc_id(&coll_key, &doc_id);
+                let staged_value = match overlay.get_by_doc_id(&coll_key, &doc_id) {
+                    Ok(staged) => staged.map(std::borrow::Cow::into_owned),
+                    Err(e) => return self.response_error(task, e),
+                };
                 if matches!(staged_value, Some(Staged::Tombstone)) {
                     return self.kv_get_ttl_response(task, -2);
                 }
@@ -176,7 +179,10 @@ impl CoreLoop {
                 if staged_value.is_none() && overlay.is_truncated(&coll_key) {
                     return self.kv_get_ttl_response(task, -2);
                 }
-                let staged_ttl = overlay.get_ttl_by_doc_id(&coll_key, &doc_id);
+                let staged_ttl = match overlay.get_ttl_by_doc_id(&coll_key, &doc_id) {
+                    Ok(ttl) => ttl,
+                    Err(e) => return self.response_error(task, e),
+                };
                 match staged_ttl {
                     Some(StagedTtl::ExpireAt(expire_at_ms)) => {
                         let ttl_ms = if expire_at_ms <= now_ms {

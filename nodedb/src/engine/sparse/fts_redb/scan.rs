@@ -23,7 +23,11 @@ pub(crate) type StatsKeyDef = (u64, u64, &'static str, &'static str);
 /// Key definition of DOC_FIELDS.
 pub(crate) type DocFieldsKeyDef = (u64, u64, &'static str, u32);
 
+/// One POSTINGS key `owner` owns: `(collection, field, term, surrogate)`.
+pub(crate) type PostingKeyRow = (String, String, String, u32);
+
 /// One POSTINGS row within one collection: `(field, term, surrogate, value)`.
+#[cfg(test)]
 pub(crate) struct PostingRow {
     pub(crate) field: String,
     pub(crate) term: String,
@@ -31,19 +35,9 @@ pub(crate) struct PostingRow {
     pub(crate) value: Vec<u8>,
 }
 
-/// One POSTINGS key `owner` owns: `(collection, field, term, surrogate)`.
-pub(crate) type PostingKeyRow = (String, String, String, u32);
-
-/// One row of a document table within one collection:
-/// `(field, surrogate, value)`.
-pub(crate) struct DocRow {
-    pub(crate) field: String,
-    pub(crate) surrogate: u32,
-    pub(crate) value: Vec<u8>,
-}
-
 /// Every POSTINGS row of one collection, with values, in key order: by
 /// field, then term, then surrogate.
+#[cfg(test)]
 pub(crate) fn posting_rows<T>(
     table: &T,
     database_id: u64,
@@ -193,33 +187,6 @@ where
         }
         None => Ok(false),
     }
-}
-
-/// Every DOC_LENGTHS / DOC_TERMS row of one collection, with values.
-pub(crate) fn doc_rows<T>(
-    table: &T,
-    database_id: u64,
-    tid: u64,
-    collection: &str,
-) -> Result<Vec<DocRow>, StorageError>
-where
-    T: ReadableTable<DocKeyDef, &'static [u8]>,
-{
-    let owner = KeyOwner::collection(database_id, tid, collection);
-    let mut out = Vec::new();
-    for entry in table.range(owner.doc_start()..)? {
-        let (key, value) = entry?;
-        let (db, tid, collection, field, surrogate) = key.value();
-        if !owner.owns(db, tid, collection, Some(field)) {
-            break;
-        }
-        out.push(DocRow {
-            field: field.to_string(),
-            surrogate,
-            value: value.value().to_vec(),
-        });
-    }
-    Ok(out)
 }
 
 /// Every `(collection, field, surrogate)` key `owner` owns in a document table.

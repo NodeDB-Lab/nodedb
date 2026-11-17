@@ -35,13 +35,13 @@ impl NativeClient {
     ///
     /// The server owns the identity column: it writes `doc.id` under the
     /// collection's key and refuses a field there that names another id.
+    /// The body is a native object, so every field keeps its exact type.
     pub(super) async fn document_put_impl(
         &self,
         collection: &str,
         doc: Document,
     ) -> NodeDbResult<()> {
-        let data = sonic_rs::to_vec(&doc.fields)
-            .map_err(|e| NodeDbError::serialization("json", format!("doc serialize: {e}")))?;
+        let data = native_document_body(&doc)?;
         let mut conn = self.pool.acquire().await?;
         let resp = conn
             .send(
@@ -140,6 +140,17 @@ fn point_get_response_to_document(
     Ok(Some(doc))
 }
 
+/// The PointPut body of `doc`: its fields as one native object
+/// `[7, {field: <tagged value>}]`.
+///
+/// A native object keeps every field's exact type, which the server decodes
+/// typed and stores as it came. JSON text would turn a Decimal into a string,
+/// bytes into a number array, and a UUID or an instant into plain text.
+fn native_document_body(doc: &Document) -> NodeDbResult<Vec<u8>> {
+    zerompk::to_msgpack_vec(&nodedb_types::Value::Object(doc.fields.clone()))
+        .map_err(|e| NodeDbError::serialization("msgpack", format!("doc serialize: {e}")))
+}
+
 fn malformed(collection: &str, id: &str, detail: impl std::fmt::Display) -> NodeDbError {
     NodeDbError::serialization(
         "native",
@@ -150,6 +161,37 @@ fn malformed(collection: &str, id: &str, detail: impl std::fmt::Display) -> Node
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The put body is a native object holding every field typed: a Decimal
+    /// with its scale, a UUID, an instant and bytes.
+    #[test]
+    fn the_put_body_is_a_native_object_of_typed_fields() {
+        use nodedb_types::Value;
+
+        let mut doc = Document::new("d1");
+        doc.set("price", Value::Decimal("12.50".parse().unwrap()));
+        doc.set(
+            "uid",
+            Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+        );
+        doc.set(
+            "at",
+            Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+                1_700_000_000_000_000,
+            )),
+        );
+        doc.set("blob", Value::Bytes(vec![0, 255]));
+        let body = native_document_body(&doc).expect("body encodes");
+        assert_eq!(
+            body[..2],
+            [0x92, 0x07],
+            "a native object opens with its tag"
+        );
+        assert_eq!(
+            nodedb_types::object_msgpack::decode_object(&body).expect("body decodes"),
+            Value::Object(doc.fields)
+        );
+    }
     use nodedb_types::protocol::ResponseStatus;
     use nodedb_types::value::Value;
 

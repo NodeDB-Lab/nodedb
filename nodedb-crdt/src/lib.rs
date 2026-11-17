@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! # nodedb-crdt
 //!
 //! CRDT engine with SQL constraint validation for NodeDB.
@@ -28,7 +31,7 @@ pub mod dead_letter;
 pub mod deferred;
 pub mod error;
 pub mod list_ops;
-mod loro_value;
+pub mod loro_value;
 pub mod policy;
 pub mod pre_validate;
 pub mod row_lookup;

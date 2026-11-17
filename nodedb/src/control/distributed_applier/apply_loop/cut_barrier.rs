@@ -315,7 +315,7 @@ mod tests {
             }],
         });
         pipeline.pump();
-        pipeline.settle();
+        pipeline.settle().await;
 
         assert_eq!(*saved.lock().expect("saved"), vec![(GROUP, 1)]);
         assert_eq!(*compacted.lock().expect("compacted"), vec![(GROUP, 1)]);

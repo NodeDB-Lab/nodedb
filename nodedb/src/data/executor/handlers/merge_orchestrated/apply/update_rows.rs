@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The MERGE UPDATE arm (matched + not-matched-by-source), applied inside the
-//! phase-A transaction shared with the INSERT arm.
+//! statement transaction shared with the INSERT and DELETE arms.
 
 use redb::WriteTransaction;
 
 use crate::bridge::envelope::{Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::submitted_row_image;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::balanced::BalancedEntry;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
@@ -16,7 +16,9 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::RowIdentity;
 
 use super::super::abort::MergeAbort;
-use super::super::apply_support::{MergePutEvent, record_put_index_undo, returning_doc};
+use super::super::apply_support::{
+    MergeEvent, gate_merge_row, record_put_index_undo, retain_target_writes, returning_doc,
+};
 use super::super::plan::MergeUpdate;
 
 /// Read-only context the UPDATE arm needs from the shared apply pass.
@@ -31,15 +33,16 @@ pub(super) struct UpdateRowsCtx<'a> {
     /// The target's declared `PRIMARY KEY` column, when it has one. Names
     /// each row in its event and redo entry.
     pub(super) declared_primary_key: Option<&'a str>,
+    pub(super) rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 /// Mutable accumulators the UPDATE arm folds into. Owned by the caller for
 /// the whole apply pass and borrowed here rather than cloned.
-pub(super) struct UpdateRowsTally<'a, 'p> {
+pub(super) struct UpdateRowsTally<'a> {
     pub(super) affected: &'a mut u64,
-    pub(super) applied_keys: &'a mut Vec<String>,
+    pub(super) applied_keys: &'a mut Vec<(String, crate::engine::document::store::StorageKey)>,
     pub(super) undo_log: &'a mut Vec<UndoEntry>,
-    pub(super) put_events: &'a mut Vec<MergePutEvent<'p>>,
+    pub(super) events: &'a mut Vec<MergeEvent>,
     pub(super) write_set: &'a mut Vec<WriteSetEntry>,
     pub(super) balanced_entries: &'a mut Vec<BalancedEntry>,
     pub(super) returned_docs: &'a mut Vec<nodedb_types::Value>,
@@ -50,12 +53,12 @@ impl CoreLoop {
     /// caller's shared write transaction. `Err(response)` is the terminating
     /// error response the caller must return as-is — the transaction is left
     /// uncommitted for the caller to abort.
-    pub(super) fn apply_merge_update_arm<'p>(
+    pub(super) fn apply_merge_update_arm(
         &mut self,
         txn: &WriteTransaction,
-        updates: &'p [MergeUpdate],
+        updates: &[MergeUpdate],
         ctx: UpdateRowsCtx<'_>,
-        tally: UpdateRowsTally<'_, 'p>,
+        tally: UpdateRowsTally<'_>,
     ) -> Result<(), Response> {
         let UpdateRowsCtx {
             task,
@@ -65,12 +68,13 @@ impl CoreLoop {
             returning,
             resolved_sum_targets,
             declared_primary_key,
+            rls_write_check,
         } = ctx;
         let UpdateRowsTally {
             affected,
             applied_keys,
             undo_log,
-            put_events,
+            events,
             write_set,
             balanced_entries,
             returned_docs,
@@ -79,14 +83,14 @@ impl CoreLoop {
 
         for upd in updates {
             let surrogate = upd.key.surrogate();
-            applied_keys.push(upd.key.to_string());
+            applied_keys.push((collection.to_owned(), upd.key));
             // The identity INSERT minted for this row, from its MessagePack
             // body: the declared primary key, else the decimal surrogate.
             let row_identity = RowIdentity::of_stored_row(&upd.body, declared_primary_key, upd.key);
             // `apply_point_put` ends the row's prior vector nodes at the new
             // version's ordinal and records their undo before its inserts', so
             // an abort undeletes the old vector after removing the new one.
-            match self.apply_point_put(
+            let prepared = match self.prepare_point_put(
                 txn,
                 PointPutParams {
                     database_id,
@@ -106,13 +110,85 @@ impl CoreLoop {
                     ),
                 },
             ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
+                }
+            };
+            let image = prepared.installed();
+            let schema = match image.schema.as_ref() {
+                nodedb_physical::physical_plan::StorageMode::Schemaless => None,
+                nodedb_physical::physical_plan::StorageMode::Strict { schema } => Some(schema),
+            };
+            if let Err(error) = gate_merge_row(
+                self,
+                &WriteSetRow {
+                    database_id,
+                    tid,
+                    collection,
+                    identity: row_identity.clone(),
+                },
+                rls_write_check,
+                &image.stored,
+                schema,
+            ) {
+                return Err(self.abort_merge_apply(MergeAbort {
+                    task,
+                    database_id,
+                    tid,
+                    applied_keys,
+                    undo_log: std::mem::take(undo_log),
+                    err: error.into(),
+                }));
+            }
+            match self.apply_prepared_point_put(txn, prepared) {
                 Ok(mut outcome) => {
                     record_put_index_undo(undo_log, &mut outcome);
                     // The arm's materialized-sum delta is folded inside
                     // the SAME transaction the arm's row lands in, so a
                     // moved total rolls back with the row that moved it.
-                    // Both images come from the plan: the classifier held
-                    // the pre-image already, so nothing is re-read.
+                    // Both images come from the actual write outcome, so repeated
+                    // keys observe earlier writes in this transaction.
+                    let event = match self.prepare_installed_put_event(
+                        &WriteSetRow {
+                            database_id,
+                            tid,
+                            collection,
+                            identity: row_identity.clone(),
+                        },
+                        &outcome.installed,
+                        outcome.prior_value.as_deref(),
+                    ) {
+                        Ok(event) => event,
+                        Err(error) => {
+                            return Err(self.abort_merge_apply(MergeAbort {
+                                task,
+                                database_id,
+                                tid,
+                                applied_keys: applied_keys.as_slice(),
+                                undo_log: std::mem::take(undo_log),
+                                err: error.into(),
+                            }));
+                        }
+                    };
+                    write_set.push(WriteSetEntry::installed_put(
+                        surrogate.as_u32(),
+                        row_identity.clone(),
+                        outcome.installed.clone(),
+                        event.clone(),
+                    ));
+                    events.push(MergeEvent::Put {
+                        collection: collection.to_owned(),
+                        identity: row_identity.clone(),
+                        event,
+                    });
                     match write_hook::run(
                         self,
                         txn,
@@ -123,15 +199,27 @@ impl CoreLoop {
                             resolved_targets: resolved_sum_targets,
                             deferred_sum_targets: &[],
                             wal_lsn: task.wal_lsn(),
+                            target_unique:
+                                crate::data::executor::enforcement::unique::UniqueJudge::Unit,
                         },
-                        write_hook::WriteImages::Update {
-                            old: write_hook::ImageBody::Submitted(&upd.old_body),
-                            new: write_hook::ImageBody::Submitted(&upd.body),
+                        match outcome.prior_value.as_deref() {
+                            Some(old) => write_hook::WriteImages::Update {
+                                old: write_hook::ImageBody::Stored(old),
+                                new: write_hook::ImageBody::Stored(&outcome.installed.stored),
+                            },
+                            None => write_hook::WriteImages::Insert {
+                                new: write_hook::ImageBody::Stored(&outcome.installed.stored),
+                            },
                         },
                     ) {
                         Ok(enforcement) => {
-                            write_set
-                                .extend(write_hook::target_write_set(&enforcement.target_writes));
+                            retain_target_writes(
+                                enforcement.target_writes,
+                                undo_log,
+                                applied_keys,
+                                events,
+                                write_set,
+                            );
                             balanced_entries.extend(enforcement.balanced_entries);
                         }
                         Err(e) => {
@@ -139,30 +227,24 @@ impl CoreLoop {
                                 task,
                                 database_id,
                                 tid,
-                                collection,
                                 applied_keys: applied_keys.as_slice(),
                                 undo_log: std::mem::take(undo_log),
                                 err: e.into(),
                             }));
                         }
                     }
-                    // The updated row, journalled after the phase-A commit
-                    // from the MessagePack body `apply_point_put` took.
-                    write_set.push(submitted_row_image(
-                        surrogate.as_u32(),
-                        row_identity.clone(),
-                        upd.body.clone(),
-                        outcome.version_sys_from,
-                    ));
                     if returning {
-                        match returning_doc(&upd.body, &upd.key, &identity_column) {
+                        match returning_doc(
+                            &outcome.installed.canonical,
+                            &upd.key,
+                            &identity_column,
+                        ) {
                             Ok(doc) => returned_docs.push(doc),
                             Err(e) => {
                                 return Err(self.abort_merge_apply(MergeAbort {
                                     task,
                                     database_id,
                                     tid,
-                                    collection,
                                     applied_keys: applied_keys.as_slice(),
                                     undo_log: std::mem::take(undo_log),
                                     err: e.into(),
@@ -170,7 +252,7 @@ impl CoreLoop {
                             }
                         }
                     }
-                    put_events.push((row_identity, upd.body.as_slice(), outcome.prior_value));
+
                     *affected += 1;
                 }
                 Err(e) => {
@@ -178,7 +260,6 @@ impl CoreLoop {
                         task,
                         database_id,
                         tid,
-                        collection,
                         applied_keys: applied_keys.as_slice(),
                         undo_log: std::mem::take(undo_log),
                         err: e.into(),

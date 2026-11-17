@@ -289,12 +289,12 @@ async fn update_scalar_function_rhs_strict() {
         .await
         .unwrap();
     server
-        .exec("INSERT INTO scores (id, confidence) VALUES ('s1', 0.8)")
+        .exec("INSERT INTO scores (id, confidence) VALUES ('s1', 0.5)")
         .await
         .unwrap();
 
     server
-        .exec("UPDATE scores SET confidence = LEAST(confidence + 0.05, 1.0) WHERE id = 's1'")
+        .exec("UPDATE scores SET confidence = LEAST(confidence + 0.25, 1.0) WHERE id = 's1'")
         .await
         .unwrap();
 
@@ -304,8 +304,8 @@ async fn update_scalar_function_rhs_strict() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0], "0.85",
-        "expected confidence=0.85, got {:?}",
+        rows[0], "0.75",
+        "expected confidence=0.75, got {:?}",
         rows[0]
     );
 }

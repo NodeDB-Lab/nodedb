@@ -51,6 +51,17 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::DATA_EXCEPTION => sqlstate::DATA_EXCEPTION,
         // Mirrors the `InvalidLimitValue` arm.
         Ec::INVALID_LIMIT_VALUE => sqlstate::INVALID_LIMIT_VALUE,
+        // Mirrors the `InvalidArgumentForLogarithm` and
+        // `InvalidArgumentForPowerFunction` arms.
+        Ec::INVALID_ARGUMENT_FOR_LOGARITHM => sqlstate::INVALID_ARGUMENT_FOR_LOGARITHM,
+        Ec::INVALID_ARGUMENT_FOR_POWER_FUNCTION => sqlstate::INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+        // Mirrors the `InvalidTextRepresentation`, `InvalidDatetimeFormat`
+        // and `DatetimeFieldOverflow` arms.
+        Ec::INVALID_TEXT_REPRESENTATION => sqlstate::INVALID_TEXT_REPRESENTATION,
+        Ec::INVALID_DATETIME_FORMAT => sqlstate::INVALID_DATETIME_FORMAT,
+        Ec::DATETIME_FIELD_OVERFLOW => sqlstate::DATETIME_FIELD_OVERFLOW,
+        // Mirrors the `DatatypeMismatch` arm.
+        Ec::DATATYPE_MISMATCH => sqlstate::DATATYPE_MISMATCH,
         // Mirrors the `RejectedAuthz` arm.
         Ec::AUTHORIZATION_DENIED => sqlstate::INSUFFICIENT_PRIVILEGE,
         // Mirrors the `SessionTokenExpired` arm.

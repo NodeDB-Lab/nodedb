@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Compression codecs for NodeDB timeseries columnar storage.
 //!
 //! Provides per-column codec selection with **cascading compression**:

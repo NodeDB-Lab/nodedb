@@ -52,10 +52,11 @@ pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
             TimeseriesAggOutput::GroupColumn { name, .. } => {
                 types.get(name).copied().unwrap_or(DdlColType::Text)
             }
-            TimeseriesAggOutput::Aggregate(index) => scan
-                .aggregates
-                .get(*index)
-                .map_or(DdlColType::Text, |agg| infer_aggregate_type(agg, &types)),
+            TimeseriesAggOutput::Aggregate(index) => {
+                scan.aggregates.get(*index).map_or(DdlColType::Text, |agg| {
+                    gap_filled_type(scan, agg, infer_aggregate_type(agg, &types))
+                })
+            }
         };
         columns.push(OutputColumn {
             lookup_key: if renamed { name.clone() } else { key },
@@ -69,6 +70,31 @@ pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
         cp_computed: Vec::new(),
         declared_key: None,
     })
+}
+
+/// The type of aggregate `agg` of `scan`, typed `ty`, when its buckets are
+/// gap-filled.
+///
+/// A `prev`, `linear` or literal fill writes the neighbouring buckets' AVG,
+/// or the literal, into each value aggregate of a filled bucket. Over an
+/// integer column that AVG is a numeric, so an integer-typed value
+/// aggregate is `Numeric`: an integer cell renders as valid `numeric` text
+/// too. A count stays a count. A `null` fill, or none, keeps `ty`.
+fn gap_filled_type(scan: &TimeseriesScanPlan, agg: &AggregateExpr, ty: DdlColType) -> DdlColType {
+    if matches!(agg.function.as_str(), "count" | "approx_count_distinct") {
+        return ty;
+    }
+    use crate::engine::timeseries::gap_fill::GapFillStrategy;
+    let fills_values = matches!(
+        GapFillStrategy::parse(&scan.gap_fill),
+        Some(GapFillStrategy::Prev | GapFillStrategy::Linear | GapFillStrategy::Literal(_))
+    );
+    match ty {
+        DdlColType::Int2 | DdlColType::Int4 | DdlColType::Int8 if fills_values => {
+            DdlColType::Numeric
+        }
+        other => other,
+    }
 }
 
 /// The columns a native grouped timeseries scan encodes, in its own order:
@@ -135,11 +161,27 @@ pub(super) fn aggregate_schema<C: SqlCatalog + ?Sized>(
     // is parallel to `group_by` when populated, but may be empty when the
     // plan was built without a projection in scope — treat a
     // missing/`None` entry as "no alias".
+    // Each key's row key is decided by the rule the aggregate's rename
+    // applies, so an alias another cell already holds reads its row name.
+    let row_names: Vec<String> = group_by
+        .iter()
+        .enumerate()
+        .map(|(index, key)| nodedb_sql::planner::agg_naming::group_key_row_name(key, index))
+        .collect();
+    let aggregate_names: Vec<&str> = aggregates.iter().map(|agg| agg.alias.as_str()).collect();
+    let final_names = nodedb_sql::planner::agg_naming::group_key_final_names(
+        &row_names,
+        group_by_aliases,
+        &aggregate_names,
+    );
     let key_column = |index: usize| {
-        group_by.get(index).map(|key| {
-            let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
-            group_by_key_column(key, index, alias, &types)
-        })
+        group_by
+            .get(index)
+            .zip(final_names.get(index))
+            .map(|(key, final_name)| {
+                let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
+                group_by_key_column(key, index, alias, final_name, &types)
+            })
     };
     // Derives the `OutputColumn` for one aggregate. `AggregateExpr::alias`
     // is always populated by the planner: either the user's explicit
@@ -148,7 +190,8 @@ pub(super) fn aggregate_schema<C: SqlCatalog + ?Sized>(
     // lowercasing of non-column expressions. So the alias is already the
     // canonical name; no separate derivation needed. The result type is
     // inferred conservatively (COUNT -> Int8, MIN/MAX preserve the input
-    // column type, SUM/AVG of a float -> Float8, else Text).
+    // column type, SUM of a float -> Float8, AVG of a float -> Float8 and of
+    // anything else -> Numeric, else Text).
     let agg_column = |index: usize| {
         aggregates.get(index).map(|agg| OutputColumn {
             display_name: agg.alias.clone(),
@@ -294,9 +337,9 @@ mod tests {
         // SUM(float_col) -> Float8.
         assert_eq!(schema.columns[3].display_name, "sum_amount");
         assert_eq!(schema.columns[3].ty, DdlColType::Float8);
-        // SUM(int_col) stays Text (numeric promotion, no regression).
+        // SUM(bigint_col) -> Numeric, as PostgreSQL's sum(int8).
         assert_eq!(schema.columns[4].display_name, "sum_n");
-        assert_eq!(schema.columns[4].ty, DdlColType::Text);
+        assert_eq!(schema.columns[4].ty, DdlColType::Numeric);
     }
 
     fn timeseries_scan(

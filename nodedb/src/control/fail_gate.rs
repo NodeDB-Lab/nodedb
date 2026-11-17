@@ -126,6 +126,23 @@ pub(crate) fn holds_redo_propose(node_id: u64, collections: &[String]) -> bool {
     })
 }
 
+/// The Calvin scheduler's stream gate on node `node_id`: a committed
+/// slice's streamed redo proposed its first chunk and has not proposed its
+/// second. Named per collection, `calvin::before_second_chunk::<collection>`.
+///
+/// Like [`holds_redo_propose`], the gate answers without waiting: `true`
+/// while the file armed for one of `collections` is absent. The scheduler
+/// keeps the stream where it stopped and asks again on its next stall tick.
+/// On its first hold the gate creates `<path>.parked`.
+pub(crate) fn holds_redo_stream(node_id: u64, collections: &[String]) -> bool {
+    collections.iter().any(|collection| {
+        holds(
+            FailScope::Node(node_id),
+            &format!("calvin::before_second_chunk::{collection}"),
+        )
+    })
+}
+
 /// The Calvin install gate on node `node_id`: after a stamped redo's install
 /// is durable and before its `RedoApplied` event reaches the vShard's
 /// scheduler. Named per collection,
@@ -317,5 +334,33 @@ pub(crate) async fn before_catalog_ddl_apply(node_id: u64, collection: &str) {
     let name = format!("catalog_ddl::before_apply::{collection}");
     if let Some(FailAction::Sleep(pause)) = lookup(FailScope::Node(node_id), &name) {
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// The change stream's gate on node `state.node_id`: after a page of an
+/// installed chunked redo's change events staged, once the entry moved
+/// staged events to the change journal and before the entry settles. Named
+/// per collection, `change_stream::after_spill::<collection>`, and evaluated
+/// only once boot's data-group replay finished. A crash test parks the
+/// apply here and kills the node while no event of the entry is visible.
+pub(crate) async fn after_spill(
+    state: &crate::control::state::SharedState,
+    group_id: u64,
+    log_index: u64,
+    collections: &std::collections::BTreeSet<String>,
+) {
+    if !state
+        .data_groups_replayed
+        .load(std::sync::atomic::Ordering::Acquire)
+        || !state.change_stream.spilled(group_id, log_index)
+    {
+        return;
+    }
+    for collection in collections {
+        wait(
+            FailScope::Node(state.node_id),
+            &format!("change_stream::after_spill::{collection}"),
+        )
+        .await;
     }
 }

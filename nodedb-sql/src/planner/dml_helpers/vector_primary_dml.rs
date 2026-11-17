@@ -38,7 +38,7 @@ pub(crate) struct VectorPrimaryUpdateParams<'a> {
     pub assignments: Vec<(String, SqlExpr)>,
     pub filters: Vec<Filter>,
     pub target_keys: Vec<SqlValue>,
-    pub returning: bool,
+    pub returning: Option<crate::types::ResolvedReturning>,
 }
 
 /// Build a `SqlPlan::VectorPrimaryUpdate`.
@@ -103,6 +103,7 @@ pub(crate) fn build_vector_primary_delete_plan(
     target_keys: Vec<SqlValue>,
 ) -> Vec<SqlPlan> {
     vec![SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan {
+        returning: None,
         collection: collection.to_string(),
         field: vpc.vector_field.clone(),
         filters,

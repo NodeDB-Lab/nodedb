@@ -28,6 +28,7 @@ use crate::control::server::shared::cluster_array_dispatch::{
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::conn_scope::scoped_system_txn;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::shared::session::staging_gate::StagingGateError;
 use crate::control::server::shared::session::{
@@ -38,6 +39,9 @@ use crate::control::server::shared::txn_route::{
 };
 use crate::control::server::shared::write_admission::plan_is_write;
 use crate::control::state::SharedState;
+use crate::control::trigger::statement_txn::{
+    ImplicitAttempt, ImplicitRetry, begin_implicit, finish_implicit,
+};
 use crate::types::{DatabaseId, TenantId};
 
 use super::answer::{StatementAnswer, StatementFold};
@@ -275,29 +279,53 @@ pub(crate) async fn run_statement_loop(
 }
 
 /// Run a statement in an implicit transaction: it commits when every task
-/// succeeds, and rolls back when one fails. `client` is the session the
-/// statement arrived on. The transaction runs on a private session of its
-/// own, so a transport with no session passes a detached one.
+/// succeeds, and rolls back when one fails. The transaction runs on a
+/// private session of its own, so the session the statement arrived on
+/// takes no part.
+///
+/// A COMMIT that aborts on a serialization conflict runs the statement
+/// again on a new transaction, until the statement deadline, unless its
+/// writes fire a joined trigger body.
 pub(crate) async fn run_implicit_statement(
     exec: &StatementExec<'_>,
     statement: PlannedStatement,
-    client: &DmlTxnCtx<'_>,
 ) -> Result<StatementAnswer, StatementError> {
     let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
-    crate::control::trigger::statement_txn::with_statement_txn_lifted(
-        exec.state,
-        exec.identity,
-        client,
-        true,
-        StatementError::Error,
-        async |txn: &DmlTxnCtx<'_>| {
-            if cuts_at_commit {
-                txn.sessions.allow_tx_edge_truncate(txn.session_id);
+    let retry = !statement_fires_joined_body(exec.state, &statement.tasks);
+    let mut pacing = ImplicitRetry::new(exec.state, retry);
+    loop {
+        let attempt = scoped_system_txn(async {
+            let txn = match begin_implicit(exec.state, exec.identity) {
+                Ok(txn) => txn,
+                Err(error) => return ImplicitAttempt::Failed(StatementError::Error(error)),
+            };
+            let result = match txn.txn_ctx() {
+                Ok(txn_ctx) => {
+                    if cuts_at_commit {
+                        txn_ctx.sessions.allow_tx_edge_truncate(txn_ctx.session_id);
+                    }
+                    let planned = PlannedStatement {
+                        tasks: statement.tasks.clone(),
+                        plan_lease_scope: Arc::clone(&statement.plan_lease_scope),
+                        sum_target_reads: statement.sum_target_reads.clone(),
+                    };
+                    run_statement_loop(exec, planned, Some(&txn_ctx)).await
+                }
+                Err(error) => Err(StatementError::Error(error)),
+            };
+            finish_implicit(txn, result, StatementError::Error).await
+        })
+        .await;
+        match attempt {
+            ImplicitAttempt::Committed(answer) => return Ok(answer),
+            ImplicitAttempt::Failed(error) => return Err(error),
+            ImplicitAttempt::Conflict(conflict) => {
+                if !pacing.pause().await {
+                    return Err(StatementError::Error(crate::Error::from(conflict)));
+                }
             }
-            run_statement_loop(exec, statement, Some(txn)).await
-        },
-    )
-    .await
+        }
+    }
 }
 
 /// Whether an implicit transaction of `tasks` reads no edge after a TRUNCATE:

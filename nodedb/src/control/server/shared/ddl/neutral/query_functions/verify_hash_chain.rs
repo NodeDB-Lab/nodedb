@@ -27,7 +27,9 @@ pub async fn verify_hash_chain(
     args: &VerifyHashChainArgs,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let tenant_id = identity.tenant_id;
-    let collection = args.collection.to_lowercase();
+    // A string-literal argument names the collection verbatim, as in every
+    // other query function.
+    let collection = args.collection.clone();
     if collection.is_empty() {
         return Err(err("42601", "VERIFY_HASH_CHAIN requires (collection)"));
     }

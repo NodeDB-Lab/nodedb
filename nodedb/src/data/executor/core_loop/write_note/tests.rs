@@ -38,12 +38,14 @@ pub fn make_core_with_dir(
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir,
-        std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-        crate::data::executor::core_loop::test_governor(),
+        crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir,
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            crate::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx)
@@ -93,6 +95,29 @@ pub fn make_default_task() -> ExecutionTask {
     ExecutionTask::new(make_request(point_get()))
 }
 
+/// Declare `text_fields` as the full-text fields of `collection` in database
+/// DEFAULT under tenant `tid`.
+///
+/// A config the core already holds keeps every other value. Otherwise the
+/// collection gets a default schemaless config. Every field is indexed and
+/// readable, as a ready index declares it.
+pub(crate) fn declare_text_fields(
+    core: &mut CoreLoop,
+    tid: u64,
+    collection: &str,
+    text_fields: &[&str],
+) {
+    let fields: Vec<String> = text_fields.iter().map(|f| f.to_string()).collect();
+    core.doc_configs
+        .entry((
+            DatabaseId::DEFAULT,
+            TenantId::new(tid),
+            collection.to_string(),
+        ))
+        .or_insert_with(|| crate::engine::document::store::CollectionConfig::new(collection))
+        .text_fields = nodedb_physical::physical_plan::TextFieldSet::all_readable(fields);
+}
+
 /// A `{k: v}` document body: a standard MessagePack map.
 pub(crate) fn doc_value(k: &str, v: &str) -> Vec<u8> {
     let mut obj = std::collections::HashMap::new();
@@ -134,6 +159,7 @@ pub(crate) fn point_put(
             returning: None,
             rls_filters: &[],
             resolved_sum_targets: &[],
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
         },
     )
 }

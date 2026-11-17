@@ -56,13 +56,13 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::ConflictRetry
         | ErrorCode::SerializationConflict { .. }
         | ErrorCode::OllpRetryRequired
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::TransactionRollback { .. } => true,
         ErrorCode::DeadlineExceeded
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
         | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. }
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
         | ErrorCode::SyncRejected { .. }
@@ -97,6 +97,8 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedObject { .. }
         | ErrorCode::ObjectNotInPrerequisiteState { .. }
@@ -163,14 +165,13 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // before the statement ran.
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
-        // The staging overlay hit its byte budget, so the transaction's writes
-        // were discarded from the overlay and never installed.
-        | ErrorCode::TxnOverlayMemoryExceeded { .. }
         // A label write past the node-label cap is refused before any label of
         // the statement stays set.
         | ErrorCode::NodeLabelLimit { .. }
         // A statement past a program limit is refused before it applies.
         | ErrorCode::ProgramLimitExceeded { .. }
+        // So is one past a configured execution limit.
+        | ErrorCode::ExecutionLimitExceeded { .. }
         // Expression evaluation failed before producing a value to write.
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
@@ -180,6 +181,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::InvalidTextRepresentation { .. }
         | ErrorCode::DatatypeMismatch { .. }
         | ErrorCode::InvalidDatetimeFormat { .. }
+        | ErrorCode::InvalidArgumentForLogarithm { .. }
+        | ErrorCode::InvalidArgumentForPowerFunction { .. }
         | ErrorCode::DatetimeFieldOverflow { .. }
         | ErrorCode::UndefinedColumn { .. }
         // A full-text read refused the field before ranking.

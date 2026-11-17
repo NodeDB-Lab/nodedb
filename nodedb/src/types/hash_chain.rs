@@ -25,7 +25,16 @@ pub fn is_chain_field(name: &str) -> bool {
 /// One link of a chain: its position and hash.
 ///
 /// As a collection's head it is the last link. `seq == 0` is genesis.
-#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct ChainHead {
     pub seq: u64,
     pub hash: String,

@@ -11,7 +11,7 @@ use nodedb_types::timeseries::SymbolDictionary;
 
 pub use crate::engine::timeseries::continuous_agg::GroupCell;
 
-use super::super::columnar_memtable::ColumnType;
+use super::super::columnar_memtable::{ColumnData, ColumnType};
 
 /// The key of one group: its time bucket when the query buckets, then one
 /// cell per GROUP BY column in GROUP BY order.
@@ -27,17 +27,29 @@ pub struct GroupKey {
 ///
 /// `present` is false when the source holds no data for the column: every
 /// row of that source is NULL in it. A symbol the dictionary does not hold,
-/// the NULL symbol ID among them, is NULL. A NaN float is NULL.
+/// the NULL symbol ID among them, is NULL. A NaN float is NULL. A DECIMAL or
+/// UUID part is an interned code: `reps` holds the value of each code, and
+/// a code it does not hold is NULL ([`super::exact_keys`]). A BOOLEAN part
+/// is `0` false, `1` true, anything else NULL.
 pub(super) fn key_cell(
     ty: ColumnType,
     part: u64,
     present: bool,
     dict: Option<&SymbolDictionary>,
+    reps: Option<&ColumnData>,
 ) -> GroupCell {
     if !present {
         return GroupCell::Null;
     }
     match ty {
+        ColumnType::Decimal(_) | ColumnType::Uuid => usize::try_from(part)
+            .ok()
+            .map_or(GroupCell::Null, |code| GroupCell::of(reps, None, code)),
+        ColumnType::Bool => match part {
+            0 => GroupCell::Bool(false),
+            1 => GroupCell::Bool(true),
+            _ => GroupCell::Null,
+        },
         ColumnType::Symbol | ColumnType::Text => u32::try_from(part)
             .ok()
             .and_then(|id| dict.and_then(|d| d.get(id)))
@@ -63,24 +75,39 @@ mod tests {
         let mut dict = SymbolDictionary::new();
         let empty = dict.resolve("", 10).expect("intern");
         assert_eq!(
-            key_cell(ColumnType::Symbol, u64::from(empty), true, Some(&dict)),
+            key_cell(
+                ColumnType::Symbol,
+                u64::from(empty),
+                true,
+                Some(&dict),
+                None
+            ),
             GroupCell::Text(String::new())
         );
         assert_eq!(
-            key_cell(ColumnType::Symbol, u64::from(u32::MAX), true, Some(&dict)),
+            key_cell(
+                ColumnType::Symbol,
+                u64::from(u32::MAX),
+                true,
+                Some(&dict),
+                None
+            ),
             GroupCell::Null
         );
     }
 
     #[test]
     fn an_absent_column_and_a_nan_are_null() {
-        assert_eq!(key_cell(ColumnType::Int64, 0, false, None), GroupCell::Null);
         assert_eq!(
-            key_cell(ColumnType::Float64, f64::NAN.to_bits(), true, None),
+            key_cell(ColumnType::Int64, 0, false, None, None),
             GroupCell::Null
         );
         assert_eq!(
-            key_cell(ColumnType::Int64, (-1i64) as u64, true, None),
+            key_cell(ColumnType::Float64, f64::NAN.to_bits(), true, None, None),
+            GroupCell::Null
+        );
+        assert_eq!(
+            key_cell(ColumnType::Int64, (-1i64) as u64, true, None, None),
             GroupCell::Int(-1)
         );
     }

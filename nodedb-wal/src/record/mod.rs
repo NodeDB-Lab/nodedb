@@ -35,9 +35,9 @@ pub use header::{
     RecordHeader, WAL_FORMAT_VERSION, WAL_MAGIC,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use padding::pad_buffer_to_alignment;
-#[cfg(not(target_arch = "wasm32"))]
 pub use padding::{MIN_PADDING_RECORD_SIZE, padding_record, padding_span};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use padding::{one_shot_record_buffer, pad_buffer_to_alignment};
 #[cfg(not(target_arch = "wasm32"))]
 pub use restore_point::{RESTORE_POINT_PAYLOAD_SIZE, RestorePointPayload};
 #[cfg(not(target_arch = "wasm32"))]

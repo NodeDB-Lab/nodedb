@@ -129,7 +129,6 @@ impl WriteGroup {
     Debug,
     Clone,
     PartialEq,
-    Eq,
     Serialize,
     Deserialize,
     zerompk::ToMessagePack,
@@ -137,6 +136,8 @@ impl WriteGroup {
 )]
 #[msgpack(map)]
 pub struct WriteGroupRecord {
+    /// Schema witnesses shared by the installed rows in this part.
+    pub schemas: Vec<nodedb_physical::physical_plan::StorageMode>,
     pub group: WriteGroup,
     /// Engine-native sub-records, applied in order on replay, in the payload
     /// shape each engine's own per-op record uses.
@@ -336,6 +337,7 @@ mod tests {
     #[test]
     fn records_round_trip() {
         let record = WriteGroupRecord {
+            schemas: Vec::new(),
             group: part(7, 1, 1),
             ops: vec![RedoSubRecord {
                 record_type: nodedb_wal::record::RecordType::Put as u32,

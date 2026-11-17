@@ -45,9 +45,11 @@ const FINALIZE_CAP_FACTOR: usize = 10;
 pub(super) struct SpillCore<K, V> {
     spill_dir: PathBuf,
     /// Paths of the spill-run files written so far (one serialized
-    /// `Vec<(K, V)>` blob per file). Files are unlinked on `Drop`.
+    /// `Vec<(K, V)>` blob per file). `merge` unlinks them, or `Drop` when no merge ran.
     runs: Vec<PathBuf>,
     pub(super) spilled_runs: u64,
+    /// Set once the run files and the directory are removed.
+    removed: bool,
     _marker: PhantomData<(K, V)>,
 }
 
@@ -65,6 +67,7 @@ where
             spill_dir,
             runs: Vec::new(),
             spilled_runs: 0,
+            removed: false,
             _marker: PhantomData,
         })
     }
@@ -101,10 +104,11 @@ where
     /// `cap × FINALIZE_CAP_FACTOR`.
     ///
     /// Runs are read back one at a time so the transient read buffer is bounded
-    /// to a single run rather than the sum of all spilled runs; the spill files
-    /// themselves are unlinked when `self` is dropped at the end of this call.
+    /// to a single run rather than the sum of all spilled runs. The spill files
+    /// are unlinked at the end of this call, and a removal that fails is an
+    /// error.
     pub(super) fn merge<F>(
-        self,
+        mut self,
         in_mem: &mut HashMap<K, V>,
         cap: usize,
         merge_fn: F,
@@ -140,6 +144,7 @@ where
         let in_mem_entries: Vec<(K, V)> = in_mem.drain().collect();
         merge_entries(&mut output, in_mem_entries, output_cap, &merge_fn)?;
 
+        self.remove_files()?;
         Ok(output)
     }
 }
@@ -227,22 +232,42 @@ where
     Ok(())
 }
 
+impl<K, V> SpillCore<K, V> {
+    /// Remove every run file, then the spill directory. Unlink is a bounded
+    /// metadata op, not bulk content I/O, so it stays plain `std::fs`. Each
+    /// removal that fails files its faultbox report at the removal site.
+    fn remove_files(&mut self) -> Result<(), super::error::SpillError> {
+        let mut first_error = None;
+        for path in self.runs.drain(..) {
+            if let Err(e) =
+                super::cleanup::remove_spill_file(super::cleanup::SpillKind::GroupBy, &path)
+            {
+                first_error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = super::cleanup::remove_empty_spill_dir(
+            super::cleanup::SpillKind::GroupBy,
+            &self.spill_dir,
+        ) {
+            first_error.get_or_insert(e);
+        }
+        self.removed = true;
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
 impl<K, V> Drop for SpillCore<K, V> {
     fn drop(&mut self) {
-        // Named spill files do not auto-unlink (unlike the previous tempfile
-        // handles); remove each explicitly. Unlink is a bounded metadata op,
-        // not bulk content I/O, so it stays plain `std::fs`.
-        for path in self.runs.drain(..) {
-            let _ = std::fs::remove_file(&path);
+        if self.removed {
+            return;
         }
-        if let Err(e) = std::fs::remove_dir(&self.spill_dir)
-            && self.spill_dir.exists()
-        {
-            tracing::warn!(
-                dir = %self.spill_dir.display(),
-                error = %e,
-                "groupby_spill: could not remove spill directory"
-            );
+        // Reached when the aggregation stops before `merge`, with its own
+        // error or with no group left to merge.
+        if let Err(e) = self.remove_files() {
+            tracing::error!(error = %e, "groupby_spill: spill files left after the aggregation");
         }
     }
 }

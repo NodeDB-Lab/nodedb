@@ -61,6 +61,11 @@ pub struct AbortCause {
     /// participant that never staged (an expired request, a drained core)
     /// carries none.
     pub refusal: Option<Vec<u8>>,
+    /// The refusals of every other participant that refused, in vShard
+    /// order, encoded by the host crate. A verdict reports `refusal`. The
+    /// host reads these only for the results their evaluations drew, which
+    /// stand though the txn aborts. Empty on a vote.
+    pub other_refusals: Vec<Vec<u8>>,
 }
 
 impl AbortCause {
@@ -69,6 +74,7 @@ impl AbortCause {
         Self {
             reason: AbortReason::ParticipantError,
             refusal: Some(refusal),
+            other_refusals: Vec::new(),
         }
     }
 }
@@ -78,6 +84,7 @@ impl From<AbortReason> for AbortCause {
         Self {
             reason,
             refusal: None,
+            other_refusals: Vec::new(),
         }
     }
 }

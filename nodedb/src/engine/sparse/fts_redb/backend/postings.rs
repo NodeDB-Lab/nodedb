@@ -243,8 +243,8 @@ mod tests {
 
     fn open_temp() -> (RedbFtsBackend, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let db = redb::Database::create(dir.path().join("postings.redb")).unwrap();
-        let backend = RedbFtsBackend::open(Arc::new(GatedDatabase::new(db))).unwrap();
+        let db = GatedDatabase::create(dir.path().join("postings.redb")).unwrap();
+        let backend = RedbFtsBackend::open(Arc::new(db)).unwrap();
         (backend, dir)
     }
 

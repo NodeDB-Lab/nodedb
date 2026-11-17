@@ -84,7 +84,7 @@ fn apply_event(cache: &mut PermissionCache, event: &WriteEvent) {
     let new_val = event
         .new_value
         .as_ref()
-        .and_then(|b| nodedb_types::json_from_msgpack(b).ok());
+        .and_then(|b| crate::data::executor::response_codec::decode_body_plain_json(b).ok());
 
     match event.op {
         crate::event::types::WriteOp::Insert | crate::event::types::WriteOp::Update => {
@@ -102,10 +102,9 @@ fn apply_event(cache: &mut PermissionCache, event: &WriteEvent) {
             }
         }
         crate::event::types::WriteOp::Delete => {
-            let old_val = event
-                .old_value
-                .as_ref()
-                .and_then(|b| nodedb_types::json_from_msgpack(b).ok());
+            let old_val = event.old_value.as_ref().and_then(|b| {
+                crate::data::executor::response_codec::decode_body_plain_json(b).ok()
+            });
 
             if is_permission_table
                 && let Some(ref val) = old_val

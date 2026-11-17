@@ -14,6 +14,9 @@ async fn mode_docs(srv: &TestServer, coll: &str) {
     ))
     .await
     .unwrap();
+    srv.exec(&format!("CREATE SEARCH INDEX ON {coll} (body)"))
+        .await
+        .unwrap();
     for (id, body) in [
         ("m1", "machine learning is everywhere"),
         ("m2", "machine shop tools"),

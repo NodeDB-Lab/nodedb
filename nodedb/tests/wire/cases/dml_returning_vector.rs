@@ -228,8 +228,8 @@ async fn vector_primary_insert_returning_named_columns() {
     );
 }
 
-/// A vector-primary multi-row insert plans one op PER ROW, so the per-task rows
-/// must fold into ONE result set in submission order.
+/// A vector-primary multi-row insert plans one `DirectBatchWrite` page, so its
+/// rows must fold into ONE result set in submission order.
 ///
 /// This is the assertion that fails if the response shaper misses its
 /// `returning: Some(_)` arm: the rows then travel the opaque passthrough path,

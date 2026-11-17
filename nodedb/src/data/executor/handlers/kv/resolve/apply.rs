@@ -88,6 +88,25 @@ impl CoreLoop {
             {
                 return self.response_error(task, error);
             }
+            // A row over the row limit is refused here, before any mutation
+            // applies.
+            if let KvResolvedMutation::Put {
+                collection,
+                key,
+                value,
+                ..
+            }
+            | KvResolvedMutation::Rewrite {
+                collection,
+                key,
+                value,
+                ..
+            } = mutation
+                && let Err(refusal) =
+                    crate::engine::kv::KvRowTooLarge::check(collection.as_str(), key, value)
+            {
+                return self.response_error(task, refusal);
+            }
             // A put binds its row. One carrying `Surrogate::ZERO` is refused
             // here, before any mutation applies.
             if let KvResolvedMutation::Put {
@@ -187,7 +206,7 @@ impl CoreLoop {
                         now_ms,
                     },
                     *expire_at_ms,
-                );
+                )?;
                 if let Some(ref m) = self.metrics {
                     m.record_kv_put();
                 }
@@ -302,12 +321,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

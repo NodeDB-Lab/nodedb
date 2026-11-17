@@ -42,8 +42,9 @@ impl SearchCut {
     }
 }
 
-/// The payload predicates of a vector-primary search as row filters, so a
-/// search at a cut evaluates them against the bodies at the cut. An atom
+/// The payload predicates of a vector search as row filters, so a search
+/// evaluates them against the candidates' bodies: every predicate at a cut,
+/// and every predicate the index's payload bitmaps do not cover. An atom
 /// shape this build does not know fails with `Unsupported`.
 pub(in crate::data::executor) fn payload_atoms_as_filters(
     atoms: &[PayloadAtom],
@@ -91,7 +92,8 @@ pub(in crate::data::executor) fn payload_atoms_as_filters(
             other => {
                 return Err(ErrorCode::Unsupported {
                     detail: format!(
-                        "payload predicate on '{}' cannot be read at a system-time cut",
+                        "payload predicate on '{}' cannot be evaluated against a row body; \
+                         this predicate shape needs a payload bitmap index on the field",
                         other.field()
                     ),
                 });

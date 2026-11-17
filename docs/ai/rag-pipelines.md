@@ -43,6 +43,9 @@ ALTER COLLECTION chunks SET VECTOR METADATA ON embedding (
 Vector search finds semantically similar chunks. BM25 finds keyword matches. Combining both via RRF catches what either alone would miss — especially for domain-specific terminology that embedding models may not handle well.
 
 ```sql
+-- The BM25 leg reads only fields a search index declares.
+CREATE SEARCH INDEX ON chunks FIELDS content;
+
 -- Hybrid retrieval: vector similarity + keyword match
 SELECT id, content, source_doc, rrf_score(
     vector_distance(embedding, $query_embedding),
@@ -65,6 +68,7 @@ LIMIT 10;
 **With the new sparse vector support**, you can add SPLADE-style learned sparse retrieval as a third signal:
 
 ```sql
+-- Uses the search index on chunks (content) declared above.
 SELECT id, content, rrf_score(
     vector_distance(embedding, $dense_query),
     bm25_score(content, $text_query),

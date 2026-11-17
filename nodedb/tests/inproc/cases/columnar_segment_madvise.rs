@@ -18,7 +18,7 @@ use tempfile::tempdir;
 
 fn make_col_file(dir: &std::path::Path, name: &str, bytes: &[u8]) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join(format!("{name}.col")), bytes).unwrap();
+    std::fs::write(dir.join(columnar_segment::column_file_name(name)), bytes).unwrap();
 }
 
 #[test]

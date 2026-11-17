@@ -8,9 +8,10 @@
 //!   (the common case). It VALIDATES the read-set to compute the local commit
 //!   vote and STAGES the transaction's plans into the synthetic overlay and
 //!   the commit-pending buffer WITHOUT mutating base or firing side effects,
-//!   then returns the vote. The data group's apply of the slice's stamped
-//!   redo entry later installs it and consumes the staged state, or
-//!   `CoreLoop::execute_calvin_drop` discards it.
+//!   judges the slice's commit boundary with the check its install runs
+//!   (`commit_boundary`), then returns the vote. The data group's apply of
+//!   the slice's stamped redo entry later installs it and consumes the
+//!   staged state, or `CoreLoop::execute_calvin_drop` discards it.
 //!
 //! - `CoreLoop::execute_calvin_execute_passive`: passive participant for a
 //!   dependent-read txn. Reads each declared key from base storage and
@@ -30,7 +31,12 @@
 //! to the data group. The Data Plane writes no WAL record for a slice.
 
 mod active_passive;
+mod commit_boundary;
+#[cfg(test)]
+mod commit_boundary_tests;
 mod discard;
+#[cfg(test)]
+mod row_limit_tests;
 mod shared;
 mod snapshot_vote;
 mod static_stage;

@@ -15,35 +15,32 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use nodedb_types::RowIdentity;
 use tracing::debug;
 
 use crate::control::change_stream::journal::ChangeJournal;
+use crate::control::change_stream::unjournaled::UnjournaledEntries;
 use crate::event::cdc::CdcOffset;
-use crate::event::cross_shard::types::NotifyBroadcastMsg;
-use crate::types::{DatabaseId, Lsn, TenantId};
+use crate::types::{DatabaseId, TenantId};
 
 use super::fanout::ChangeFanout;
-use super::ring::{
-    AppendedRun, ChangeRun, PositionedChange, ReplayError, ReplayRing, ReplayScope, ReplaySnapshot,
-    ReplayStart,
-};
-use super::{ChangeEvent, ChangeOperation, ChangePartition, SequencedChangeEvent, Subscription};
-
-/// A settled entry's changes, staged by the write funnel until the apply
-/// loop settles the entry in log order.
-type StagedChanges = Vec<(DatabaseId, ChangeEvent)>;
+use super::journal_debt::JournalDebt;
+use super::ring::{AppendedRun, ChangeRun, ReplayError, ReplayRing, ReplaySnapshot, ReplayStart};
+use super::staged::{HeldGauge, StagedEntry};
+use super::{ChangeEvent, ChangePartition, SequencedChangeEvent, Subscription};
 
 pub(super) struct BusState {
     pub(super) ring: ReplayRing,
-    /// `(group, log index)` to the entry's changes. Bounded by the apply
-    /// pipeline's window: every staged entry settles.
-    staged: BTreeMap<(u64, u64), StagedChanges>,
-    /// Per partition, the position through which this node forwarded it.
-    forwarded: BTreeMap<ChangePartition, CdcOffset>,
+    /// `(group, log index)` to the entry's staged changes. Bounded by the
+    /// apply pipeline's window: every staged entry settles.
+    pub(super) staged: BTreeMap<(u64, u64), StagedEntry>,
     /// Per data group, settled events above the group's saved applied
-    /// floor, which the journal takes when the floor rises past them.
+    /// floor that the journal lacks, which it takes when the floor rises
+    /// past them. A spilled page is in the journal already and never here.
     pub(super) group_pending: BTreeMap<u64, Vec<SequencedChangeEvent>>,
+    /// The events `staged` and `group_pending` hold in memory.
+    pub(super) held: HeldGauge,
+    /// The groups whose settled events the journal refused.
+    pub(super) debt: JournalDebt,
 }
 
 /// Control-plane change notification bus.
@@ -55,9 +52,11 @@ pub struct ChangeStream {
     events_published: AtomicU64,
     last_lsn: AtomicU64,
     state: std::sync::Mutex<BusState>,
-    fanout: ChangeFanout,
+    pub(super) fanout: ChangeFanout,
     /// The durable journal every feed is written to, once attached.
     pub(super) journal: OnceLock<Arc<ChangeJournal>>,
+    /// The applied entries whose events the journal does not hold yet.
+    unjournaled: UnjournaledEntries,
     capacity: usize,
 }
 
@@ -76,13 +75,21 @@ impl ChangeStream {
             state: std::sync::Mutex::new(BusState {
                 ring: ReplayRing::new(capacity),
                 staged: BTreeMap::new(),
-                forwarded: BTreeMap::new(),
                 group_pending: BTreeMap::new(),
+                held: HeldGauge::default(),
+                debt: JournalDebt::default(),
             }),
             fanout: ChangeFanout::default(),
             journal: OnceLock::new(),
+            unjournaled: UnjournaledEntries::new(),
             capacity,
         }
+    }
+
+    /// The applied data-group entries whose change events the journal does
+    /// not hold yet, which a restart stages again.
+    pub fn unjournaled(&self) -> &UnjournaledEntries {
+        &self.unjournaled
     }
 
     /// Events the replay ring holds.
@@ -144,92 +151,28 @@ impl ChangeStream {
         }
     }
 
-    /// Hold the changes of the data-group entry at `(group_id, log_index)`
-    /// until the apply loop settles it.
-    pub(crate) fn stage(
-        &self,
-        group_id: u64,
-        log_index: u64,
-        database_id: DatabaseId,
-        events: Vec<ChangeEvent>,
-    ) {
-        if events.is_empty() {
-            return;
-        }
-        let mut state = self.lock();
-        state
-            .staged
-            .entry((group_id, log_index))
-            .or_default()
-            .extend(events.into_iter().map(|event| (database_id, event)));
-    }
-
-    /// Publish the staged changes of `group_id`'s entries `first..=last`,
-    /// which the apply loop settled in log order. Returns the run for the
-    /// nodes that do not replicate the group.
-    pub(crate) fn settle_group(&self, group_id: u64, first: u64, last: u64) -> AppendedRun {
-        let mut state = self.lock();
-        let mut changes = Vec::new();
-        let keys: Vec<(u64, u64)> = state
-            .staged
-            .range((group_id, 0)..=(group_id, last))
-            .map(|(key, _)| *key)
-            .collect();
-        for key in keys {
-            let Some(staged) = state.staged.remove(&key) else {
-                continue;
-            };
-            // An entry below `first` settled in an earlier pass without
-            // this node ever publishing it; it is not part of this run.
-            if key.1 < first {
-                continue;
-            }
-            for (ordinal, (database_id, event)) in staged.into_iter().enumerate() {
-                changes.push(PositionedChange {
-                    position: CdcOffset::data_event(0, key.1, ordinal as u64 + 1),
-                    database_id,
-                    event,
-                });
-            }
-        }
-        let run = ChangeRun {
-            partition: ChangePartition(group_id),
-            after: Some(CdcOffset::whole_index(first.saturating_sub(1))),
-            through: CdcOffset::whole_index(last),
-            changes,
-        };
-        let appended = self.append_locked(&mut state, run);
-        self.queue_group(&mut state, group_id, &appended);
-        appended
-    }
-
     /// Record that a snapshot install covered `group_id`'s entries through
     /// `last_included_index`. This node never applies them, so it holds none
     /// of their events. A cursor below the install expires at once. Staged
     /// changes of a covered entry never settle, so they are dropped.
     pub(crate) fn install_group_floor(&self, group_id: u64, last_included_index: u64) {
-        let mut state = self.lock();
-        state
-            .staged
-            .retain(|&(group, index), _| group != group_id || index > last_included_index);
+        let mut guard = self.lock();
+        let state = &mut *guard;
+        let held = &mut state.held;
+        state.staged.retain(|&(group, index), entry| {
+            let kept = group != group_id || index > last_included_index;
+            if !kept {
+                held.sub(entry.held.len());
+            }
+            kept
+        });
         state.ring.raise_floor(
             ChangePartition(group_id),
             CdcOffset::whole_index(last_included_index),
         );
     }
 
-    /// Publish a run this node's own ordered feed produced, or a peer
-    /// forwarded, and journal it before the caller acknowledges it.
-    pub(crate) fn publish_run(&self, run: ChangeRun) -> AppendedRun {
-        let appended = {
-            let mut state = self.lock();
-            self.append_locked(&mut state, run)
-        };
-        self.journal_run(&appended);
-        appended
-    }
-
-    fn append_locked(&self, state: &mut BusState, run: ChangeRun) -> AppendedRun {
+    pub(super) fn append_locked(&self, state: &mut BusState, run: ChangeRun) -> AppendedRun {
         let appended = state.ring.append(run);
         for event in &appended.events {
             self.last_lsn
@@ -246,68 +189,29 @@ impl ChangeStream {
         appended
     }
 
-    /// Forward `partition`'s new events to the nodes that do not replicate
-    /// it, when this node leads it.
+    /// Wake the feed of `partition`'s new events to the nodes that do not
+    /// replicate it, when this node leads it.
     pub(crate) fn forward(
         &self,
         shared: &Arc<crate::control::state::SharedState>,
         partition: ChangePartition,
     ) {
-        let targets = self.fanout.targets(shared, partition);
-        if targets.is_empty() {
-            return;
-        }
-        self.fanout.ensure_heartbeat(shared);
-        if let Some(run) = self.outbound_run(partition, false) {
-            self.fanout.send(shared, &run, &targets);
+        if self.fanout.wake(shared, partition, false) {
+            self.fanout.ensure_heartbeat(shared);
         }
     }
 
-    /// Forward the position of every partition this node leads whose feed
-    /// advanced since it last forwarded it, events or not.
-    pub(crate) fn heartbeat(&self, shared: &crate::control::state::SharedState) {
-        let partitions = self.lock().ring.partitions();
-        for partition in partitions {
-            let targets = self.fanout.targets(shared, partition);
-            if targets.is_empty() {
-                continue;
-            }
-            if let Some(run) = self.outbound_run(partition, true) {
-                self.fanout.send(shared, &run, &targets);
-            }
+    /// Wake the feed of every partition this node leads, with the feed
+    /// position advanced past a stretch with no event too.
+    pub(crate) fn heartbeat(&self, shared: &Arc<crate::control::state::SharedState>) {
+        for partition in self.partitions() {
+            self.fanout.wake(shared, partition, true);
         }
     }
 
-    /// The run this node forwards for `partition`: every held event past the
-    /// position it last forwarded. `None` when the feed did not advance, or
-    /// when it gained no event and `heartbeat` is off: the next run carries
-    /// that stretch.
-    pub(crate) fn outbound_run(
-        &self,
-        partition: ChangePartition,
-        heartbeat: bool,
-    ) -> Option<AppendedRun> {
-        let mut state = self.lock();
-        let (through, held_from) = state.ring.feed_bounds(partition)?;
-        // Continuity is vouched only from where this node holds every event.
-        let after = match state.forwarded.get(&partition) {
-            Some(&sent) if sent >= held_from => sent,
-            _ => held_from,
-        };
-        if through <= after {
-            return None;
-        }
-        let events = state.ring.events_after(partition, after);
-        if events.is_empty() && !heartbeat {
-            return None;
-        }
-        state.forwarded.insert(partition, through);
-        Some(AppendedRun {
-            partition,
-            after,
-            through,
-            events,
-        })
+    /// Every partition this node saw.
+    pub(crate) fn partitions(&self) -> Vec<ChangePartition> {
+        self.lock().ring.partitions()
     }
 
     pub fn subscriber_count(&self) -> u64 {
@@ -341,9 +245,8 @@ impl ChangeStream {
         start: ReplayStart,
         limit: usize,
     ) -> Result<ReplaySnapshot, ReplayError> {
-        let state = self.lock();
-        state.ring.replay(
-            ReplayScope {
+        self.replay(
+            super::ring::ReplayScope {
                 tenant_id,
                 database_id,
                 collection,
@@ -355,41 +258,6 @@ impl ChangeStream {
 
     pub fn unsubscribe(&self) {
         self.active_subscriptions.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    /// Append a run a peer that leads the partition forwarded.
-    pub fn deliver_remote_notify(&self, msg: &NotifyBroadcastMsg) {
-        let Some(partition) = msg.partition() else {
-            tracing::warn!(
-                kind = msg.partition_kind,
-                "change run names an unknown partition kind"
-            );
-            return;
-        };
-        let changes = msg
-            .changes
-            .iter()
-            .map(|change| PositionedChange {
-                position: change.position,
-                database_id: DatabaseId::new(change.database_id),
-                event: ChangeEvent {
-                    lsn: Lsn::new(change.lsn),
-                    tenant_id: TenantId::new(change.tenant_id),
-                    collection: change.collection.clone(),
-                    // The wire carries the identity as text; wrap it verbatim.
-                    document_id: RowIdentity::from_user_key(change.document_id.clone()),
-                    operation: parse_operation(&change.operation),
-                    timestamp_ms: change.timestamp_ms,
-                    after: None,
-                },
-            })
-            .collect();
-        self.publish_run(ChangeRun {
-            partition,
-            after: Some(msg.after),
-            through: msg.through,
-            changes,
-        });
     }
 
     /// Publish `events` as the data-group entry `(group_id, log_index)`,
@@ -408,18 +276,13 @@ impl ChangeStream {
     }
 }
 
-fn parse_operation(operation: &str) -> ChangeOperation {
-    match operation {
-        "UPDATE" => ChangeOperation::Update,
-        "DELETE" => ChangeOperation::Delete,
-        _ => ChangeOperation::Insert,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use nodedb_types::RowIdentity;
+
     use super::*;
-    use crate::control::change_stream::CursorStep;
+    use crate::control::change_stream::ChangeOperation;
+    use crate::types::Lsn;
 
     fn event(lsn: u64, tenant: u64, document: &str) -> ChangeEvent {
         ChangeEvent {
@@ -586,105 +449,6 @@ mod tests {
         assert_eq!(rest.events[0].document_id.as_str(), "c");
         assert_eq!(rest.events[0].position(), CdcOffset::data_event(0, 12, 1));
         assert_eq!(replicas[1].events_published(), 3);
-    }
-
-    /// A node that does not replicate the group receives the leader's runs.
-    /// A run that repeats a stretch appends nothing, and a lost run makes
-    /// every cursor below it reset.
-    #[test]
-    fn forwarded_runs_deduplicate_and_report_a_lost_run() {
-        let leader = ChangeStream::new(16);
-        let outsider = ChangeStream::new(16);
-        let mut live = outsider.subscribe(None, Some(TenantId::new(1)));
-        let mut cursor = live.start_cursor().clone();
-        let group = ChangePartition(3);
-        let deliver = |run: &AppendedRun| {
-            outsider.deliver_remote_notify(&NotifyBroadcastMsg::from_run(1, run))
-        };
-
-        leader.stage(3, 1, DatabaseId::DEFAULT, vec![event(1, 1, "a")]);
-        leader.settle_group(3, 1, 1);
-        let run = leader
-            .outbound_run(group, false)
-            .expect("a run with an event");
-        deliver(&run);
-        deliver(&run);
-        let delivered = live.try_recv_sequenced().expect("first run");
-        assert_eq!(cursor.accept(&delivered), CursorStep::Deliver);
-        assert!(
-            live.try_recv_sequenced().is_err(),
-            "the repeat appended nothing"
-        );
-
-        // The run carrying entry 2 never arrives.
-        leader.stage(3, 2, DatabaseId::DEFAULT, vec![event(2, 1, "lost")]);
-        leader.settle_group(3, 2, 2);
-        leader
-            .outbound_run(group, false)
-            .expect("a run with an event");
-        leader.stage(3, 3, DatabaseId::DEFAULT, vec![event(3, 1, "c")]);
-        leader.settle_group(3, 3, 3);
-        deliver(
-            &leader
-                .outbound_run(group, false)
-                .expect("a run with an event"),
-        );
-        let after_hole = live.try_recv_sequenced().expect("third run");
-        assert_eq!(cursor.accept(&after_hole), CursorStep::Reset);
-    }
-
-    /// Settled stretches with no event send nothing. The next run with an
-    /// event covers them, so the receiver sees no hole. An idle feed whose
-    /// position advanced goes out on a heartbeat, once.
-    #[test]
-    fn a_stretch_with_no_event_is_carried_by_the_next_run() {
-        let leader = ChangeStream::new(16);
-        let outsider = ChangeStream::new(16);
-        let mut live = outsider.subscribe(None, Some(TenantId::new(1)));
-        let mut cursor = live.start_cursor().clone();
-        let group = ChangePartition(5);
-        let deliver = |run: &AppendedRun| {
-            outsider.deliver_remote_notify(&NotifyBroadcastMsg::from_run(1, run))
-        };
-
-        leader.stage(5, 1, DatabaseId::DEFAULT, vec![event(1, 1, "a")]);
-        leader.settle_group(5, 1, 1);
-        deliver(
-            &leader
-                .outbound_run(group, false)
-                .expect("a run with an event"),
-        );
-        let first = live.try_recv_sequenced().expect("first event");
-        assert_eq!(cursor.accept(&first), CursorStep::Deliver);
-
-        // Entries 2..=9 carry no event: no message.
-        for index in 2..=9 {
-            leader.settle_group(5, index, index);
-            assert!(leader.outbound_run(group, false).is_none());
-        }
-        leader.stage(5, 10, DatabaseId::DEFAULT, vec![event(10, 1, "b")]);
-        leader.settle_group(5, 10, 10);
-        let run = leader
-            .outbound_run(group, false)
-            .expect("a run with an event");
-        assert_eq!(run.after, CdcOffset::whole_index(1));
-        assert_eq!(run.events.len(), 1);
-        deliver(&run);
-        let next = live.try_recv_sequenced().expect("second event");
-        assert_eq!(cursor.accept(&next), CursorStep::Deliver, "no false hole");
-
-        // An idle stretch goes out once on a heartbeat.
-        leader.settle_group(5, 11, 11);
-        let heartbeat = leader
-            .outbound_run(group, true)
-            .expect("the position advanced");
-        assert!(heartbeat.events.is_empty());
-        assert_eq!(heartbeat.through, CdcOffset::whole_index(11));
-        deliver(&heartbeat);
-        assert!(
-            leader.outbound_run(group, true).is_none(),
-            "nothing new to say"
-        );
     }
 
     const TENANT_A: u64 = 10;

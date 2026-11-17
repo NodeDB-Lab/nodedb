@@ -114,16 +114,6 @@ impl CoreLoop {
         };
 
         let is_strict = ctx.strict_schema.is_some();
-        let has_expr = updates
-            .iter()
-            .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
-        let has_generated = self.doc_configs.get(&config_key).is_some_and(|c| {
-            !c.enforcement.generated_columns.is_empty()
-                && crate::data::executor::handlers::generated::needs_recomputation(
-                    updates,
-                    &c.enforcement.generated_columns,
-                )
-        });
         // Stamped as the live handler stamps it; apply mints its own on write.
         let sys_from = if ctx.bitemporal {
             self.bitemporal_ordinal()
@@ -135,8 +125,6 @@ impl CoreLoop {
             current_bytes: &current_bytes,
             updates,
             is_strict,
-            has_generated,
-            has_expr,
             bitemporal: ctx.bitemporal,
             sys_from,
             declared_primary_key,

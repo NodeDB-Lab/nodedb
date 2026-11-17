@@ -9,7 +9,7 @@ use super::super::decode_sync_engines::decode_returning;
 use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::ctx::DecodeCtx;
 use super::document;
-use super::document::{PointInsertOptions, ReturningFields, UpsertExtras};
+use super::document::{PointInsertOptions, PutFields, ReturningFields, UpsertExtras};
 use super::document_join;
 use crate::bridge::envelope::PhysicalPlan;
 
@@ -24,6 +24,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_targets,
             returning,
             rls_filters,
+            rls_write_check,
         } => document::point_put(
             database_id,
             collection,
@@ -31,9 +32,12 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             value,
             *surrogate,
             resolved_sum_targets,
-            ReturningFields {
-                returning: decode_returning(returning)?,
-                rls_filters,
+            PutFields {
+                returning: ReturningFields {
+                    returning: decode_returning(returning)?,
+                    rls_filters,
+                },
+                rls_write_check,
             },
         ),
         ReplicatedWrite::PointInsert {
@@ -46,6 +50,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             deferred_sum_targets,
             returning,
             rls_filters,
+            rls_write_check,
         } => document::point_insert(
             database_id,
             collection,
@@ -58,9 +63,12 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                     resolved: resolved_sum_targets,
                     deferred: deferred_sum_targets,
                 },
-                returning: ReturningFields {
-                    returning: decode_returning(returning)?,
-                    rls_filters,
+                fields: PutFields {
+                    returning: ReturningFields {
+                        returning: decode_returning(returning)?,
+                        rls_filters,
+                    },
+                    rls_write_check,
                 },
             },
         ),
@@ -161,6 +169,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             deferred_sum_targets,
             returning,
             rls_filters,
+            rls_write_check,
         } => document::batch_insert(
             database_id,
             collection,
@@ -171,9 +180,12 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 resolved: resolved_sum_targets,
                 deferred: deferred_sum_targets,
             },
-            ReturningFields {
-                returning: decode_returning(returning)?,
-                rls_filters,
+            PutFields {
+                returning: ReturningFields {
+                    returning: decode_returning(returning)?,
+                    rls_filters,
+                },
+                rls_write_check,
             },
         ),
         ReplicatedWrite::DocTruncate {

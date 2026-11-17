@@ -216,16 +216,24 @@ impl CoreLoop {
                 )
             }
 
-            TextOp::SetTextConfig {
+            TextOp::SetTextConfig { collection, .. } => {
+                self.execute_set_text_config(task, collection.as_str())
+            }
+
+            TextOp::RebuildIndex {
                 collection,
-                analyzer_name,
+                text_fields,
+                analyzer,
                 fuzzy_default,
-            } => self.execute_set_text_config(
+            } => self.execute_rebuild_text_index(
                 task,
                 tid,
                 collection.as_str(),
-                analyzer_name.as_deref(),
-                *fuzzy_default,
+                text_fields,
+                crate::data::executor::handlers::fts_analyzer::TextAnalysis {
+                    analyzer: analyzer.as_deref(),
+                    fuzzy_default: *fuzzy_default,
+                },
             ),
         }
     }

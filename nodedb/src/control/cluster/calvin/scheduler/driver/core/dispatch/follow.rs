@@ -47,6 +47,7 @@ impl Scheduler {
                 superseded: false,
                 gates: Vec::new(),
                 ungated: false,
+                returning: Default::default(),
             },
         );
         // A dependent txn keeps its barrier log from its grant on, so a

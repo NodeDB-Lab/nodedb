@@ -797,7 +797,7 @@ mod tests {
         handle: super::super::handle::ConsumerHandle,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
         deltas: tokio::sync::mpsc::Receiver<crate::event::crdt_sync::types::OutboundDelta>,
-        _control: tokio::sync::mpsc::Receiver<nodedb_types::sync::wire::SyncFrame>,
+        _control: tokio::sync::mpsc::Receiver<crate::event::crdt_sync::types::ControlFrame>,
     }
 
     /// Open the node's state in `dir`, load the sink state, subscribe a Lite
@@ -813,9 +813,13 @@ mod tests {
             1,
             TENANT,
             DatabaseId::DEFAULT,
-            vec![COLLECTION.into()],
             &crate::event::crdt_sync::types::DeliveryConfig::default(),
         );
+        let shape = crate::event::crdt_sync::SubscribedShape::new(COLLECTION.into(), Vec::new())
+            .expect("empty predicate decodes");
+        shared
+            .crdt_sync_delivery
+            .subscribe_shape("lite-1", "lite-1-shape", shape);
         let (producers, mut consumers) = create_event_bus_with_capacity(1, 1024);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (shutdown_bus, _) =

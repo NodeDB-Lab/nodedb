@@ -25,3 +25,23 @@ pub enum RedoOrigin {
     /// that every unique value has one owner in the post-state.
     Restore,
 }
+
+impl RedoOrigin {
+    /// The origin of the redo record a slice of `plans` resolves to: a
+    /// RESTORE when a plan installs a RESTORE batch, a commit otherwise.
+    /// The stage that checks the slice and the install that applies its
+    /// record both read it here.
+    pub fn of_plans(plans: &[super::PhysicalPlan]) -> Self {
+        let restores = plans.iter().any(|plan| {
+            matches!(
+                plan,
+                super::PhysicalPlan::Meta(super::MetaOp::RestoreRedo(_))
+            )
+        });
+        if restores {
+            Self::Restore
+        } else {
+            Self::Commit
+        }
+    }
+}

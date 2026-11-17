@@ -85,14 +85,17 @@ impl CoreLoop {
         let edges = match (scope.merges_txn_overlay(), task.request.txn_id) {
             (true, Some(txn_id)) => {
                 self.touch_overlay(txn_id);
-                super::graph::graph_txn_merge::merge_graph_txn_overlay_collection_edges(
+                match super::graph::graph_txn_merge::merge_graph_txn_overlay_collection_edges(
                     self.graph_txn_overlays.get(&txn_id),
                     &(task.request.database_id, tenant, collection.to_string()),
                     node_id,
                     edge_label.as_deref().as_slice(),
                     direction,
                     edges,
-                )
+                ) {
+                    Ok(edges) => edges,
+                    Err(e) => return self.response_error(task, e),
+                }
             }
             _ => edges,
         };

@@ -93,13 +93,15 @@ impl CoreLoop {
             None => self.kv_engine.collection_rows(did, tid, collection, now_ms),
             Some(at) => self.kv_engine.collection_rows_at(did, tid, collection, at),
         };
-        if let Some(txn_id) = txn_id {
-            self.merge_kv_overlay_into_scan(
+        if let Some(txn_id) = txn_id
+            && let Err(e) = self.merge_kv_overlay_into_scan(
                 txn_id,
                 &coll_key,
                 &mut rows,
                 &|_key: &[u8], _value: &[u8]| true,
-            );
+            )
+        {
+            return self.response_error(task, e);
         }
         let (index, _) = SortedIndex::build(def, rows.into_iter());
 
@@ -358,12 +360,14 @@ mod tests {
 
         let txn_id = TxnId::new(7);
         let coll_key = (DatabaseId::new(0), TenantId::new(1), "players".to_string());
-        core.txn_overlay_mut(txn_id).insert_put(
-            coll_key,
-            row_surrogate(b"p4").as_u32(),
-            &kv_row_identity(b"p4"),
-            scored("p4", 25),
-        );
+        core.txn_overlay_mut(txn_id)
+            .insert_put(
+                coll_key,
+                row_surrogate(b"p4").as_u32(),
+                &kv_row_identity(b"p4"),
+                scored("p4", 25),
+            )
+            .unwrap();
 
         let snapshot = SystemTimeScope::TxnSnapshot {
             ordinal: 150,

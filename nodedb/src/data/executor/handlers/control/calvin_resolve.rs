@@ -1,35 +1,48 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `MetaOp::CalvinResolve` handler: resolve a staged Calvin transaction's
-//! write plans into ONE replayable [`RedoRecord`][crate::wal::RedoRecord],
-//! WITHOUT mutating base.
+//! write plans into the parts of one replayable redo, WITHOUT mutating base.
 //!
-//! Mirrors `MetaOp::ResolveTxn`'s `CoreLoop::execute_resolve_txn` exactly, but
-//! sources its plans and tenant scope from Calvin's own staging state instead
-//! of a session transaction's: the plans buffered in `commit_pending` under
-//! `(epoch, position, vshard)` (by [`CoreLoop::execute_calvin_execute_static`])
-//! and the per-core `txn_overlays` / `graph_txn_overlays` entries staged under
-//! the corresponding synthetic `TxnId` (by
-//! [`CoreLoop::stage_calvin_overlay`][super::calvin_overlay_stage]). Reusing
-//! `execute_resolve_txn` directly means the redo serialization logic itself is
-//! never duplicated.
+//! Resolves through `CoreLoop::resolve_into_cursor`, as the session resolve
+//! of `MetaOp::ResolveTxnPart` does, but sources its plans and tenant scope
+//! from Calvin's own staging state instead of a session transaction's: the
+//! plans buffered in `commit_pending` under `(epoch, position, vshard)` (by
+//! [`CoreLoop::execute_calvin_execute_static`]) and the per-core
+//! `txn_overlays` / `graph_txn_overlays` entries staged under the
+//! corresponding synthetic `TxnId` (by
+//! [`CoreLoop::stage_calvin_overlay`][super::calvin_overlay_stage]). The
+//! slice's parts go into the synthetic transaction's resolve spill file,
+//! which the staged state's teardown removes with its spill directory.
 //!
-//! The answer is a [`CalvinResolved`]: the redo record and the reply the
-//! staged plans decided, as a [`nodedb_physical::physical_plan::CalvinReplySpec`].
+//! The answer is a [`CalvinResolvedPart`]: one part, and on part `0` the
+//! reply the staged plans decided, as a
+//! [`nodedb_physical::physical_plan::CalvinReplySpec`].
 
-use nodedb_physical::physical_plan::{CalvinReplySpec, CalvinResolved};
+use nodedb_physical::physical_plan::{CalvinReplySpec, CalvinResolvedPart};
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::resolve::PartRequest;
 use crate::data::executor::task::ExecutionTask;
 
 use super::calvin_txn_id::calvin_synthetic_txn_id;
 
+/// One `CalvinResolve` request.
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) struct CalvinPartRequest {
+    pub(in crate::data::executor) epoch: u64,
+    pub(in crate::data::executor) position: u32,
+    pub(in crate::data::executor) part: u32,
+    pub(in crate::data::executor) max_part_bytes: u64,
+}
+
 impl CoreLoop {
-    /// Resolve the Calvin transaction staged under `(epoch, position)` on
-    /// this vshard into a [`RedoRecord`][crate::wal::RedoRecord], without
-    /// touching any base engine. Answers a [`CalvinResolved`] with the
-    /// record's encoded bytes and the staged reply.
+    /// Answer one `CalvinResolve` request with a [`CalvinResolvedPart`].
+    ///
+    /// Part `0` resolves the Calvin transaction staged under
+    /// `(epoch, position)` on this vshard into its resolve spill file,
+    /// without touching any base engine, and answers the first part with the
+    /// staged reply. A later part reads the slice's cursor.
     ///
     /// Errors (rather than silently dropping data or producing an empty
     /// record) when no `commit_pending` entry exists for
@@ -45,43 +58,64 @@ impl CoreLoop {
     pub(in crate::data::executor) fn execute_calvin_resolve(
         &mut self,
         task: &ExecutionTask,
-        epoch: u64,
-        position: u32,
+        request: CalvinPartRequest,
     ) -> Response {
+        let answer = self.calvin_resolve_part(task, request).and_then(|part| {
+            zerompk::to_msgpack_vec(&part).map_err(|error| ErrorCode::Internal {
+                detail: format!(
+                    "calvin resolve: encode part {} of epoch={} position={}: {error}",
+                    request.part, request.epoch, request.position
+                ),
+            })
+        });
+        match answer {
+            Ok(bytes) => self.response_with_payload(task, bytes),
+            Err(code) => self.response_error(task, code),
+        }
+    }
+
+    fn calvin_resolve_part(
+        &mut self,
+        task: &ExecutionTask,
+        request: CalvinPartRequest,
+    ) -> Result<CalvinResolvedPart, ErrorCode> {
+        let CalvinPartRequest {
+            epoch,
+            position,
+            part,
+            max_part_bytes,
+        } = request;
         let vshard_id = task.request.vshard_id.as_u32();
-        let synthetic_txn_id = match calvin_synthetic_txn_id(epoch, position, vshard_id) {
-            Ok(id) => id,
-            Err(e) => return self.response_error(task, e),
-        };
+        let synthetic_txn_id = calvin_synthetic_txn_id(epoch, position, vshard_id)?;
+        if part > 0 {
+            return Ok(CalvinResolvedPart {
+                part: self.read_resolve_part(synthetic_txn_id, part)?,
+                reply: None,
+            });
+        }
 
         // Clone the staged plans, the deterministic epoch anchor, and the
         // staged reply out of `commit_pending` so the `&mut self` resolve
-        // call — which assigns bitemporal stamps into the overlay — does not
-        // overlap the immutable borrow of the pending buffer.
-        let (tid, plans, epoch_system_ms, reply) = match self
+        // call does not overlap the immutable borrow of the pending buffer.
+        let Some(pending) = self
             .calvin
             .commit_pending
             .get(&(epoch, position, vshard_id))
-        {
-            Some(pending) => (
-                pending.tenant_id.as_u64(),
-                pending.plans.clone(),
-                pending.epoch_system_ms,
-                CalvinReplySpec::from(&pending.reply),
-            ),
-            None => {
-                return self.response_error(
-                    task,
-                    crate::Error::Internal {
-                        detail: format!(
-                            "calvin resolve: no staged commit for epoch={epoch} \
-                                 position={position} vshard={vshard_id} (must be staged via \
-                                 CalvinExecuteStatic before CalvinResolve)"
-                        ),
-                    },
-                );
-            }
+        else {
+            return Err(ErrorCode::Internal {
+                detail: format!(
+                    "calvin resolve: no staged commit for epoch={epoch} position={position} \
+                     vshard={vshard_id} (must be staged via CalvinExecuteStatic before \
+                     CalvinResolve)"
+                ),
+            });
         };
+        let (tid, plans, epoch_system_ms, reply) = (
+            pending.tenant_id.as_u64(),
+            pending.plans.clone(),
+            pending.epoch_system_ms,
+            CalvinReplySpec::from(&pending.reply),
+        );
 
         // Restore the epoch's deterministic time anchor around resolve. The
         // graph and document versions take the transaction's ordinal. Every
@@ -90,38 +124,70 @@ impl CoreLoop {
         // replica stamps the transaction's documents alike. The redo record
         // carries the stamps, so every install writes the same version key.
         // The local clock folds the ordinal in, so a later local write stamps
-        // above it.
+        // above it. Every attempt of the slice resolves the same parts.
         let txn_ordinal = nodedb_types::calvin_txn_ordinal(epoch_system_ms, position);
         self.hlc.update_from_remote(txn_ordinal);
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
         self.apply_scope.calvin_txn_ordinal = Some(txn_ordinal);
-        let mut resp = self.execute_resolve_txn(task, tid, synthetic_txn_id, &plans);
+        let resolved = self.resolve_into_cursor(
+            task,
+            tid,
+            PartRequest {
+                txn_id: synthetic_txn_id,
+                part: 0,
+                max_part_bytes,
+            },
+            &plans,
+        );
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
-        if resp.status != Status::Ok {
-            return resp;
-        }
-        let resolved = CalvinResolved {
-            redo: resp.payload.as_bytes().to_vec(),
-            reply,
-        };
-        match zerompk::to_msgpack_vec(&resolved) {
-            Ok(bytes) => {
-                resp.payload = Payload::from_vec(bytes);
-                resp
-            }
-            Err(error) => self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: format!(
-                        "calvin resolve: encode the resolved answer of epoch={epoch} \
-                         position={position} vshard={vshard_id}: {error}"
-                    ),
-                },
-            ),
-        }
+        Ok(CalvinResolvedPart {
+            part: resolved?,
+            reply: Some(reply),
+        })
     }
+
+    /// Resolve the slice staged under `(epoch, position)` in one part, and
+    /// decode it: the encoded record of its lists and the staged reply.
+    #[cfg(test)]
+    pub(in crate::data::executor) fn calvin_resolve_whole(
+        &mut self,
+        task: &ExecutionTask,
+        epoch: u64,
+        position: u32,
+    ) -> Result<WholeResolved, ErrorCode> {
+        let answer = self.calvin_resolve_part(
+            task,
+            CalvinPartRequest {
+                epoch,
+                position,
+                part: 0,
+                max_part_bytes: u64::MAX,
+            },
+        )?;
+        if !answer.part.done {
+            return Err(ErrorCode::Internal {
+                detail: "a one-part resolve answered more parts".into(),
+            });
+        }
+        let record = crate::wal::redo::frame::lists_record(&answer.part.bytes)?;
+        let reply = answer.reply.ok_or_else(|| ErrorCode::Internal {
+            detail: "part 0 carries no reply".into(),
+        })?;
+        Ok(WholeResolved {
+            redo: record.to_bytes()?,
+            reply,
+        })
+    }
+}
+
+/// A slice resolved in one part, as a test installs it.
+#[cfg(test)]
+pub(in crate::data::executor) struct WholeResolved {
+    /// The encoded redo record of the slice's lists.
+    pub redo: Vec<u8>,
+    pub reply: CalvinReplySpec,
 }
 
 #[cfg(test)]
@@ -196,6 +262,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         })
     }
 
@@ -257,11 +324,31 @@ mod tests {
             .expect("seed row");
     }
 
+    /// Resolve the slice at `(epoch, position)` in one part.
+    fn resolve(core: &mut CoreLoop, task: &ExecutionTask, epoch: u64, position: u32) -> Response {
+        core.execute_calvin_resolve(
+            task,
+            CalvinPartRequest {
+                epoch,
+                position,
+                part: 0,
+                max_part_bytes: u64::MAX,
+            },
+        )
+    }
+
+    /// The answer a one-part resolve gave.
+    fn resolved_part(resp: &Response) -> CalvinResolvedPart {
+        let resolved: CalvinResolvedPart =
+            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode resolved answer");
+        assert!(resolved.part.done, "a one-part resolve answers one part");
+        resolved
+    }
+
     /// The redo record a resolve answered with.
     fn resolved_record(resp: &Response) -> RedoRecord {
-        let resolved: CalvinResolved =
-            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode resolved answer");
-        RedoRecord::from_bytes(&resolved.redo).expect("decode redo record")
+        crate::wal::redo::frame::lists_record(&resolved_part(resp).part.bytes)
+            .expect("decode resolved lists")
     }
 
     /// The resolve answers the reply the stage decided, beside the record.
@@ -287,12 +374,10 @@ mod tests {
                 .reply,
         );
 
-        let resp = core.execute_calvin_resolve(&task, 2, 0);
+        let resp = resolve(&mut core, &task, 2, 0);
 
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
-        let resolved: CalvinResolved =
-            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode resolved answer");
-        assert_eq!(resolved.reply, staged);
+        assert_eq!(resolved_part(&resp).reply, Some(staged));
         assert_eq!(resolved_record(&resp).ops.len(), 1);
     }
 
@@ -333,7 +418,7 @@ mod tests {
             &[point_insert_plan("orders", "o1", 7)],
         );
 
-        let resp = core.execute_calvin_resolve(&task, 1, 0);
+        let resp = resolve(&mut core, &task, 1, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
 
         let record = resolved_record(&resp);
@@ -403,7 +488,7 @@ mod tests {
             &[bulk_delete_plan("orders", Some(vec![10, 11, 12]))],
         );
 
-        let resp = core.execute_calvin_resolve(&task, 3, 0);
+        let resp = resolve(&mut core, &task, 3, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
         let record = resolved_record(&resp);
         assert_eq!(
@@ -446,7 +531,7 @@ mod tests {
             Some(crate::bridge::envelope::StageVote::PredictionDrift)
         );
 
-        let resp = core.execute_calvin_resolve(&task, 4, 0);
+        let resp = resolve(&mut core, &task, 4, 0);
         assert_eq!(
             resp.status,
             Status::Error,
@@ -474,7 +559,7 @@ mod tests {
             &[bulk_update_plan("orders", updates, Some(vec![30, 31]))],
         );
 
-        let resp = core.execute_calvin_resolve(&task, 5, 0);
+        let resp = resolve(&mut core, &task, 5, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
         let record = resolved_record(&resp);
         assert_eq!(record.ops.len(), 2, "one Put sub-record per predicted row");
@@ -530,7 +615,7 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let task = make_task();
 
-        let resp = core.execute_calvin_resolve(&task, 99, 0);
+        let resp = resolve(&mut core, &task, 99, 0);
         assert_eq!(
             resp.status,
             Status::Error,
@@ -595,7 +680,7 @@ mod tests {
         });
         stage(&mut core, &task, 6, 0, &[upsert]);
 
-        let resp = core.execute_calvin_resolve(&task, 6, 0);
+        let resp = resolve(&mut core, &task, 6, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
         let record = resolved_record(&resp);
         let image = record
@@ -666,7 +751,7 @@ mod tests {
                 &[],
             );
             assert_eq!(staged.status, Status::Ok, "staging: {staged:?}");
-            let resp = core.execute_calvin_resolve(&task, 8, 3);
+            let resp = resolve(&mut core, &task, 8, 3);
             assert_eq!(resp.status, Status::Ok, "resolve: {resp:?}");
             assert_eq!(
                 core.apply_scope.calvin_txn_ordinal, None,

@@ -33,7 +33,67 @@ pub struct EndedNodeExport {
     pub sys_to: i64,
 }
 
+/// The nodes of one row a read sees, for a copy of the row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowNodesExport {
+    /// The vectors of the nodes, in node id order.
+    pub vectors: Vec<Vec<f32>>,
+    /// The newest start among the nodes. `i64::MIN` when no retained cut
+    /// reads below any of them.
+    pub sys_from: i64,
+    /// Whether the row is a multi-vector document.
+    pub multi: bool,
+}
+
 impl VectorCollection {
+    /// The nodes of row `surrogate` a read at ordinal `at` sees, or its live
+    /// nodes when `at` is `None`. `None` when the read sees no node of the
+    /// row. A node whose vector no segment holds fails with
+    /// [`VectorError::VectorUnavailable`]: a copy without it loses the row's
+    /// vector.
+    pub fn export_row_nodes(
+        &self,
+        surrogate: Surrogate,
+        at: Option<i64>,
+    ) -> Result<Option<RowNodesExport>, VectorError> {
+        let ids: Vec<u32> = match at {
+            Some(at) => self.nodes_at([surrogate], at).iter().collect(),
+            None => match self.multi_doc_map.get(&surrogate) {
+                Some(ids) => ids.clone(),
+                None => self
+                    .surrogate_to_local
+                    .get(&surrogate)
+                    .copied()
+                    .into_iter()
+                    .collect(),
+            },
+        };
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let vectors = ids
+            .iter()
+            .map(|&id| {
+                self.stored_vector(id)
+                    .ok_or(VectorError::VectorUnavailable { id })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let sys_from = ids
+            .iter()
+            .map(|id| {
+                self.versions
+                    .span(*id)
+                    .map_or(i64::MIN, |span| span.sys_from)
+            })
+            .max()
+            .unwrap_or(i64::MIN);
+        Ok(Some(RowNodesExport {
+            multi: self.multi_doc_map.contains_key(&surrogate) || vectors.len() > 1,
+            vectors,
+            sys_from,
+        }))
+    }
+
     /// `(global node id, sys_from)` of every live node a cut can read below,
     /// ascending by id. A live node not listed is visible at every cut.
     pub fn live_node_starts(&self) -> Vec<(u32, i64)> {
@@ -125,6 +185,32 @@ mod tests {
         coll.search_at(&[1.0, 0.0], 10, 32, DistanceMetric::L2, None, at)
             .unwrap()
             .len()
+    }
+
+    /// A row's export at a cut carries the node visible there with its
+    /// start. The current export carries the live node. A cut before the
+    /// row's first node sees none.
+    #[test]
+    fn a_row_exports_the_nodes_a_read_sees() {
+        let mut coll = VectorCollection::new(2, HnswParams::default());
+        let s = Surrogate::new(3);
+        coll.insert_at(vec![1.0, 0.0], s, 10).unwrap();
+        coll.insert_at(vec![0.5, 0.5], s, 20).unwrap();
+
+        let past = coll.export_row_nodes(s, Some(15)).unwrap().unwrap();
+        assert_eq!(past.vectors, vec![vec![1.0, 0.0]]);
+        assert_eq!(past.sys_from, 10);
+        assert!(!past.multi);
+
+        let live = coll.export_row_nodes(s, None).unwrap().unwrap();
+        assert_eq!(live.vectors, vec![vec![0.5, 0.5]]);
+        assert_eq!(live.sys_from, 20);
+
+        assert_eq!(coll.export_row_nodes(s, Some(5)).unwrap(), None);
+        assert_eq!(
+            coll.export_row_nodes(Surrogate::new(4), None).unwrap(),
+            None
+        );
     }
 
     #[test]

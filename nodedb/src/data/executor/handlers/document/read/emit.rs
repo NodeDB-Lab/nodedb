@@ -117,12 +117,14 @@ mod tests {
         let (requests, request_rx) = RingBuffer::channel::<BridgeRequest>(8);
         let (response_tx, responses) = RingBuffer::channel::<BridgeResponse>(ring);
         let core = CoreLoop::open(
-            0,
-            request_rx,
-            response_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                request_rx,
+                response_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         Harness {

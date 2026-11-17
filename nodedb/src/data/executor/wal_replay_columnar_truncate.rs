@@ -435,7 +435,9 @@ mod tests {
             payload: nodedb_types::value_to_msgpack(&Value::Array(vec![row])).expect("encode row"),
             provenance: None,
             surrogates: Vec::new(),
-            conflict_policy: Vec::new(),
+            conflict_policy: crate::wal::ColumnarConflictPolicy::replace()
+                .encode()
+                .expect("encode policy"),
             system_from: Some(system_from),
             restored_versions: Vec::new(),
         };

@@ -5,10 +5,6 @@
 //! `build_vector_search_sql` renders `MetadataFilter` into a `WHERE`
 //! clause and emits the SELECT form the SEARCH preprocessor would
 //! produce, so the filter is applied before `vector_distance` ordering.
-//! `translate_params` boxes each `&[Value]` parameter into a
-//! `tokio_postgres::types::ToSql`-compatible owned value for the
-//! pgwire driver; the trait method `execute_sql` borrows them as
-//! `&[&(dyn ToSql + Sync)]` for the actual `Client::query` call.
 
 use std::collections::HashSet;
 
@@ -149,46 +145,38 @@ fn render_metadata_filter(filter: &MetadataFilter) -> NodeDbResult<String> {
     }
 }
 
-/// Render a single `Value` as a SQL literal. Strings are single-quote
-/// escaped; numeric / boolean / null variants are formatted directly.
-/// Returns `Err` for variants the SQL literal layer cannot represent.
+/// Render a single `Value` as a SQL literal, typed as the value is.
+///
+/// Strings are single-quote escaped. A decimal keeps its exact digits and
+/// scale. A UUID, an instant and bytes render as their typed literal
+/// (`UUID '...'`, `TIMESTAMPTZ '...'`, `TIMESTAMP '...'`, `BYTEA '\x...'`),
+/// an array as `ARRAY[...]` of its elements, a duration as
+/// `'<n>us'::DURATION`, a ULID as its text. Returns
+/// `Err` for a non-finite float and for variants no SQL literal represents.
 fn render_sql_literal(v: &Value) -> NodeDbResult<String> {
+    let typed = |type_name: &str, text: &str| format!("{type_name} {}", quote_string_literal(text));
     match v {
         Value::Null => Ok("NULL".into()),
         Value::Bool(b) => Ok(if *b { "TRUE".into() } else { "FALSE".into() }),
         Value::Integer(i) => Ok(i.to_string()),
-        Value::Float(f) => Ok(f.to_string()),
-        Value::String(s) => Ok(quote_string_literal(s)),
+        Value::Float(f) if f.is_finite() => Ok(f.to_string()),
+        Value::String(s) | Value::Ulid(s) => Ok(quote_string_literal(s)),
+        Value::Decimal(d) => Ok(d.to_string()),
+        Value::Uuid(u) => Ok(typed("UUID", u)),
+        Value::DateTime(at) => Ok(typed("TIMESTAMPTZ", &at.to_iso8601())),
+        Value::NaiveDateTime(at) => Ok(typed("TIMESTAMP", &at.to_iso8601())),
+        Value::Bytes(b) => Ok(typed(
+            "BYTEA",
+            &nodedb_types::bytea_text::format_bytea_hex(b),
+        )),
+        Value::Array(items) => {
+            let rendered: NodeDbResult<Vec<_>> = items.iter().map(render_sql_literal).collect();
+            Ok(format!("ARRAY[{}]", rendered?.join(", ")))
+        }
+        Value::Duration(d) => Ok(format!("'{}us'::DURATION", d.micros)),
         other => Err(NodeDbError::storage(format!(
-            "metadata filter value cannot be rendered as a SQL literal: {other:?}"
-        ))),
-    }
-}
-
-/// Translate trait-level `&[Value]` parameters into owned, `ToSql`-
-/// compatible boxes for `tokio_postgres`. Returns one boxed parameter
-/// per input `Value`; the caller borrows them as `&[&(dyn ToSql + Sync)]`
-/// for the driver call.
-///
-/// Unsupported value variants (objects, arrays, datetimes, etc.) return
-/// `Err` rather than silently coercing — surfacing the gap to the
-/// caller so the trait contract stays honest.
-pub(super) fn translate_params(
-    params: &[Value],
-) -> NodeDbResult<Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>> {
-    params.iter().map(translate_value).collect()
-}
-
-fn translate_value(v: &Value) -> NodeDbResult<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> {
-    match v {
-        Value::Null => Ok(Box::new(None::<i64>)),
-        Value::Bool(b) => Ok(Box::new(*b)),
-        Value::Integer(i) => Ok(Box::new(*i)),
-        Value::Float(f) => Ok(Box::new(*f)),
-        Value::String(s) => Ok(Box::new(s.clone())),
-        Value::Bytes(b) => Ok(Box::new(b.clone())),
-        other => Err(NodeDbError::storage(format!(
-            "execute_sql parameter cannot be translated to a pgwire bind: {other:?}"
+            "metadata filter value of type {} cannot be rendered as a SQL literal",
+            other.type_name()
         ))),
     }
 }
@@ -300,46 +288,21 @@ mod tests {
     }
 
     #[test]
-    fn render_sql_literal_rejects_unsupported_variants() {
+    fn render_sql_literal_keeps_typed_values_typed() {
+        let price = Value::Decimal("12.50".parse().expect("decimal"));
+        assert_eq!(render_sql_literal(&price).unwrap(), "12.50");
+        let uid = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        assert_eq!(
+            render_sql_literal(&uid).unwrap(),
+            "UUID '550e8400-e29b-41d4-a716-446655440000'"
+        );
         let array = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
-        assert!(render_sql_literal(&array).is_err());
+        assert_eq!(render_sql_literal(&array).unwrap(), "ARRAY[1, 2]");
     }
 
     #[test]
-    fn translate_params_passes_through_empty() {
-        // Empty params is a no-op; translate produces an empty vec.
-        let translated = translate_params(&[]).expect("empty translate is fine");
-        assert!(translated.is_empty());
-    }
-
-    #[test]
-    fn translate_params_accepts_bound_parameters() {
-        // Spec: non-empty params translate cleanly without rejection.
-        let params = vec![Value::String("alice".into()), Value::Integer(42)];
-        let translated = translate_params(&params)
-            .expect("non-empty params must translate for the pgwire driver");
-        assert_eq!(translated.len(), 2);
-    }
-
-    #[test]
-    fn translate_params_supports_common_value_variants() {
-        let params = vec![
-            Value::Null,
-            Value::Bool(true),
-            Value::Integer(7),
-            Value::Float(2.5),
-            Value::String("hi".into()),
-            Value::Bytes(vec![1, 2, 3]),
-        ];
-        let translated = translate_params(&params).expect("common variants translate cleanly");
-        assert_eq!(translated.len(), 6);
-    }
-
-    #[test]
-    fn translate_params_rejects_unsupported_variants() {
-        // Object isn't a pgwire scalar; the translator must surface
-        // the gap rather than silently coercing.
-        let params = vec![Value::Object(Default::default())];
-        assert!(translate_params(&params).is_err());
+    fn render_sql_literal_rejects_unsupported_variants() {
+        assert!(render_sql_literal(&Value::Object(Default::default())).is_err());
+        assert!(render_sql_literal(&Value::Float(f64::NAN)).is_err());
     }
 }

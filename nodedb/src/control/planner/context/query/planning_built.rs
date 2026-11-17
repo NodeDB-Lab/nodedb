@@ -78,7 +78,7 @@ impl QueryContext {
             .with_session_sequences(self.session_sequences());
         let plans = build(&catalog).map_err(|error| map_plan_error(error, tenant_id))?;
         let (output_schema, _) =
-            resolve_returning_and_output_schema(&plans, None, &catalog, database_id, tenant_id)?;
+            resolve_returning_and_output_schema(&plans, &catalog, database_id, tenant_id)?;
         let mut tasks = self
             .convert_prefetched(&plans, PlanningPurpose::Execute, database_id, tenant_id)
             .await?;

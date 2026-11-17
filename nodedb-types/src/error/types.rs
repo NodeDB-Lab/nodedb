@@ -106,6 +106,12 @@ impl NodeDbError {
                 | ErrorDetails::DivisionByZero
                 | ErrorDetails::DataException { .. }
                 | ErrorDetails::ProgramLimitExceeded { .. }
+                | ErrorDetails::InvalidArgumentForLogarithm { .. }
+                | ErrorDetails::InvalidArgumentForPowerFunction { .. }
+                | ErrorDetails::InvalidTextRepresentation { .. }
+                | ErrorDetails::InvalidDatetimeFormat { .. }
+                | ErrorDetails::DatetimeFieldOverflow { .. }
+                | ErrorDetails::DatatypeMismatch { .. }
                 | ErrorDetails::ActiveSqlTransaction { .. }
                 | ErrorDetails::DependentObjectsExist { .. }
                 | ErrorDetails::InvalidLimitValue { .. }

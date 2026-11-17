@@ -21,8 +21,9 @@
 //! - One `UringWriter` per spill file (created on demand, dropped on `finish`).
 //! - `append(data)` issues `IORING_OP_WRITE` at the running file offset, looping
 //!   until every byte is durably submitted (short writes are resubmitted).
-//! - `flush()` issues `IORING_OP_FSYNC` and waits for its CQE.
-//! - `finish()` flushes and returns the spill path.
+//! - `finish()` closes the file and returns the spill path. It never syncs:
+//!   the core reads the file back through the page cache, and core open
+//!   removes every spill directory a crash left.
 //!
 //! ## Short-write correctness (the critical invariant)
 //!
@@ -43,10 +44,11 @@ use std::os::unix::io::AsRawFd;
 #[cfg(target_os = "linux")]
 const QUEUE_DEPTH: u32 = 8;
 
-/// Default staging buffer size (1 MiB). Sized to hold a typical spill chunk
-/// without reallocation; larger `append`s transparently grow it.
+/// Initial staging buffer size (64 KiB). Most spill files are small, as a
+/// Calvin slice's resolve file on each of many vShards is. A larger
+/// `append` grows the buffer to its size.
 #[cfg(target_os = "linux")]
-const DEFAULT_BUF_SIZE: usize = 1024 * 1024;
+const DEFAULT_BUF_SIZE: usize = 64 * 1024;
 
 /// Per-spill-file io_uring sequential writer.
 ///
@@ -188,50 +190,14 @@ impl UringWriter {
         Ok(())
     }
 
-    /// Flush the spill file durably via `IORING_OP_FSYNC`.
+    /// Close the writer and return the spill file path.
     ///
-    /// Submits the fsync and waits for its CQE, surfacing a negative result as a
-    /// typed [`crate::Error::Io`].
-    pub fn flush(&mut self) -> crate::Result<()> {
-        let fsync_op = io_uring::opcode::Fsync::new(io_uring::types::Fd(self.file.as_raw_fd()))
-            .build()
-            .user_data(0);
-
-        // SAFETY: the fd is valid for `self.file`'s lifetime; fsync references
-        // no user buffer.
-        unsafe {
-            self.ring
-                .submission()
-                .push(&fsync_op)
-                .map_err(|e| crate::Error::Storage {
-                    engine: "spill".into(),
-                    detail: format!("uring submission queue push failed: {e}"),
-                })?;
-        }
-
-        self.ring.submit_and_wait(1).map_err(crate::Error::Io)?;
-
-        let cqe = self
-            .ring
-            .completion()
-            .next()
-            .ok_or_else(|| crate::Error::Storage {
-                engine: "spill".into(),
-                detail: "uring fsync completion missing after submit_and_wait".into(),
-            })?;
-
-        let res = cqe.result();
-        if res < 0 {
-            return Err(crate::Error::Io(std::io::Error::from_raw_os_error(-res)));
-        }
-
-        Ok(())
-    }
-
-    /// Flush and close the writer, returning the spill file path.
-    pub fn finish(mut self) -> crate::Result<PathBuf> {
-        self.flush()?;
-        // `self` (and thus `self.file`) is dropped at end of scope, closing the fd.
+    /// Every append completed before this returns, so a reader of the path
+    /// sees every byte through the page cache. The file is not synced: a
+    /// spill file is never durable state, and core open removes every spill
+    /// directory a crash left.
+    pub fn finish(self) -> crate::Result<PathBuf> {
+        // Dropping `self` closes the fd.
         Ok(self.path)
     }
 }
@@ -251,11 +217,6 @@ impl UringWriter {
 
     /// Stub so generic call sites compile on non-Linux hosts.
     pub fn append(&mut self, _data: &[u8]) -> crate::Result<()> {
-        Ok(())
-    }
-
-    /// Stub so generic call sites compile on non-Linux hosts.
-    pub fn flush(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
@@ -350,19 +311,6 @@ mod tests {
 
         let got = std::fs::read(&path).unwrap();
         assert_eq!(got, expected, "appends must concatenate in order");
-    }
-
-    #[test]
-    fn flush_does_not_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("flush.tmp");
-
-        let mut w = UringWriter::create(&path, 4096).unwrap();
-        w.append(&data_of(2048, 9)).unwrap();
-        w.flush().unwrap();
-        // A second flush with no new data is also fine.
-        w.flush().unwrap();
-        w.finish().unwrap();
     }
 
     #[test]

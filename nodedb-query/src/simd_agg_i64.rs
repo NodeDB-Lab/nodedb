@@ -50,7 +50,11 @@ impl I64SimdRuntime {
                 sum_i64: wasm_sum_i64,
                 min_i64: wasm_min_i64,
                 max_i64: wasm_max_i64,
-                name: "wasm-simd128",
+                name: if cfg!(target_feature = "simd128") {
+                    "wasm-simd128"
+                } else {
+                    "scalar"
+                },
             };
         }
         #[allow(unreachable_code)]

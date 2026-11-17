@@ -205,6 +205,7 @@ pub(in crate::control::backup::restore) async fn reissue_array_cells(
                 }],
                 columnar_keys: Vec::new(),
                 vector_rows: Vec::new(),
+                synced_text: Vec::new(),
                 timeseries: Vec::new(),
                 // The array names itself by `array_id`: the batch writes no
                 // user collection.

@@ -27,6 +27,8 @@
 //! - `calvin_applied`: this node's Calvin apply ledger.
 //! - `calvin_barrier_logs`: this node's dependent-read barrier logs,
 //!   carried by data-group snapshots.
+//! - `calvin_frozen_replies`: this node's frozen Calvin `RETURNING` replies,
+//!   carried by data-group snapshots.
 //! - `redo_snapshot_owed`: the data-group snapshot installs this node's
 //!   replicas owe.
 //! - `vshard_residency`: the vShards this node hosts, and the departure
@@ -165,6 +167,7 @@ pub(super) const REPLICATED_TABLES: &[ReplicatedTable] = replicated_tables![
     "vector_model_metadata" => VECTOR_MODEL_METADATA,
     "vector_index_params" => VECTOR_INDEX_PARAMS,
     "index_registry" => INDEX_REGISTRY,
+    "index_registry_by_collection" => INDEX_REGISTRY_BY_COLLECTION,
     "checkpoints" => CHECKPOINTS,
     "crdt_compaction_points" => super::crdt_compaction_points::CRDT_COMPACTION_POINTS,
     // ── Metadata-group host state ──

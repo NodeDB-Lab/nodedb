@@ -108,10 +108,6 @@ pub(super) async fn run_implicit_statement(
         database_id,
         sequences: &sequences,
     };
-    let client = DmlTxnCtx {
-        sessions: ctx.sessions,
-        session_id: ctx.peer_addr.into(),
-    };
     let result = statement_exec::run_implicit_statement(
         &exec,
         statement_exec::PlannedStatement {
@@ -119,7 +115,6 @@ pub(super) async fn run_implicit_statement(
             plan_lease_scope,
             sum_target_reads,
         },
-        &client,
     )
     .await;
     SqlOutcome::Response(Box::new(statement_result_to_native(seq, result)))

@@ -10,6 +10,7 @@
 //! its redo and proposes it (see `super::commit_redo`), or drops the staged
 //! state of a slice that ends with no log entry.
 
+mod cast_vote;
 mod drop_tail;
 mod verdict;
 mod vote;

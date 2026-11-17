@@ -5,6 +5,9 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::control::change_stream::stream::catch_up::{
+    CATCH_UP_EVENTS, ReplayRequest, replay_blocking,
+};
 use crate::control::change_stream::{ChangeCursor, CursorStep, LiveSubscriptionSet, ReplayStart};
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
@@ -293,16 +296,19 @@ async fn resume_auth(
     let start = cursor
         .map(ReplayStart::Cursor)
         .unwrap_or(ReplayStart::Timestamp(0));
-    // The ring is bounded, so the replay returns every event it holds.
-    let snapshot = match shared.change_stream.query_changes_in_database(
-        identity.tenant_id,
+    // The replay goes page by page, from the journal for a cursor the ring
+    // no longer serves, then from the ring, so it holds one page at a time.
+    let request = |start: ReplayStart| ReplayRequest {
+        tenant_id: identity.tenant_id,
         database_id,
-        None,
+        collection: None,
         start,
-        usize::MAX,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(_) => {
+        limit: CATCH_UP_EVENTS,
+    };
+    let mut page = match replay_blocking(&shared, request(start)).await {
+        Ok(Ok(page)) => page,
+        Err(error) => return (error_response(id.clone(), &error.to_string()), false),
+        Ok(Err(_)) => {
             return (
                 error_response(
                     id.clone(),
@@ -314,31 +320,50 @@ async fn resume_auth(
     };
     let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
     let mut replayed = 0usize;
-    for change in &snapshot.events {
-        let event = &change.event;
-        if authorize_collection(
-            identity,
-            database_id,
-            &event.collection,
-            Permission::Read,
-            &shared.permissions,
-            &shared.roles,
-            &emitter,
-        )
-        .is_ok()
-        {
-            if live_tx
-                .send(format_resume_notification(event, &change.cursor))
-                .await
-                .is_err()
+    let mut closed = false;
+    let mut cursor = loop {
+        for change in &page.events {
+            let event = &change.event;
+            if authorize_collection(
+                identity,
+                database_id,
+                &event.collection,
+                Permission::Read,
+                &shared.permissions,
+                &shared.roles,
+                &emitter,
+            )
+            .is_ok()
             {
-                break;
+                if live_tx
+                    .send(format_resume_notification(event, &change.cursor))
+                    .await
+                    .is_err()
+                {
+                    closed = true;
+                    break;
+                }
+                replayed += 1;
             }
-            replayed += 1;
         }
-    }
-    let snapshot_cursor = snapshot.cursor.to_string();
-    let mut cursor = snapshot.cursor;
+        if closed || !page.has_more {
+            break page.cursor;
+        }
+        page = match replay_blocking(&shared, request(ReplayStart::Cursor(page.cursor))).await {
+            Ok(Ok(next)) => next,
+            Err(error) => return (error_response(id.clone(), &error.to_string()), false),
+            Ok(Err(_)) => {
+                return (
+                    error_response(
+                        id.clone(),
+                        "reset_required: the stream's next change left this node's feed",
+                    ),
+                    false,
+                );
+            }
+        };
+    };
+    let snapshot_cursor = cursor.to_string();
     let live_tx = live_tx.clone();
     let shared = Arc::clone(&shared);
     let identity = identity.clone();

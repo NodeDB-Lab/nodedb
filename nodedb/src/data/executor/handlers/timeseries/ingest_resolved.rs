@@ -40,15 +40,14 @@ use std::borrow::Cow;
 use crate::bridge::envelope::{Admission, ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec;
-use crate::engine::timeseries::columnar_memtable::{
-    ColumnValue, ColumnarMemtable, ColumnarMemtableConfig,
-};
+use crate::engine::timeseries::columnar_memtable::{ColumnarMemtable, ColumnarMemtableConfig};
 use crate::engine::timeseries::ilp_ingest;
 use crate::engine::timeseries::resolved_ingest::{ResolvedTsBatch, ResolvedTsRow, TsDriftPolicy};
 
 use super::admission;
 use super::ingest_dispatch::{TimeseriesApplyMode, TimeseriesIngestParams};
 use super::ingest_resolved_fit::{CollKey, SchemaFit, landing_values};
+use super::ingest_resolved_preview::{landed_images, stamp_system_ordinal};
 use super::ingest_resolved_returning::decode_returning_images;
 use crate::data::executor::response_codec::IngestRejection;
 use crate::engine::timeseries::install_counts::TsInstallCount;
@@ -64,6 +63,7 @@ impl CoreLoop {
             collection,
             payload,
             wal_lsn,
+            provenance: _,
             now_ms: _,
             mode,
             rls_write_check: _,
@@ -158,21 +158,15 @@ impl CoreLoop {
         // position. A refusable install never gets here with one, since only
         // a by-name fit conflicts.
         let mut row_values = landing_values(fit, &schema, &batch);
-        if let Some(system_idx) = schema.ts_system_idx() {
-            for values in row_values.iter_mut().flatten() {
-                let Some(cell) = values.get_mut(system_idx) else {
-                    continue;
-                };
-                // A clone copy keeps its source version's ordinal, which
-                // folds into the shared clock so a later write stamps above.
-                if batch.carried_system
-                    && let ColumnValue::Int64(carried) = *cell
-                {
-                    self.hlc.update_from_remote(carried);
-                    continue;
-                }
-                *cell = ColumnValue::Int64(system_ordinal);
-            }
+        // A clone copy keeps its source version's ordinal, which folds into
+        // the shared clock so a later write stamps above.
+        for carried in stamp_system_ordinal(
+            &schema,
+            batch.carried_system,
+            &mut row_values,
+            system_ordinal,
+        ) {
+            self.hlc.update_from_remote(carried);
         }
         let conflicts = row_values.iter().filter(|values| values.is_none()).count();
         // Every landing row is checked before any lands: the tag
@@ -216,8 +210,7 @@ impl CoreLoop {
         // consumer reads the collection, its outcome is durable before the
         // first row lands, so WAL catch-up rebuilds exactly these events. An
         // install no reader asks for images of renders none.
-        let wants_images =
-            batch.emits_events || returning.is_some() || mode == TimeseriesApplyMode::RedoInstall;
+        let wants_images = batch.emits_events || returning.is_some();
         let by_name_images = match fit {
             SchemaFit::Exact => None,
             SchemaFit::ByName if !wants_images => None,
@@ -311,14 +304,7 @@ impl CoreLoop {
         // the values its resolve imaged. A by-name fit's images were
         // rendered from the live schema above.
         let emits = batch.emits_events && mode != TimeseriesApplyMode::Replay;
-        let images: Vec<&[u8]> = match &by_name_images {
-            None => landed
-                .iter()
-                .filter_map(|position| batch.rows.get(*position))
-                .map(|row| row.image.as_slice())
-                .collect(),
-            Some(rendered) => rendered.iter().map(Vec::as_slice).collect(),
-        };
+        let images: Vec<&[u8]> = landed_images(&batch, &landed, by_name_images.as_deref());
         if emits {
             self.emit_resolved_ts_events(task, collection, &images);
         }
@@ -327,19 +313,11 @@ impl CoreLoop {
         let accepted = landed.len();
         let rejected = batch.rejected.saturating_add(conflicts as u64);
         if mode == TimeseriesApplyMode::RedoInstall {
-            let stored_images = images
-                .iter()
-                .filter(|image| !image.is_empty())
-                .map(|image| image.to_vec())
-                .collect();
-            self.note_redo_ts_install(
-                TsInstallCount {
-                    collection: collection.to_string(),
-                    accepted: accepted as u64,
-                    rejected,
-                },
-                stored_images,
-            );
+            self.note_redo_ts_install(TsInstallCount {
+                collection: collection.to_string(),
+                accepted: accepted as u64,
+                rejected,
+            });
         }
 
         // An image that does not decode refuses the statement below, once the
@@ -428,214 +406,11 @@ impl CoreLoop {
 
 #[cfg(test)]
 mod tests {
-    use nodedb_physical::physical_plan::TimeseriesOp;
-
-    use super::super::{TimeseriesApplyMode, TimeseriesIngestExec, TsResolveInput};
-    use crate::bridge::envelope::{
-        Admission, ErrorCode, ExemptReason, PhysicalPlan, Response, Status,
+    use super::super::ingest_resolved_test_support::{
+        install, install_committed, key, resolve, resolve_lines,
     };
-    use crate::data::executor::core_loop::CoreLoop;
+    use crate::bridge::envelope::{ErrorCode, Status};
     use crate::data::executor::core_loop::tests::make_core_with_dir;
-    use crate::data::executor::handlers::timeseries::raw_scan::emit_memtable_rows_at;
-    use crate::data::executor::task::ExecutionTask;
-    use crate::engine::timeseries::resolved_ingest::{
-        RESOLVED_INGEST_FORMAT, ResolvedTsBatch, TsDriftPolicy,
-    };
-    use crate::event::bus::{EventConsumerRx, create_event_bus_with_capacity};
-    use crate::event::interest::{EventInterest, Interest, InterestSlice, InterestSources};
-    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-
-    const TENANT: u64 = 1;
-    const COLLECTION: &str = "metrics";
-
-    fn task_at(lsn: u64) -> ExecutionTask {
-        CoreLoop::replay_task(
-            TenantId::new(TENANT),
-            DatabaseId::DEFAULT,
-            VShardId::new(0),
-            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
-                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
-                restart_identity: false,
-            }),
-            Some(Lsn::new(lsn)),
-        )
-    }
-
-    fn key() -> (DatabaseId, TenantId, String) {
-        (
-            DatabaseId::DEFAULT,
-            TenantId::new(TENANT),
-            COLLECTION.to_string(),
-        )
-    }
-
-    /// Wire `core` to an event bus, with a consumer on the collection.
-    fn wire_events(core: &mut CoreLoop) -> EventConsumerRx {
-        let (mut producers, mut consumers) = create_event_bus_with_capacity(1, 64);
-        core.set_event_producer(producers.pop().expect("producer"));
-        let triggers = InterestSlice::new();
-        let mut interest = Interest::default();
-        interest.insert(DatabaseId::DEFAULT, COLLECTION);
-        triggers.publish(interest);
-        let set = EventInterest::new();
-        set.install(InterestSources {
-            triggers,
-            ..InterestSources::default()
-        });
-        core.set_event_interest(set);
-        consumers.pop().expect("consumer")
-    }
-
-    fn resolve(core: &CoreLoop, line: &str, now_ms: i64) -> ResolvedTsBatch {
-        resolve_lines(core, &[line], now_ms)
-    }
-
-    fn resolve_lines(core: &CoreLoop, lines: &[&str], now_ms: i64) -> ResolvedTsBatch {
-        let lines: Vec<String> = lines.iter().map(|line| (*line).to_string()).collect();
-        core.resolve_ts_batch(
-            &task_at(0),
-            TsResolveInput {
-                tid: TenantId::new(TENANT),
-                collection: COLLECTION,
-                lines: &lines,
-                now_ms,
-                drift: TsDriftPolicy::Refuse,
-                needs_images: false,
-                base: None,
-            },
-        )
-        .expect("resolve")
-    }
-
-    /// Install `batch` as a live write that passed the admission gate.
-    fn install(core: &mut CoreLoop, batch: &ResolvedTsBatch, lsn: u64) -> Response {
-        install_as(core, batch, lsn, Admission::Admitted)
-    }
-
-    /// Install `batch` as a committed entry's apply: its order was decided
-    /// by the log.
-    fn install_committed(core: &mut CoreLoop, batch: &ResolvedTsBatch, lsn: u64) -> Response {
-        install_as(
-            core,
-            batch,
-            lsn,
-            Admission::Exempt(ExemptReason::AlreadyOrdered),
-        )
-    }
-
-    fn install_as(
-        core: &mut CoreLoop,
-        batch: &ResolvedTsBatch,
-        lsn: u64,
-        admission: Admission,
-    ) -> Response {
-        let payload = batch.to_bytes().expect("encode batch");
-        let mut task = task_at(lsn);
-        task.request.admission = admission;
-        core.execute_timeseries_ingest(TimeseriesIngestExec {
-            task: &task,
-            tid: TenantId::new(TENANT),
-            collection: COLLECTION,
-            payload: &payload,
-            format: RESOLVED_INGEST_FORMAT,
-            wal_lsn: Some(lsn),
-            provenance: None,
-            mode: TimeseriesApplyMode::Immediate,
-            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
-            returning: None,
-            rls_filters: &[],
-        })
-    }
-
-    /// The stored row at `index`, as a scan reads it.
-    fn stored_row(core: &CoreLoop, index: usize) -> rmpv::Value {
-        let mt = core.columnar_memtables.get(&key()).expect("memtable");
-        emit_memtable_rows_at(mt, &[index])
-            .expect("read row")
-            .pop()
-            .expect("one row")
-    }
-
-    /// The images of every event the core emitted since the last drain.
-    fn drained_images(events: &mut EventConsumerRx) -> Vec<rmpv::Value> {
-        std::iter::from_fn(|| events.try_recv())
-            .map(|event| {
-                let image = event.new_value.expect("insert image");
-                crate::util::bounded_msgpack::read_value(&image).expect("decode image")
-            })
-            .collect()
-    }
-
-    /// Two ingests resolve against the same schema and add different
-    /// columns. The first installs. The second finds the schema changed,
-    /// stores nothing and refuses, then resolves again and installs. Each
-    /// ingest's event equals the row it stored.
-    #[test]
-    fn interleaved_ingests_that_add_columns_emit_their_stored_rows() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let mut events = wire_events(&mut core);
-
-        let first = resolve(&core, "metrics alpha=1 1000000000", 1_000);
-        let second = resolve(&core, "metrics beta=2 2000000000", 2_000);
-
-        assert_eq!(install(&mut core, &first, 1).status, Status::Ok);
-        assert_eq!(drained_images(&mut events), vec![stored_row(&core, 0)]);
-
-        let refused = install(&mut core, &second, 2);
-        assert_eq!(refused.status, Status::Error);
-        assert_eq!(
-            refused.error_code.as_deref(),
-            Some(&ErrorCode::OllpRetryRequired)
-        );
-        assert!(
-            drained_images(&mut events).is_empty(),
-            "a refusal stores and emits nothing"
-        );
-        assert_eq!(
-            core.columnar_memtables.get(&key()).map(|mt| mt.row_count()),
-            Some(1)
-        );
-
-        let second = resolve(&core, "metrics beta=2 2000000000", 2_000);
-        assert_eq!(install(&mut core, &second, 3).status, Status::Ok);
-        assert_eq!(drained_images(&mut events), vec![stored_row(&core, 1)]);
-    }
-
-    /// A committed apply cannot refuse, whatever drift its batch names: it
-    /// stores each value under its column name, and a column the batch does
-    /// not name takes its empty value.
-    #[test]
-    fn an_apply_by_name_install_stores_values_under_their_columns() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-
-        let first = resolve(&core, "metrics alpha=1 1000000000", 1_000);
-        let second = resolve(&core, "metrics beta=2 2000000000", 2_000);
-        let by_name = second.clone().with_drift(TsDriftPolicy::ApplyByName);
-        assert_eq!(install(&mut core, &first, 1).status, Status::Ok);
-        assert_eq!(install_committed(&mut core, &second, 2).status, Status::Ok);
-        assert_eq!(install(&mut core, &by_name, 3).status, Status::Ok);
-        assert_eq!(
-            core.columnar_memtables.get(&key()).map(|mt| mt.row_count()),
-            Some(3)
-        );
-
-        let rmpv::Value::Map(fields) = stored_row(&core, 1) else {
-            panic!("a stored row is a map");
-        };
-        let field = |name: &str| {
-            fields
-                .iter()
-                .find(|(key, _)| key.as_str() == Some(name))
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(field("beta"), Some(rmpv::Value::F64(2.0)));
-        assert!(
-            matches!(field("alpha"), Some(rmpv::Value::Nil)),
-            "a column the batch does not name is empty"
-        );
-    }
 
     /// A staged transaction that resolved into the collection holds it until
     /// its overlay drops. An autocommit install into it refuses meanwhile.
@@ -655,262 +430,9 @@ mod tests {
             Some(&ErrorCode::OllpRetryRequired)
         );
 
-        core.drop_overlay_entry(crate::types::TxnId::new(7));
+        core.drop_overlay_entry(crate::types::TxnId::new(7))
+            .expect("drop overlay");
         assert_eq!(install(&mut core, &batch, 2).status, Status::Ok);
-    }
-
-    /// A line whose field conflicts with its column's type is rejected at
-    /// resolve. The batch carries the count and the reason, and the install
-    /// reports it as the ingest's `rejected` count.
-    #[test]
-    fn a_type_conflicting_line_is_reported_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let batch = resolve_lines(
-            &core,
-            &[
-                "metrics value=1 1000000000",
-                "metrics value=\"text\" 2000000000",
-            ],
-            1_000,
-        );
-        assert_eq!(batch.rows.len(), 1);
-        assert_eq!(batch.rejected, 1);
-        assert!(
-            batch.first_rejection.is_some(),
-            "the rejection names its reason"
-        );
-
-        let response = install_committed(&mut core, &batch, 1);
-        assert_eq!(response.status, Status::Ok);
-        let json = crate::data::executor::response_codec::decode_payload_to_json(
-            response.payload.as_bytes(),
-        );
-        let body: serde_json::Value = sonic_rs::from_str(&json).expect("decode response");
-        assert_eq!(body["accepted"], serde_json::json!(1));
-        assert_eq!(body["rejected"], serde_json::json!(1));
-    }
-
-    /// Two ingests resolve against the same schema and give a new column
-    /// conflicting types. The first installs. The second is a committed
-    /// entry: its conflicting row is rejected and counted, its other row
-    /// lands with the column empty, the core stays up, and its one event
-    /// equals the row it stored.
-    #[test]
-    fn a_committed_row_that_conflicts_is_rejected_and_the_rest_land() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let mut events = wire_events(&mut core);
-
-        let first = resolve(&core, "metrics extra=1.5 1000000000", 1_000);
-        let second = resolve_lines(
-            &core,
-            &[
-                "metrics extra=\"text\" 2000000000",
-                "metrics value=2 3000000000",
-            ],
-            2_000,
-        );
-        assert_eq!(second.rows.len(), 2, "the resolve saw no conflict");
-
-        assert_eq!(install_committed(&mut core, &first, 1).status, Status::Ok);
-        assert_eq!(drained_images(&mut events), vec![stored_row(&core, 0)]);
-
-        let response = install_committed(&mut core, &second, 2);
-        assert_eq!(response.status, Status::Ok);
-        assert!(!core.is_fail_stopped());
-        let json = crate::data::executor::response_codec::decode_payload_to_json(
-            response.payload.as_bytes(),
-        );
-        let body: serde_json::Value = sonic_rs::from_str(&json).expect("decode response");
-        assert_eq!(body["accepted"], serde_json::json!(1));
-        assert_eq!(body["rejected"], serde_json::json!(1));
-        assert_eq!(
-            core.columnar_memtables.get(&key()).map(|mt| mt.row_count()),
-            Some(2)
-        );
-        let stored = stored_row(&core, 1);
-        assert_eq!(drained_images(&mut events), vec![stored.clone()]);
-        let rmpv::Value::Map(fields) = stored else {
-            panic!("a stored row is a map");
-        };
-        let field = |name: &str| {
-            fields
-                .iter()
-                .find(|(key, _)| key.as_str() == Some(name))
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(field("value"), Some(rmpv::Value::F64(2.0)));
-        assert!(
-            matches!(field("extra"), Some(rmpv::Value::Nil)),
-            "a column the row does not name is empty, not a conflict"
-        );
-    }
-
-    /// A flush drains the memtable and keeps its schema on disk. A restart
-    /// seeds the memtable with it, so a committed row that conflicts with
-    /// the flushed schema is rejected after the restart as before it.
-    #[test]
-    fn a_restart_keeps_the_flushed_schema_for_conflicts() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let first = resolve(&core, "metrics extra=1.5 1000000000", 1_000);
-        assert_eq!(install_committed(&mut core, &first, 1).status, Status::Ok);
-        core.flush_ts_collection(
-            TenantId::new(TENANT),
-            DatabaseId::DEFAULT,
-            COLLECTION,
-            1_000,
-        )
-        .expect("flush");
-        drop(core);
-
-        let (mut restarted, _tx, _rx) = make_core_with_dir(dir.path());
-        restarted.load_ts_registries().expect("load registries");
-        let second = resolve(&restarted, "metrics extra=\"text\" 2000000000", 2_000);
-        assert_eq!(second.rejected, 1, "the resolve sees the flushed schema");
-
-        // A proposer that never held the column resolves the row whole.
-        let unseeded = {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let (other, _tx, _rx) = make_core_with_dir(scratch.path());
-            resolve(&other, "metrics extra=\"text\" 2000000000", 2_000)
-        };
-        assert_eq!(unseeded.rows.len(), 1);
-        let response = install_committed(&mut restarted, &unseeded, 2);
-        assert_eq!(response.status, Status::Ok);
-        assert!(!restarted.is_fail_stopped());
-        let json = crate::data::executor::response_codec::decode_payload_to_json(
-            response.payload.as_bytes(),
-        );
-        let body: serde_json::Value = sonic_rs::from_str(&json).expect("decode response");
-        assert_eq!(body["accepted"], serde_json::json!(0));
-        assert_eq!(body["rejected"], serde_json::json!(1));
-    }
-
-    /// The ring drops the events of a committed by-name install that
-    /// rejected a row. WAL catch-up rebuilds them from the record and the
-    /// install's outcome: one event per landed row, with its stored image,
-    /// and none for the rejected row.
-    #[test]
-    fn catch_up_after_an_apply_time_rejection_rebuilds_only_landed_rows() {
-        use crate::control::server::wal_dispatch::{
-            TimeseriesIngestRecord, encode_timeseries_ingest_payload,
-        };
-        use crate::engine::timeseries::install_outcome::{TsOutcomeIndex, outcome_dir};
-        use crate::event::wal_replay_scope::{ReplayScope, RowSources};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let mut events = wire_events(&mut core);
-
-        let first = resolve(&core, "metrics extra=1.5 1000000000", 1_000);
-        let second = resolve_lines(
-            &core,
-            &[
-                "metrics extra=\"text\" 2000000000",
-                "metrics value=2 3000000000",
-            ],
-            2_000,
-        );
-        assert_eq!(install_committed(&mut core, &first, 1).status, Status::Ok);
-        assert_eq!(install_committed(&mut core, &second, 2).status, Status::Ok);
-        assert_eq!(
-            drained_images(&mut events).len(),
-            2,
-            "one live event per landed row"
-        );
-
-        // The ring lost both events. Catch-up reads the logged record.
-        let logged = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
-            collection: COLLECTION,
-            payload: &second.to_bytes().expect("encode batch"),
-            provenance: None,
-            format: RESOLVED_INGEST_FORMAT,
-            default_timestamp_ms: second.now_ms,
-        })
-        .expect("encode record");
-        let outcomes =
-            TsOutcomeIndex::load(&outcome_dir(dir.path(), core.core_id)).expect("load outcomes");
-        let scope = ReplayScope {
-            database_id: DatabaseId::DEFAULT,
-            tenant_id: TenantId::new(TENANT),
-            vshard_id: VShardId::new(0),
-            lsn: Lsn::new(2),
-            sources: RowSources::uniform(crate::event::EventSource::User),
-            commit_hlc: None,
-        };
-        let mut sequence = 0;
-        let rebuilt = crate::event::wal_replay_timeseries::replayed_timeseries_events(
-            &logged,
-            &scope,
-            &outcomes,
-            &mut sequence,
-        );
-        let images: Vec<rmpv::Value> = rebuilt
-            .iter()
-            .map(|event| {
-                let image = event.new_value.as_deref().expect("insert image");
-                crate::util::bounded_msgpack::read_value(image).expect("decode image")
-            })
-            .collect();
-        assert_eq!(images, vec![stored_row(&core, 1)]);
-    }
-
-    /// A follower catches up by a snapshot taken after the leader flushed a
-    /// column's first rows. It installs the leader's schema, so a committed
-    /// row that conflicts with it is rejected on the follower as on the
-    /// leader, before and after the follower restarts.
-    #[test]
-    fn a_follower_restored_from_a_snapshot_rejects_as_the_leader_does() {
-        let leader_dir = tempfile::tempdir().expect("tempdir");
-        let (mut leader, _tx, _rx) = make_core_with_dir(leader_dir.path());
-        let first = resolve(&leader, "metrics extra=1.5 1000000000", 1_000);
-        assert_eq!(install_committed(&mut leader, &first, 1).status, Status::Ok);
-        leader
-            .flush_ts_collection(
-                TenantId::new(TENANT),
-                DatabaseId::DEFAULT,
-                COLLECTION,
-                1_000,
-            )
-            .expect("flush");
-        let snapshot = leader.execute_create_tenant_snapshot(&task_at(1), TENANT, false);
-        assert_eq!(snapshot.status, Status::Ok, "{:?}", snapshot.error_code);
-
-        let follower_dir = tempfile::tempdir().expect("tempdir");
-        let (mut follower, _ftx, _frx) = make_core_with_dir(follower_dir.path());
-        let restored = follower.execute_restore_tenant_snapshot(
-            &task_at(1),
-            TENANT,
-            snapshot.payload.as_bytes(),
-            true,
-            &[],
-            &[],
-        );
-        assert_eq!(restored.status, Status::Ok, "{:?}", restored.error_code);
-
-        // A proposer that never held the column resolves the row whole.
-        let conflicting = {
-            let scratch = tempfile::tempdir().expect("tempdir");
-            let (other, _otx, _orx) = make_core_with_dir(scratch.path());
-            resolve(&other, "metrics extra=\"text\" 2000000000", 2_000)
-        };
-        let rejected = |core: &mut CoreLoop| {
-            let response = install_committed(core, &conflicting, 2);
-            assert_eq!(response.status, Status::Ok);
-            let json = crate::data::executor::response_codec::decode_payload_to_json(
-                response.payload.as_bytes(),
-            );
-            let body: serde_json::Value = sonic_rs::from_str(&json).expect("decode response");
-            body["rejected"].clone()
-        };
-        assert_eq!(rejected(&mut leader), serde_json::json!(1));
-        assert_eq!(rejected(&mut follower), serde_json::json!(1));
-        drop(follower);
-        let (mut restarted, _rtx, _rrx) = make_core_with_dir(follower_dir.path());
-        restarted.load_ts_registries().expect("load registries");
-        assert_eq!(rejected(&mut restarted), serde_json::json!(1));
     }
 
     /// The log already orders a committed entry after a staged

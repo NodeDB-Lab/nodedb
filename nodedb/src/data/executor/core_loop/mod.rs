@@ -13,12 +13,15 @@ mod crs_context;
 mod declared_columns;
 mod decode_stored;
 pub(in crate::data::executor) mod deferred;
+pub(in crate::data::executor) mod doc_config_key;
 mod doc_config_seed;
 pub(in crate::data::executor) mod event_emit;
 mod event_emit_engines;
 pub(in crate::data::executor) mod event_image;
 pub(in crate::data::executor) mod event_outlet;
 pub(in crate::data::executor) use event_emit_engines::KvWriteEvent;
+#[cfg(test)]
+mod engine_row_limit_tests;
 pub(in crate::data::executor) mod fail_stop;
 pub(in crate::data::executor) mod filter_match;
 pub(in crate::data::executor) mod graph_metrics;
@@ -27,17 +30,29 @@ mod graph_view;
 pub(in crate::data::executor) mod hash_chain_state;
 pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
+#[cfg(test)]
+mod installed_event_tests;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
+#[cfg(test)]
+mod materialized_policy_tests;
+#[cfg(test)]
+mod merge_atomic_tests;
 pub(in crate::data::executor) mod newest_ordinals;
 mod open;
+mod open_params;
+#[cfg(test)]
+mod prepared_update_tests;
 pub mod pressure;
 pub(in crate::data::executor) mod priority_queues;
 mod read_vshards;
 pub(in crate::data::executor) mod redo_image;
 mod response;
+#[cfg(test)]
+mod row_image_limit_tests;
 mod segment_keks;
 mod state;
+pub(in crate::data::executor) mod state_types;
 mod test_governor;
 mod tick;
 mod ts_declared_schema;
@@ -52,6 +67,7 @@ pub(in crate::data::executor) mod write_set_journal;
 
 pub(in crate::data::executor) use crdt_dead_letters::crdt_rejection;
 pub use doc_config_seed::DocConfigSeedEntry;
+pub use open_params::CoreOpenParams;
 pub(in crate::data::executor) use segment_keks::SegmentKeks;
 pub use state::CoreLoop;
 pub use test_governor::test_governor;

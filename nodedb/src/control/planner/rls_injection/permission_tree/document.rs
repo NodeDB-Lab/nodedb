@@ -108,6 +108,7 @@ pub(super) fn apply_document(ctx: &PermCtx<'_>, op: &mut DocumentOp) -> crate::R
         DocumentOp::InsertSelect {
             target_collection,
             source,
+            ..
         } => {
             ctx.authorize(target_collection, PermTreeLevel::Write)?;
             apply_row_source(ctx, source)

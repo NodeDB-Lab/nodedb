@@ -97,11 +97,36 @@ pub(crate) struct ReplayScope<'a> {
 }
 
 impl ReplayScope<'_> {
-    fn matches(&self, event: &SequencedChangeEvent) -> bool {
-        event.database_id() == self.database_id
-            && event.tenant_id == self.tenant_id
-            && self.collection.is_none_or(|name| event.collection == name)
+    pub(crate) fn matches(&self, event: &SequencedChangeEvent) -> bool {
+        self.admits(event.database_id(), event.tenant_id, &event.collection)
     }
+
+    /// Whether a change of `collection` in `database_id` for `tenant_id` is
+    /// in scope.
+    pub(crate) fn admits(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        collection: &str,
+    ) -> bool {
+        database_id == self.database_id
+            && tenant_id == self.tenant_id
+            && self.collection.is_none_or(|name| collection == name)
+    }
+}
+
+/// A partition whose cursor sits below what the ring holds of it: the ring
+/// evicted events the cursor has not consumed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Lag {
+    pub partition: ChangePartition,
+    /// The cursor's position in the partition.
+    pub from: CdcOffset,
+    /// The highest position the ring evicted. The ring holds every event
+    /// of the partition above it.
+    pub to: CdcOffset,
+    /// The feed's floor, which every replayed event carries.
+    pub floor: CdcOffset,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,27 +152,49 @@ impl ReplayRing {
         }
     }
 
-    /// Append the events of `run` the ring does not hold yet.
-    pub fn append(&mut self, run: ChangeRun) -> AppendedRun {
-        let ChangeRun {
-            partition,
-            after,
-            through,
-            changes,
-        } = run;
-        let prior = self.feeds.get(&partition).copied();
-        let (start, floor) = match (prior, after) {
+    /// Where `run` starts on this ring, and the feed's floor once the ring
+    /// took it.
+    fn start_and_floor(&self, run: &ChangeRun) -> (CdcOffset, CdcOffset) {
+        match (self.feeds.get(&run.partition), run.after) {
             (Some(feed), None) => (feed.through, feed.floor),
             (Some(feed), Some(after)) if after <= feed.through => (feed.through, feed.floor),
             // A hole between what this node saw and what the run vouches.
             (Some(_), Some(after)) | (None, Some(after)) => (after, after),
             (None, None) => {
-                let start = changes
+                let start = run
+                    .changes
                     .first()
-                    .map_or(through, |change| before(change.position));
+                    .map_or(run.through, |change| before(change.position));
                 (start, start)
             }
-        };
+        }
+    }
+
+    /// The floor of `run`'s partition once the ring takes `run`.
+    pub fn floor_after(&self, run: &ChangeRun) -> CdcOffset {
+        self.start_and_floor(run).1
+    }
+
+    /// The changes of `run` that [`Self::append`] takes: those above where
+    /// the run starts on this ring. A run the ring took before has none.
+    pub fn fresh_in<'a>(&self, run: &'a ChangeRun) -> &'a [PositionedChange] {
+        let (start, _) = self.start_and_floor(run);
+        let first = run
+            .changes
+            .partition_point(|change| change.position <= start);
+        &run.changes[first..]
+    }
+
+    /// Append the events of `run` the ring does not hold yet.
+    pub fn append(&mut self, run: ChangeRun) -> AppendedRun {
+        let (start, floor) = self.start_and_floor(&run);
+        let ChangeRun {
+            partition,
+            through,
+            changes,
+            ..
+        } = run;
+        let prior = self.feeds.get(&partition).copied();
         let mut last = start;
         let mut events = Vec::with_capacity(changes.len());
         for change in changes {
@@ -207,6 +254,41 @@ impl ReplayRing {
         });
         feed.floor = feed.floor.max(floor);
         feed.through = feed.through.max(floor);
+    }
+
+    /// Record that the ring holds no event of `partition` at or below
+    /// `position`, as if it evicted them: boot loads a partition's newest
+    /// journaled events only.
+    pub fn note_evicted(&mut self, partition: ChangePartition, position: CdcOffset) {
+        if let Some(feed) = self.feeds.get_mut(&partition) {
+            feed.evicted = Some(feed.evicted.map_or(position, |held| held.max(position)));
+        }
+    }
+
+    /// The partitions of `cursor` the ring evicted unconsumed events of.
+    /// Fails when the cursor sits below a partition's floor: the node lacks
+    /// events there.
+    pub fn lagging(&self, cursor: &ChangeCursor) -> Result<Vec<Lag>, ReplayError> {
+        let mut lags = Vec::new();
+        for (partition, position) in cursor.entries() {
+            let Some(feed) = self.feeds.get(&partition) else {
+                continue;
+            };
+            if position < feed.floor {
+                return Err(ReplayError::Expired);
+            }
+            if let Some(evicted) = feed.evicted
+                && position < evicted
+            {
+                lags.push(Lag {
+                    partition,
+                    from: position,
+                    to: evicted,
+                    floor: feed.floor,
+                });
+            }
+        }
+        Ok(lags)
     }
 
     /// `(through, held_from)` of `partition`: the position up to which this

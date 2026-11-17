@@ -9,6 +9,9 @@
 
 pub mod flush;
 pub mod geometry_index;
+mod geometry_prepare;
+#[cfg(test)]
+mod geometry_prepare_tests;
 pub mod geometry_remove;
 pub mod insert;
 pub mod read_prior;

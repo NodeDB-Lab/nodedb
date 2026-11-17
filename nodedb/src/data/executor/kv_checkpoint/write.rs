@@ -11,8 +11,9 @@ use super::format::{
 use super::history_codec::export_history;
 use super::index_export::export_collection_indexes;
 use super::manifest::storage_err;
-use super::paths::{KV_CKPT_MANIFEST, kv_ckpt_dir, kv_ckpt_filename, kv_ckpt_gen_dir};
+use super::paths::{KV_CKPT_MANIFEST, kv_ckpt_dir, kv_ckpt_gen_dir, kv_ckpt_key};
 use crate::data::executor::applied_prefix::ReplayStamp;
+use crate::data::executor::checkpoint_key::write_keyed_checkpoint;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 
@@ -149,15 +150,13 @@ impl CoreLoop {
                     ),
                 })?;
 
-            let fname = kv_ckpt_filename(coll.tenant_id, coll.collection);
-            nodedb_wal::segment::write_checkpoint_framed(gen_dir, &fname, &bytes).map_err(|e| {
-                crate::Error::Storage {
-                    engine: "kv".to_string(),
-                    detail: format!(
-                        "KV checkpoint write failed for tenant {} collection {}: {e}",
-                        coll.tenant_id, coll.collection
-                    ),
-                }
+            let key = kv_ckpt_key(coll.tenant_id, coll.collection);
+            write_keyed_checkpoint(gen_dir, &key, &bytes).map_err(|e| crate::Error::Storage {
+                engine: "kv".to_string(),
+                detail: format!(
+                    "KV checkpoint write failed for tenant {} collection {}: {e}",
+                    coll.tenant_id, coll.collection
+                ),
             })?;
             written += 1;
         }
@@ -191,5 +190,49 @@ impl CoreLoop {
         nodedb_wal::segment::write_checkpoint_framed(ckpt_dir, KV_CKPT_MANIFEST, &bytes)
             .map_err(|e| storage_err(&path, "publish manifest", &e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::Surrogate;
+
+    use crate::data::executor::crdt_checkpoint::open_core_at;
+
+    /// A 255-byte collection name checkpoints under a short file name and
+    /// restores its rows under the full name.
+    #[test]
+    fn long_collection_name_checkpoints_and_restores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let collection = "k".repeat(255);
+
+        let mut core = open_core_at(dir.path());
+        core.kv_engine
+            .put_with_absolute_expiry(
+                crate::engine::kv::KvPutParams {
+                    database_id: 0,
+                    tenant_id: 7,
+                    collection: &collection,
+                    key: b"alice",
+                    value: b"va",
+                    ttl_ms: 0,
+                    now_ms: 1_000,
+                    surrogate: Surrogate(11),
+                },
+                0,
+            )
+            .expect("a bound row writes");
+        core.checkpoint_kv_engines()
+            .expect("a long-named collection must publish");
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        restored.load_kv_checkpoints().expect("load must succeed");
+        let restored_rows: Vec<(String, usize)> = restored
+            .kv_engine
+            .live_collections()
+            .map(|c| (c.collection.to_string(), c.table.map_or(0, |t| t.len())))
+            .collect();
+        assert_eq!(restored_rows, vec![(collection, 1)]);
     }
 }

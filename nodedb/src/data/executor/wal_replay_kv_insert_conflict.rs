@@ -165,12 +165,7 @@ impl CoreLoop {
             None => self.kv_engine.put(params),
         };
         if let Err(e) = written {
-            self.replay_record_unapplied(
-                "kv",
-                "insert_on_conflict_identity",
-                record_lsn,
-                &e.to_string(),
-            );
+            self.replay_kv_write_refused("insert_on_conflict", record_lsn, e);
             return 0;
         }
         self.note_replay_write(
@@ -217,12 +212,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

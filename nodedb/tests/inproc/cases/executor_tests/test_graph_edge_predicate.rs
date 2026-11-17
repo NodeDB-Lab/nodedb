@@ -171,8 +171,7 @@ fn rows_carry_edge_properties_on_request() {
         &mut rx,
         neighbors_multi("a", Direction::Out, 0, Vec::new(), true),
     );
-    let mut rows: Vec<serde_json::Value> =
-        serde_json::from_value(payload_value(&payload)).expect("rows array");
+    let mut rows = neighbor_rows_value(&payload);
     rows.sort_by(|x, y| x["node"].as_str().cmp(&y["node"].as_str()));
     assert_eq!(
         rows[0]["properties"],

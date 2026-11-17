@@ -43,22 +43,24 @@ impl CoreLoop {
         // returns `None` immediately (no txn, or no overlay entry for this
         // key) so an autocommit `BatchGet` takes the exact base-only path it
         // always has.
-        let results: Vec<Option<Vec<u8>>> = keys
-            .iter()
-            .map(|key| {
-                match system_time
-                    .merges_txn_overlay()
-                    .then(|| self.kv_overlay_body(task, tid, collection, key))
-                    .flatten()
-                {
-                    Some(overlay_result) => overlay_result,
-                    None => self
-                        .kv_engine
-                        .get_at(did, tid, collection, key, system_time, now_ms)
-                        .map(|(value, _)| value),
+        let mut results: Vec<Option<Vec<u8>>> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let staged = if system_time.merges_txn_overlay() {
+                match self.kv_overlay_body(task, tid, collection, key) {
+                    Ok(staged) => staged,
+                    Err(e) => return self.response_error(task, e),
                 }
-            })
-            .collect();
+            } else {
+                None
+            };
+            results.push(match staged {
+                Some(overlay_result) => overlay_result,
+                None => self
+                    .kv_engine
+                    .get_at(did, tid, collection, key, system_time, now_ms)
+                    .map(|(value, _)| value),
+            });
+        }
 
         // A row the read policy excludes reads as absent — indistinguishable
         // from a missing key, so a caller cannot probe for keys it may not read.

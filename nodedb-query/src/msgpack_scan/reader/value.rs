@@ -119,7 +119,7 @@ mod tests {
     fn read_value_unknown_ext_is_none() {
         let buf = [FIXEXT8, 0x09, 0, 0, 0, 0, 0, 0, 0, 1];
         assert_eq!(read_value(&buf, 0), None);
-        let buf = [FIXEXT1, 0x01, 0xab];
+        let buf = [0xd4, 0x01, 0xab];
         assert_eq!(read_value(&buf, 0), None);
     }
 

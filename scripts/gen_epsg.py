@@ -11,6 +11,9 @@ EPSG database EPSG_VERSION. Any other version stops the script.
 
 epsg_supplement.tsv holds EPSG CRSs published after EPSG_VERSION, written from SUPPLEMENT.
 The script stops when the pinned database already holds a SUPPLEMENT code.
+
+After writing epsg.tsv, run scripts/pack_epsg.sh. It writes epsg_core.tsv and epsg.tsv.zst,
+the files nodedb-crs embeds.
 """
 
 from __future__ import annotations

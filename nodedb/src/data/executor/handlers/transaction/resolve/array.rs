@@ -33,6 +33,7 @@
 use nodedb_physical::physical_plan::ArrayOp;
 use nodedb_wal::record::RecordType;
 
+use super::sink::OpSink;
 use crate::engine::array::wal::{encode_delete_spliced, encode_put_spliced};
 use crate::wal::RedoSubRecord;
 
@@ -41,7 +42,7 @@ use crate::wal::RedoSubRecord;
 /// `Put` / `Delete` serialize to their version-tagged `ArrayPut` / `ArrayDelete`
 /// shape; read and maintenance ops emit nothing; catalog DDL raises a typed
 /// error (see module docs).
-pub(super) fn serialize_array_op(op: &ArrayOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+pub(super) fn serialize_array_op(op: &ArrayOp, ops: &mut dyn OpSink) -> crate::Result<()> {
     match op {
         ArrayOp::Put {
             array_id,
@@ -95,9 +96,28 @@ pub(super) fn serialize_array_op(op: &ArrayOp, ops: &mut Vec<RedoSubRecord>) -> 
         ArrayOp::OpenArray { .. }
         | ArrayOp::DropArray { .. }
         | ArrayOp::RekeyArray { .. }
+        | ArrayOp::PurgeArrayDrop { .. } => refuse_array_op(op),
+    }
+}
+
+/// Refuse an array op that no transaction resolves: catalog DDL. Every
+/// other op passes.
+pub(super) fn refuse_array_op(op: &ArrayOp) -> crate::Result<()> {
+    match op {
+        ArrayOp::OpenArray { .. }
+        | ArrayOp::DropArray { .. }
+        | ArrayOp::RekeyArray { .. }
         | ArrayOp::PurgeArrayDrop { .. } => Err(crate::Error::PlanError {
             detail: "array OPEN/DROP (catalog DDL) is not supported in transaction resolve"
                 .to_string(),
         }),
+        ArrayOp::Put { .. }
+        | ArrayOp::Delete { .. }
+        | ArrayOp::Slice { .. }
+        | ArrayOp::SurrogateBitmapScan { .. }
+        | ArrayOp::Aggregate { .. }
+        | ArrayOp::Elementwise { .. }
+        | ArrayOp::Flush { .. }
+        | ArrayOp::Compact { .. } => Ok(()),
     }
 }

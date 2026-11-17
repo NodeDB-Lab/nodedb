@@ -22,6 +22,12 @@ pub(super) struct ReturningFields<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// Projection and authenticated materialized-row policy carried by a put.
+pub(super) struct PutFields<'a> {
+    pub returning: ReturningFields<'a>,
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+}
+
 /// Lift the wire resolution back into plan shape.
 pub(super) fn plan_targets(wire: &[ReplicatedSumTarget]) -> Vec<ResolvedSumTarget> {
     wire.iter()
@@ -42,7 +48,7 @@ pub(super) fn point_put(
     value: &[u8],
     surrogate: u32,
     resolved_sum_targets: &[ReplicatedSumTarget],
-    returning: ReturningFields<'_>,
+    fields: PutFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     let pk_bytes = document_id.as_bytes().to_vec();
     Ok(PhysicalPlan::Document(DocumentOp::PointPut {
@@ -52,8 +58,9 @@ pub(super) fn point_put(
         surrogate: nodedb_types::Surrogate::new(surrogate),
         pk_bytes,
         // Carried on the record — a replay re-executes for the originating request.
-        returning: returning.returning,
-        rls_filters: returning.rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
     }))
@@ -76,7 +83,7 @@ pub(super) struct SumDecisions<'a> {
 /// lint once `returning` joins the signature.
 pub(super) struct PointInsertOptions<'a> {
     pub sums: SumDecisions<'a>,
-    pub returning: ReturningFields<'a>,
+    pub fields: PutFields<'a>,
 }
 
 pub(super) fn point_insert(
@@ -88,7 +95,7 @@ pub(super) fn point_insert(
     surrogate: u32,
     options: PointInsertOptions<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let PointInsertOptions { sums, returning } = options;
+    let PointInsertOptions { sums, fields } = options;
     let SumDecisions {
         resolved: resolved_sum_targets,
         deferred: deferred_sum_targets,
@@ -100,8 +107,9 @@ pub(super) fn point_insert(
         if_absent,
         surrogate: nodedb_types::Surrogate::new(surrogate),
         // Carried on the record — see `point_put`.
-        returning: returning.returning,
-        rls_filters: returning.rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
         deferred_sum_targets: deferred_sum_targets.to_vec(),
@@ -271,7 +279,7 @@ pub(super) fn batch_insert(
     surrogates: &[u32],
     if_absent: bool,
     sum_targets: BatchSumTargets<'_>,
-    returning: ReturningFields<'_>,
+    fields: PutFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     // `zip` stops at the shorter side, silently truncating rows with no identity.
     // Refuse here, where the discrepancy is still visibly a malformed record.
@@ -295,8 +303,9 @@ pub(super) fn batch_insert(
             .map(|&raw| nodedb_types::Surrogate::new(raw))
             .collect(),
         // Carried on the record — see `point_put`.
-        returning: returning.returning,
-        rls_filters: returning.rls_filters.to_vec(),
+        returning: fields.returning.returning,
+        rls_filters: fields.returning.rls_filters.to_vec(),
+        rls_write_check: fields.rls_write_check.clone(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(sum_targets.resolved),
         deferred_sum_targets: sum_targets.deferred.to_vec(),
@@ -480,6 +489,66 @@ mod tests {
         )
     }
 
+    #[test]
+    fn materialized_document_write_checks_survive_replication() {
+        let check = nodedb_types::RlsWriteCheck::from_injected(vec![1, 2, 3]);
+        let collection = QualifiedCollection::new(DatabaseId::DEFAULT, "orders");
+        let plans = [
+            PhysicalPlan::Document(DocumentOp::PointPut {
+                collection: collection.clone(),
+                document_id: "a".into(),
+                value: vec![0x80],
+                surrogate: Surrogate::new(1),
+                pk_bytes: b"a".to_vec(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: check.clone(),
+                resolved_sum_targets: Vec::new(),
+            }),
+            PhysicalPlan::Document(DocumentOp::PointInsert {
+                collection: collection.clone(),
+                document_id: "a".into(),
+                value: vec![0x80],
+                surrogate: Surrogate::new(1),
+                if_absent: false,
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: check.clone(),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+            }),
+            PhysicalPlan::Document(DocumentOp::BatchInsert {
+                collection,
+                documents: vec![("a".into(), vec![0x80])],
+                surrogates: vec![Surrogate::new(1)],
+                if_absent: false,
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: check.clone(),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+            }),
+        ];
+        for plan in plans {
+            let committed =
+                crate::control::wal_replication::ReplicableWrite::for_already_committed_entry(
+                    &plan,
+                );
+            let entry = crate::control::wal_replication::encode::to_replicated_entry(
+                TenantId::new(1),
+                DatabaseId::DEFAULT,
+                VShardId::new(0),
+                &committed,
+            )
+            .expect("encode materialized write")
+            .expect("replicated document write");
+            let (_, _, decoded, _) = decode::decode_replicated_entry(&entry.to_bytes())
+                .expect("decode materialized write")
+                .expect("document plan");
+            assert_eq!(decoded.sole_rls_write_check(), Some(&check));
+        }
+    }
+
     /// The materialized-sum resolution survives the wire on the insert and
     /// predicate shapes. A lost resolution fails the fold silently; a lost
     /// deferral double-counts against the sibling `ApplyBalanceDelta` entry.
@@ -503,6 +572,7 @@ mod tests {
                 ResolvedSumTarget::new("audit_totals", "acc-1", Surrogate::new(9001)),
             ],
             deferred_sum_targets: vec!["accounts_elsewhere".to_string()],
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let bytes = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -661,6 +731,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -737,6 +808,7 @@ mod tests {
     fn document_point_put_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointPut {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
@@ -747,6 +819,7 @@ mod tests {
             returning: Some(spec.clone()),
             rls_filters: b"rls-predicate".to_vec(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let entry = to_replicated_entry(
             TenantId::new(1),
@@ -787,11 +860,12 @@ mod tests {
     fn document_point_update_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Named(vec![
-                nodedb_physical::physical_plan::ReturningItem {
+                nodedb_physical::physical_plan::ReturningItem::Column {
                     name: "balance".into(),
                     alias: None,
                 },
             ]),
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -844,6 +918,7 @@ mod tests {
     fn document_point_delete_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -894,6 +969,7 @@ mod tests {
     fn document_upsert_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::Upsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),

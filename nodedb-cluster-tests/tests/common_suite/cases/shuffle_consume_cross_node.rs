@@ -94,7 +94,8 @@ fn row_array_len(bytes: &[u8]) -> usize {
 
 /// The partition a row routes to: `partition_hash(row, ["k"]) % NUM_PARTS`.
 fn expected_part(row: &Row) -> u32 {
-    (nodedb_query::partition_hash(&row.bytes, &["k"]) % NUM_PARTS as u64) as u32
+    let hash = nodedb_query::partition_hash(&row.bytes, &["k"]).expect("test row is an object");
+    (hash % NUM_PARTS as u64) as u32
 }
 
 /// A `ProviderScan` plan that streams `rows` inline (no collection needed).

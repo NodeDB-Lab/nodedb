@@ -10,6 +10,7 @@ mod predicate;
 mod resolve;
 mod singular;
 
+pub(crate) use gate::period_lock_gated_collection;
 pub use resolve::{
     resolve_period_lock_targets, resolve_period_lock_targets_for_bodies,
     target_declares_period_lock,

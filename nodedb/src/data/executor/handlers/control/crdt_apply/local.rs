@@ -36,6 +36,9 @@ enum LocalRefusal {
     /// This node could not build the candidate the delta validates in.
     /// Nothing applied, and the delta is not at fault, so the sender re-sends.
     CandidateUnavailable { detail: String },
+    /// A written row does not decode, or its projection into the sparse
+    /// store failed. Nothing applied: a staged install was undone.
+    Unprojected { error: crate::Error },
 }
 
 impl CoreLoop {
@@ -92,7 +95,7 @@ impl CoreLoop {
         // the merged row back and encode it while the borrow is live, carrying
         // the materialized bytes out.
         let mut imported_authoritative = false;
-        let materialized = {
+        let (materialized, staged) = {
             let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                 Ok(e) => e,
                 Err(e) => {
@@ -100,7 +103,10 @@ impl CoreLoop {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             };
-            let outcome = engine.apply_committed_delta_validated(
+            // Staged: the state this apply displaces is kept until the merged
+            // row has landed in the sparse store, so a projection that fails
+            // puts it back and the CRDT state never runs ahead of it.
+            let (outcome, staged) = engine.apply_committed_delta_staged(
                 collection,
                 delta,
                 crate::engine::crdt::tenant_state::ApplyTarget::Document {
@@ -108,9 +114,14 @@ impl CoreLoop {
                     surrogate,
                 },
                 peer_id,
+                crate::engine::crdt::tenant_state::DeltaSigningAdmission {
+                    auth: nodedb_crdt::CrdtAuthContext::default(),
+                    required: false,
+                    preverified: false,
+                },
                 &crs,
             );
-            match outcome {
+            let materialized = match outcome {
                 // Loro names every operation by `(peer, counter)` and trims
                 // the ones the document already holds. A re-delivered delta
                 // imports no operation: the document did not move, so there
@@ -120,7 +131,13 @@ impl CoreLoop {
                 } => Ok(None),
                 ValidatedApplyOutcome::Clean { .. } => {
                     imported_authoritative = true;
-                    Ok(Self::encode_crdt_row(engine, collection, document_id))
+                    Self::encode_crdt_row(engine, collection, document_id)
+                        .map_err(|error| LocalRefusal::Unprojected { error })
+                }
+                ValidatedApplyOutcome::UndecodableValue { error } => {
+                    Err(LocalRefusal::Unprojected {
+                        error: crate::Error::Crdt(error),
+                    })
                 }
                 ValidatedApplyOutcome::Rejected(vt) => Err(LocalRefusal::Constraint(vt)),
                 ValidatedApplyOutcome::DeadLetterRefused { violation, error } => {
@@ -153,23 +170,44 @@ impl CoreLoop {
                         ),
                     })
                 }
-            }
+            };
+            (materialized, staged)
         };
-        // Engine borrow dropped here. A clean import changed authoritative
-        // state. A refused one did not.
-        if imported_authoritative {
-            self.checkpoint_coordinator.mark_dirty("crdt", 1);
-        }
-        match materialized {
-            Ok(Some(bytes)) => {
-                self.materialize_synced_document(
+        // Engine borrow dropped here. Project the merged row. A row that does
+        // not encode or a projection that does not land undoes the staged
+        // install, so nothing was applied.
+        let materialized = match materialized {
+            Ok(Some(bytes)) => self
+                .materialize_synced_document(
                     task,
                     tenant_id.as_u64(),
                     collection,
                     document_id,
                     surrogate,
                     &bytes,
-                );
+                )
+                .map(|()| Some(bytes))
+                .map_err(|error| LocalRefusal::Unprojected { error }),
+            other => other,
+        };
+        if let Some(staged) = staged {
+            let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
+                Ok(engine) => engine,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+            if materialized.is_ok() {
+                engine.confirm_install(staged);
+            } else {
+                engine.rollback_install(staged);
+                imported_authoritative = false;
+            }
+        }
+        // A clean import changed authoritative state. A refused one did not.
+        if imported_authoritative {
+            self.checkpoint_coordinator.mark_dirty("crdt", 1);
+        }
+        match materialized {
+            Ok(Some(_)) => {
                 if imported_authoritative
                     && let Err(e) = self.note_collection_write(task, collection)
                 {
@@ -245,6 +283,16 @@ impl CoreLoop {
                     // The apply recorded the refusal in the black box.
                     LocalRefusal::DeadLetterRefused { detail } => {
                         ErrorCode::RetryableRefusal { reason: detail }
+                    }
+                    LocalRefusal::Unprojected { error } => {
+                        warn!(
+                            core = self.core_id,
+                            %collection,
+                            %document_id,
+                            %error,
+                            "crdt apply refused: its row does not decode or did not project"
+                        );
+                        ErrorCode::from(error)
                     }
                     LocalRefusal::CandidateUnavailable { detail } => {
                         warn!(
@@ -360,6 +408,82 @@ pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
             1,
             "a re-delivered delta must not add history"
         );
+    }
+
+    /// A delta whose row does not project into the sparse store is refused,
+    /// and the CRDT document goes back to exactly what it was: the CRDT
+    /// state never runs ahead of its projection.
+    #[test]
+    fn a_delta_whose_projection_fails_is_undone() {
+        use crate::engine::document::store::{CollectionConfig, IndexPath, StorageKey};
+        use crate::types::{DatabaseId, TenantId};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let source = nodedb_crdt::CrdtState::new(42).expect("source state");
+        source
+            .upsert(
+                "docs",
+                "one",
+                &[("value", LoroValue::String("first".into()))],
+            )
+            .expect("source write");
+        let first = source.export_snapshot().expect("first delta");
+        let applied = core.apply_crdt_local(&task, params("one", &first));
+        assert_eq!(applied.status, Status::Ok, "got {:?}", applied.error_code);
+
+        // The next projection of the row fails: the collection gets an index
+        // path and its stored row an undecodable body, so the write that
+        // diffs the prior row's index entries refuses.
+        let mut config = CollectionConfig::new("docs");
+        config.index_paths.push(IndexPath::new("value"));
+        core.doc_configs.insert(
+            (DatabaseId::DEFAULT, TenantId::new(1), "docs".to_string()),
+            config,
+        );
+        let key = StorageKey::for_surrogate(document_surrogate("one"));
+        let db = task.request.database_id.as_u64();
+        let tid = task.request.tenant_id.as_u64();
+        core.sparse
+            .put(db, tid, "docs", &key, &[0xc1], core.bitemporal_ordinal())
+            .expect("overwrite the stored row");
+        core.doc_cache.invalidate(db, tid, "docs", &key);
+
+        let engine_key = (task.request.database_id, task.request.tenant_id);
+        let before = core.crdt_engines.get(&engine_key).map(|engine| {
+            (
+                engine.read_row_deep("docs", "one"),
+                engine.version_vector_json("docs").expect("version"),
+            )
+        });
+        source
+            .upsert(
+                "docs",
+                "one",
+                &[("value", LoroValue::String("second".into()))],
+            )
+            .expect("source write");
+        let second = source
+            .export_updates_since(&source_version_after(&first))
+            .expect("second delta");
+        let refused = core.apply_crdt_local(&task, params("one", &second));
+        assert_eq!(refused.status, Status::Error, "the projection fails");
+
+        let after = core.crdt_engines.get(&engine_key).map(|engine| {
+            (
+                engine.read_row_deep("docs", "one"),
+                engine.version_vector_json("docs").expect("version"),
+            )
+        });
+        assert_eq!(after, before, "the apply is undone");
+    }
+
+    /// The version a fresh document reaches after importing `snapshot`.
+    fn source_version_after(snapshot: &[u8]) -> loro::VersionVector {
+        let state = nodedb_crdt::CrdtState::new(99).expect("state");
+        state.import(snapshot).expect("import");
+        state.oplog_version_vector()
     }
 
     /// A delta whose document carries no surrogate is refused before the

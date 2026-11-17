@@ -40,6 +40,8 @@ use crate::wal::{
 
 use super::restore::restored_edge;
 use super::restore_changes::RestoreChanges;
+use super::restore_synced_text::{NewestFrames, RestoredFrame};
+use super::sink::OpSink;
 
 /// Where a RESTORE batch writes, the ordinal it applies at, and the cut the
 /// RESTORE takes effect at.
@@ -131,7 +133,8 @@ impl CoreLoop {
     /// versions its install writes (`restore_key_plan`), and notes its change
     /// entry in `changes`. Each restored
     /// document row the destination holds past its newest backed-up version
-    /// gets that version once more, after every op.
+    /// gets that version once more, after every op. So does each restored
+    /// row's newest sync frame (`restore_synced_text`).
     pub(super) fn reassert_restored_rows(
         &self,
         scope: RestoreScope,
@@ -140,6 +143,7 @@ impl CoreLoop {
     ) -> crate::Result<Vec<RedoSubRecord>> {
         let mut out = Vec::with_capacity(ops.len());
         let mut newest: BTreeMap<(String, u32), NewestVersion> = BTreeMap::new();
+        let mut frames = NewestFrames::default();
         for op in ops {
             if let Some(kv) = KvRestoreRedo::decode(&op.payload) {
                 out.push(self.reassert_kv_key(scope, op.record_type, kv)?);
@@ -175,6 +179,11 @@ impl CoreLoop {
                 out.extend(self.resolve_restored_timeseries(scope, collection, changes)?);
                 continue;
             }
+            if let Some(frame) = RestoredFrame::decode(op.record_type, &op.payload)? {
+                frames.note(frame);
+                out.push(op);
+                continue;
+            }
             let version = match RecordType::from_raw(op.record_type) {
                 Some(RecordType::Put) => {
                     DocumentPutRedo::decode(&op.payload).map(NewestVersion::Put)
@@ -200,6 +209,7 @@ impl CoreLoop {
                 out.push(op);
             }
         }
+        out.extend(self.reassert_restored_frames(scope, frames)?);
         Ok(out)
     }
 
@@ -306,7 +316,7 @@ impl CoreLoop {
         &self,
         scope: RestoreScope,
         edges: &[RestoredEdgeVersion],
-        ops: &mut Vec<RedoSubRecord>,
+        ops: &mut dyn OpSink,
     ) -> crate::Result<()> {
         let mut newest: BTreeMap<(&str, &str, &str, &str), &RestoredEdgeVersion> = BTreeMap::new();
         for edge in edges {

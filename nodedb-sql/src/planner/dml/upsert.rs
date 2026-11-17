@@ -21,7 +21,18 @@ use crate::types::*;
 ///
 /// Same parsing as INSERT but routes through `engine_rules.plan_upsert()`.
 pub fn plan_upsert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
-    plan_upsert_rows(ins, catalog, "UPSERT", Vec::new())
+    let plans = plan_upsert_rows(ins, catalog, "UPSERT", Vec::new())?;
+    let alias = ins
+        .table_alias
+        .as_ref()
+        .map(|alias| crate::reserved::check_ast_identifier(&alias.alias))
+        .transpose()?;
+    crate::planner::returning::attach_returning(
+        plans,
+        ins.returning.as_deref(),
+        alias.as_deref(),
+        catalog,
+    )
 }
 
 /// Plan an `INSERT ... ON CONFLICT DO UPDATE SET` statement.

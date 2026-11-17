@@ -35,9 +35,11 @@ pub enum SyncMessageType {
     CollectionSchema = 0x13,
     /// Collection purged notification (server → client, 0x14).
     /// Sent when an Origin collection is hard-deleted (UNDROP window
-    /// expired or explicit `DROP COLLECTION ... PURGE`). The client
-    /// must drop local Loro state and remove the collection's redb
-    /// record; future deltas for the collection are not sync-eligible.
+    /// expired or explicit `DROP COLLECTION ... PURGE`): to an online
+    /// session, and ahead of the `HandshakeAck` of a session whose client
+    /// missed it. The client drops the collection's local state and its
+    /// pending writes; future deltas for the collection are not
+    /// sync-eligible.
     CollectionPurged = 0x14,
     /// Row post-image push (server → client, 0x15).
     ///
@@ -51,10 +53,32 @@ pub enum SyncMessageType {
     ///
     /// Lite sends this for a [`Self::RowPush`] it could not apply.
     RowPushReject = 0x16,
+    /// Collection schema announce refusal (server → client, 0x17).
+    ///
+    /// Origin sends this for a [`Self::CollectionSchema`] announce it
+    /// cannot answer with the collection's descriptor and incarnation.
+    CollectionSchemaReject = 0x17,
     ShapeSubscribe = 0x20,
     ShapeSnapshot = 0x21,
     ShapeDelta = 0x22,
     ShapeUnsubscribe = 0x23,
+    /// Shape snapshot refusal (server → client, 0x24).
+    ///
+    /// Origin sends this for a `ShapeSubscribe` or `ResyncRequest` it
+    /// authorized but could not answer with a `ShapeSnapshot`.
+    ShapeSnapshotReject = 0x24,
+    /// Collection replace (server → client, 0x25).
+    ///
+    /// Origin sends this when it dropped pushes for a collection the session
+    /// holds shapes on. The snapshot covers every held shape on the
+    /// collection, and it replaces the collection's rows on the client.
+    CollectionResync = 0x25,
+    /// Database resync directive (server → client, 0x26).
+    ///
+    /// Origin sends it ahead of a `HandshakeAck` when purges the client
+    /// missed are no longer on record. The client drops its local state of
+    /// the database and subscribes its shapes again.
+    DatabaseResync = 0x26,
     VectorClockSync = 0x30,
     /// Timeseries metric batch push (client → server, 0x40).
     TimeseriesPush = 0x40,
@@ -150,10 +174,14 @@ impl SyncMessageType {
             0x14 => Some(Self::CollectionPurged),
             0x15 => Some(Self::RowPush),
             0x16 => Some(Self::RowPushReject),
+            0x17 => Some(Self::CollectionSchemaReject),
             0x20 => Some(Self::ShapeSubscribe),
             0x21 => Some(Self::ShapeSnapshot),
             0x22 => Some(Self::ShapeDelta),
             0x23 => Some(Self::ShapeUnsubscribe),
+            0x24 => Some(Self::ShapeSnapshotReject),
+            0x25 => Some(Self::CollectionResync),
+            0x26 => Some(Self::DatabaseResync),
             0x30 => Some(Self::VectorClockSync),
             0x40 => Some(Self::TimeseriesPush),
             0x41 => Some(Self::TimeseriesAck),
@@ -216,6 +244,17 @@ impl SyncMessageType {
 pub struct SyncFrame {
     pub msg_type: SyncMessageType,
     pub body: Vec<u8>,
+}
+
+/// Prints the message type and body length. The body holds row data, so it
+/// never reaches a log.
+impl std::fmt::Debug for SyncFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncFrame")
+            .field("msg_type", &self.msg_type)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl SyncFrame {
@@ -403,9 +442,9 @@ mod tests {
     #[test]
     fn message_type_roundtrip() {
         for v in [
-            0x01, 0x02, 0x10, 0x11, 0x12, 0x14, 0x20, 0x21, 0x22, 0x23, 0x30, 0x40, 0x41, 0x50,
-            0x52, 0x60, 0x61, 0x70, 0x80, 0x81, 0x82, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96,
-            0x97, 0x98, 0x99, 0xFF,
+            0x01, 0x02, 0x10, 0x11, 0x12, 0x14, 0x17, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
+            0x30, 0x40, 0x41, 0x50, 0x52, 0x60, 0x61, 0x70, 0x80, 0x81, 0x82, 0x90, 0x91, 0x92,
+            0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xFF,
         ] {
             let mt = SyncMessageType::from_u8(v).unwrap();
             assert_eq!(mt as u8, v);

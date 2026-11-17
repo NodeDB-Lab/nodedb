@@ -14,8 +14,8 @@ use super::wire::*;
 use crate::types::TenantId;
 
 impl SyncSession {
-    /// Process a `FtsIndexMsg`: allocate surrogate, WAL-append on CP, dispatch
-    /// to Data Plane through the idempotency gate, return an ACK frame.
+    /// Process a `FtsIndexMsg`: allocate its surrogate, dispatch through the
+    /// idempotency gate, and return a checked ACK frame.
     pub async fn handle_fts_index<D: FtsDispatcher>(
         &mut self,
         msg: &FtsIndexMsg,
@@ -29,9 +29,9 @@ impl SyncSession {
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some(reason.clone()),
+                reject_reason: Some(reason),
                 applied_seq: 0,
-                status: AckStatus::Rejected { reason },
+                status: AckStatus::Fenced,
             };
             return SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack);
         }
@@ -57,18 +57,7 @@ impl SyncSession {
                     error = %e,
                     "fts sync: surrogate assignment failed"
                 );
-                let ack = FtsIndexAckMsg {
-                    collection: msg.collection.clone(),
-                    doc_id: msg.doc_id.clone(),
-                    batch_id: msg.batch_id,
-                    accepted: false,
-                    reject_reason: Some(format!("surrogate assignment failed: {e}")),
-                    applied_seq: 0,
-                    status: AckStatus::Rejected {
-                        reason: format!("surrogate assignment failed: {e}"),
-                    },
-                };
-                return SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack);
+                return None;
             }
         };
 
@@ -105,15 +94,8 @@ impl SyncSession {
             .await
         {
             Ok(payload_bytes) => {
+                let wire = super::ack_decode::decode_core_ack(&payload_bytes)?;
                 self.mutations_processed += 1;
-                let wire = super::ack_decode::decode_sync_ack(
-                    &payload_bytes,
-                    "fts index",
-                    &self.session_id,
-                    &msg.collection,
-                    msg.seq,
-                )
-                .into_wire();
                 let ack = FtsIndexAckMsg {
                     collection: msg.collection.clone(),
                     doc_id: msg.doc_id.clone(),
@@ -134,23 +116,23 @@ impl SyncSession {
                     error = %e,
                     "fts index dispatch failed"
                 );
-                let status = super::refusal::ack_status_for_dispatch_error(&e, msg.seq);
+                let wire = super::ack_decode::decode_core_error(&e)?;
                 let ack = FtsIndexAckMsg {
                     collection: msg.collection.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: super::refusal::reject_reason_for(&status),
-                    applied_seq: msg.seq.saturating_sub(1),
-                    status,
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack)
             }
         }
     }
 
-    /// Process a `FtsDeleteMsg`: look up surrogate, WAL-append on CP, dispatch
-    /// tombstone through the idempotency gate, return an ACK frame.
+    /// Process a `FtsDeleteMsg`: look up its surrogate, dispatch through the
+    /// idempotency gate, and return a checked ACK frame.
     pub async fn handle_fts_delete<D: FtsDispatcher>(
         &mut self,
         msg: &FtsDeleteMsg,
@@ -164,9 +146,9 @@ impl SyncSession {
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some(reason.clone()),
+                reject_reason: Some(reason),
                 applied_seq: 0,
-                status: AckStatus::Rejected { reason },
+                status: AckStatus::Fenced,
             };
             return SyncFrame::try_encode(SyncMessageType::FtsDeleteAck, &ack);
         }
@@ -194,18 +176,7 @@ impl SyncSession {
                     error = %e,
                     "fts sync: surrogate lookup failed for delete"
                 );
-                let ack = FtsDeleteAckMsg {
-                    collection: msg.collection.clone(),
-                    doc_id: msg.doc_id.clone(),
-                    batch_id: msg.batch_id,
-                    accepted: false,
-                    reject_reason: Some(format!("surrogate lookup failed: {e}")),
-                    applied_seq: 0,
-                    status: AckStatus::Rejected {
-                        reason: format!("surrogate lookup failed: {e}"),
-                    },
-                };
-                return SyncFrame::try_encode(SyncMessageType::FtsDeleteAck, &ack);
+                return None;
             }
         };
 
@@ -241,15 +212,8 @@ impl SyncSession {
             .await
         {
             Ok(payload_bytes) => {
+                let wire = super::ack_decode::decode_core_ack(&payload_bytes)?;
                 self.mutations_processed += 1;
-                let wire = super::ack_decode::decode_sync_ack(
-                    &payload_bytes,
-                    "fts delete",
-                    &self.session_id,
-                    &msg.collection,
-                    msg.seq,
-                )
-                .into_wire();
                 let ack = FtsDeleteAckMsg {
                     collection: msg.collection.clone(),
                     doc_id: msg.doc_id.clone(),
@@ -270,15 +234,15 @@ impl SyncSession {
                     error = %e,
                     "fts delete dispatch failed"
                 );
-                let status = super::refusal::ack_status_for_dispatch_error(&e, msg.seq);
+                let wire = super::ack_decode::decode_core_error(&e)?;
                 let ack = FtsDeleteAckMsg {
                     collection: msg.collection.clone(),
                     doc_id: msg.doc_id.clone(),
                     batch_id: msg.batch_id,
                     accepted: false,
-                    reject_reason: super::refusal::reject_reason_for(&status),
-                    applied_seq: msg.seq.saturating_sub(1),
-                    status,
+                    reject_reason: wire.reject_reason,
+                    applied_seq: wire.applied_seq,
+                    status: wire.status,
                 };
                 SyncFrame::try_encode(SyncMessageType::FtsDeleteAck, &ack)
             }

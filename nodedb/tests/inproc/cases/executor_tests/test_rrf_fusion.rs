@@ -17,6 +17,7 @@ use super::helpers::*;
 #[test]
 fn rrf_fusion_mathematically_correct() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
+    register_text_fields(&mut core, &mut tx, &mut rx, 1, "docs", &["body"]);
 
     // Insert documents with text content for BM25.
     for i in 0..20u32 {
@@ -39,6 +40,7 @@ fn rrf_fusion_mathematically_correct() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }

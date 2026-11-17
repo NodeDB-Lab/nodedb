@@ -227,7 +227,7 @@ impl JoinParams<'_> {
             }
         } else if !self.projection.is_empty() {
             for row in results.iter_mut() {
-                *row = super::binary_row_project(row, self.projection);
+                *row = super::binary_row_project(row, self.projection)?;
             }
         }
 

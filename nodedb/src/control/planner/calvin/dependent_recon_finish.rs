@@ -5,9 +5,8 @@
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::dependent_recon::DependentReconOutcome;
-use super::submit::local::{ReplyFold, with_reported_results};
-use crate::Error;
-use crate::control::state::{CalvinApplyResult, SharedState};
+use super::submit::reported_results::{ReplyFold, with_reported_results};
+use crate::control::state::SharedState;
 
 /// The outcome of a committed recon transaction over `tasks`: waits for the
 /// authorization barrier when a task writes a permission-tree source, then
@@ -30,36 +29,16 @@ pub(super) async fn finish_committed(
     if binds_authorization {
         crate::control::security::auth_lease::calvin_write_barrier(
             state,
-            crate::control::server::shared::session::StatementDeadline::of_statement(state)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(state),
         )
         .await?;
     }
 
-    // Completion fired: the scheduler deposited the applied Response (with any
-    // RETURNING rows) into the sidecar before proposing the ack that woke the
-    // retry loop, so the entry is present now if this write carried RETURNING.
-    // Drain it (removing the entry) for the caller to shape into DATA-ROWs; a
-    // `Conflict` (>1 RETURNING participant) fails loudly rather than returning a
-    // partial cross-shard union.
-    let drained = state.calvin.apply_results.take(&completed_txn);
-    let applied = match drained {
-        Some(CalvinApplyResult::Single {
-            response,
-            has_returning,
-        }) => {
-            // An installed txn whose reply failed to render deposits it as an
-            // error for the statement.
-            crate::control::local_dispatch::reject_data_plane_error(&response)?;
-            Some((response, has_returning))
-        }
-        Some(CalvinApplyResult::Conflict) => {
-            return Err(Error::Internal {
-                detail: "multi-participant cross-shard RETURNING not supported".to_owned(),
-            });
-        }
-        None => None,
-    };
+    // Completion fired: every local participant deposited its applied
+    // Response (with any RETURNING rows) into the sidecar before proposing the
+    // ack that woke the retry loop. Drain them (removing the entry) for the
+    // caller to shape into DATA-ROWs.
+    let applied = state.calvin.apply_results.take(&completed_txn);
     // A participant on a node that holds no replica of it reports its
     // counts and RETURNING rows through its completion ack.
     let fold = ReplyFold::of_plans(tasks.iter().map(|task| &task.plan));

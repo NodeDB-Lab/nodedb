@@ -20,6 +20,9 @@ async fn text_match_evaluates_computed_columns() {
     srv.exec("CREATE COLLECTION tx_hits WITH (engine='document_schemaless')")
         .await
         .unwrap_or_else(|e| panic!("create tx_hits: {e}"));
+    srv.exec("CREATE SEARCH INDEX ON tx_hits (body)")
+        .await
+        .unwrap_or_else(|e| panic!("index tx_hits: {e}"));
     for (id, body, title, n) in [
         ("a", "rust lang", "Rust", 3),
         ("b", "python lang", "Python", 5),

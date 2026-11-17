@@ -22,9 +22,7 @@ use nodedb_wal::{TombstoneSet, WalRecord};
 use crate::bootstrap::write_group_settle::StoredWriteSets;
 use crate::bootstrap::write_group_settle::settle::settle_against;
 use crate::bridge::dispatch::JournalGroup;
-use crate::bridge::envelope::{
-    Admission, PhysicalPlan, Priority, Request, Response, Status, WriteSetEntry,
-};
+use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request, Status, WriteSetEntry};
 use crate::control::cluster::calvin::scheduler::recover_all_applied;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::wal_dispatch::{
@@ -40,6 +38,9 @@ use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VS
 use crate::wal::GroupMembership;
 use crate::wal::manager::{NO_APPLY_KEY, WalManager};
 use nodedb_types::RowIdentity;
+
+mod large_row;
+mod row_limit;
 
 const TID: u64 = 1;
 const ORDERS: &str = "orders";
@@ -126,18 +127,24 @@ impl Live {
     fn journalled_in(&mut self, collection: &str, plan: PhysicalPlan, stored: bool) -> GroupOrigin {
         let origin = self.append_origin(&plan);
         let task = ExecutionTask::new(request(plan, origin));
-        self.core.begin_journalled();
-        let response: Response = self.core.execute(&task);
-        assert_eq!(response.status, Status::Ok, "{response:?}");
+        let group = JournalGroup {
+            origin: origin.lsn,
+            collection: collection.to_string(),
+            apply_key: NO_APPLY_KEY,
+            commit_hlc: None,
+            change_position: None,
+        };
         if stored {
-            let group = JournalGroup {
-                origin: origin.lsn,
-                collection: collection.to_string(),
-                apply_key: NO_APPLY_KEY,
-                commit_hlc: None,
-                change_position: None,
-            };
-            self.core.finish_journalled_task(&task, group, &response);
+            let permit = self.core.begin_task_journal(&task, group);
+            let mut response = self.core.execute_with_journal(&task, permit);
+            assert_eq!(response.status, Status::Ok, "{response:?}");
+            self.core
+                .finish_journalled_task(&task, &mut response)
+                .expect("finish journal");
+        } else {
+            self.core.begin_journalled();
+            let response = self.core.execute(&task);
+            assert_eq!(response.status, Status::Ok, "{response:?}");
         }
         self.wal.sync().expect("sync");
         origin
@@ -218,6 +225,7 @@ fn put(note: &str) -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
@@ -264,8 +272,12 @@ fn notes_after_replay(dir: &Path, records: &[WalRecord]) -> Vec<String> {
                 .expect("rows")
         })
         .filter_map(|(_, bytes)| {
-            let (start, _) = nodedb_query::msgpack_scan::extract_field(&bytes, 0, "note")?;
-            nodedb_query::msgpack_scan::read_str(&bytes, start).map(str::to_string)
+            let row = nodedb_types::object_msgpack::ObjectView::new(&bytes)
+                .expect("a stored document row is an object");
+            match row.get("note").expect("decode note") {
+                Some(Value::String(note)) => Some(note),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -387,17 +399,28 @@ fn put_row(id: &str, surrogate: u32, note: &str) -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 
 /// The target row `t` of another collection, as a sum fold stores it: at
 /// the version ordinal `sys_from` its write stamped.
 fn target_row(note: &str, sys_from: i64) -> WriteSetEntry {
-    WriteSetEntry::put(
+    let value = note_doc(note);
+    WriteSetEntry::installed_put(
         100,
         RowIdentity::from_user_key("t"),
-        note_doc(note),
-        crate::bridge::envelope::RowVersion::open(sys_from),
+        crate::types::installed_document::InstalledDocument {
+            canonical: value.clone(),
+            stored: value.clone(),
+            version: crate::bridge::envelope::RowVersion::open(sys_from),
+            schema: std::sync::Arc::new(nodedb_physical::physical_plan::StorageMode::Schemaless),
+            chain_head: None,
+        },
+        crate::types::document_event::DocumentPutEvent {
+            new_value: value,
+            old_value: None,
+        },
     )
     .in_collection(TOTALS.to_string())
 }
@@ -449,7 +472,11 @@ fn a_part_boot_journals_never_regresses_a_later_write_of_its_row() {
         .write_set_capture(&task_a, group_a, &response_a)
         .expect("capture a");
     let records = live.wal.replay().expect("replay");
-    assert!(settle_against(&live.wal, &records, &[stored_a]).expect("settle"));
+    assert!(
+        settle_against(&live.wal, &records, &[stored_a])
+            .expect("settle")
+            .appended
+    );
     live.wal.sync().expect("sync");
     let records = live.wal.replay().expect("replay");
     let tail = records.iter().map(|r| r.header.lsn).max().unwrap_or(0);
@@ -471,7 +498,9 @@ fn a_settled_group_needs_nothing_at_boot() {
     let stores = live.crash_image();
     let stored = StoredWriteSets::read(stores.path()).expect("read");
     assert!(
-        !settle_against(&live.wal, &records, &stored.captures).expect("settle"),
+        !settle_against(&live.wal, &records, &stored.captures)
+            .expect("settle")
+            .appended,
         "a whole WAL needs no record"
     );
 }

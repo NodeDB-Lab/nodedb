@@ -20,25 +20,24 @@
 //! [`super::pk_resolve::resolve_surrogate_pks`], the resolver the vector
 //! translator uses.
 
-use nodedb_types::{DatabaseId, Surrogate, TenantId};
-use serde_json::Value as JsonValue;
+use nodedb_types::{DatabaseId, Surrogate, TenantId, Value};
 
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::{RowContext, decode_row_payload_value};
 
 use super::hit_key::parse_surrogate_hex;
 use super::pk_resolve::resolve_surrogate_pks;
 
-/// Decode the DP-side JSON/msgpack array of `TextOp::Search` /
+/// Decode, typed, the DP-side JSON/msgpack array of `TextOp::Search` /
 /// `PhraseSearch` / `BM25ScoreScan` rows (`{id: <surrogate hex>, data: {...}}`), and for
 /// any row whose `data` object lacks the collection's identity column, resolve
 /// the surrogate to the user PK via the catalog and inject it into `data`
 /// under that column. A declared-key row never gains an `id` beside its key.
 /// Rows that hold the column (the common case) are left untouched. An
 /// unresolved or headless surrogate is left untouched (no fabricated PK).
-/// On a decode failure, or a catalog error resolving the identity column,
-/// the payload is returned unchanged: a row never gains a wrongly named
-/// column. A resolver error, or a `collection` without its database's
+/// A payload that does not decode fails the call. A payload that is not a
+/// row array, or a catalog error resolving the identity column, returns the
+/// payload unchanged: a row never gains a wrongly named column. A resolver error, or a `collection` without its database's
 /// form, fails the call.
 pub async fn translate_text_search_payload(
     payload: &[u8],
@@ -52,8 +51,8 @@ pub async fn translate_text_search_payload(
     }
 
     let bare = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.name();
-    let text = decode_payload_to_json(payload);
-    let Ok(JsonValue::Array(mut rows)) = sonic_rs::from_str::<JsonValue>(&text) else {
+    let Value::Array(mut rows) = decode_row_payload_value(payload, RowContext::ScanEnvelope)?
+    else {
         return Ok(payload.to_vec());
     };
     let Ok(identity_column) = identity_column(state, database_id, tenant_id, bare) else {
@@ -62,15 +61,15 @@ pub async fn translate_text_search_payload(
 
     let mut unnamed: Vec<(usize, Surrogate)> = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let JsonValue::Object(map) = row else {
+        let Value::Object(map) = row else {
             continue;
         };
-        let Some(JsonValue::String(hex_id)) = map.get("id") else {
+        let Some(Value::String(hex_id)) = map.get("id") else {
             continue;
         };
         let data_has_identity = matches!(
             map.get("data"),
-            Some(JsonValue::Object(inner)) if inner.contains_key(&identity_column)
+            Some(Value::Object(inner)) if inner.contains_key(&identity_column)
         );
         if data_has_identity {
             continue;
@@ -92,17 +91,14 @@ pub async fn translate_text_search_payload(
     .await?;
     for (index, surrogate) in &unnamed {
         if let Some(key) = keys.get(*surrogate)
-            && let Some(JsonValue::Object(map)) = rows.get_mut(*index)
-            && let Some(JsonValue::Object(inner)) = map.get_mut("data")
+            && let Some(Value::Object(map)) = rows.get_mut(*index)
+            && let Some(Value::Object(inner)) = map.get_mut("data")
         {
-            inner.insert(identity_column.clone(), JsonValue::String(key.to_owned()));
+            inner.insert(identity_column.clone(), Value::String(key.to_owned()));
         }
     }
 
-    Ok(match sonic_rs::to_string(&JsonValue::Array(rows)) {
-        Ok(s) => s.into_bytes(),
-        Err(_) => payload.to_vec(),
-    })
+    encode_rows(rows)
 }
 
 /// The column the rows of the collection named `bare` render their
@@ -132,8 +128,8 @@ fn identity_column(
 /// so `doc_id` itself is rewritten to the row's identity too: the catalog PK
 /// when one is declared, else the surrogate's decimal string. A `__local_`
 /// sentinel (no surrogate binding) passes through untouched in both fields.
-/// On a decode failure the payload is returned unchanged. A resolver error
-/// fails the call.
+/// A payload that does not decode fails the call, and one that is not a row
+/// array returns unchanged. A resolver error fails the call.
 pub async fn translate_hybrid_search_payload(
     payload: &[u8],
     state: &SharedState,
@@ -145,21 +141,17 @@ pub async fn translate_hybrid_search_payload(
         return Ok(payload.to_vec());
     }
 
-    let text = decode_payload_to_json(payload);
-    let Ok(JsonValue::Array(mut rows)) = sonic_rs::from_str::<JsonValue>(&text) else {
+    let Value::Array(mut rows) = decode_row_payload_value(payload, RowContext::Flat)? else {
         return Ok(payload.to_vec());
     };
 
     let bound: Vec<(usize, Surrogate)> = rows
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| match row {
-            JsonValue::Object(map) => match map.get("doc_id") {
-                Some(JsonValue::String(hex_id)) => {
-                    parse_surrogate_hex(hex_id).map(|surrogate| (index, surrogate))
-                }
-                _ => None,
-            },
+        .filter_map(|(index, row)| match row.get("doc_id") {
+            Some(Value::String(hex_id)) => {
+                parse_surrogate_hex(hex_id).map(|surrogate| (index, surrogate))
+            }
             _ => None,
         })
         .collect();
@@ -172,19 +164,24 @@ pub async fn translate_hybrid_search_payload(
     )
     .await?;
     for (index, surrogate) in &bound {
-        let Some(JsonValue::Object(map)) = rows.get_mut(*index) else {
+        let Some(Value::Object(map)) = rows.get_mut(*index) else {
             continue;
         };
         let identity = keys
             .get(*surrogate)
             .map(str::to_owned)
             .unwrap_or_else(|| surrogate.as_u32().to_string());
-        map.insert("id".to_string(), JsonValue::String(identity.clone()));
-        map.insert("doc_id".to_string(), JsonValue::String(identity));
+        map.insert("id".to_string(), Value::String(identity.clone()));
+        map.insert("doc_id".to_string(), Value::String(identity));
     }
 
-    Ok(match sonic_rs::to_string(&JsonValue::Array(rows)) {
-        Ok(s) => s.into_bytes(),
-        Err(_) => payload.to_vec(),
+    encode_rows(rows)
+}
+
+/// Re-encode translated rows as one plain msgpack row array.
+fn encode_rows(rows: Vec<Value>) -> crate::Result<Vec<u8>> {
+    nodedb_types::value_to_msgpack(&Value::Array(rows)).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("translated search rows do not encode: {e}"),
     })
 }

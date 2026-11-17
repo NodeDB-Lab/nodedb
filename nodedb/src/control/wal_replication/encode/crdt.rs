@@ -94,14 +94,14 @@ pub(super) fn encode(op: &CrdtOp) -> Option<ReplicatedWrite> {
             document_id,
             list_path,
             index,
-            fields_json,
+            fields,
             surrogate,
         } => list_insert(
             collection.as_str(),
             document_id,
             list_path,
             *index,
-            fields_json,
+            fields,
             surrogate.as_u32(),
         ),
         CrdtOp::ListDelete {
@@ -135,7 +135,7 @@ pub(super) fn encode(op: &CrdtOp) -> Option<ReplicatedWrite> {
         CrdtOp::DocUpsert {
             collection,
             document_id,
-            fields_json,
+            fields,
             surrogate,
             partial,
             verb,
@@ -145,7 +145,7 @@ pub(super) fn encode(op: &CrdtOp) -> Option<ReplicatedWrite> {
             collection: collection.as_str().to_owned(),
             document_id: document_id.clone(),
             surrogate: surrogate.as_u32(),
-            fields_json: fields_json.clone(),
+            fields: fields.clone(),
             partial: *partial,
             verb: *verb,
             returning: super::entry::encode_returning(returning),
@@ -276,7 +276,7 @@ pub(super) fn list_insert(
     document_id: &str,
     list_path: &str,
     index: usize,
-    fields_json: &str,
+    fields: &[u8],
     surrogate: u32,
 ) -> ReplicatedWrite {
     ReplicatedWrite::CrdtListInsert {
@@ -284,7 +284,7 @@ pub(super) fn list_insert(
         document_id: document_id.to_owned(),
         list_path: list_path.to_owned(),
         index: index as u64,
-        fields_json: fields_json.to_owned(),
+        fields: fields.to_vec(),
         surrogate,
     }
 }

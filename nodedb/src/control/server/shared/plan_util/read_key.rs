@@ -209,7 +209,8 @@ fn text_read_key(op: &TextOp) -> ReadKey {
         | TextOp::FtsIndexDoc { .. }
         | TextOp::FtsDeleteDoc { .. }
         | TextOp::HybridSearchTriple { .. }
-        | TextOp::SetTextConfig { .. } => ReadKey::Predicate,
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => ReadKey::Predicate,
     }
 }
 
@@ -345,8 +346,9 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::ResolveTxn { .. }
+        | MetaOp::ResolveTxnPart { .. }
         | MetaOp::CalvinResolve { .. }
+        | MetaOp::ReadRedoStreamPage { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_) => ReadKey::Predicate,
     }

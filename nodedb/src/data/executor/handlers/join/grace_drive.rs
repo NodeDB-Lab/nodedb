@@ -428,20 +428,15 @@ impl CoreLoop {
                 })();
 
                 // Remove the per-join spill directory regardless of outcome.
-                // Best-effort: the rows have already been read back into RAM by
-                // `finish_and_probe`, so a failed cleanup cannot corrupt results;
-                // it only leaves temp files. Surface it loudly via tracing.
-                if let Err(e) = std::fs::remove_dir_all(&spill_dir)
-                    && spill_dir.exists()
-                {
-                    tracing::warn!(
-                        error = %e,
-                        dir = %spill_dir.display(),
-                        "failed to remove grace-join spill dir"
-                    );
-                }
-
-                probe_result
+                // A cleanup that fails files its report and fails the join. A
+                // probe error outranks it: the cleanup error is already filed.
+                let cleanup = crate::data::executor::handlers::spill::cleanup::remove_spill_dir(
+                    crate::data::executor::handlers::spill::cleanup::SpillKind::Join,
+                    &spill_dir,
+                );
+                let rows = probe_result?;
+                cleanup?;
+                Ok(rows)
             }
         }
     }

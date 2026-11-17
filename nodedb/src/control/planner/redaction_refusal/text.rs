@@ -46,10 +46,12 @@ pub(super) fn refuse_text_op(op: &TextOp, ctx: &RefusalCtx<'_>) -> crate::Result
             text_field,
             ..
         } => refuse_text_field(ctx, collection, text_field.as_deref(), "the text leg"),
-        // Index writes and analyzer configuration return no column values.
-        TextOp::FtsIndexDoc { .. } | TextOp::FtsDeleteDoc { .. } | TextOp::SetTextConfig { .. } => {
-            Ok(())
-        }
+        // Index writes, analyzer configuration, and an index rebuild return
+        // no column values.
+        TextOp::FtsIndexDoc { .. }
+        | TextOp::FtsDeleteDoc { .. }
+        | TextOp::SetTextConfig { .. }
+        | TextOp::RebuildIndex { .. } => Ok(()),
     }
 }
 

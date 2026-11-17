@@ -119,7 +119,7 @@ pub fn show_alert_status(
     name: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let tenant_id = identity.tenant_id.as_u64();
-    let name = name.to_lowercase();
+    let name = crate::control::server::shared::ddl::sql_parse::resolve_name_token(name);
 
     // Verify alert exists.
     if state

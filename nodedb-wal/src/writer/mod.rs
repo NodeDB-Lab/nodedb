@@ -10,7 +10,8 @@
 //! 1. Caller creates a `WalRecord` and submits it to the writer.
 //! 2. Writer serializes the record into the aligned write buffer.
 //! 3. When the buffer is full or `sync()` is called, the buffer is written
-//!    to the WAL file via `O_DIRECT` + `fsync`.
+//!    to the WAL file via `O_DIRECT` + `fsync`. A record larger than the
+//!    buffer is written alone after the buffered batch (see `oversize`).
 //! 4. Group commit: multiple concurrent writers can submit records between
 //!    syncs, and they all share a single `fsync` call.
 //!
@@ -30,10 +31,15 @@ mod core;
 // the flushed-but-unsynced tracking without going through `WalWriter`.
 pub(crate) mod durability;
 mod dwb;
-mod flush;
+mod encryption;
+// Crate-visible for the same reason as `config`: the io_uring writer
+// classifies a failed write the same way.
+pub(crate) mod flush;
 mod open;
+mod oversize;
 mod split_sync;
 
 pub use config::{DEFAULT_WRITE_BUFFER_SIZE, WalWriterConfig};
 pub use core::WalWriter;
+pub use oversize::MAX_RECORD_PAYLOAD;
 pub use split_sync::PendingSync;

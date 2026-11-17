@@ -18,10 +18,14 @@
 //! - [`replicated_entry`]: [`ReplicatedEntry`] (routing envelope) + (de)serialization.
 //! - [`transaction_redo_wire`]: wire types of the committed-transaction redo entry.
 //! - [`redo_chunk_wire`]: a redo body, inline or chunked across entries.
+//! - [`redo_content_frames`]: the framed redo content a chunk stream carries.
 //! - [`system_span`]: the run of system-time ordinals a write stamps.
+//! - [`calvin_frozen_reply`]: the frozen `RETURNING` replies of a Calvin slice.
 
 mod aliases;
+mod calvin_frozen_reply;
 mod redo_chunk_wire;
+mod redo_content_frames;
 mod replicated_entry;
 mod replicated_write;
 mod retention_op;
@@ -33,7 +37,11 @@ pub use aliases::{
     AppliedOutput, AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, ProposedAt, ProposedWrite,
     RaftAppliedIndexSink, RaftCompactor, RaftProposer,
 };
+pub use calvin_frozen_reply::{
+    CalvinFrozenReply, FrozenPlanReply, FrozenRejection, FrozenSequenceEffect, PlanSequenceEffects,
+};
 pub use redo_chunk_wire::{RedoBody, RedoContent};
+pub use redo_content_frames::RedoContentView;
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};
 pub use replicated_write::ReplicatedWrite;
 pub use retention_op::RetentionOp;

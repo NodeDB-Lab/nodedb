@@ -2,19 +2,14 @@
 
 //! Local commit-vote casting for a staged static Calvin transaction.
 
-use std::sync::atomic::Ordering;
-use std::time::Instant;
-
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::driver::core::halt::{
     HaltReason, HaltStep, error_response_text,
 };
-use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::core::staged_vote::{
     StageVoteError, StagedVote, staged_commit_vote,
 };
-use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
 impl Scheduler {
@@ -29,7 +24,11 @@ impl Scheduler {
     /// which aggregates every participant's vote into one authoritative
     /// `SequencerEntry::Verdict`, applied on every replica.
     ///
-    /// This method moves the txn to [`CommitState::AwaitingVerdict`] WITHOUT
+    /// A commit of a slice that holds a `RETURNING` plan of the contract
+    /// waits for the plan's evaluation, which casts the vote (see
+    /// [`Self::hold_vote_for_returning`]). An evaluation error votes abort.
+    ///
+    /// [`Self::cast_staged_vote`] moves the txn to `CommitState::AwaitingVerdict` WITHOUT
     /// dispatching a resolve or drop, then immediately probes
     /// `registry.verdict(txn)`: if the verdict is already durable (replay, or a
     /// push we raced) it resumes at once via [`Self::resume_on_verdict`];
@@ -71,73 +70,24 @@ impl Scheduler {
                 }
             }
         };
-
-        // Durably propose this leader's commit vote via the sequencer Raft
-        // group. Only the leader stages, so its vote is the vShard's. The
-        // sequencer aggregates every participant's vote into the single
-        // global verdict this txn parks on below. An abort travels as
-        // `AbortVote` so its cause and refusal survive to the coordinator.
-        // The vote stays owed until the tally holds it, so a refused or dropped proposal is
-        // proposed again rather than lost. A promoted leader's vote for a
-        // txn whose vote applied already changes nothing: the first counts.
-        self.propose_sequencer_entry(
-            txn_id,
-            SchedulerProposal::Vote {
-                abort: vote.abort_cause(),
-            },
-        );
-
-        if vote == StagedVote::SerializationConflict {
-            // The staged slice's read-set was no longer current: observe it on
-            // the node-global counter. A participant error never validated a
-            // read-set, so it must not count here.
-            self.shared
-                .calvin
-                .counters
-                .read_set_validation_failures
-                .fetch_add(1, Ordering::Relaxed);
+        // A commit waits for the slice's `RETURNING` evaluation, which
+        // casts the vote once it finishes: commit, or abort with the
+        // evaluation's refusal.
+        if vote == StagedVote::Commit && self.hold_vote_for_returning(txn_id) {
+            return;
         }
-
-        // PARK on the barrier: transition to `AwaitingVerdict` and arm the stall
-        // deadline. Do NOT dispatch resolve/drop here — the GLOBAL verdict, not
-        // this local vote, decides. If the txn already vanished (torn down
-        // elsewhere), there is nothing to park.
-        //
-        // A stage error parks too. The leader votes abort, and every
-        // participant drops at the abort verdict. A COMMIT verdict for it
-        // can follow only a vote an earlier leader cast: `resume_on_verdict`
-        // restages the txn.
-        match self.pending.get_mut(&txn_id) {
-            Some(pending) => {
-                pending.commit_state = CommitState::AwaitingVerdict;
-                // A superseded slice cannot commit here: its collection is gone.
-                pending.stage_error = match vote {
-                    StagedVote::ParticipantError { .. } | StagedVote::PredictionDrift => {
-                        Some(error_response_text("stage", staged_response))
-                    }
-                    StagedVote::CollectionSuperseded => Some(
-                        "a collection the transaction names no longer holds its planned \
-                         incarnation"
-                            .to_owned(),
-                    ),
-                    StagedVote::Commit | StagedVote::SerializationConflict => None,
-                };
-                // no-determinism: local stall-warning deadline only; the global replicated verdict, not this wall-clock, decides commit/abort.
-                pending.verdict_deadline = Some(Instant::now() + self.config.verdict_stall_warn());
+        // A superseded slice cannot commit here: its collection is gone.
+        let stage_error = match vote {
+            StagedVote::ParticipantError { .. } | StagedVote::PredictionDrift => {
+                Some(error_response_text("stage", staged_response))
             }
-            None => return,
-        }
-
-        // PROBE on park (correctness backstop): the verdict can already be
-        // durable — on replay, or a push that raced ahead of this park. Resume
-        // immediately if so; the double-resume guard in `resume_on_verdict`
-        // makes a later duplicate push/probe a no-op.
-        if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(
-            txn_id.epoch,
-            txn_id.position,
-        )) {
-            self.resume_on_verdict(txn_id, verdict);
-        }
+            StagedVote::CollectionSuperseded => Some(
+                "a collection the transaction names no longer holds its planned incarnation"
+                    .to_owned(),
+            ),
+            StagedVote::Commit | StagedVote::SerializationConflict => None,
+        };
+        self.cast_staged_vote(txn_id, vote, stage_error);
     }
 }
 
@@ -149,14 +99,59 @@ mod tests {
     use crate::bridge::envelope::ErrorCode;
     use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind;
+    use crate::control::cluster::calvin::scheduler::driver::core::returning_eval::{
+        contract, division_by_zero, image_rows, with_contract,
+    };
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
         CapturingProposer, lead_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler, error_response, make_sequenced_txn, staged_pending, staged_response,
     };
+    use crate::control::cluster::calvin::scheduler::driver::staged_returning::StagedReturning;
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 
     const VSHARD: u32 = 7;
+
+    /// [`staged_leader`] whose txn carries `contract`. Its one local plan
+    /// sits at class index 0, with `images` image rows when `Some`.
+    fn returning_leader(
+        txn_id: TxnId,
+        contract: nodedb_cluster::calvin::types::ReturningContract,
+        images: Option<usize>,
+    ) -> (
+        Scheduler,
+        tempfile::TempDir,
+        std::sync::Arc<CapturingProposer>,
+    ) {
+        let (mut scheduler, dir, proposer) = staged_leader(txn_id);
+        let txn = with_contract(make_sequenced_txn(txn_id.epoch, txn_id.position), contract);
+        let mut pending = staged_pending(txn, txn_id);
+        pending.returning = StagedReturning::of_slice(vec![0]);
+        if let Some(rows) = images {
+            pending.returning.images.insert(0, image_rows(rows));
+        }
+        scheduler.pending.insert(txn_id, pending);
+        (scheduler, dir, proposer)
+    }
+
+    /// The refusal of the one abort vote `proposer` accepted.
+    fn refusal_of_the_vote(proposer: &CapturingProposer) -> ErrorCode {
+        match proposer.accepted().as_slice() {
+            [
+                SequencerEntry::AbortVote {
+                    reason: AbortReason::ParticipantError,
+                    refusal: Some(refusal),
+                    ..
+                },
+            ] => {
+                crate::control::cluster::calvin::refusal::decode_refusal(refusal)
+                    .expect("the refusal decodes")
+                    .code
+            }
+            other => panic!("expected one refused abort vote, got {other:?}"),
+        }
+    }
 
     /// A data-group leader holding `txn_id` staged, with a proposer that
     /// accepts every proposal.
@@ -349,5 +344,84 @@ mod tests {
             }],
             "the vote is the stage's commit, not a forced abort"
         );
+    }
+
+    /// A commit stage whose `RETURNING` list fails votes abort with the
+    /// error's code, once the evaluation finishes. Nothing halts.
+    #[tokio::test]
+    async fn a_returning_evaluation_error_votes_abort_with_its_refusal() {
+        let txn_id = TxnId::new(35, 0);
+        let (mut scheduler, _dir, proposer) =
+            returning_leader(txn_id, contract(vec![division_by_zero()], 10), Some(1));
+
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+        assert_eq!(proposer.attempt_count(), 0, "the vote waits");
+        scheduler.settle_returning_eval().await;
+
+        assert_eq!(refusal_of_the_vote(&proposer), ErrorCode::DivisionByZero);
+        let pending = scheduler.pending.get(&txn_id).expect("parked");
+        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
+        assert!(pending.stage_error.is_some());
+        assert!(pending.returning.frozen.is_empty());
+        assert!(scheduler.apply_halt().is_none());
+    }
+
+    /// Rows past the contract's limit vote abort before any expression runs.
+    #[tokio::test]
+    async fn a_returning_limit_exceeded_votes_abort() {
+        let txn_id = TxnId::new(36, 0);
+        let (mut scheduler, _dir, proposer) =
+            returning_leader(txn_id, contract(vec![division_by_zero()], 1), Some(2));
+
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+        scheduler.settle_returning_eval().await;
+
+        match refusal_of_the_vote(&proposer) {
+            ErrorCode::ExecutionLimitExceeded { detail } => {
+                assert_eq!(detail, "RETURNING rows 2 exceeds limit 1")
+            }
+            other => panic!("expected the limit refusal, got {other:?}"),
+        }
+        assert!(scheduler.apply_halt().is_none());
+    }
+
+    /// Images the leader cannot read, or no images for a plan the contract
+    /// names, vote abort at once with an internal refusal. Nothing halts.
+    #[tokio::test]
+    async fn unreadable_or_missing_images_vote_an_internal_abort() {
+        let unreadable = TxnId::new(37, 0);
+        let (mut scheduler, _dir, proposer) =
+            returning_leader(unreadable, contract(vec![division_by_zero()], 10), Some(1));
+        if let Some(pending) = scheduler.pending.get_mut(&unreadable) {
+            pending.returning.failed = Some("the images do not decode".into());
+        }
+        scheduler.resolve_staged_commit(
+            unreadable,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+        assert!(matches!(
+            refusal_of_the_vote(&proposer),
+            ErrorCode::Internal { .. }
+        ));
+        assert!(scheduler.apply_halt().is_none());
+
+        let missing = TxnId::new(38, 0);
+        let (mut scheduler, _dir, proposer) =
+            returning_leader(missing, contract(vec![division_by_zero()], 10), None);
+        scheduler.resolve_staged_commit(
+            missing,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+        assert!(matches!(
+            refusal_of_the_vote(&proposer),
+            ErrorCode::Internal { .. }
+        ));
+        assert!(scheduler.apply_halt().is_none());
     }
 }

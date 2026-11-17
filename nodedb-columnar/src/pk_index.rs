@@ -143,6 +143,13 @@ impl PkIndex {
         self.inner.retain(|_, loc| keep(loc));
     }
 
+    /// Current encoded keys and their bound locations, in encoded-key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &RowLocation)> {
+        self.inner
+            .iter()
+            .map(|(key, location)| (key.as_slice(), location))
+    }
+
     /// Remove all entries pointing to a given segment (used when dropping a segment).
     pub fn remove_segment(&mut self, segment_id: u64) {
         self.inner.retain(|_, loc| loc.segment_id != segment_id);

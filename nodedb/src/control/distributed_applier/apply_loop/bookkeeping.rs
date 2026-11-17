@@ -36,9 +36,17 @@ pub(super) fn release_admission_holds(state: &SharedState, group_id: u64, log_in
 /// gated on the floor (it may only discard entries the engines can no longer
 /// need the log for). Compacting first would either be refused or, if the gate
 /// used the delivery watermark, discard entries whose redo is not yet fsynced.
-pub(super) fn record_durable_apply(state: &Arc<SharedState>, group_id: u64, applied_index: u64) {
-    save_applied_index(state, group_id, applied_index);
+///
+/// Returns whether the floor saved. A floor that did not save leaves every
+/// entry above the old floor to a restart's delivery.
+pub(super) fn record_durable_apply(
+    state: &Arc<SharedState>,
+    group_id: u64,
+    applied_index: u64,
+) -> bool {
+    let saved = save_applied_index(state, group_id, applied_index);
     maybe_compact_log(state, group_id, applied_index);
+    saved
 }
 
 /// Fire the Raft log-compaction trigger for `group_id` up to the

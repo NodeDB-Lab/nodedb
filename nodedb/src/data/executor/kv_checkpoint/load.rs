@@ -9,8 +9,9 @@ use super::decoded::{DecodedKvCollection, DecodedKvGeneration};
 use super::format::{KV_CKPT_FORMAT_VERSION, KvCheckpointFile};
 use super::index_decode::decode_kv_indexes;
 use super::index_restore::restore_collection_indexes;
-use super::paths::{kv_ckpt_dir, kv_ckpt_gen_dir, parse_kv_ckpt_stem};
+use super::paths::{kv_ckpt_dir, kv_ckpt_gen_dir, kv_map_key};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
+use crate::data::executor::checkpoint_key::{is_keyed_checkpoint_path, read_keyed_checkpoint};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::snapshot::restore::database_id_from_qualified;
 
@@ -104,22 +105,16 @@ impl CoreLoop {
         for entry in entries {
             let entry = entry.map_err(|source| CheckpointDecodeError::DirEntry { source })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("ckpt") {
+            if !is_keyed_checkpoint_path(&path) {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let (tenant_id, collection) = parse_kv_ckpt_stem(stem).ok_or_else(|| {
-                CheckpointDecodeError::UnparseableFilename {
-                    stem: stem.to_string(),
-                }
-            })?;
-
-            let bytes = nodedb_wal::segment::read_checkpoint_framed(&path).map_err(|source| {
-                CheckpointDecodeError::ReadFile {
+            let (stored, bytes) = read_keyed_checkpoint(&path)?;
+            let (tenant_id, collection) =
+                kv_map_key(&stored).ok_or_else(|| CheckpointDecodeError::KeyShape {
                     path: path.clone(),
-                    source,
-                }
-            })?;
+                    stored: stored.to_string(),
+                    expected: "kv",
+                })?;
             let file = zerompk::from_msgpack::<KvCheckpointFile>(&bytes).map_err(|source| {
                 CheckpointDecodeError::MsgpackDecode {
                     path: path.clone(),
@@ -244,8 +239,11 @@ struct RestoredCounts {
 mod tests {
     use super::super::format::{KvCheckpointEntry, KvCheckpointManifest};
     use super::super::index_format::KvCheckpointIndexes;
-    use super::super::paths::{KV_CKPT_MANIFEST, kv_ckpt_filename};
+    use super::super::paths::{KV_CKPT_MANIFEST, kv_ckpt_key};
     use super::*;
+    use crate::data::executor::checkpoint_key::{
+        read_keyed_checkpoint_expecting, write_keyed_checkpoint,
+    };
     use nodedb_types::Surrogate;
     use std::collections::HashSet;
 
@@ -323,12 +321,11 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let name = kv_ckpt_filename(7, "users");
-        let path = tmp.path().join(&name);
+        let key = kv_ckpt_key(7, "users");
         let bytes = zerompk::to_msgpack_vec(&written).expect("encode");
-        nodedb_wal::segment::write_checkpoint_framed(tmp.path(), &name, &bytes).expect("write");
+        let path = write_keyed_checkpoint(tmp.path(), &key, &bytes).expect("write");
 
-        let read_back = nodedb_wal::segment::read_checkpoint_framed(&path).expect("read");
+        let read_back = read_keyed_checkpoint_expecting(&path, &key).expect("read");
         let decoded: KvCheckpointFile = zerompk::from_msgpack(&read_back).expect("decode");
         assert_eq!(decoded, written, "the file must decode to what was written");
 
@@ -579,12 +576,14 @@ mod tests {
         let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         drop(req_tx); // no requests are dispatched in this test
         CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir,
-            hlc,
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir,
+                hlc,
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("CoreLoop::open")
     }

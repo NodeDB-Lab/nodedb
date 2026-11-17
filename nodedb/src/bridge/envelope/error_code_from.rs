@@ -23,9 +23,36 @@ impl From<nodedb_query::EvalError> for ErrorCode {
             | nodedb_query::EvalError::ArgumentValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
-            e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
-                detail: e.to_string(),
+            nodedb_query::EvalError::MathDomain(fault) => match fault.class() {
+                nodedb_query::expr::MathDomainClass::Logarithm => {
+                    Self::InvalidArgumentForLogarithm {
+                        detail: fault.to_string(),
+                    }
+                }
+                nodedb_query::expr::MathDomainClass::PowerFunction => {
+                    Self::InvalidArgumentForPowerFunction {
+                        detail: fault.to_string(),
+                    }
+                }
             },
+            e @ (nodedb_query::EvalError::NumericOverflow { .. }
+            | nodedb_query::EvalError::NumericFieldOverflow { .. }
+            | nodedb_query::EvalError::OutOfRange(_)
+            | nodedb_query::EvalError::NumericSpecialValue { .. }) => {
+                Self::NumericValueOutOfRange {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidTextRepresentation { .. } => {
+                Self::InvalidTextRepresentation {
+                    detail: e.to_string(),
+                }
+            }
+            e @ nodedb_query::EvalError::InvalidDatetimeFormat { .. } => {
+                Self::InvalidDatetimeFormat {
+                    detail: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -36,6 +63,23 @@ impl From<crate::engine::kv::UnboundKvWrite> for ErrorCode {
     fn from(e: crate::engine::kv::UnboundKvWrite) -> Self {
         Self::RejectedPrevalidation {
             reason: e.to_string(),
+        }
+    }
+}
+
+/// A KV row over the row image limit is refused with SQLSTATE 54000, as
+/// every other stored row over the limit is.
+impl From<crate::engine::kv::KvRowTooLarge> for ErrorCode {
+    fn from(e: crate::engine::kv::KvRowTooLarge) -> Self {
+        crate::data::executor::row_image_limit::row_image_too_large(&e.collection, &e.key, e.bytes)
+    }
+}
+
+impl From<crate::engine::kv::KvWriteRefusal> for ErrorCode {
+    fn from(e: crate::engine::kv::KvWriteRefusal) -> Self {
+        match e {
+            crate::engine::kv::KvWriteRefusal::Unbound(e) => e.into(),
+            crate::engine::kv::KvWriteRefusal::RowTooLarge(e) => e.into(),
         }
     }
 }
@@ -130,12 +174,18 @@ impl From<crate::Error> for ErrorCode {
             capacity @ crate::Error::DispatchCapacity { .. } => Self::DispatchCapacity {
                 reason: capacity.to_string(),
             },
-            crate::Error::TxnOverlayMemoryExceeded { limit } => {
-                Self::TxnOverlayMemoryExceeded { limit }
-            }
             crate::Error::DivisionByZero => Self::DivisionByZero,
+            crate::Error::ExecutionLimitExceeded { detail } => {
+                Self::ExecutionLimitExceeded { detail }
+            }
             crate::Error::UndefinedFunction { name } => Self::UndefinedFunction { name },
             crate::Error::DataException { detail } => Self::DataException { detail },
+            crate::Error::InvalidArgumentForLogarithm { detail } => {
+                Self::InvalidArgumentForLogarithm { detail }
+            }
+            crate::Error::InvalidArgumentForPowerFunction { detail } => {
+                Self::InvalidArgumentForPowerFunction { detail }
+            }
             // `42601` (syntax_error), as the Control Plane gives both.
             crate::Error::BadRequest { detail } | crate::Error::PlanError { detail } => {
                 Self::BadRequest { detail }
@@ -222,13 +272,15 @@ impl From<crate::Error> for ErrorCode {
                 let detail = crate::Error::RoleInUse { role, dependents }.to_string();
                 Self::DependentObjectsExist { object, detail }
             }
-            crate::Error::CrdtAdmissionRetriesExhausted { .. } => Self::ConflictRetry,
+            crate::Error::CrdtAdmissionRetriesExhausted { .. }
+            | crate::Error::MetadataDdlSuperseded { .. } => Self::ConflictRetry,
             // Retryable refusals whose class (`55P03`) no Data-Plane code has.
             // The retry contract survives: nothing was applied.
             e @ (crate::Error::NoLeader { .. }
             | crate::Error::GroupQuorumUnavailable { .. }
             | crate::Error::GroupMarksUnavailable { .. }
             | crate::Error::BackupCaptureMoved { .. }
+            | crate::Error::MetadataLeaderUnavailable
             | crate::Error::AuthorizationStateBehind { .. }
             | crate::Error::LinearizableReadRefused { .. }
             | crate::Error::StaleReadNotLeader { .. }) => Self::RetryableRefusal {
@@ -276,7 +328,6 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::WrongObjectType { .. }
             | crate::Error::AmbiguousColumn { .. }
             | crate::Error::UngroupedColumn { .. }
-            | crate::Error::ExecutionLimitExceeded { .. }
             | crate::Error::LimitExceeded { .. }
             | crate::Error::Promql(_)
             | crate::Error::SequencerUnavailable
@@ -307,9 +358,7 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::RetryableLeaderChange { .. }
             | crate::Error::CommittedResultUnavailable { .. }
             | crate::Error::ProposalOutcomeUnknown { .. }
-            | crate::Error::MetadataLeaderUnavailable
             | crate::Error::MetadataGroupGone { .. }
-            | crate::Error::MetadataDdlSuperseded { .. }
             | crate::Error::Wal(_)
             | crate::Error::Dispatch { .. }
             | crate::Error::Storage { .. }
@@ -329,7 +378,6 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::RemoteTyped { .. }
             | crate::Error::Ddl(_)
             | crate::Error::DescriptorVersionAnomaly { .. }
-            | crate::Error::CollectionPurgeRowMissing { .. }
             | crate::Error::CollectionUnstamped { .. }
             | crate::Error::CatalogIntegrityViolation { .. }
             | crate::Error::CascadeCycle { .. }) => Self::Internal {

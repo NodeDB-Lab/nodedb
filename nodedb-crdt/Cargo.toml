@@ -31,3 +31,5 @@ getrandom = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

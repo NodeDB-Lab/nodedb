@@ -15,7 +15,8 @@ use crate::types::{DatabaseId, VShardId};
 use nodedb_physical::physical_plan::GraphOp;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::support::{data_plane_verdict, ddl_err};
+use super::support::ddl_err;
+use crate::control::server::shared::ddl::neutral::refusal::response_verdict;
 
 /// Read the affected count off a Data-Plane response. A missing count is an
 /// error, never a default.
@@ -79,7 +80,7 @@ pub async fn set_node_labels(
         )
         .await
         .map_err(|e| DdlError::from_error(&e))?;
-    data_plane_verdict(&response)?;
+    response_verdict(&response)?;
 
     let tag = if remove { "UNLABEL" } else { "LABEL" };
     Ok(vec![DdlResult::Status {

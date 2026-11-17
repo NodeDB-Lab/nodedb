@@ -18,6 +18,7 @@ impl From<ColumnarError> for Error {
             | ColumnarError::RangeParse { .. }
             | ColumnarError::MsgpackSerialize { .. }
             | ColumnarError::MsgpackDeserialize { .. }
+            | ColumnarError::MissingPrimaryKey
             | ColumnarError::InvalidVersionInterval { .. } => Self::BadRequest {
                 detail: e.to_string(),
             },
@@ -82,6 +83,10 @@ mod tests {
             expected: "Decimal".into(),
         });
         assert!(matches!(e, Error::BadRequest { ref detail } if detail.contains("'v'")));
+        assert!(matches!(
+            Error::from(ColumnarError::MissingPrimaryKey),
+            Error::BadRequest { .. }
+        ));
     }
 
     #[test]

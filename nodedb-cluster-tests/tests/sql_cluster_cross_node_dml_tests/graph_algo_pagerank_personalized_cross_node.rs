@@ -96,7 +96,7 @@ async fn personalized_pagerank_biases_toward_seed_cross_node() {
 
     // Wait until every node sees all N nodes in the result (edges replicated +
     // routing converged) before asserting.
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {N} ppr nodes"),
             Duration::from_secs(30),
@@ -104,7 +104,7 @@ async fn personalized_pagerank_biases_toward_seed_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, PPR_SQL).await;
+                        let rows = pagerank_rows(&node.client, PPR_SQL).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         names == expected_nodes
                     })
@@ -116,8 +116,8 @@ async fn personalized_pagerank_biases_toward_seed_cross_node() {
 
     let uniform = 1.0 / N as f64;
 
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, PPR_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&node.client, PPR_SQL).await;
         let ranks: HashMap<String, f64> = rows.iter().cloned().collect();
 
         assert_eq!(
@@ -195,7 +195,7 @@ async fn personalized_pagerank_unknown_seed_falls_back_to_uniform_cross_node() {
     const UNK_SQL: &str =
         r#"GRAPH ALGO PAGERANK ON 'gppr_unk_xnode' PERSONALIZATION {"does_not_exist": 1.0}"#;
 
-    for idx in 0..cluster.nodes.len() {
+    for (idx, node) in cluster.nodes.iter().enumerate() {
         wait_for(
             &format!("node {idx} sees all {N} unknown-seed nodes"),
             Duration::from_secs(30),
@@ -203,7 +203,7 @@ async fn personalized_pagerank_unknown_seed_falls_back_to_uniform_cross_node() {
             || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        let rows = pagerank_rows(&cluster.nodes[idx].client, UNK_SQL).await;
+                        let rows = pagerank_rows(&node.client, UNK_SQL).await;
                         let names: HashSet<String> = rows.into_iter().map(|(n, _)| n).collect();
                         names == expected_nodes
                     })
@@ -215,8 +215,8 @@ async fn personalized_pagerank_unknown_seed_falls_back_to_uniform_cross_node() {
 
     let uniform = 1.0 / N as f64;
 
-    for idx in 0..cluster.nodes.len() {
-        let rows = pagerank_rows(&cluster.nodes[idx].client, UNK_SQL).await;
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = pagerank_rows(&node.client, UNK_SQL).await;
         assert_eq!(rows.len(), N, "node {idx} must return one row per node");
 
         // Unknown seed → uniform fallback: every rank ≈ 1/N.

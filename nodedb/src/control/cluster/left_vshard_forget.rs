@@ -2,10 +2,16 @@
 
 //! Forget the stored Calvin state of the vShards this node left.
 //!
-//! A vShard that left keeps no applied positions, base or dependent-read
-//! barrier rows here. A forget that fails leaves the vShard in
-//! `CalvinLocalState::forget_pending`, and every scheduler reconcile pass
-//! retries it. Boot adds every vShard that holds any stored Calvin state.
+//! A vShard that left keeps no applied positions, base, dependent-read
+//! barrier rows or frozen replies here. A forget that fails leaves the
+//! vShard in `CalvinLocalState::forget_pending`, and every scheduler
+//! reconcile pass retries it. Boot adds every vShard that holds any stored
+//! Calvin state.
+//!
+//! Every reconcile pass also adds each vShard that holds frozen replies. The
+//! apply loop can store a reply after its vShard left, and a vShard can hold
+//! rows with no scheduler here. So no row of an unreplicated vShard outlives
+//! the next pass.
 //!
 //! A pending vShard whose group lists this node as a voter or learner
 //! leaves the set with no forget: its state belongs to that membership.
@@ -20,7 +26,9 @@ use std::sync::RwLock;
 
 use nodedb_cluster::RoutingTable;
 
-use crate::control::cluster::calvin::scheduler::{NOT_YET_APPLIED_EPOCH, barrier_store};
+use crate::control::cluster::calvin::scheduler::{
+    NOT_YET_APPLIED_EPOCH, barrier_store, frozen_replies,
+};
 use crate::control::cluster::calvin_snapshot;
 use crate::control::state::SharedState;
 
@@ -107,6 +115,7 @@ pub fn retry_pending_forgets(shared: &SharedState, replicated: &[u32]) {
     if !membership_settled(shared) {
         return;
     }
+    add_frozen_reply_vshards(shared);
     let pending: Vec<u32> = shared
         .calvin
         .forget_pending
@@ -145,10 +154,30 @@ pub fn retry_pending_forgets(shared: &SharedState, replicated: &[u32]) {
     }
 }
 
-/// Remove every barrier row and the buffer of `vshard_id`. Returns whether
-/// the rows went.
+/// Add every vShard that holds frozen replies to the pending set. A failed
+/// read adds none, and the next pass reads again.
+fn add_frozen_reply_vshards(shared: &SharedState) {
+    match frozen_replies::stored_vshards(shared.credentials.catalog()) {
+        Ok(vshards) => shared
+            .calvin
+            .forget_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(vshards),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "calvin: the vShards holding frozen replies do not read; the next reconcile \
+                 pass reads again"
+            );
+        }
+    }
+}
+
+/// Remove every barrier row, every frozen reply and the buffers of
+/// `vshard_id`. Returns whether the rows went.
 fn forget_rows(shared: &SharedState, vshard_id: u32) -> bool {
-    match barrier_store::forget_vshard(shared, vshard_id) {
+    let barriers = match barrier_store::forget_vshard(shared, vshard_id) {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!(
@@ -160,7 +189,21 @@ fn forget_rows(shared: &SharedState, vshard_id: u32) -> bool {
             crate::diag::calvin_barrier_log_store_failed(Some(vshard_id), None, "forget", &e);
             false
         }
-    }
+    };
+    let frozen = match frozen_replies::forget_vshard(shared, vshard_id) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                vshard_id,
+                error = %e,
+                "calvin: the frozen replies of a vShard that left were not removed; the next \
+                 reconcile pass retries"
+            );
+            crate::diag::calvin_frozen_reply_store_failed(vshard_id, None, "forget", &e);
+            false
+        }
+    };
+    barriers && frozen
 }
 
 #[cfg(test)]
@@ -256,6 +299,74 @@ mod tests {
             BTreeSet::from([VSHARD + 1]),
             "the hosted vShard keeps its rows"
         );
+    }
+
+    fn store_frozen(state: &SharedState, vshard_id: u32, epoch: u64) {
+        frozen_replies::store(
+            state.credentials.catalog(),
+            &crate::control::wal_replication::types::CalvinFrozenReply {
+                epoch,
+                position: 0,
+                vshard: vshard_id,
+                plans: Vec::new(),
+            },
+        )
+        .expect("store the reply");
+    }
+
+    fn frozen_vshards(state: &SharedState) -> BTreeSet<u32> {
+        frozen_replies::stored_vshards(state.credentials.catalog()).expect("load")
+    }
+
+    /// Frozen replies of a vShard this node does not replicate go on the
+    /// next pass, though no scheduler or pending forget names the vShard.
+    /// A replicated vShard keeps its rows.
+    #[test]
+    fn frozen_replies_of_an_unreplicated_vshard_go_on_the_next_pass() {
+        let (state, _dir) = state();
+        store_frozen(&state, VSHARD, 3);
+        store_frozen(&state, VSHARD + 1, 3);
+        assert!(pending(&state).is_empty());
+
+        retry_pending_forgets(&state, &[VSHARD + 1]);
+
+        assert_eq!(frozen_vshards(&state), BTreeSet::from([VSHARD + 1]));
+        assert!(pending(&state).is_empty());
+    }
+
+    /// A reply the apply loop stores after its vShard's forget ran goes on
+    /// the next pass.
+    #[test]
+    fn a_frozen_reply_stored_after_the_forget_goes_on_the_next_pass() {
+        let (state, _dir) = state();
+        store_frozen(&state, VSHARD, 3);
+        forget_left_vshards(&state, &[VSHARD]);
+        assert!(frozen_vshards(&state).is_empty());
+
+        store_frozen(&state, VSHARD, 4);
+        retry_pending_forgets(&state, &[]);
+
+        assert!(frozen_vshards(&state).is_empty());
+    }
+
+    /// Boot names a vShard whose frozen replies wait, and a pass before
+    /// membership settles keeps them.
+    #[test]
+    fn boot_frozen_rows_wait_for_membership() {
+        let (state, _dir) = booting_state();
+        store_frozen(&state, VSHARD, 3);
+        let holding = frozen_replies::restore_at_boot(&state).expect("restore");
+        assert_eq!(holding, BTreeSet::from([VSHARD]));
+        seed_at_boot(&state, holding);
+
+        retry_pending_forgets(&state, &[]);
+        assert_eq!(frozen_vshards(&state), BTreeSet::from([VSHARD]));
+
+        state
+            .data_groups_replayed
+            .store(true, std::sync::atomic::Ordering::Release);
+        retry_pending_forgets(&state, &[]);
+        assert!(frozen_vshards(&state).is_empty());
     }
 
     /// A pending vShard hosted again leaves the set, and its rows stay.

@@ -59,6 +59,9 @@ WHERE category = 'machine-learning'
   );
 
 -- Hybrid vector + full-text search (RRF fusion)
+-- The text leg reads only fields a search index declares.
+CREATE SEARCH INDEX ON articles FIELDS body;
+
 SELECT title, rrf_score() AS score
 FROM articles
 WHERE id IN (

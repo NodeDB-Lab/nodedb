@@ -29,7 +29,8 @@ use crate::types::{DatabaseId, RecordHomes, TenantId, TraceId, VShardId};
 
 use super::super::super::result::DdlError;
 use super::edge::{EdgeHomes, response_affected};
-use super::support::{data_plane_verdict, ddl_err};
+use super::support::ddl_err;
+use crate::control::server::shared::ddl::neutral::refusal::response_verdict;
 
 /// SQLSTATE `program_limit_exceeded`.
 const PROGRAM_LIMIT_EXCEEDED: &str = "54000";
@@ -241,7 +242,7 @@ pub(super) async fn write_edge_unit(
             .await
             .map_err(|e| DdlError::from_error(&e))?
     };
-    data_plane_verdict(&response)?;
+    response_verdict(&response)?;
     response_affected(&response)
 }
 

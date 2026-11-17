@@ -84,7 +84,14 @@ pub(super) async fn dispatch_local(
         )
         .await?
     } else {
-        None
+        // A staged write lands in the transaction's redo at COMMIT, so its
+        // volatile DEFAULTs bind now, as an autocommit write's do above.
+        crate::control::write_resolve::bind_volatile_defaults(
+            shared,
+            tenant_id,
+            database_id,
+            &route.plan,
+        )?
     };
     let plan = resolved.unwrap_or(route.plan);
 

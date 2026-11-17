@@ -53,7 +53,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut docs, &every_row);
+            self.merge_overlay_into_scan(txn_id, &coll_key, &mut docs, &every_row)?;
         }
         Ok(docs)
     }

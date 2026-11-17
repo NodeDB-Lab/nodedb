@@ -163,12 +163,14 @@ mod tests {
         let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         drop(req_tx); // no requests are dispatched in these tests
         CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir,
-            Arc::new(OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir,
+                Arc::new(OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("CoreLoop::open")
     }
@@ -209,6 +211,8 @@ mod tests {
             tenant_id: TID,
             collection: Some(COLL),
             document_cut: Default::default(),
+            edge_cut: Default::default(),
+            staged_edges: None,
         };
         let parsed = compiler::parse(query).expect("parse MATCH");
         let mut sources: Vec<String> = execute(
@@ -226,7 +230,7 @@ mod tests {
         .expect("execute MATCH")
         .rows
         .into_iter()
-        .filter_map(|row| row.get("a").cloned())
+        .filter_map(|row| row.get("a").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
         sources.sort();
         sources

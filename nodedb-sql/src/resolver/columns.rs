@@ -427,6 +427,13 @@ impl TableScope {
         } = factor
         {
             let alias_str = crate::reserved::check_ast_identifier(&alias.name)?;
+            if !*lateral {
+                crate::resolver::derived::check_materialized_column_aliases(
+                    catalog,
+                    &alias_str,
+                    alias.columns.len(),
+                )?;
+            }
             let declared: Vec<String> = alias
                 .columns
                 .iter()
@@ -484,6 +491,7 @@ pub(crate) mod test_support {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
+            text_indexes: None,
         };
         TableScope::single(ResolvedTable {
             name: info.name.clone(),
@@ -526,6 +534,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+            text_indexes: None,
         }
     }
 

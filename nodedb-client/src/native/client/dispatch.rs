@@ -71,7 +71,19 @@ impl NodeDb for NativeClient {
         embedding: &[f32],
         metadata: Option<Document>,
     ) -> NodeDbResult<()> {
-        self.vector_insert_impl(collection, id, embedding, metadata)
+        self.vector_insert_impl(collection, "", id, embedding, metadata)
+            .await
+    }
+
+    async fn vector_insert_field(
+        &self,
+        collection: &str,
+        field_name: &str,
+        id: &str,
+        embedding: &[f32],
+        metadata: Option<Document>,
+    ) -> NodeDbResult<()> {
+        self.vector_insert_impl(collection, field_name, id, embedding, metadata)
             .await
     }
 

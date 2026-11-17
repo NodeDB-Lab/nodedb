@@ -102,6 +102,7 @@ fn schemaless_put_scan_roundtrip() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -122,6 +123,7 @@ fn schemaless_put_scan_roundtrip() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -129,7 +131,8 @@ fn schemaless_put_scan_roundtrip() {
     assert_eq!(docs.len(), 2, "expected 2 docs, got {}", docs.len());
 
     for (doc_id, bytes) in &docs {
-        let json = nodedb_types::json_from_msgpack(bytes).unwrap();
+        // A schemaless body is stored as a native object; read its fields.
+        let json = response_codec::decode_body_plain_json(bytes).unwrap();
         let obj = json.as_object().unwrap();
         assert!(obj.contains_key("id"), "doc {doc_id} missing 'id': {json}");
         assert!(
@@ -144,7 +147,8 @@ fn merge_encode_decode_roundtrip() {
     let left = build_msgpack_map(&[("id", "d1"), ("name", "Alice")]);
     let right = build_msgpack_map(&[("key", "d1"), ("theme", "dark")]);
 
-    let merged = join::merge_join_docs_binary(&left, Some(&right), "docs", "prefs");
+    let merged =
+        join::merge_join_docs_binary(&left, Some(&right), "docs", "prefs").expect("merge rows");
     let merged_json = nodedb_types::json_from_msgpack(&merged).unwrap();
     let obj = merged_json.as_object().unwrap();
     assert!(

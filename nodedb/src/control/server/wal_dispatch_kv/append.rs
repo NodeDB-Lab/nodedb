@@ -65,6 +65,16 @@ fn unresolved_conditional_write(collection: &str) -> crate::Error {
     }
 }
 
+/// Refuse a KV row whose key and value are over the row image limit, with
+/// SQLSTATE 54000, before its record is appended. A record the Data Plane
+/// would refuse never reaches the WAL, so a crash between the append and the
+/// refusal leaves nothing for replay to refuse. Rows whose final size only
+/// the Data Plane knows (a merge, an atomic, a transfer) are refused there,
+/// and replay refuses their records the same way on every replica.
+pub(super) fn check_kv_row(collection: &str, key: &[u8], value: &[u8]) -> crate::Result<()> {
+    crate::engine::kv::KvRowTooLarge::check(collection, key, value).map_err(crate::Error::from)
+}
+
 /// Serialize a KV operation and append to the WAL — see [`KvAppendOutcome`].
 /// `now_override` pins `expire_at_ms` to an instant decided elsewhere (e.g. a
 /// Raft-committed entry), so every replica's redo installs it verbatim.
@@ -87,6 +97,7 @@ pub fn wal_append_kv_op(
             provenance,
             ..
         } => {
+            check_kv_row(collection.as_str(), key, value)?;
             if let Some(prov) = provenance {
                 append_sync_mark(wal, prov)?;
             }
@@ -122,6 +133,7 @@ pub fn wal_append_kv_op(
             surrogate,
             ..
         } => {
+            check_kv_row(collection.as_str(), key, value)?;
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
             let entry = encode_kv_put(
@@ -179,6 +191,9 @@ pub fn wal_append_kv_op(
             surrogates,
             ..
         } => {
+            for (key, value) in entries {
+                check_kv_row(collection.as_str(), key, value)?;
+            }
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
             let raw: Vec<u32> = surrogates.iter().map(|s| s.as_u32()).collect();

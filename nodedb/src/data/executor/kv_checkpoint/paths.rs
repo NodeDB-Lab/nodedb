@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Filesystem naming for KV checkpoints: directories, per-collection filenames,
-//! and the inverse parse.
+//! Filesystem naming for KV checkpoints: directories and the per-collection
+//! checkpoint key.
 //!
 //! Both the write path (`write.rs`) and the load path (`load.rs`) build every
 //! path through these helpers so the two can never drift. A path divergence
 //! between writer and reader is silent, and its symptom is indistinguishable
 //! from data loss.
+
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 
 /// Filename of the manifest that names the live generation.
 pub(crate) const KV_CKPT_MANIFEST: &str = "MANIFEST";
@@ -26,24 +28,26 @@ pub(crate) fn kv_ckpt_gen_dir(ckpt_dir: &std::path::Path, generation: u64) -> st
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// Per-collection checkpoint filename: `tenant-{tid}-coll-{hex(collection)}.ckpt`.
-///
-/// The collection is hex-encoded so the filename is filesystem-safe (collection
-/// names may contain `/`, `:` or `-`) and unambiguously parseable: hex contains
-/// only `[0-9a-f]`, so the `-coll-` separator never collides with the encoded
-/// name and the numeric tenant id never collides with the encoding.
-pub(crate) fn kv_ckpt_filename(tenant_id: u64, collection: &str) -> String {
-    format!("tenant-{tenant_id}-coll-{}.ckpt", hex::encode(collection))
+/// The checkpoint key for one collection. The KV map is keyed by
+/// `(tenant, collection)` with no database id, so the key's database id is
+/// always 0. The file name is a fixed-length hash of the key, and the file
+/// stores the key.
+pub(crate) fn kv_ckpt_key(tenant_id: u64, collection: &str) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::Kv,
+        0,
+        tenant_id,
+        vec![collection.to_string()],
+    )
 }
 
-/// Parse a checkpoint file stem (no extension) back into `(tenant_id,
-/// collection)`. Returns `None` for any unparseable stem.
-pub(crate) fn parse_kv_ckpt_stem(stem: &str) -> Option<(u64, String)> {
-    let rest = stem.strip_prefix("tenant-")?;
-    let (tid_str, encoded) = rest.split_once("-coll-")?;
-    let tenant_id = tid_str.parse::<u64>().ok()?;
-    let collection = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
-    Some((tenant_id, collection))
+/// The `(tenant_id, collection)` a stored key restores under, or `None` when
+/// the key is not a KV key.
+pub(crate) fn kv_map_key(key: &CheckpointKey) -> Option<(u64, String)> {
+    match (key.engine, key.database_id, key.parts.as_slice()) {
+        (CheckpointEngine::Kv, 0, [collection]) => Some((key.tenant_id, collection.clone())),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -68,33 +72,24 @@ mod tests {
         assert_ne!(kv_ckpt_gen_dir(base, 0), kv_ckpt_gen_dir(base, 1));
     }
 
-    /// Filenames must round-trip collection names containing exactly the
-    /// separators the hex encoding exists to neutralise.
     #[test]
-    fn filename_roundtrips_through_parse() {
+    fn key_roundtrips_through_map_key() {
         for coll in ["users", "2/orders", "a-coll-b", "weird:name", "-coll-"] {
-            let fname = kv_ckpt_filename(42, coll);
-            let stem = fname.strip_suffix(".ckpt").expect("ckpt extension");
-            let (tid, parsed) = parse_kv_ckpt_stem(stem).expect("stem must parse");
+            let (tid, parsed) = kv_map_key(&kv_ckpt_key(42, coll)).expect("kv key");
             assert_eq!(tid, 42);
             assert_eq!(parsed, coll);
         }
     }
 
     #[test]
-    fn unparseable_stems_are_rejected() {
-        assert!(
-            parse_kv_ckpt_stem("tenant-abc-coll-6162").is_none(),
-            "non-numeric tenant"
-        );
-        assert!(
-            parse_kv_ckpt_stem("tenant-1-coll-616").is_none(),
-            "odd hex length"
-        );
-        assert!(
-            parse_kv_ckpt_stem("tenant-1-coll-zz").is_none(),
-            "non-hex digits"
-        );
-        assert!(parse_kv_ckpt_stem("garbage").is_none(), "no prefix");
+    fn max_length_collection_name_fits() {
+        let name = kv_ckpt_key(1, &"c".repeat(255)).file_name();
+        assert!(name.len() < 64, "{name}");
+    }
+
+    #[test]
+    fn non_kv_key_is_none() {
+        let key = CheckpointKey::new(CheckpointEngine::Crdt, 0, 1, vec!["users".into()]);
+        assert!(kv_map_key(&key).is_none());
     }
 }

@@ -10,13 +10,14 @@
 //! enforcement logic run here. The result is the protocol-neutral
 //! [`DdlResult`] / [`DdlError`].
 
-use nodedb_types::DatabaseId;
+use nodedb_types::{DatabaseId, Value};
 
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
+use crate::data::executor::response_codec::{RowContext, decode_row_payload_value};
 use crate::types::TraceId;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -76,8 +77,11 @@ pub async fn validate_typeguard(
         .await
         .map_err(|error| super::parse::err(&error.sqlstate, &error.message))?;
 
-    let mut json_chunks = Vec::new();
+    // Each task's rows decode typed, under the row shape its plan produces,
+    // so a guard checks the stored value's own type, plain or native.
+    let mut chunks: Vec<(RowContext, Value)> = Vec::new();
     for task in tasks {
+        let row_context = crate::bridge::envelope::describe_row_context(&task.plan);
         let emitter =
             crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
         let resp = crate::control::server::shared::clone_write::intercept_authorize_and_dispatch(
@@ -96,58 +100,62 @@ pub async fn validate_typeguard(
         .map_err(|e| DdlError::from_error_in_context("scan dispatch failed", &e))?;
 
         if !resp.payload.is_empty() {
-            let json = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-            if !json.is_empty() {
-                json_chunks.push(json);
-            }
+            let decoded = decode_row_payload_value(&resp.payload, row_context)
+                .map_err(|e| DdlError::from_error_in_context("scan rows do not decode", &e))?;
+            chunks.push((row_context, decoded));
         }
     }
 
-    // Parse JSON rows and validate each document.
+    // Validate each document.
     let mut violations = Vec::new();
     let crs = crate::control::crs_context::crs_context_for(state);
+    let text = |v: Option<&Value>| match v {
+        Some(Value::String(s) | Value::Uuid(s) | Value::Ulid(s)) => Some(s.clone()),
+        _ => None,
+    };
 
-    for chunk in &json_chunks {
-        if let Ok(serde_json::Value::Array(rows)) = sonic_rs::from_str::<serde_json::Value>(chunk) {
-            for row in rows {
-                // Scan responses wrap documents as {"id": "...", "data": {...}}.
-                // The outer "id" is the substrate row key (a surrogate hex
-                // string); the user-visible primary key lives inside the
-                // document body. Prefer the body's PK so violation reports
-                // reference the identifier the caller wrote.
-                let (doc_id, inner) = if let Some(data) = row.get("data") {
-                    let body_id = data.get("id").and_then(|v| v.as_str());
-                    let outer_id = row.get("id").and_then(|v| v.as_str());
-                    let id = body_id.or(outer_id).unwrap_or("unknown").to_string();
-                    (id, data.clone())
-                } else {
-                    let id = row
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    (id, row.clone())
-                };
+    for (row_context, chunk) in chunks {
+        let Value::Array(rows) = chunk else {
+            continue;
+        };
+        for row in rows {
+            // Scan responses wrap documents as {"id": "...", "data": {...}}.
+            // The outer "id" is the substrate row key (a surrogate hex
+            // string); the user-visible primary key lives inside the
+            // document body. Prefer the body's PK so violation reports
+            // reference the identifier the caller wrote.
+            let envelope_data = match (&row_context, row.get("data")) {
+                (RowContext::ScanEnvelope, Some(data @ Value::Object(_))) => Some(data.clone()),
+                _ => None,
+            };
+            let (doc_id, doc) = match envelope_data {
+                Some(data) => {
+                    let id = text(data.get("id"))
+                        .or_else(|| text(row.get("id")))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (id, data)
+                }
+                None => {
+                    let id = text(row.get("id")).unwrap_or_else(|| "unknown".to_string());
+                    (id, row)
+                }
+            };
 
-                let doc = nodedb_types::Value::from(inner);
-
-                // Validate against each guard individually to collect ALL violations.
-                for guard in &guards {
-                    if let Err(e) = crate::data::executor::enforcement::typeguard::check_type_guards(
-                        std::slice::from_ref(guard),
-                        &doc,
-                        None,
-                        &crs,
-                    ) {
-                        let detail = match &e {
-                            crate::bridge::envelope::ErrorCode::TypeGuardViolation {
-                                detail,
-                                ..
-                            } => detail.clone(),
-                            other => format!("{other:?}"),
-                        };
-                        violations.push((doc_id.clone(), guard.field.clone(), detail));
-                    }
+            // Validate against each guard individually to collect ALL violations.
+            for guard in &guards {
+                if let Err(e) = crate::data::executor::enforcement::typeguard::check_type_guards(
+                    std::slice::from_ref(guard),
+                    &doc,
+                    None,
+                    &crs,
+                ) {
+                    let detail = match &e {
+                        crate::bridge::envelope::ErrorCode::TypeGuardViolation {
+                            detail, ..
+                        } => detail.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    violations.push((doc_id.clone(), guard.field.clone(), detail));
                 }
             }
         }

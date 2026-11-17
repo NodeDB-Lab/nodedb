@@ -58,6 +58,45 @@ impl DocVersionStamp {
     }
 }
 
+/// The nodes of one source row in one vector index, as a clone copies them:
+/// the nodes a read at the clone's cut sees, with the newest start among
+/// them.
+#[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
+pub struct CopiedVectorNodes {
+    /// The index's vector field. Empty for the collection's default index.
+    pub field_name: String,
+    pub vectors: Vec<Vec<f32>>,
+    pub sys_from: i64,
+    /// Whether the row is a multi-vector document.
+    pub multi: bool,
+}
+
+impl CopiedVectorNodes {
+    /// The bytes a materialize scan carries for one row's `nodes`. A row
+    /// with no node carries no bytes.
+    pub fn encode(nodes: &[Self]) -> crate::Result<Vec<u8>> {
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        zerompk::to_msgpack_vec(&nodes).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("materialize scan: encode a row's vector nodes: {e}"),
+        })
+    }
+
+    /// The nodes [`Self::encode`] wrote into `bytes`.
+    pub fn decode(bytes: &[u8]) -> crate::Result<Vec<Self>> {
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("materialize scan: decode a row's vector nodes: {e}"),
+        })
+    }
+}
+
 /// The stamps of one KV version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvVersionStamp {

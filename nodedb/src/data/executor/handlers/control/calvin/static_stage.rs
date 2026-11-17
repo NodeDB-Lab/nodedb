@@ -6,10 +6,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tracing::{debug, info_span};
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
-use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
+use crate::data::executor::handlers::control::calvin_reply::CalvinStaging;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -96,12 +96,15 @@ impl CoreLoop {
                 // Test-only fault boundary after a potentially-mutating stage.
                 crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
-            Ok::<CalvinReply, ErrorCode>(staging.into_reply())
+            // A committed slice cannot abort: every check its install runs
+            // runs here, so a refusal is this slice's abort vote.
+            self.check_calvin_commit_boundary(task, synthetic_txn_id, *tenant_id, plans)?;
+            self.finish_calvin_staging(synthetic_txn_id, tenant_id.as_u64(), staging)
         }));
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
-        let reply = match stage_result {
-            Ok(Ok(reply)) => reply,
+        let (reply, images) = match stage_result {
+            Ok(Ok(parts)) => parts,
             Ok(Err(error)) => {
                 return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
             }
@@ -138,6 +141,14 @@ impl CoreLoop {
             }
         };
 
+        // The response carries the staged `RETURNING` images to the leader.
+        let payload = match super::shared::stage_images_payload(&images) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
+            }
+        };
+
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
         self.calvin.commit_pending.insert(
@@ -155,7 +166,7 @@ impl CoreLoop {
             status: Status::Ok,
             attempt: 1,
             partial: false,
-            payload: Payload::empty(),
+            payload,
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: Some(vote),
@@ -338,10 +349,22 @@ mod tests {
         let drifted = stage_at(&mut core, 35, &[resolved_delete(vec![5])]);
         assert_drift_stages_nothing(&core, &drifted, 35);
 
+        // The covered delete folds into target row `a1`, which the install
+        // reads, so the row is stored.
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         configure_sum(&mut core);
         source_row(&mut core, 6, "a1");
+        core.sparse
+            .put(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(4242)),
+                &doc_format::encode_to_msgpack(&serde_json::json!({"id": "a1", "balance": "100"})),
+                core.bitemporal_ordinal(),
+            )
+            .expect("seed target row");
         let covered = stage_at(&mut core, 36, &[resolved_delete(vec![6])]);
         assert_eq!(covered.status, Status::Ok, "{:?}", covered.error_code);
     }
@@ -386,10 +409,8 @@ mod tests {
         let coll_key = (DatabaseId::DEFAULT, tenant_id, "orders".to_string());
         let expected_body = doc_format::canonicalize_document_for_storage(&doc_value("a", "1"));
         assert_eq!(
-            core.txn_overlays
-                .get(&synthetic)
-                .and_then(|o| o.get(&coll_key, 7)),
-            Some(&Staged::Put(expected_body)),
+            core.staged_row(synthetic, &coll_key, 7).unwrap(),
+            Some(Staged::Put(expected_body)),
             "the Calvin write plan must be staged into the synthetic-TxnId overlay"
         );
     }
@@ -504,6 +525,7 @@ mod tests {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 },
             )],
             CalvinSnapshot {
@@ -833,7 +855,7 @@ mod tests {
         assert_eq!(
             core.txn_overlays
                 .get(&synthetic)
-                .map(|overlay| overlay.len()),
+                .map(|overlay| overlay.len().unwrap()),
             Some(2)
         );
 

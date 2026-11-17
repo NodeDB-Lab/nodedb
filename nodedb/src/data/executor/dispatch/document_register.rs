@@ -31,6 +31,7 @@ impl CoreLoop {
             vector_fields,
             declared_columns,
             declared_key,
+            text_fields,
             incarnation,
         } = op
         else {
@@ -68,6 +69,7 @@ impl CoreLoop {
                 vector_fields,
                 declared_columns,
                 declared_key: declared_key.as_deref(),
+                text_fields,
                 incarnation: *incarnation,
             },
         )

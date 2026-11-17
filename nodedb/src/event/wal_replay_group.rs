@@ -10,7 +10,6 @@
 //! delivered, and the reverse.
 
 use nodedb_wal::record::RecordType;
-use tracing::warn;
 
 use crate::engine::timeseries::install_outcome::TsOutcomeIndex;
 use crate::event::types::{RecordPosition, WriteEvent};
@@ -21,24 +20,15 @@ use crate::types::Lsn;
 
 /// The events of one `WriteGroup` record, each at the group's origin.
 ///
-/// A malformed payload is logged and skipped, as a malformed redo record is.
+/// Malformed payloads return errors without publishing partial events.
 pub(super) fn group_record_events(
     payload: &[u8],
     scope: &ReplayScope,
     outcomes: &TsOutcomeIndex,
     sequence: &mut u64,
-) -> Vec<WriteEvent> {
-    let group = match crate::wal::WriteGroupRecord::from_bytes(payload) {
-        Ok(group) => group,
-        Err(e) => {
-            warn!(
-                lsn = scope.lsn.as_u64(),
-                error = %e,
-                "WAL replay: skipping malformed WriteGroup payload"
-            );
-            return Vec::new();
-        }
-    };
+) -> crate::Result<Vec<WriteEvent>> {
+    let group = crate::wal::WriteGroupRecord::from_bytes(payload)?;
+    let mut next_sequence = *sequence;
     let origin = Lsn::new(group.group.origin_at(scope.lsn.as_u64()));
     // A continuation of a committed transaction record rebuilds its rows as
     // the record's own rows rebuild: committed sources and net kinds.
@@ -50,7 +40,14 @@ pub(super) fn group_record_events(
         None => *scope,
     };
     let mut events = Vec::new();
-    for sub in group.ops {
+    for mut sub in group.ops {
+        if let Some(installed) =
+            crate::wal::redo::installed_document::InstalledDocumentRedo::<u32>::decode(
+                &sub.payload,
+            )?
+        {
+            sub.payload = installed.resolve(&group.schemas)?.encode()?;
+        }
         let Some(record_type) = RecordType::from_raw(sub.record_type) else {
             continue;
         };
@@ -60,8 +57,8 @@ pub(super) fn group_record_events(
                 &sub.payload,
                 &scope,
                 outcomes,
-                sequence,
-            ));
+                &mut next_sequence,
+            )?);
         }
     }
     if let Some(continued) = &group.redo {
@@ -75,7 +72,8 @@ pub(super) fn group_record_events(
     for event in &mut events {
         event.record = Some(RecordPosition::first(origin));
     }
-    events
+    *sequence = next_sequence;
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -111,6 +109,7 @@ mod tests {
     #[test]
     fn a_part_rebuilds_its_events_at_the_origin() {
         let record = WriteGroupRecord {
+            schemas: Vec::new(),
             group: WriteGroup::part_of(40, 1, 1),
             ops: vec![doc_put("o1"), doc_put("o2")],
             redo: None,
@@ -121,7 +120,8 @@ mod tests {
             &scope(55),
             &TsOutcomeIndex::default(),
             &mut sequence,
-        );
+        )
+        .expect("events");
         assert_eq!(events.len(), 2);
         assert!(
             events
@@ -133,6 +133,7 @@ mod tests {
 
     fn part_events(origin: u64, lsn: u64, part: u32, ids: &[&str]) -> Vec<WriteEvent> {
         let record = WriteGroupRecord {
+            schemas: Vec::new(),
             group: WriteGroup::part_of(origin, part, 2),
             ops: ids.iter().copied().map(doc_put).collect(),
             redo: None,
@@ -144,6 +145,7 @@ mod tests {
             &TsOutcomeIndex::default(),
             &mut sequence,
         )
+        .expect("events")
     }
 
     /// A crash after the ring delivered a write's events, and before the
@@ -190,6 +192,7 @@ mod tests {
     #[test]
     fn an_opening_record_is_its_own_origin() {
         let record = WriteGroupRecord {
+            schemas: Vec::new(),
             group: WriteGroup::OPENING,
             ops: vec![doc_put("o1")],
             redo: None,
@@ -200,7 +203,90 @@ mod tests {
             &scope(12),
             &TsOutcomeIndex::default(),
             &mut sequence,
-        );
+        )
+        .expect("events");
         assert_eq!(events[0].record, Some(RecordPosition::first(Lsn::new(12))));
+    }
+    #[test]
+    fn installed_group_events_preserve_public_bytes_and_origin() {
+        use crate::bridge::envelope::RowVersion;
+        use crate::types::installed_document::InstalledDocument;
+        use crate::wal::redo::installed_document::InstalledDocumentRedo;
+        use nodedb_physical::physical_plan::StorageMode;
+        let canonical = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(
+            std::collections::HashMap::from([("n".to_string(), nodedb_types::Value::Integer(7))]),
+        ))
+        .expect("canonical");
+        let event_new_value =
+            nodedb_types::json_to_msgpack(&serde_json::json!({"n": 7})).expect("event");
+        assert_ne!(canonical, event_new_value);
+        let installed = InstalledDocumentRedo {
+            collection: "orders".into(),
+            document_id: "o1".into(),
+            surrogate: 7,
+            event: crate::types::document_event::DocumentPutEvent {
+                new_value: event_new_value.clone(),
+                old_value: Some(
+                    nodedb_types::json_to_msgpack(&serde_json::json!({"n": 3})).expect("prior"),
+                ),
+            },
+            image: InstalledDocument {
+                canonical: canonical.clone(),
+                stored: vec![0x91, 7],
+                version: RowVersion {
+                    sys_from: 12 * nodedb_types::NANOS_PER_MS,
+                    valid_from_ms: 3,
+                    valid_until_ms: 8,
+                },
+                schema: 0u32,
+                chain_head: None,
+            },
+        };
+        let mut record = WriteGroupRecord {
+            schemas: vec![StorageMode::Schemaless],
+            group: WriteGroup::part_of(40, 1, 1),
+            ops: vec![RedoSubRecord {
+                record_type: RecordType::Put as u32,
+                payload: installed.encode().expect("installed"),
+            }],
+            redo: None,
+        };
+        let mut sequence = 0;
+        let events = group_record_events(
+            &record.to_bytes().expect("group"),
+            &scope(55),
+            &TsOutcomeIndex::default(),
+            &mut sequence,
+        )
+        .expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].op, crate::event::WriteOp::Update);
+        assert_eq!(
+            events[0].new_value.as_deref(),
+            Some(event_new_value.as_slice())
+        );
+        assert_eq!(
+            events[0].old_value.as_deref(),
+            installed.event.old_value.as_deref()
+        );
+        assert_eq!(events[0].record, Some(RecordPosition::first(Lsn::new(40))));
+        assert_eq!(events[0].system_time_ms, Some(12));
+        assert_eq!(events[0].valid_time_ms, Some(3));
+        record.schemas.clear();
+        record.ops.insert(0, doc_put("before"));
+        let prior_sequence = sequence;
+        assert!(
+            group_record_events(
+                &record.to_bytes().expect("group"),
+                &scope(55),
+                &TsOutcomeIndex::default(),
+                &mut sequence
+            )
+            .is_err()
+        );
+        assert_eq!(
+            sequence, prior_sequence,
+            "a malformed later subrecord publishes no earlier event numbers"
+        );
     }
 }

@@ -2,59 +2,90 @@
 
 //! Shared helpers for LATERAL join handlers.
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, describe_row_context};
 use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 use crate::data::executor::handlers::join::{binary_row_project, merge_join_docs_binary};
+use crate::data::executor::response_codec::{RowContext, scan_rows_in_context};
 use nodedb_physical::physical_plan::{DocumentOp, JoinProjection};
-use nodedb_query::msgpack_scan;
+use nodedb_types::object_msgpack::ObjectView;
 
 pub(super) const MAX_RESULT_ROWS: usize = 100_000;
 
-/// Extract a field value from an outer scan row.
+/// One outer row of a LATERAL join, split by the row shape its plan
+/// produces.
+pub(super) struct OuterRow {
+    /// The user-visible fields as one flat body.
+    pub body: Vec<u8>,
+    /// The storage key of a scan envelope. `None` for a flat row.
+    pub envelope_id: Option<String>,
+}
+
+/// The rows of the outer plan's `payload`, split under the row shape
+/// `outer_plan` produces: a document scan answers `{id, data}` envelopes, and
+/// a materialized `ProviderScan` answers flat rows. A flat row whose columns
+/// are `id` and `data` stays whole.
+pub(super) fn outer_rows(
+    payload: &[u8],
+    outer_plan: &PhysicalPlan,
+) -> crate::Result<Vec<OuterRow>> {
+    let context = describe_row_context(outer_plan);
+    Ok(scan_rows_in_context(payload, context)?
+        .into_iter()
+        .map(|(id, body)| OuterRow {
+            body,
+            envelope_id: match context {
+                RowContext::ScanEnvelope => Some(id),
+                RowContext::Flat => None,
+            },
+        })
+        .collect())
+}
+
+/// The bodies of the inner scan's `payload`, split under the row shape
+/// `inner_plan` produces.
+pub(super) fn inner_rows(payload: &[u8], inner_plan: &PhysicalPlan) -> crate::Result<Vec<Vec<u8>>> {
+    Ok(
+        scan_rows_in_context(payload, describe_row_context(inner_plan))?
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect(),
+    )
+}
+
+/// Extract a field value from an outer row.
 ///
-/// Scan rows are `{id: "<doc_id>", data: <payload>}` wrappers. The primary key
-/// (`id`) lives at the top level; all other fields live inside `data`. This
-/// function checks both levels so that correlation predicates referencing the
-/// primary key (e.g. `WHERE e.user_id = u.id`) work correctly.
+/// The field is read from the row's body. A scan envelope's storage key
+/// answers `id` when the body has no `id` field, so a correlation on the
+/// primary key (e.g. `WHERE e.user_id = u.id`) binds.
 ///
-/// `Ok(None)` when neither level has the field. A field whose bytes do not
+/// `Ok(None)` when the row has no such field. A field whose bytes do not
 /// decode is an error, never a missing field: a missing correlation value
 /// drops the predicate it binds.
 pub(super) fn extract_outer_field(
-    outer_bytes: &[u8],
+    outer: &OuterRow,
     field: &str,
 ) -> crate::Result<Option<nodedb_types::Value>> {
-    let decode = |bytes: &[u8]| {
-        nodedb_types::value_from_msgpack(bytes).map_err(|e| crate::Error::Codec {
-            detail: format!("LATERAL outer field '{field}': {e}"),
-        })
-    };
-    // Prefer the `data` sub-map (user-visible document fields, including the
-    // user-provided primary key). The wrapper-level `id` is the internal hex
-    // surrogate and must not shadow the user-visible `id` stored in `data`.
-    if let Some((s, e)) = msgpack_scan::extract_field(outer_bytes, 0, "data") {
-        let data_bytes = &outer_bytes[s..e];
-        if let Some((start, end)) = msgpack_scan::extract_field(data_bytes, 0, field) {
-            return decode(&data_bytes[start..end]).map(Some);
-        }
-    }
-    // Fall back to the top-level wrapper (covers non-`data` wrapper fields
-    // that have no user-data counterpart).
-    if let Some((start, end)) = msgpack_scan::extract_field(outer_bytes, 0, field) {
-        return decode(&outer_bytes[start..end]).map(Some);
-    }
-    Ok(None)
+    let view = ObjectView::new(&outer.body).map_err(|error| crate::Error::Codec {
+        detail: format!("LATERAL outer object: {error}"),
+    })?;
+    let value = view.get(field).map_err(|error| crate::Error::Codec {
+        detail: format!("LATERAL outer field '{field}': {error}"),
+    })?;
+    Ok(match (value, &outer.envelope_id) {
+        (Some(value), _) => Some(value),
+        (None, Some(id)) if field == "id" => Some(nodedb_types::Value::String(id.clone())),
+        (None, _) => None,
+    })
 }
 
 /// The correlation value `outer_col` supplies for an equality with an inner
 /// column. `Ok(None)` when the outer value is missing or NULL: `inner = NULL`
 /// is never true, so no inner row matches.
 pub(super) fn correlation_value(
-    outer_bytes: &[u8],
+    outer: &OuterRow,
     outer_col: &str,
 ) -> crate::Result<Option<nodedb_types::Value>> {
-    Ok(extract_outer_field(outer_bytes, outer_col)?
-        .filter(|v| !matches!(v, nodedb_types::Value::Null)))
+    Ok(extract_outer_field(outer, outer_col)?.filter(|v| !matches!(v, nodedb_types::Value::Null)))
 }
 
 /// Walk `filters` and substitute any `*Column` filter whose column reference
@@ -69,12 +100,12 @@ pub(super) fn correlation_value(
 /// `*Column` ops that reference the outer row.
 pub(super) fn bind_outer_values(
     filters: Vec<ScanFilter>,
-    outer_bytes: &[u8],
+    outer: &OuterRow,
     outer_alias: &str,
 ) -> crate::Result<Vec<ScanFilter>> {
     filters
         .into_iter()
-        .map(|f| bind_filter_outer(f, outer_bytes, outer_alias))
+        .map(|f| bind_filter_outer(f, outer, outer_alias))
         .collect()
 }
 
@@ -100,7 +131,7 @@ pub(super) fn strip_filter_qualifiers(filters: Vec<ScanFilter>) -> Vec<ScanFilte
 
 pub(super) fn bind_filter_outer(
     f: ScanFilter,
-    outer_bytes: &[u8],
+    outer: &OuterRow,
     outer_alias: &str,
 ) -> crate::Result<ScanFilter> {
     let literal_op = match f.op {
@@ -128,7 +159,7 @@ pub(super) fn bind_filter_outer(
                 .map(|clause| {
                     clause
                         .into_iter()
-                        .map(|sf| bind_filter_outer(sf, outer_bytes, outer_alias))
+                        .map(|sf| bind_filter_outer(sf, outer, outer_alias))
                         .collect::<crate::Result<Vec<_>>>()
                 })
                 .collect::<crate::Result<Vec<_>>>()?;
@@ -160,7 +191,7 @@ pub(super) fn bind_filter_outer(
         col_ref.clone()
     };
 
-    if let Some(val) = extract_outer_field(outer_bytes, &bare)? {
+    if let Some(val) = extract_outer_field(outer, &bare)? {
         // Also strip any table-alias qualifier from the left-side field name
         // (e.g. "e.log_time" → "log_time") so the inner scan can find it.
         let unqualified_field = f
@@ -220,40 +251,111 @@ pub(super) fn build_row(
     outer_alias: &str,
     lateral_alias: &str,
     projection: &[JoinProjection],
-) -> Vec<u8> {
-    let merged = merge_join_docs_binary(outer, inner, outer_alias, lateral_alias);
+) -> crate::Result<Vec<u8>> {
+    let merged = merge_join_docs_binary(outer, inner, outer_alias, lateral_alias)?;
     if projection.is_empty() {
-        merged
+        Ok(merged)
     } else {
-        binary_row_project(&merged, projection)
+        Ok(binary_row_project(&merged, projection)?)
     }
 }
 
-/// If `bytes` is a scan-row wrapper `{id: ..., data: ...}`, return the `data`
-/// field's bytes. Otherwise return `bytes` as-is (already a plain map).
-pub(super) fn unwrap_data_field(bytes: &[u8]) -> &[u8] {
-    if let Some((start, end)) = msgpack_scan::extract_field(bytes, 0, "data") {
-        &bytes[start..end]
-    } else {
-        bytes
-    }
-}
+#[cfg(test)]
+mod native_tests {
+    use super::{OuterRow, correlation_value, extract_outer_field};
+    use nodedb_types::Value;
 
-/// Produce a flat msgpack map containing the user-visible fields of an outer
-/// scan row.
-///
-/// Scan rows arrive as `{id: "<hex_surrogate>", data: {field1: v1, ...}}`.
-/// The wrapper `id` is an internal surrogate; user queries always refer to
-/// the fields inside `data` (including the user-provided primary key). This
-/// function returns the `data` sub-map bytes directly so that `merge_join_docs_binary`
-/// can prefix those fields with the outer alias for the projection step.
-///
-/// If the input is not a `{id, data}` wrapper (e.g. already a flat map from a
-/// prior join), it is returned as-is.
-pub(super) fn flatten_outer_row(bytes: &[u8]) -> Vec<u8> {
-    if let Some((s, e)) = msgpack_scan::extract_field(bytes, 0, "data") {
-        bytes[s..e].to_vec()
-    } else {
-        bytes.to_vec()
+    fn flat(body: Vec<u8>) -> OuterRow {
+        OuterRow {
+            body,
+            envelope_id: None,
+        }
+    }
+
+    #[test]
+    fn correlation_reads_whole_native_objects_and_preserves_plain_arrays() {
+        let decimal = Value::Decimal("123456789.123456789".parse().expect("decimal"));
+        let native = zerompk::to_msgpack_vec(&Value::Object(
+            [("key".into(), decimal.clone())].into_iter().collect(),
+        ))
+        .expect("native object");
+        assert_eq!(
+            extract_outer_field(&flat(native), "key").expect("lookup"),
+            Some(decimal)
+        );
+        let plain = nodedb_types::json_to_msgpack(&serde_json::json!({"key": [4, "text"]}))
+            .expect("plain object");
+        assert_eq!(
+            extract_outer_field(&flat(plain), "key").expect("lookup"),
+            Some(Value::Array(vec![
+                Value::Integer(4),
+                Value::String("text".into())
+            ]))
+        );
+        assert!(extract_outer_field(&flat(vec![0x92, 7, 0x81]), "key").is_err());
+    }
+
+    /// A flat row with a column named `data` is never read as an envelope:
+    /// `data` is a value, and the row's other columns stay reachable.
+    #[test]
+    fn a_flat_row_with_a_data_column_stays_whole() {
+        let row = Value::Object(
+            [
+                ("id".to_owned(), Value::String("u1".into())),
+                (
+                    "data".to_owned(),
+                    Value::Object(
+                        [("key".to_owned(), Value::Integer(5))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                ),
+                ("key".to_owned(), Value::Integer(9)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        for body in [
+            zerompk::to_msgpack_vec(&row).expect("native row"),
+            nodedb_types::value_to_msgpack(&row).expect("plain row"),
+        ] {
+            let outer = flat(body);
+            assert_eq!(
+                correlation_value(&outer, "key").expect("key"),
+                Some(Value::Integer(9))
+            );
+            assert_eq!(
+                extract_outer_field(&outer, "id").expect("id"),
+                Some(Value::String("u1".into()))
+            );
+            assert!(matches!(
+                extract_outer_field(&outer, "data").expect("data"),
+                Some(Value::Object(_))
+            ));
+        }
+    }
+
+    /// An envelope body answers its fields, and the storage key answers
+    /// `id` only when the body has none.
+    #[test]
+    fn an_envelope_row_reads_its_body_and_falls_back_to_its_key_for_id() {
+        let body = Value::Object(
+            [("key".to_owned(), Value::Integer(9_007_199_254_740_993))]
+                .into_iter()
+                .collect(),
+        );
+        let outer = OuterRow {
+            body: zerompk::to_msgpack_vec(&body).expect("native body"),
+            envelope_id: Some("k1".into()),
+        };
+        assert_eq!(
+            correlation_value(&outer, "key").expect("key"),
+            Some(Value::Integer(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            extract_outer_field(&outer, "id").expect("id"),
+            Some(Value::String("k1".into()))
+        );
+        assert_eq!(correlation_value(&outer, "absent").expect("absent"), None);
     }
 }

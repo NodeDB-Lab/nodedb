@@ -159,6 +159,7 @@ mod shuffle_aggregate_cost_model;
 mod shuffle_aggregate_cross_node;
 mod shuffle_aggregate_e2e;
 mod shuffle_aggregate_in_txn_occ;
+mod shuffle_aggregate_int_sum;
 mod shuffle_consume_cross_node;
 mod shuffle_join_cost_model;
 mod shuffle_join_cross_node;

@@ -45,6 +45,7 @@ fn wal_replay_deterministic() {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 }),
             );
         }
@@ -141,6 +142,7 @@ fn mixed_engine_isolation_no_cross_eviction() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }

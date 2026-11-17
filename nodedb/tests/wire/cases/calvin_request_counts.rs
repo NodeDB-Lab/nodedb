@@ -10,11 +10,10 @@
 //! through Calvin with two slices. A write of a cross-shard sum source commits
 //! through Calvin too, so two writes of `ptv_post` share one slice.
 
-use nodedb::control::planner::calvin::settling_writes::SEVERAL_RETURNING_REFUSAL;
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use nodedb_types::id::DatabaseId;
 
-use super::materialized_sum_cross_shard_expanders::{balance, sum_fixture};
+use super::materialized_sum_cross_shard_expanders::{balance, sum_fixture, sum_fixture_on};
 use crate::harness::TestServer;
 
 /// Data Plane cores the server runs.
@@ -252,23 +251,86 @@ async fn native_one_slice_of_two_verbs_answers_mixed_with_the_sum() {
     assert_eq!(balance(&server, "acc").await, "1", "e1 is gone");
 }
 
-/// `RETURNING` attaches to every task of a request. One transaction answers one
-/// set of rows, so two such tasks are refused whole, over two slices or one.
+/// Each write of a request owns its own `RETURNING` clause. Two such writes
+/// on two slices commit through one Calvin transaction, and the request
+/// answers every write's rows in statement order, as the per-task path does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn returning_on_several_calvin_tasks_is_refused_whole() {
+async fn returning_on_several_calvin_tasks_answers_every_row() {
     let (server, other) = fixture().await;
     let sql = format!(
-        "{}; {} RETURNING v",
+        "{} RETURNING id, v; {} RETURNING id, v",
         update(ONE, "r1"),
-        update(&other, "r1")
+        update(&other, "r2")
     );
 
     let (status, body) = server.http_query(&sql).await;
 
-    assert_eq!(status, 501, "feature not supported: {body}");
-    assert!(body.contains(SEVERAL_RETURNING_REFUSAL), "{body}");
-    assert_eq!(values(&server, ONE).await, ["a", "b"]);
-    assert_eq!(values(&server, &other).await, ["a", "b"]);
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+    let rows: Vec<(Option<&str>, Option<&str>)> = answer["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rows in {body}"))
+        .iter()
+        .map(|row| (row["id"].as_str(), row["v"].as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [(Some("r1"), Some("x")), (Some("r2"), Some("x"))],
+        "{body}"
+    );
+    assert_eq!(values(&server, ONE).await, ["x", "b"]);
+    assert_eq!(values(&server, &other).await, ["a", "x"]);
+
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let sql = format!(
+        "{} RETURNING id; {} RETURNING id",
+        update(ONE, "r2"),
+        update(&other, "r1")
+    );
+    let response = send_sql(&mut stream, 2, &sql).await;
+    assert!(response.error.is_none(), "{sql}: {:?}", response.error);
+    assert_eq!(response.columns, Some(vec!["id".to_owned()]));
+    assert_eq!(
+        response.rows,
+        Some(vec![
+            vec![nodedb_types::Value::String("r2".into())],
+            vec![nodedb_types::Value::String("r1".into())],
+        ])
+    );
+    assert_eq!(values(&server, ONE).await, ["x", "x"]);
+    assert_eq!(values(&server, &other).await, ["x", "x"]);
+}
+
+/// A later statement's `currval` sees an earlier statement's `nextval`, as
+/// the statements run in order, though another participant drew it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_currval_sees_an_earlier_nextval_on_another_slice() {
+    let (server, other) = fixture().await;
+    server
+        .exec("CREATE SEQUENCE cc_seq")
+        .await
+        .expect("create the sequence");
+    let sql = format!(
+        "{} RETURNING id, nextval('cc_seq') AS n; {} RETURNING id, currval('cc_seq') AS n",
+        update(ONE, "r1"),
+        update(&other, "r2")
+    );
+
+    let (status, body) = server.http_query(&sql).await;
+
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+    let rows: Vec<(Option<&str>, Option<i64>)> = answer["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rows in {body}"))
+        .iter()
+        .map(|row| (row["id"].as_str(), row["n"].as_i64()))
+        .collect();
+    assert_eq!(
+        rows,
+        [(Some("r1"), Some(1)), (Some("r2"), Some(1))],
+        "{body}"
+    );
 }
 
 /// One `RETURNING` write of a cross-shard sum source answers its own rows, and
@@ -286,4 +348,118 @@ async fn one_returning_write_on_calvin_answers_its_rows() {
     assert_eq!(answer["rows"].as_array().map(Vec::len), Some(1), "{body}");
     assert_eq!(answer["rows"][0]["id"], "e0", "{body}");
     assert_eq!(balance(&server, "acc").await, "6", "1 + 5");
+}
+
+/// The amount posting `e0` holds.
+async fn e0_amount(server: &TestServer) -> Vec<String> {
+    server
+        .query_text("SELECT amount FROM ptv_post WHERE id = 'e0'")
+        .await
+        .expect("read posting e0")
+}
+
+/// A `RETURNING` list that fails on a Calvin write refuses the write with
+/// its own SQLSTATE before the participant votes. The divisor reads a row
+/// column, so only the participant's evaluation of the written row can
+/// raise it. The row keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_error_on_calvin_leaves_the_row() {
+    let server = sum_fixture().await;
+    server
+        .exec("ALTER TABLE ptv_post ADD COLUMN n INT NOT NULL DEFAULT 0")
+        .await
+        .expect("add column n");
+
+    server
+        .expect_error(
+            "UPDATE ptv_post SET amount = '1', n = 5 WHERE id = 'e0' RETURNING 10 / (n - n)",
+            "SQLSTATE 22012",
+        )
+        .await;
+
+    assert_eq!(e0_amount(&server).await, ["10"]);
+    assert_eq!(
+        server
+            .query_text("SELECT n FROM ptv_post WHERE id = 'e0'")
+            .await
+            .expect("read n"),
+        ["0"]
+    );
+    assert_eq!(balance(&server, "acc").await, "15", "10 + 5");
+}
+
+/// A Calvin write whose `RETURNING` response holds more rows than
+/// `max_returning_rows` is refused before the participant votes. The row
+/// keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_over_limit_on_calvin_leaves_the_row() {
+    // The sum fixture runs on as many cores as this file's fixture.
+    let server =
+        sum_fixture_on(TestServer::start_multicores_with_max_returning_rows(CORES, 0).await).await;
+
+    // The SQLSTATE and message a direct statement past an execution limit
+    // reports: `54000` with the limit's own text.
+    server
+        .expect_error(
+            "UPDATE ptv_post SET amount = '1' WHERE id = 'e0' RETURNING id, amount",
+            "execution limit exceeded: RETURNING rows 1 exceeds limit 0 (SQLSTATE 54000)",
+        )
+        .await;
+
+    assert_eq!(e0_amount(&server).await, ["10"]);
+    assert_eq!(balance(&server, "acc").await, "15", "10 + 5");
+}
+
+/// A Calvin write's `RETURNING` list draws each `nextval` once per row: the
+/// participant's leader evaluates it before the vote, and the client gets
+/// those rows. A later `nextval` follows them, and the session's `currval`
+/// is the last value the rows drew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_nextval_on_calvin_is_once_per_row() {
+    let server = sum_fixture().await;
+    server
+        .exec("CREATE SEQUENCE cc_returning_seq")
+        .await
+        .expect("create the sequence");
+
+    let rows = server
+        .query_named_rows(
+            "UPDATE ptv_post SET amount = '1' WHERE id IN ('e0', 'e1') \
+             RETURNING id, nextval('cc_returning_seq') AS n",
+        )
+        .await
+        .expect("the update answers its rows");
+
+    let mut drawn: Vec<i64> = rows
+        .iter()
+        .map(|row| {
+            row.get("n")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("a drawn value in {row:?}"))
+        })
+        .collect();
+    drawn.sort_unstable();
+    assert_eq!(drawn, vec![1, 2], "one value per row: {rows:?}");
+    let mut ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.get("id").map(String::as_str))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["e0", "e1"]);
+    assert_eq!(
+        server
+            .query_text("SELECT currval('cc_returning_seq')")
+            .await
+            .expect("currval"),
+        ["2"],
+        "the session's currval is the last value the rows drew"
+    );
+    assert_eq!(
+        server
+            .query_text("SELECT nextval('cc_returning_seq')")
+            .await
+            .expect("nextval"),
+        ["3"],
+        "the write drew each value once"
+    );
 }

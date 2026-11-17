@@ -16,16 +16,25 @@
 
 use nodedb_physical::physical_plan::CrdtOp;
 
+use super::sink::OpSink;
 use crate::control::server::wal_dispatch::encode_crdt_op_record;
 use crate::wal::RedoSubRecord;
 
-/// Append the redo sub-record for a single CRDT plan op to `ops`.
-pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut Vec<RedoSubRecord>) -> crate::Result<()> {
+/// Refuse a CRDT op that no transaction resolves: a raw `Apply` /
+/// `ApplyAuthenticated` delta. It applies through its own admission, outside
+/// any transaction. Every other op passes.
+pub(super) fn refuse_crdt_op(op: &CrdtOp) -> crate::Result<()> {
     if matches!(op, CrdtOp::Apply { .. } | CrdtOp::ApplyAuthenticated { .. }) {
         return Err(crate::Error::PlanError {
             detail: "CRDT Apply is not supported inside a transaction".to_string(),
         });
     }
+    Ok(())
+}
+
+/// Append the redo sub-record for a single CRDT plan op to `ops`.
+pub(super) fn serialize_crdt_op(op: &CrdtOp, ops: &mut dyn OpSink) -> crate::Result<()> {
+    refuse_crdt_op(op)?;
     if let Some((kind, payload)) = encode_crdt_op_record(op)? {
         ops.push(RedoSubRecord {
             record_type: kind.record_type() as u32,
@@ -47,14 +56,20 @@ mod tests {
         let op = CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
             document_id: "n1".to_string(),
-            fields_json: r#"{"title":"a"}"#.to_string(),
+            fields: nodedb_physical::physical_plan::encode_fields_body(
+                &std::collections::HashMap::from([(
+                    "title".to_string(),
+                    nodedb_types::Value::String("a".into()),
+                )]),
+            )
+            .expect("fields body encodes"),
             surrogate: Surrogate::new(5),
             partial: false,
             verb: CrdtWriteVerb::Insert,
             returning: None,
             rls_filters: Vec::new(),
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         serialize_crdt_op(&op, &mut ops).expect("resolve crdt doc upsert");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::CrdtDocOp as u32);
@@ -73,7 +88,7 @@ mod tests {
             constraint_version_required: 0,
             expected_frontier_digest: None,
         };
-        let mut ops = Vec::new();
+        let mut ops: Vec<crate::wal::RedoSubRecord> = Vec::new();
         assert!(serialize_crdt_op(&op, &mut ops).is_err());
         assert!(ops.is_empty());
     }

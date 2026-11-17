@@ -40,10 +40,13 @@ fn read(rel: &str) -> String {
 fn assert_durable_checkpoint_writer(rel: &str) {
     let src = read(rel);
     assert!(
-        src.contains("atomic_write_fsync") || src.contains("write_checkpoint_framed"),
+        src.contains("atomic_write_fsync")
+            || src.contains("write_checkpoint_framed")
+            || src.contains("write_keyed_checkpoint"),
         "{rel} must route checkpoint writes through \
          nodedb_wal::segment::atomic_write_fsync — directly, or via the \
-         write_checkpoint_framed CRC wrapper that delegates to it — so tmp-file \
+         write_checkpoint_framed / write_keyed_checkpoint CRC wrappers that \
+         delegate to it — so tmp-file \
          data and the parent directory are fsynced before rename. Raw fs::write + \
          fs::rename is not crash-safe on ext4/XFS."
     );
@@ -179,6 +182,24 @@ fn crdt_checkpoint_writes_are_durable() {
     assert_durable_checkpoint_writer("nodedb/src/data/executor/crdt_checkpoint/publish.rs");
 }
 
+/// The keyed checkpoint frame and the helper every per-collection checkpoint
+/// writes and reads through must stay on the durable write path and the
+/// page-cache-drop read path.
+#[test]
+fn keyed_checkpoint_frame_wraps_durable_helpers() {
+    let frame = read("nodedb-wal/src/segment/checkpoint_keyed_frame.rs");
+    assert!(
+        frame.contains("atomic_write_fsync") && frame.contains("read_checkpoint_dontneed"),
+        "write_checkpoint_keyed / read_checkpoint_keyed must delegate to \
+         atomic_write_fsync and read_checkpoint_dontneed."
+    );
+    let helper = read("nodedb/src/data/executor/checkpoint_key/file.rs");
+    assert!(
+        helper.contains("write_checkpoint_keyed") && helper.contains("read_checkpoint_keyed"),
+        "the keyed checkpoint helper must write and read through the keyed WAL frame."
+    );
+}
+
 /// The CRC-framing wrapper must not bypass the durable write path: it has to
 /// delegate to `atomic_write_fsync` (tmp write + data fsync + rename + parent
 /// directory fsync), not hand-roll its own `fs::write` + `fs::rename`.
@@ -304,17 +325,30 @@ fn checkpoint_reads_drop_page_cache() {
         "nodedb/src/data/executor/crdt_checkpoint/load.rs",
         "nodedb/src/data/executor/kv_checkpoint/load.rs",
         "nodedb/src/data/executor/sync_hwm_checkpoint/load.rs",
-        "nodedb/src/data/executor/columnar_checkpoint/load.rs",
+        // The columnar load path reads its bytes in the manifest and
+        // generation-restore readers, not in `load.rs`.
+        "nodedb/src/data/executor/columnar_checkpoint/manifest.rs",
+        "nodedb/src/data/executor/columnar_checkpoint/restore.rs",
         "nodedb/src/data/executor/graph_label_checkpoint/load.rs",
         // The timeseries loader reads one `partition.meta` per partition to
         // rebuild the registry at boot. They are consumed once and superseded
         // by the in-memory registry, exactly like every checkpoint blob above.
         "nodedb/src/data/executor/timeseries_checkpoint/load.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/stamp.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/series_catalog.rs",
+        "nodedb/src/data/executor/timeseries_checkpoint/schema.rs",
+        // Durable timeseries sidecars and the sequencer snapshot are read
+        // once at boot or recovery, then superseded by in-memory state.
+        "nodedb/src/data/executor/handlers/timeseries/cagg_persist.rs",
+        "nodedb/src/data/executor/handlers/timeseries/merge_commit.rs",
+        "nodedb/src/data/executor/handlers/timeseries/flush_commit.rs",
+        "nodedb/src/control/cluster/sequencer_snapshot.rs",
     ] {
         let src = read(rel);
         assert!(
             src.contains("read_checkpoint_dontneed")
                 || src.contains("read_checkpoint_framed")
+                || src.contains("read_keyed_checkpoint")
                 || src.contains("POSIX_FADV_DONTNEED"),
             "{rel} reads checkpoint bytes with `std::fs::read`, leaving them \
              pinned in the page cache for the process lifetime. Use the \

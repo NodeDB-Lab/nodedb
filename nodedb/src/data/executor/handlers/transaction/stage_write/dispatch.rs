@@ -12,7 +12,7 @@ use super::stage_returning::{StageReturning, StagedImage};
 use super::{StageBalanceDeltaParams, StageSpatialInsertParams};
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{MAX_TXN_OVERLAY_BYTES, Staged};
+use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
@@ -143,6 +143,7 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
+                rls_write_check,
                 ..
             } => {
                 let ctx = StageCtx::new(
@@ -157,7 +158,7 @@ impl CoreLoop {
                     &ctx,
                     StageReturning::of(returning, rls_filters),
                     StagedImage::After,
-                    |core, ctx| core.stage_point_insert(ctx, value, *if_absent),
+                    |core, ctx| core.stage_point_insert(ctx, value, *if_absent, rls_write_check),
                 )
             }
             DocumentOp::PointPut {
@@ -167,6 +168,7 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
+                rls_write_check,
                 ..
             } => {
                 let ctx = StageCtx::new(
@@ -181,7 +183,7 @@ impl CoreLoop {
                     &ctx,
                     StageReturning::of(returning, rls_filters),
                     StagedImage::After,
-                    |core, ctx| core.stage_point_put(ctx, value),
+                    |core, ctx| core.stage_point_put(ctx, value, rls_write_check),
                 )
             }
             DocumentOp::PointDelete {
@@ -361,17 +363,17 @@ impl CoreLoop {
     // The Document point-write staging methods live in `stage_point_document`
     // and call the `pub(super)` helpers below.
 
-    pub(super) fn stage_overlay_pk(&self, ctx: &StageCtx<'_>) -> OverlayPk {
-        match self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .and_then(|o| o.get(&ctx.coll_key, ctx.surrogate.0))
-        {
+    pub(super) fn stage_overlay_pk(&self, ctx: &StageCtx<'_>) -> crate::Result<OverlayPk> {
+        let staged = match self.txn_overlays.get(&ctx.txn_id) {
+            Some(o) => o.get(&ctx.coll_key, ctx.surrogate.0)?,
+            None => None,
+        };
+        Ok(match staged.as_deref() {
             Some(Staged::Put(_)) => OverlayPk::Present,
             Some(Staged::Tombstone) => OverlayPk::Absent,
             None if !self.stage_base_visible(ctx.txn_id, &ctx.coll_key) => OverlayPk::Absent,
             None => OverlayPk::Unstaged,
-        }
+        })
     }
 
     /// Decide one staged row body against the compiled RLS write policy.
@@ -409,29 +411,15 @@ impl CoreLoop {
         )
     }
 
-    /// Stage a put after enforcing the per-transaction overlay memory cap.
-    pub(super) fn stage_put_capped(
-        &mut self,
-        ctx: &StageCtx<'_>,
-        body: Vec<u8>,
-    ) -> crate::Result<()> {
-        let current = self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .map(|o| o.memory_size_estimate())
-            .unwrap_or(0);
-        if current.saturating_add(body.len()) > MAX_TXN_OVERLAY_BYTES {
-            return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
-            });
-        }
+    /// Stage a put. Past `[tuning.query] max_txn_overlay_bytes` of hot
+    /// entries the overlay spills to the transaction's spill directory.
+    pub(super) fn stage_put(&mut self, ctx: &StageCtx<'_>, body: Vec<u8>) -> crate::Result<()> {
         self.txn_overlay_mut(ctx.txn_id).insert_put(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,
             body,
-        );
-        Ok(())
+        )
     }
 
     pub(super) fn stage_count_response(&self, task: &ExecutionTask, affected: usize) -> Response {

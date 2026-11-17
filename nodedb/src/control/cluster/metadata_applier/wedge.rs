@@ -67,7 +67,6 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         }
         // Not provably a pure function of the entry and persisted state.
         crate::Error::RejectedConstraint { .. }
-        | crate::Error::TxnOverlayMemoryExceeded { .. }
         | crate::Error::RejectedAuthz { .. }
         | crate::Error::OffsetRegression { .. }
         | crate::Error::DeadlineExceeded { .. }
@@ -127,6 +126,8 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
         | crate::Error::InvalidDatetimeFormat { .. }
+        | crate::Error::InvalidArgumentForLogarithm { .. }
+        | crate::Error::InvalidArgumentForPowerFunction { .. }
         | crate::Error::DatetimeFieldOverflow { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableSchemaChanged { .. }
@@ -163,7 +164,6 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::Shaping(_)
         | crate::Error::Ddl(_)
         | crate::Error::RemoteTyped { .. }
-        | crate::Error::CollectionPurgeRowMissing { .. }
         | crate::Error::DataPlane(_)
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }

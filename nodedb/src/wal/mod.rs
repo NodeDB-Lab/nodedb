@@ -26,13 +26,15 @@ pub use redo::{
     CapturedEntry, CarriedRedoStream, ColumnarRestoreRedo, ColumnarRestoreVersion, ContinuedRedo,
     CrossShardAppliedKey, DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp, EVERY_ROW,
     EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership, KV_RESTORE, KvRestoreLive,
-    KvRestoreRedo, KvRestoreVersion, NodeLabelRedo, OriginAppend, PublishPosition, RedoChunkHeader,
-    RedoChunkPiece, RedoChunkRecord, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind,
-    RedoRowSource, RedoStreamId, RedoSubRecord, RowSourceIndex, SplitRedo,
+    KvRestoreRedo, KvRestoreVersion, NeverDurableRedos, NodeLabelRedo, OriginAppend,
+    PublishPosition, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord, RedoChunkRef, RedoPublish,
+    RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource, RedoStreamId, RedoStreamReader,
+    RedoStreamRef, RedoSubRecord, ReplayedCaptures, RowSourceIndex, SplitRedo,
     TIMESERIES_ENDED_PARTITION, TIMESERIES_RESTORE, TIMESERIES_SERIES_CATALOG,
     TimeseriesEndedPartitionRedo, TimeseriesRestoreRedo, TimeseriesSeriesCatalogRedo,
-    VECTOR_RESTORE, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo, WriteGroup,
-    WriteGroupRecord, WriteSetCapture, split_redo,
+    VECTOR_RESTORE, VectorRestoreIndex, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo,
+    VectorSidecarVersion, WalReadSource, WriteGroup, WriteGroupRecord, WriteSetCapture, chunk_crc,
+    split_redo,
 };
 pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;

@@ -146,18 +146,15 @@ impl CoreLoop {
             ),
             (p.dest_key, computed.new_dest.as_slice(), p.credit_surrogate),
         ];
-        for (_, _, surrogate) in writes {
-            let checked = crate::engine::kv::UnboundKvWrite::check(
+        for (key, value, surrogate) in writes {
+            let checked = crate::engine::kv::KvWriteRefusal::check(
                 p.collection,
+                key,
+                value,
                 nodedb_types::Surrogate::new(surrogate),
             );
             if let Err(e) = checked {
-                self.replay_record_unapplied(
-                    "kv",
-                    "transfer_identity",
-                    p.record_lsn,
-                    &e.to_string(),
-                );
+                self.replay_kv_write_refused("transfer", p.record_lsn, e);
                 return 0;
             }
         }
@@ -172,12 +169,7 @@ impl CoreLoop {
                 now_ms: p.now_ms,
                 surrogate: nodedb_types::Surrogate::new(surrogate),
             }) {
-                self.replay_record_unapplied(
-                    "kv",
-                    "transfer_identity",
-                    p.record_lsn,
-                    &e.to_string(),
-                );
+                self.replay_kv_write_refused("transfer", p.record_lsn, e);
                 return 0;
             }
         }
@@ -245,15 +237,16 @@ impl CoreLoop {
             }
         };
 
-        // The moved row is bound before the source row is deleted.
+        // The moved row is bound and within the row limit before the source
+        // row is deleted.
         let surrogate = nodedb_types::Surrogate::new(p.surrogate);
-        if let Err(e) = crate::engine::kv::UnboundKvWrite::check(p.dest_collection, surrogate) {
-            self.replay_record_unapplied(
-                "kv",
-                "transfer_item_identity",
-                p.record_lsn,
-                &e.to_string(),
-            );
+        if let Err(e) = crate::engine::kv::KvWriteRefusal::check(
+            p.dest_collection,
+            p.dest_key,
+            &dest_data,
+            surrogate,
+        ) {
+            self.replay_kv_write_refused("transfer_item", p.record_lsn, e);
             return (0, 0);
         }
         self.kv_engine.delete(
@@ -273,12 +266,7 @@ impl CoreLoop {
             now_ms: p.now_ms,
             surrogate,
         }) {
-            self.replay_record_unapplied(
-                "kv",
-                "transfer_item_identity",
-                p.record_lsn,
-                &e.to_string(),
-            );
+            self.replay_kv_write_refused("transfer_item", p.record_lsn, e);
             return (0, 0);
         }
 
@@ -441,12 +429,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

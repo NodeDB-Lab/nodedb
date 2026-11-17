@@ -122,6 +122,30 @@ fn require_list_index(value: Option<u64>, field_name: &str) -> crate::Result<usi
     })
 }
 
+/// The block fields of a `CrdtListInsert`: a `Value::Object`, encoded as
+/// the native object body `CrdtOp::ListInsert` carries. A missing or
+/// non-object value is refused.
+fn require_list_block(fields: &TextFields) -> crate::Result<Vec<u8>> {
+    match fields.list_fields.as_ref() {
+        Some(nodedb_types::Value::Object(block)) => {
+            nodedb_physical::physical_plan::encode_fields_body(block).map_err(|e| {
+                crate::Error::BadRequest {
+                    detail: e.to_string(),
+                }
+            })
+        }
+        Some(other) => Err(crate::Error::BadRequest {
+            detail: format!(
+                "'list_fields' holds {}, expected an object",
+                other.type_name()
+            ),
+        }),
+        None => Err(crate::Error::BadRequest {
+            detail: "missing 'list_fields'".to_string(),
+        }),
+    }
+}
+
 pub(crate) async fn build_list_insert(
     ctx: &DispatchCtx<'_>,
     fields: &TextFields,
@@ -130,14 +154,7 @@ pub(crate) async fn build_list_insert(
     let document_id = require_doc_id(fields)?;
     let list_path = require_list_path(fields)?;
     let index = require_list_index(fields.list_index, "list_index")?;
-    let fields_json =
-        fields
-            .list_fields_json
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: "missing 'list_fields_json'".to_string(),
-            })?;
+    let block = require_list_block(fields)?;
 
     let surrogate =
         super::helpers::assign_surrogate(ctx, collection, document_id.as_bytes()).await?;
@@ -147,7 +164,7 @@ pub(crate) async fn build_list_insert(
         document_id,
         list_path,
         index,
-        fields_json,
+        fields: block,
         surrogate,
     }))
 }
@@ -206,7 +223,19 @@ mod tests {
             document_id: Some("doc-1".to_string()),
             list_path: Some("items".to_string()),
             list_index: Some(3),
-            list_fields_json: Some(r#"{"title":"hello"}"#.to_string()),
+            list_fields: Some(nodedb_types::Value::Object(
+                [
+                    (
+                        "title".to_string(),
+                        nodedb_types::Value::String("hello".into()),
+                    ),
+                    (
+                        "price".to_string(),
+                        nodedb_types::Value::Decimal("12.50".parse().unwrap()),
+                    ),
+                ]
+                .into(),
+            )),
             ..Default::default()
         }
     }
@@ -248,7 +277,15 @@ mod tests {
         let document_id = require_doc_id(&fields).unwrap();
         let list_path = require_list_path(&fields).unwrap();
         let index = require_list_index(fields.list_index, "list_index").unwrap();
-        let fields_json = fields.list_fields_json.clone().unwrap();
+        let block = require_list_block(&fields).unwrap();
+        let Some(nodedb_types::Value::Object(sent)) = fields.list_fields.clone() else {
+            panic!("the request carries an object");
+        };
+        assert_eq!(
+            nodedb_physical::physical_plan::decode_fields_body(&block).expect("block decodes"),
+            sent,
+            "the block body keeps every field typed"
+        );
 
         let surrogate = Surrogate::new(42);
         let plan = PhysicalPlan::Crdt(CrdtOp::ListInsert {
@@ -256,7 +293,7 @@ mod tests {
             document_id: document_id.clone(),
             list_path: list_path.clone(),
             index,
-            fields_json: fields_json.clone(),
+            fields: block.clone(),
             surrogate,
         });
 
@@ -265,7 +302,7 @@ mod tests {
             document_id: got_document_id,
             list_path: got_list_path,
             index: got_index,
-            fields_json: got_fields_json,
+            fields: got_block,
             surrogate: got_surrogate,
         }) = plan
         else {
@@ -275,8 +312,23 @@ mod tests {
         assert_eq!(got_document_id, document_id);
         assert_eq!(got_list_path, list_path);
         assert_eq!(got_index, index);
-        assert_eq!(got_fields_json, fields_json);
+        assert_eq!(got_block, block);
         assert_eq!(got_surrogate, surrogate);
+    }
+
+    #[test]
+    fn list_insert_refuses_missing_or_non_object_fields() {
+        let mut fields = list_insert_fields();
+        fields.list_fields = Some(nodedb_types::Value::Integer(1));
+        assert!(matches!(
+            require_list_block(&fields),
+            Err(crate::Error::BadRequest { .. })
+        ));
+        fields.list_fields = None;
+        assert!(matches!(
+            require_list_block(&fields),
+            Err(crate::Error::BadRequest { .. })
+        ));
     }
 
     #[test]

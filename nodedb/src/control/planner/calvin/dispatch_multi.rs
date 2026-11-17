@@ -19,6 +19,7 @@
 //! route that case through their own OLLP path.
 
 use crate::bridge::envelope::Response;
+use crate::control::planner::calvin::single_vshard_route::single_vshard_commits_through_calvin;
 use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, build_single_vshard_tx_class,
     classify_dispatch, read_vshards_of, submit_calvin_routed,
@@ -181,7 +182,8 @@ fn admit_legacy_multi_shard_dispatch(
 /// Drive the authorized strict Calvin multi-shard path.
 ///
 /// This API serves multi-shard dispatch, and a one-vShard autocommit set that
-/// holds settlement reads. Its strict branch delegates to
+/// holds settlement reads or carries a `RETURNING` contract. Its strict
+/// branch delegates to
 /// [`dispatch_strict_atomic_tasks_to_calvin`], while multi-shard best-effort
 /// remains rejected because this helper has no non-atomic dispatch
 /// implementation.
@@ -206,7 +208,6 @@ pub async fn dispatch_authorized_tasks_to_calvin(
         .into_iter()
         .map(|task| task.into_physical_task())
         .collect();
-    super::settling_writes::refuse_several_returning_tasks(&tasks)?;
     let read_vshards = read_vshards_of(reads)?;
     match classify_dispatch(&tasks, &read_vshards) {
         DispatchClass::MultiShard { .. } => {
@@ -222,11 +223,8 @@ pub async fn dispatch_authorized_tasks_to_calvin(
             )
             .await
         }
-        // A zero-net settlement ships no task, so its set can hold one vShard.
-        // Its reads still guard the balance, so it commits through the
-        // scheduler in every cross-shard mode.
         DispatchClass::SingleShard { .. }
-            if !reads.is_empty() && position == TxnDispatchPosition::Autocommit =>
+            if single_vshard_commits_through_calvin(&tasks, reads, position) =>
         {
             dispatch_strict_atomic_tasks_to_calvin(
                 state,
@@ -271,6 +269,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

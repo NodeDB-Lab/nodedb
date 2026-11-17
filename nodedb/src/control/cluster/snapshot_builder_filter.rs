@@ -4,18 +4,62 @@
 //! which node labels and which PK→surrogate binds have a home in the target
 //! group.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use nodedb_types::id::DatabaseId;
 
 use crate::Error;
 use crate::control::backup::snapshot_keys::{StoredRecord, homes_of_stored};
+use crate::control::security::catalog::SystemCatalog;
 use crate::types::{
-    HomedRecord, NodeLabelVersionEntry, NodeLabelsEntry, RecordHomes, TenantDataSnapshot,
+    HomedRecord, NodeLabelVersionEntry, NodeLabelsEntry, RecordHomes, SurrogateBindEntry,
+    TenantDataSnapshot, TenantId,
 };
 
 /// The number of edge-key characters an unparseable-key error carries.
 pub(crate) const EDGE_KEY_PREFIX_CHARS: usize = 32;
+
+/// Capture the PK→surrogate binds with a home in the target group, for
+/// every active collection of each tenant in `tenants`, in every database.
+///
+/// A bind homes on its collection's vShard and, in an edge-bearing
+/// collection, on the key vShard of its key, where a live edge write binds
+/// an endpoint. A group whose vShards hold an endpoint therefore ships
+/// that endpoint's bind even when the collection homes elsewhere.
+pub(crate) fn push_group_surrogates(
+    catalog: &SystemCatalog,
+    tenants: &BTreeMap<u64, BTreeSet<u64>>,
+    group_vshards: &HashSet<u32>,
+    merged: &mut TenantDataSnapshot,
+) -> Result<(), Error> {
+    let collections = catalog.load_all_collections_across_databases()?;
+    for coll in collections
+        .iter()
+        .filter(|c| c.is_active && tenants.contains_key(&c.tenant_id))
+    {
+        let key = nodedb_types::CollectionKey::from_bare(coll.database_id, &coll.name);
+        let holds_edges = coll.has_implicit_edges;
+        // Without edges every bind homes on the collection's vShard.
+        if !holds_edges && !group_vshards.contains(&key.vshard().as_u32()) {
+            continue;
+        }
+        let bindings =
+            catalog.scan_surrogates_for_collection(key, TenantId::new(coll.tenant_id))?;
+        for (pk, surrogate) in bindings {
+            if !bind_in_group(key, &pk, holds_edges, group_vshards) {
+                continue;
+            }
+            merged.surrogate_pk.push(SurrogateBindEntry {
+                database_id: coll.database_id.as_u64(),
+                tenant_id: coll.tenant_id,
+                collection: coll.name.clone(),
+                pk,
+                surrogate: surrogate.as_u32(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Whether the bind of `pk` in `collection` has a home in `group_vshards`.
 pub(crate) fn bind_in_group(

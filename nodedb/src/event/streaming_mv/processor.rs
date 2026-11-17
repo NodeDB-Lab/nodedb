@@ -27,10 +27,18 @@ pub fn process_write_event_for_mvs(event: &WriteEvent, registry: &MvRegistry, st
     if mv_states.is_empty() {
         return;
     }
+    // The view reads the CDC event's bare collection name, as the stream's
+    // buffered events carry it for backfill.
+    let Some(collection) =
+        event.routed_collection(crate::event::unrouted::UnroutedConsumer::StreamingMv)
+    else {
+        return;
+    };
 
     // Deserialize new_value for field extraction.
+    // A native body reads as the plain body of the same values.
     let new_value: Option<serde_json::Value> = event.new_value.as_ref().and_then(|bytes| {
-        nodedb_types::json_from_msgpack(bytes)
+        crate::data::executor::response_codec::decode_body_plain_json(bytes)
             .ok()
             .or_else(|| sonic_rs::from_slice(bytes).ok())
     });
@@ -41,7 +49,7 @@ pub fn process_write_event_for_mvs(event: &WriteEvent, registry: &MvRegistry, st
     let cdc_event = CdcEvent {
         sequence: event.sequence,
         partition: event.vshard_id.as_u32(),
-        collection: event.collection.to_string(),
+        collection: collection.to_string(),
         op: op_str,
         row_id: event.row_id.as_str().to_string(),
         event_time: 0,
@@ -353,5 +361,41 @@ mod tests {
 
         let update_row = results.iter().find(|(k, _)| k == "UPDATE").unwrap();
         assert_eq!(update_row.1[0].1, Value::Integer(1)); // COUNT = 1
+    }
+
+    /// A write event in a non-default database names its collection
+    /// qualified. The view reads the bare name, as a stream's buffered event
+    /// carries it.
+    #[test]
+    fn a_non_default_database_write_groups_by_the_bare_collection() {
+        let db = crate::types::DatabaseId::new(7);
+        let registry = MvRegistry::new();
+        registry.register(crate::event::streaming_mv::types::StreamingMvDef {
+            database_id: db,
+            tenant_id: 1,
+            name: "per_collection".into(),
+            source_stream: "orders_stream".into(),
+            group_by_columns: vec!["collection".into()],
+            aggregates: vec![AggDef {
+                output_name: "cnt".into(),
+                function: AggFunction::Count,
+                input_expr: String::new(),
+            }],
+            filter_expr: None,
+            owner: "admin".into(),
+            created_at: 0,
+        });
+
+        let event = crate::event::test_utils::write_event_in(db, "orders");
+        assert_eq!(event.collection.as_ref(), "7/orders");
+        process_write_event_for_mvs(&event, &registry, "orders_stream");
+
+        let results = registry
+            .get_state(db, 1, "per_collection")
+            .expect("view state")
+            .read_results()
+            .expect("view results");
+        assert!(results.iter().any(|(key, _)| key == "orders"));
+        assert!(!results.iter().any(|(key, _)| key.contains('/')));
     }
 }

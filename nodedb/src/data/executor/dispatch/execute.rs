@@ -4,6 +4,7 @@
 //! and delegates to the appropriate per-engine sub-dispatcher.
 
 use crate::bridge::envelope::Response;
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::super::core_loop::CoreLoop;
@@ -24,7 +25,16 @@ impl CoreLoop {
     /// pressure is refused before it changes anything. Every write recharges
     /// its tenant's index charges before it answers, so the governor holds
     /// each index's exact bytes after every write.
+    #[cfg(test)]
     pub(in crate::data::executor) fn execute(&mut self, task: &ExecutionTask) -> Response {
+        self.execute_with_journal(task, None)
+    }
+
+    pub(in crate::data::executor) fn execute_with_journal(
+        &mut self,
+        task: &ExecutionTask,
+        permit: Option<RootJournalPermit>,
+    ) -> Response {
         if let Some(refusal) = self.index_pressure_refusal(task) {
             return refusal;
         }
@@ -33,7 +43,13 @@ impl CoreLoop {
             self.observe_bitemporal_ordinal(ordinal);
         }
         let previous = std::mem::replace(&mut self.apply_scope.replicated_ordinal, carried);
-        let response = self.execute_plan(task, task.plan());
+        // A task that carries a WAL LSN applies a journaled record.
+        let journaled = self.apply_scope.journaled || task.wal_lsn.is_some();
+        let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, journaled);
+        let previous_schemas = std::mem::take(self.apply_scope.storage_schemas.get_mut());
+        let response = self.execute_plan_with_journal(task, task.plan(), permit);
+        *self.apply_scope.storage_schemas.get_mut() = previous_schemas;
+        self.apply_scope.journaled = previous_journaled;
         self.apply_scope.replicated_ordinal = previous;
         if !task.request.admission.is_exempt_as_read() {
             self.recharge_tenant_indexes(task.request.database_id, task.request.tenant_id);
@@ -47,11 +63,21 @@ impl CoreLoop {
         task: &ExecutionTask,
         plan: &PhysicalPlan,
     ) -> Response {
+        self.execute_plan_with_journal(task, plan, None)
+    }
+
+    fn execute_plan_with_journal(
+        &mut self,
+        task: &ExecutionTask,
+        plan: &PhysicalPlan,
+        permit: Option<RootJournalPermit>,
+    ) -> Response {
         let tid = task.request.tenant_id.as_u64();
         let mut v = visitor::DataPlaneVisitor {
             core_loop: self,
             task,
             tid,
+            permit,
         };
         match nodedb_physical::dispatch(&mut v, plan) {
             Ok(response) => response,

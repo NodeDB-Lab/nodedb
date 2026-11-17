@@ -110,8 +110,11 @@ impl CoreLoop {
             UndoEntry::MarkNodeDeleted { .. } => self.apply_undo_mark_node(entry_index, entry),
             UndoEntry::SpatialRow(undo) => self.apply_undo_spatial_row(entry_index, *undo),
             UndoEntry::VectorWrite(undo) => self.apply_undo_vector_write(entry_index, *undo),
+            UndoEntry::VectorPayloadRows(undo) => {
+                self.apply_undo_vector_payload_rows(*undo);
+                Ok(())
+            }
             UndoEntry::CrdtCollection(undo) => self.apply_undo_crdt_collection(entry_index, *undo),
-            UndoEntry::CrdtRow(undo) => self.apply_undo_crdt_row(entry_index, *undo),
             UndoEntry::ArrayTiles { array_id, snapshot } => self
                 .array_engine
                 .restore_tiles(&array_id, snapshot)
@@ -333,17 +336,20 @@ mod tests {
     const PK: &str = "doc1";
     type Core = CoreLoop;
 
-    /// Register the collection config (secondary index on `status`) and the
-    /// schemaless vector params (field `emb`) so `apply_point_put` exercises every
-    /// side-effect path.
+    /// Register the collection config (secondary index and full-text index on
+    /// `status`) and the schemaless vector params (field `emb`) so
+    /// `apply_point_put` exercises every side-effect path.
     fn register(core: &mut Core) {
+        let mut config = CollectionConfig::new(COLL).with_index("status");
+        config.text_fields =
+            nodedb_physical::physical_plan::TextFieldSet::all_readable(vec!["status".to_string()]);
         core.doc_configs.insert(
             (
                 nodedb_types::DatabaseId::new(DB),
                 TenantId::new(TID),
                 COLL.to_string(),
             ),
-            CollectionConfig::new(COLL).with_index("status"),
+            config,
         );
         core.vector_params.insert(
             (

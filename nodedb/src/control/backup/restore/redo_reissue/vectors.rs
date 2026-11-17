@@ -11,8 +11,13 @@
 //! installs each at its span. A RESTORE never truncates the destination: a
 //! row the backup does not hold keeps its nodes.
 //!
-//! A row the backup binds to a primary key re-issues under the destination's
-//! surrogate of that key. One it does not bind keeps the backup's surrogate.
+//! A row re-issues under the destination's surrogate of the key the backup
+//! carries for its backed-up surrogate: a bind, or a document identity. A
+//! row with no carried key takes a fresh surrogate (`super::row_keys`).
+//!
+//! A row of a vector-primary collection's primary index carries every
+//! version of its sidecar in the same sub-record (`sidecars`), so one
+//! install writes the row's nodes and its sidecar together.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -23,15 +28,21 @@ use nodedb_wal::record::RecordType;
 use crate::Error;
 use crate::control::state::SharedState;
 use crate::control::surrogate::CarriedIdentity;
-use crate::types::{SurrogateBindEntry, TenantId, TraceId, VectorIndexHistory};
-use crate::wal::{RedoSubRecord, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo};
+use crate::types::{TenantId, VectorIndexHistory};
+use crate::wal::{
+    RedoSubRecord, VectorRestoreIndex, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo,
+    VectorSidecarVersion,
+};
 
+use super::super::bind_conflicts::CarriedBind;
 use super::super::target::{DatabaseTarget, RestoredName};
 use super::super::vector_reissue::split_vector_coll_key;
 use super::commit::commit_collection;
+use super::row_keys::{RowKey, destination_keys};
+use super::sidecars::{CollectionSidecars, RestoredSidecars};
 use super::units::{CollectionUnits, RowUnit};
 
-/// Every node of one backed-up row.
+/// Every node of one backed-up row, and every version of its sidecar.
 #[derive(Debug, Default, PartialEq)]
 struct RowNodes {
     /// The live vectors, in node order.
@@ -41,6 +52,19 @@ struct RowNodes {
     live_from: i64,
     /// Every ended node, ascending by `sys_from`.
     ended: Vec<VectorRestoreNode>,
+    /// Every sidecar version, ascending by `sys_from`. Empty for a row of
+    /// an index that is no vector-primary collection's primary index.
+    sidecar: Vec<VectorSidecarVersion>,
+}
+
+impl RowNodes {
+    /// A row the backup holds no node of.
+    fn empty() -> Self {
+        Self {
+            live_from: i64::MIN,
+            ..Self::default()
+        }
+    }
 }
 
 /// One index's backed-up rows by surrogate, with its dimension.
@@ -70,10 +94,7 @@ fn index_rows(
             });
         };
         dim = vector.len();
-        let row = rows.entry(surrogate).or_insert_with(|| RowNodes {
-            live_from: i64::MIN,
-            ..RowNodes::default()
-        });
+        let row = rows.entry(surrogate).or_insert_with(RowNodes::empty);
         row.live_from = row
             .live_from
             .max(starts.get(&node_id).copied().unwrap_or(i64::MIN));
@@ -84,10 +105,7 @@ fn index_rows(
             continue;
         }
         dim = node.vector.len();
-        let row = rows.entry(node.surrogate).or_insert_with(|| RowNodes {
-            live_from: i64::MIN,
-            ..RowNodes::default()
-        });
+        let row = rows.entry(node.surrogate).or_insert_with(RowNodes::empty);
         row.ended.push(VectorRestoreNode {
             vector: node.vector,
             sys_from: node.sys_from,
@@ -107,14 +125,37 @@ struct RowTarget<'a> {
     dim: usize,
     multi: bool,
     vector_primary: bool,
+    primary_index: Option<&'a VectorRestoreIndex>,
+}
+
+/// The key each row of `rows` binds, with the row, in backed-up surrogate
+/// order: the key `pks` names for its surrogate, else [`RowKey::Keyless`].
+///
+/// `pks` maps a backed-up surrogate to the key the backup carries for it: a
+/// surrogate bind, or the identity of a backed-up document stored under it.
+/// Every row holds a node or a sidecar version that a read at some system
+/// time finds, so a keyless row still re-issues.
+fn row_keys(
+    rows: BTreeMap<Surrogate, RowNodes>,
+    pks: &HashMap<u32, &[u8]>,
+) -> Vec<(RowKey, (Surrogate, RowNodes))> {
+    rows.into_iter()
+        .map(|(surrogate, nodes)| {
+            let key = match pks.get(&surrogate.as_u32()) {
+                Some(pk) => RowKey::Carried(pk.to_vec()),
+                None => RowKey::Keyless,
+            };
+            (key, (surrogate, nodes))
+        })
+        .collect()
 }
 
 /// The unit one restored row re-issues as, under `surrogate` in the
-/// destination. `pk` is the primary key the backup binds the row to.
+/// destination. `pk` is the key the unit binds to `surrogate`.
 fn row_unit(
     target: &RowTarget<'_>,
     surrogate: Surrogate,
-    pk: Option<&[u8]>,
+    pk: &[u8],
     nodes: RowNodes,
 ) -> crate::Result<RowUnit> {
     let stored = target.name.stored.as_str().to_string();
@@ -138,6 +179,9 @@ fn row_unit(
         // The resolve names it from the destination's state.
         end_live_at: None,
         vector_primary: target.vector_primary,
+        sidecar: nodes.sidecar,
+        primary_index: target.primary_index.cloned(),
+        clone_copy_at: None,
     }
     .encode()?;
     Ok(RowUnit {
@@ -145,14 +189,11 @@ fn row_unit(
             record_type: RecordType::VectorPut as u32,
             payload,
         }],
-        identities: pk
-            .map(|pk| CarriedIdentity {
-                collection: target.name.bare.clone(),
-                pk_bytes: pk.to_vec(),
-                surrogate,
-            })
-            .into_iter()
-            .collect(),
+        identities: vec![CarriedIdentity {
+            collection: target.name.bare.clone(),
+            pk_bytes: pk.to_vec(),
+            surrogate,
+        }],
         changes: Vec::new(),
         rows: Vec::new(),
         kv_keys: Vec::new(),
@@ -161,29 +202,164 @@ fn row_unit(
             collection: stored,
             surrogate: surrogate.as_u32(),
         }],
+        synced_text: Vec::new(),
         timeseries: Vec::new(),
     })
 }
 
 /// The backed-up indexes of one database: their live nodes, history and
-/// multi-vector documents, each keyed `"{db}:{tid}:{coll_key}"`.
+/// multi-vector documents, each keyed `"{db}:{tid}:{coll_key}"`, and the
+/// sidecar rows of every vector-primary collection.
 pub(in crate::control::backup::restore) struct BackedUpVectors {
     pub vectors: Vec<(String, Vec<u8>)>,
     pub history: Vec<(String, Vec<u8>)>,
     pub multi_documents: Vec<(String, Vec<Surrogate>)>,
+    pub sidecars: RestoredSidecars,
+}
+
+/// One index's backed-up rows, with where they install.
+struct IndexReissue<'a> {
+    name: &'a RestoredName,
+    field_name: &'a str,
+    rows: BTreeMap<Surrogate, RowNodes>,
+    dim: usize,
+    /// The rows that are multi-vector documents.
+    multi: HashSet<Surrogate>,
+    vector_primary: bool,
+    /// The primary index settings, when the index is a vector-primary
+    /// collection's primary index.
+    primary_index: Option<VectorRestoreIndex>,
+}
+
+/// The primary index of a vector-primary collection, as its catalog entry
+/// declares it.
+struct PrimaryIndex {
+    field: String,
+    dim: usize,
+    settings: VectorRestoreIndex,
+}
+
+/// What the catalog says of one restored collection's vector rows.
+struct CollectionVectors {
+    vector_primary: bool,
+    /// The primary index, for a vector-primary collection.
+    primary_index: Option<PrimaryIndex>,
+}
+
+fn collection_vectors(
+    state: &SharedState,
+    target: DatabaseTarget,
+    tenant_id: u64,
+    bare: &str,
+) -> crate::Result<CollectionVectors> {
+    let stored = state
+        .credentials
+        .catalog()
+        .get_collection(target.dest, tenant_id, bare)?;
+    let vector_primary = stored
+        .as_ref()
+        .is_some_and(|stored| matches!(stored.primary, nodedb_types::PrimaryEngine::Vector));
+    let primary_index = stored
+        .and_then(|stored| stored.vector_primary)
+        .filter(|_| vector_primary)
+        .map(|config| PrimaryIndex {
+            field: config.vector_field,
+            dim: config.dim as usize,
+            settings: VectorRestoreIndex {
+                quantization: config.quantization,
+                storage_dtype: config.storage_dtype,
+                payload_indexes: config.payload_indexes,
+            },
+        });
+    Ok(CollectionVectors {
+        vector_primary,
+        primary_index,
+    })
+}
+
+/// Add each sidecar row of `sidecars` to its row of `rows`. A row the
+/// backup holds no node of installs its sidecar alone.
+fn join_sidecars(rows: &mut BTreeMap<Surrogate, RowNodes>, sidecars: CollectionSidecars) {
+    for (surrogate, versions) in sidecars {
+        rows.entry(surrogate)
+            .or_insert_with(RowNodes::empty)
+            .sidecar = versions;
+    }
+}
+
+/// Re-issue one index's rows as one Calvin transaction per batch. Returns
+/// the number of vectors re-issued.
+async fn reissue_index(
+    state: &SharedState,
+    tenant_id: u64,
+    target: DatabaseTarget,
+    carried: &[CarriedBind],
+    index: IndexReissue<'_>,
+) -> Result<usize, Error> {
+    let IndexReissue {
+        name,
+        field_name,
+        rows,
+        dim,
+        multi,
+        vector_primary,
+        primary_index,
+    } = index;
+    let pks: HashMap<u32, &[u8]> = carried
+        .iter()
+        .filter(|bind| bind.collection == name.bare)
+        .map(|bind| (bind.surrogate, bind.pk.as_slice()))
+        .collect();
+    let (keys, rows): (Vec<RowKey>, Vec<(Surrogate, RowNodes)>) =
+        row_keys(rows, &pks).into_iter().unzip();
+    let bound = destination_keys(
+        state,
+        name.key(target.dest),
+        TenantId::new(tenant_id),
+        &name.bare,
+        &keys,
+    )
+    .await?;
+
+    let mut reissued = 0usize;
+    let mut units = Vec::with_capacity(rows.len());
+    for ((surrogate, pk), (backed_up_surrogate, nodes)) in bound.into_iter().zip(rows) {
+        reissued += nodes.live.len();
+        let row_target = RowTarget {
+            name,
+            field_name,
+            dim,
+            multi: multi.contains(&backed_up_surrogate),
+            vector_primary,
+            primary_index: primary_index.as_ref(),
+        };
+        units.push(row_unit(&row_target, surrogate, &pk, nodes)?);
+    }
+    let collection_units = CollectionUnits::rows(target.dest, name.bare.clone(), units);
+    commit_collection(
+        state,
+        TenantId::new(tenant_id),
+        target.mark(),
+        collection_units,
+    )
+    .await?;
+    Ok(reissued)
 }
 
 /// Decode and re-issue every restored vector row of one database, one
-/// Calvin transaction per batch of rows. `binds` are the backup's surrogate
-/// binds. Returns the number of vectors re-issued.
+/// Calvin transaction per batch of rows. `carried` names the key of each
+/// backed-up surrogate: the backup's surrogate binds and the identities of
+/// its documents. Each vector-primary row's sidecar re-issues with its
+/// nodes, in the unit of its collection's primary index. Returns the number
+/// of vectors re-issued.
 pub(in crate::control::backup::restore) async fn reissue_vector_rows(
     state: &SharedState,
     tenant_id: u64,
     target: DatabaseTarget,
     backed_up: BackedUpVectors,
-    binds: &[SurrogateBindEntry],
+    carried: &[CarriedBind],
 ) -> Result<usize, Error> {
-    let tenant = TenantId::new(tenant_id);
+    let mut sidecars = backed_up.sidecars;
     let mut history: HashMap<String, Vec<u8>> = backed_up.history.into_iter().collect();
     let mut reissued = 0usize;
     for (entry_key, bytes) in backed_up.vectors {
@@ -208,73 +384,77 @@ pub(in crate::control::backup::restore) async fn reissue_vector_rows(
             })?,
             None => VectorIndexHistory::default(),
         };
-        let IndexRows { rows, dim } = index_rows(vectors, index_history)?;
+        let IndexRows { mut rows, dim } = index_rows(vectors, index_history)?;
+        let catalog = collection_vectors(state, target, tenant_id, &name.bare)?;
+        let primary = catalog
+            .primary_index
+            .filter(|primary| primary.field == field_name);
+        if primary.is_some() {
+            join_sidecars(&mut rows, sidecars.take(&name.bare));
+        }
         if rows.is_empty() {
             continue;
         }
+        // An index whose every row is a sidecar alone takes the dimension
+        // the collection declares.
+        let dim = match (&primary, dim) {
+            (Some(primary), 0) => primary.dim,
+            _ => dim,
+        };
         let multi: HashSet<Surrogate> = backed_up
             .multi_documents
             .iter()
             .filter(|(members_key, _)| *members_key == entry_key)
             .flat_map(|(_, documents)| documents.iter().copied())
             .collect();
-
-        let pks: HashMap<u32, &[u8]> = binds
-            .iter()
-            .filter(|bind| bind.tenant_id == tenant_id && bind.collection == name.bare)
-            .map(|bind| (bind.surrogate, bind.pk.as_slice()))
-            .collect();
-        let bound: Vec<&[u8]> = rows
-            .keys()
-            .filter_map(|surrogate| pks.get(&surrogate.as_u32()).copied())
-            .collect();
-        let assigned = if bound.is_empty() {
-            Vec::new()
-        } else {
-            crate::control::server::surrogate_exchange::assign_surrogates_routed(
-                state,
-                name.key(target.dest),
-                tenant,
-                &bound,
-                TraceId::ZERO,
-            )
-            .await?
-        };
-        if assigned.len() != bound.len() {
-            return Err(Error::Internal {
-                detail: format!(
-                    "restore of vector index '{}' bound {} of {} rows",
-                    name.bare,
-                    assigned.len(),
-                    bound.len()
-                ),
-            });
-        }
-        let dest: HashMap<&[u8], Surrogate> = bound.into_iter().zip(assigned).collect();
-        let vector_primary = state
-            .credentials
-            .catalog()
-            .get_collection(target.dest, tenant_id, &name.bare)?
-            .is_some_and(|stored| matches!(stored.primary, nodedb_types::PrimaryEngine::Vector));
-
-        let mut units = Vec::with_capacity(rows.len());
-        for (backed_up_surrogate, nodes) in rows {
-            reissued += nodes.live.len();
-            let pk = pks.get(&backed_up_surrogate.as_u32()).copied();
-            let surrogate = pk
-                .and_then(|pk| dest.get(pk).copied())
-                .unwrap_or(backed_up_surrogate);
-            let row_target = RowTarget {
+        reissued += reissue_index(
+            state,
+            tenant_id,
+            target,
+            carried,
+            IndexReissue {
                 name: &name,
                 field_name,
+                rows,
                 dim,
-                multi: multi.contains(&backed_up_surrogate),
-                vector_primary,
-            };
-            units.push(row_unit(&row_target, surrogate, pk, nodes)?);
-        }
-        let collection_units = CollectionUnits::rows(target.dest, name.bare.clone(), units);
-        commit_collection(state, tenant, target.mark(), collection_units).await?;
+                multi,
+                vector_primary: catalog.vector_primary,
+                primary_index: primary.map(|primary| primary.settings),
+            },
+        )
+        .await?;
+    }
+    // A vector-primary collection the backup holds no index entry of
+    // re-issues its sidecar rows under its primary index.
+    for (name, collection_sidecars) in sidecars.into_remaining() {
+        let catalog = collection_vectors(state, target, tenant_id, &name.bare)?;
+        let Some(primary) = catalog.primary_index else {
+            return Err(Error::Internal {
+                detail: format!(
+                    "restore: the backup holds sidecar rows of '{}', which the catalog does \
+                     not declare vector-primary",
+                    name.bare
+                ),
+            });
+        };
+        let mut rows = BTreeMap::new();
+        join_sidecars(&mut rows, collection_sidecars);
+        reissued += reissue_index(
+            state,
+            tenant_id,
+            target,
+            carried,
+            IndexReissue {
+                name: &name,
+                field_name: &primary.field,
+                rows,
+                dim: primary.dim,
+                multi: HashSet::new(),
+                vector_primary: catalog.vector_primary,
+                primary_index: Some(primary.settings),
+            },
+        )
+        .await?;
     }
     Ok(reissued)
 }
@@ -322,5 +502,29 @@ mod tests {
     #[test]
     fn an_unbound_node_fails_the_group() {
         assert!(index_rows(vec![(0, vec![1.0], None)], VectorIndexHistory::default()).is_err());
+    }
+
+    /// A row with a carried key binds it. A row with none, ended nodes only
+    /// included, is kept for a fresh surrogate: an AS OF read finds it.
+    #[test]
+    fn a_row_binds_its_carried_key_or_takes_a_fresh_surrogate() {
+        let ended_only = RowNodes {
+            ended: vec![VectorRestoreNode {
+                vector: vec![1.0],
+                sys_from: 5,
+                sys_to: 8,
+            }],
+            ..RowNodes::empty()
+        };
+        let rows = BTreeMap::from([
+            (Surrogate::new(3), RowNodes::empty()),
+            (Surrogate::new(4), ended_only),
+        ]);
+        let pks: HashMap<u32, &[u8]> = [(3, b"doc-3".as_slice())].into_iter().collect();
+        let keyed = row_keys(rows, &pks);
+        assert_eq!(keyed.len(), 2);
+        assert_eq!(keyed[0].0, RowKey::Carried(b"doc-3".to_vec()));
+        assert_eq!(keyed[1].0, RowKey::Keyless);
+        assert_eq!((keyed[1].1).0, Surrogate::new(4));
     }
 }

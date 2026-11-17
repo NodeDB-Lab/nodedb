@@ -47,9 +47,9 @@ pub(super) fn apply_text(ctx: &PermCtx<'_>, op: &mut TextOp) -> crate::Result<()
         // removes the row's searchable presence.
         TextOp::FtsDeleteDoc { collection, .. } => ctx.authorize(collection, PermTreeLevel::Delete),
 
-        // No-op: per-collection analyzer configuration is DDL over the index,
-        // not an operation on rows.
-        TextOp::SetTextConfig { .. } => Ok(()),
+        // No-op: per-collection analyzer configuration and an index rebuild
+        // are DDL over the index, not operations on rows.
+        TextOp::SetTextConfig { .. } | TextOp::RebuildIndex { .. } => Ok(()),
     }
 }
 

@@ -295,6 +295,18 @@ impl CoreLoop {
             Ok(bytes) => bytes,
             Err(e) => return self.response_error(task, e),
         };
+        // The row, a patched one included, is held to the row image limit
+        // before the stored row is removed.
+        if let Err(e) = crate::data::executor::row_image_native::check_vector_row(
+            collection,
+            || surrogate.as_u32().to_string(),
+            field,
+            vector.len(),
+            &fields,
+            sidecar.len(),
+        ) {
+            return self.response_error(task, e);
+        }
 
         if existing
             && let Err(e) = self.remove_vector_direct_row(&index_key, tid, collection, surrogate)
@@ -369,12 +381,14 @@ mod tests {
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(
-            0,
-            req_rx,
-            resp_tx,
-            dir.path(),
-            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
-            crate::data::executor::core_loop::test_governor(),
+            crate::data::executor::core_loop::CoreOpenParams::unencrypted(
+                0,
+                req_rx,
+                resp_tx,
+                dir.path(),
+                std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+                crate::data::executor::core_loop::test_governor(),
+            ),
         )
         .expect("open core");
         CoreHarness {

@@ -233,6 +233,10 @@ async fn ndjson_at_consistency(
                         lease_scope,
                         database_id,
                         meter_guard: stream_meter_guard,
+                        row_context: tasks.first().map_or(
+                            crate::data::executor::response_codec::RowContext::Flat,
+                            |task| crate::bridge::envelope::describe_row_context(&task.plan),
+                        ),
                     },
                     binding,
                 )))

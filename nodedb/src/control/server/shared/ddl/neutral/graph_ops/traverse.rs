@@ -17,7 +17,7 @@ use nodedb_types::filter::MetadataFilter;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::refuse_gate::RefusingReadGate;
-use super::response::payload_to_rows;
+use super::response::{payload_to_rows, value_to_rows};
 use super::support::ddl_err;
 
 /// Names the traversal family in the refusal a read policy raises: what the
@@ -184,8 +184,8 @@ pub async fn traverse(
     )
     .await?;
 
-    // Subgraph-shaped dispatcher: emits the `{nodes,edges}` JSON both clients
-    // decode. Tree DDL aggregates that only need a flat reachable set call
+    // Subgraph-shaped dispatcher: emits the typed `{nodes,edges}` object both
+    // clients decode. Tree DDL aggregates that only need a flat reachable set call
     // `cross_core_bfs_with_options` directly.
     match crate::control::server::graph_dispatch::cross_core_traverse_subgraph(
         state,
@@ -212,7 +212,7 @@ pub async fn traverse(
     )
     .await
     {
-        Ok(resp) => Ok(payload_to_rows(&resp.payload)),
+        Ok(result) => Ok(value_to_rows(result)),
         Err(e) => Err(DdlError::from_error(&e)),
     }
 }

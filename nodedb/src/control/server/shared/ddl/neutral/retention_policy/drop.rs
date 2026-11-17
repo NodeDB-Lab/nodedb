@@ -44,21 +44,15 @@ pub async fn drop_retention_policy(
     // Replicated: every node deletes the row and drops its registry entry.
     propose_delete(state, &policy_def).await?;
 
-    // Emit CRDT tombstone delta.
-    {
-        let delta = crate::event::crdt_sync::types::OutboundDelta {
-            database_id,
-            collection: super::RETENTION_POLICIES_CRDT_COLLECTION.into(),
-            document_id: name.clone(),
-            payload: Vec::new(),
-            op: crate::event::crdt_sync::types::DeltaOp::Delete,
-            lsn: 0,
-            tenant_id,
-            peer_id: state.node_id,
-            sequence: 0,
-        };
-        state.crdt_sync_delivery.enqueue(delta);
+    // Removal notice for the tenant admins' Lite sessions.
+    super::super::system_notice::SystemNotice {
+        state,
+        database_id,
+        tenant_id,
+        collection: super::RETENTION_POLICIES_CRDT_COLLECTION,
+        document_id: name.clone(),
     }
+    .delete();
 
     // Unregister auto-created continuous aggregates.
     if !policy_def.downsample_tiers().is_empty()

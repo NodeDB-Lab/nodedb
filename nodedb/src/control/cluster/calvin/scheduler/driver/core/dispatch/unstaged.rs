@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use tracing::error;
 
-use nodedb_cluster::calvin::AbortReason;
 use nodedb_cluster::calvin::types::SequencedTxn;
+use nodedb_cluster::calvin::{AbortCause, AbortReason};
 
 use super::super::owed::SchedulerProposal;
 use super::super::scheduler::Scheduler;
@@ -71,6 +71,19 @@ impl Scheduler {
         reason: AbortReason,
         stage_error: String,
     ) {
+        self.park_unstaged_with(txn, txn_id, lock_owner, reason.into(), stage_error);
+    }
+
+    /// [`Self::park_unstaged`] with an abort vote for `cause`, whose refusal
+    /// reaches the coordinator.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn park_unstaged_with(
+        &mut self,
+        txn: SequencedTxn,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+        cause: AbortCause,
+        stage_error: String,
+    ) {
         // no-determinism: dispatch time and stall deadline are observability only; the replicated verdict decides.
         let now = Instant::now();
         self.pending.insert(
@@ -91,14 +104,13 @@ impl Scheduler {
                 superseded: false,
                 gates: Vec::new(),
                 ungated: false,
+                returning: Default::default(),
             },
         );
-        self.propose_sequencer_entry(
-            txn_id,
-            SchedulerProposal::Vote {
-                abort: Some(reason.into()),
-            },
-        );
+        self.propose_sequencer_entry(txn_id, SchedulerProposal::Vote { abort: Some(cause) });
+        // A participant that follows this slice's `RETURNING` plans waits
+        // for their sequence changes.
+        self.send_sequence_refusal(txn_id);
         // The verdict can be stored already: on replay, or when a peer's
         // vote completed the tally first.
         if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(
@@ -177,7 +189,11 @@ mod tests {
                 registry.note_vote(
                     nodedb_cluster::calvin::TxnId::new(epoch, position),
                     vshard,
-                    ParticipantVote::Abort(AbortCause { reason, refusal }),
+                    ParticipantVote::Abort(AbortCause {
+                        reason,
+                        refusal,
+                        other_refusals: Vec::new(),
+                    }),
                 );
             }
         }

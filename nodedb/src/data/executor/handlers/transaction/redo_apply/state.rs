@@ -12,6 +12,9 @@
 //! decodes, routes and checks every sub-record and writes nothing. The
 //! [`RedoApplyPass::Install`] pass writes, and records the undo entries that
 //! reverse each write, so a failure part way through rolls the record back.
+//!
+//! Restart replay opens no scope. It folds only a record whose install
+//! never became durable (see `replay_fold`).
 
 use std::collections::HashMap;
 
@@ -19,10 +22,13 @@ use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::ErrorCode;
+use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_note::{KeyRepr, WriteStamp};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
+use crate::types::document_event::DocumentPutEvent;
+use crate::wal::redo::replay_arm::RedoArm;
 
 /// Committed-redo apply state owned by one core.
 pub(in crate::data::executor) struct RedoApplyState {
@@ -31,6 +37,9 @@ pub(in crate::data::executor) struct RedoApplyState {
     pub(in crate::data::executor) num_cores: usize,
     /// `Some` only while one committed redo record applies on this core.
     pub(in crate::data::executor) scope: Option<RedoApplyScope>,
+    /// Restart replay's folds of the records whose install never became
+    /// durable.
+    pub(in crate::data::executor) replay_folds: super::replay_fold::ReplayFolds,
 }
 
 impl RedoApplyState {
@@ -40,6 +49,7 @@ impl RedoApplyState {
         Self {
             num_cores: 1,
             scope: None,
+            replay_folds: Default::default(),
         }
     }
 }
@@ -50,10 +60,10 @@ pub(in crate::data::executor) struct AppliedDocWrite {
     /// The row's client identity.
     pub identity: RowIdentity,
     pub op: WriteOp,
-    /// The row as stored before this write, when the write read it.
+    /// The deleted row's stored preimage. Puts carry their public preimage in `event`.
     pub old_value: Option<Vec<u8>>,
-    /// The MessagePack body this write installed. `None` for a delete.
-    pub new_body: Option<Vec<u8>>,
+    /// The prepared public put event pair. `None` for a delete.
+    pub event: Option<DocumentPutEvent>,
     /// Whether the write emits a change event. A clone copy emits none.
     pub emits_event: bool,
 }
@@ -87,6 +97,10 @@ pub(in crate::data::executor) struct RedoApplyScope {
     /// First error any arm hit on a sub-record. The apply reports it once
     /// every arm has run.
     pub(in crate::data::executor) error: Option<ErrorCode>,
+    /// The replay step that runs now.
+    arm: RedoArm,
+    /// The replay step that recorded `error`.
+    error_arm: RedoArm,
     /// Every array the record wrote cells to.
     pub(in crate::data::executor) arrays_written: Vec<nodedb_array::types::ArrayId>,
     /// Columnar collections the install wrote, flushed once it succeeded.
@@ -113,9 +127,6 @@ pub(in crate::data::executor) struct RedoApplyScope {
 /// What one resolved timeseries batch a committed redo install stored.
 pub(in crate::data::executor) struct TsInstalled {
     pub count: crate::engine::timeseries::install_counts::TsInstallCount,
-    /// The image of each landed row as a scan reads it, in row order. Empty
-    /// when the batch carried no images.
-    pub images: Vec<Vec<u8>>,
 }
 
 /// One write note an install pass holds back until the record settles.
@@ -155,6 +166,8 @@ impl RedoApplyScope {
             doc_writes: Vec::new(),
             target_writes: Vec::new(),
             error: None,
+            arm: RedoArm::Reconstitute,
+            error_arm: RedoArm::Reconstitute,
             arrays_written: Vec::new(),
             columnar_written: Vec::new(),
             timeseries_written: Vec::new(),
@@ -228,10 +241,41 @@ impl RedoApplyScope {
             .unwrap_or_default()
     }
 
-    /// Keep the first error; a later one is a consequence of it.
+    /// Keep the first error, tagged with the step that recorded it. A later
+    /// one is a consequence of it.
     pub(in crate::data::executor) fn record_error(&mut self, error: impl Into<ErrorCode>) {
         if self.error.is_none() {
             self.error = Some(error.into());
+            self.error_arm = self.arm;
+        }
+    }
+
+    /// Take the first error with the step that recorded it. The scope then
+    /// keeps the next error a later pass over it hits.
+    pub(in crate::data::executor) fn take_arm_error(&mut self) -> Option<ArmError> {
+        self.error.take().map(|code| ArmError {
+            arm: self.error_arm,
+            code,
+        })
+    }
+}
+
+/// An error one replay step of a pass recorded, with the step.
+///
+/// The steps run in [`RedoArm`] order. So among the errors of a record's
+/// batches, the smallest `(arm, batch)` pair is the error a whole-record
+/// pass records first.
+pub(in crate::data::executor) struct ArmError {
+    pub arm: RedoArm,
+    pub code: ErrorCode,
+}
+
+impl CoreLoop {
+    /// Name the replay step that runs next. An open committed-redo scope
+    /// tags each error it records with it. Restart replay holds no scope.
+    pub(crate) fn enter_redo_arm(&mut self, arm: RedoArm) {
+        if let Some(scope) = self.redo_apply.scope.as_mut() {
+            scope.arm = arm;
         }
     }
 }
@@ -247,8 +291,8 @@ pub(in crate::data::executor) fn target_doc_write(target: &TargetWrite) -> Appli
         } else {
             WriteOp::Insert
         },
-        old_value: outcome.prior_value.clone(),
-        new_body: Some(target.body.clone()),
+        old_value: None,
+        event: Some(target.event.clone()),
         emits_event: true,
     }
 }

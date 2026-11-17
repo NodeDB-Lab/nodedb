@@ -3,6 +3,7 @@
 mod capture_arrays;
 mod capture_labels;
 mod capture_memory;
+mod capture_synced_text;
 pub mod create;
 mod departure;
 mod install_arrays;

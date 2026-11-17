@@ -8,6 +8,7 @@ use nodedb_physical::physical_plan::{CrdtOp, DocumentOp, PhysicalPlan};
 
 use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use nodedb::data::executor::core_loop::CoreLoop;
+use nodedb_test_support::tx_batch_helpers::{doc_body, doc_text};
 
 use super::helpers::*;
 
@@ -110,12 +111,13 @@ fn point_put_and_get() {
                 "docs",
             ),
             document_id: "d1".into(),
-            value: b"hello world".to_vec(),
+            value: doc_body("hello world"),
             surrogate: nodedb_types::Surrogate::new(1),
             pk_bytes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -137,7 +139,7 @@ fn point_put_and_get() {
         }),
     );
     assert_eq!(resp.status, Status::Ok);
-    assert_eq!(&*resp.payload, b"hello world");
+    assert_eq!(doc_text(&resp.payload).as_deref(), Some("hello world"));
 }
 
 #[test]
@@ -155,12 +157,13 @@ fn point_delete_removes() {
                 "docs",
             ),
             document_id: "d1".into(),
-            value: b"data".to_vec(),
+            value: doc_body("data"),
             surrogate: nodedb_types::Surrogate::new(1),
             pk_bytes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -245,6 +248,7 @@ fn range_scan_returns_results() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
     send_ok(
@@ -263,6 +267,7 @@ fn range_scan_returns_results() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -329,6 +334,7 @@ fn batch_insert_docs(
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
             deferred_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 }

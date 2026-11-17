@@ -7,8 +7,6 @@
 //! lets callers authorize a proposed merge without accepting unbounded bytes,
 //! pending causal dependencies, or an unverified sender-declared target.
 
-use std::collections::BTreeMap;
-
 use loro::LoroValue;
 use sha2::{Digest, Sha256};
 
@@ -200,14 +198,15 @@ impl CrdtState {
         } else {
             None
         };
-        let pre_image_msgpack =
-            zerompk::to_msgpack_vec(&raw_pre_image.as_ref().map(CanonicalLoroValue::from))
-                .map_err(|error| CrdtError::Loro(format!("preview pre-image encode: {error}")))?;
+        // The tagged `Value` encoding sorts object keys, so the image bytes
+        // do not depend on hash iteration order.
+        let pre_image = raw_pre_image.as_ref().map(loro_to_value).transpose()?;
+        let pre_image_msgpack = zerompk::to_msgpack_vec(&pre_image)
+            .map_err(|error| CrdtError::Loro(format!("preview pre-image encode: {error}")))?;
         let raw_post_image = fork_state.read_row(expected_collection, expected_row);
-        let post_image = raw_post_image.as_ref().map(loro_to_value);
-        let post_image_msgpack =
-            zerompk::to_msgpack_vec(&raw_post_image.as_ref().map(CanonicalLoroValue::from))
-                .map_err(|error| CrdtError::Loro(format!("preview post-image encode: {error}")))?;
+        let post_image = raw_post_image.as_ref().map(loro_to_value).transpose()?;
+        let post_image_msgpack = zerompk::to_msgpack_vec(&post_image)
+            .map_err(|error| CrdtError::Loro(format!("preview post-image encode: {error}")))?;
         if post_image_msgpack.len() > limits.max_post_image_bytes {
             return Err(CrdtError::PreviewPostImageTooLarge {
                 limit: limits.max_post_image_bytes,
@@ -224,89 +223,6 @@ impl CrdtState {
             imported_ops,
             trimmed_ops: admission.trimmed_operations(),
         })
-    }
-}
-
-/// A deterministic, recursively sorted representation for the opaque preview
-/// bytes. Loro maps and `Value::Object` use hash maps, so serializing either
-/// directly would make a byte-level post-image depend on hash iteration order.
-enum CanonicalLoroValue {
-    Null,
-    Bool(bool),
-    Integer(i64),
-    Float(f64),
-    String(String),
-    Bytes(Vec<u8>),
-    Array(Vec<CanonicalLoroValue>),
-    Object(BTreeMap<String, CanonicalLoroValue>),
-}
-
-impl zerompk::ToMessagePack for CanonicalLoroValue {
-    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        match self {
-            Self::Null => {
-                writer.write_array_len(1)?;
-                writer.write_u8(0)
-            }
-            Self::Bool(value) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(1)?;
-                writer.write_boolean(*value)
-            }
-            Self::Integer(value) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(2)?;
-                writer.write_i64(*value)
-            }
-            Self::Float(value) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(3)?;
-                writer.write_f64(*value)
-            }
-            Self::String(value) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(4)?;
-                writer.write_string(value)
-            }
-            Self::Bytes(value) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(5)?;
-                writer.write_binary(value)
-            }
-            Self::Array(values) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(6)?;
-                zerompk::ToMessagePack::write(values, writer)
-            }
-            Self::Object(values) => {
-                writer.write_array_len(2)?;
-                writer.write_u8(7)?;
-                zerompk::ToMessagePack::write(values, writer)
-            }
-        }
-    }
-}
-
-impl From<&LoroValue> for CanonicalLoroValue {
-    fn from(value: &LoroValue) -> Self {
-        match value {
-            LoroValue::Null => Self::Null,
-            LoroValue::Bool(value) => Self::Bool(*value),
-            LoroValue::I64(value) => Self::Integer(*value),
-            LoroValue::Double(value) => Self::Float(*value),
-            LoroValue::String(value) => Self::String(value.to_string()),
-            LoroValue::Binary(value) => Self::Bytes(value.to_vec()),
-            LoroValue::List(values) => Self::Array(values.iter().map(Self::from).collect()),
-            LoroValue::Map(values) => Self::Object(
-                values
-                    .iter()
-                    .map(|(key, value)| (key.to_string(), Self::from(value)))
-                    .collect(),
-            ),
-            // `loro_to_value` exposes opaque container handles as `Value::Null`.
-            // Preserve that exact public post-image semantic in canonical bytes.
-            LoroValue::Container(_) => Self::Null,
-        }
     }
 }
 
@@ -578,7 +494,7 @@ mod tests {
         assert_eq!(preview.post_image, None);
         assert_eq!(
             preview.post_image_msgpack,
-            zerompk::to_msgpack_vec(&Option::<CanonicalLoroValue>::None)
+            zerompk::to_msgpack_vec(&Option::<nodedb_types::Value>::None)
                 .expect("canonical absent image")
         );
     }
@@ -714,30 +630,37 @@ mod tests {
     }
 
     #[test]
-    fn canonical_map_encoding_sorts_keys_and_decodes_as_public_value() {
-        let mut reverse = BTreeMap::new();
-        reverse.insert("z".into(), CanonicalLoroValue::Integer(1));
-        reverse.insert("a".into(), CanonicalLoroValue::String("first".into()));
-        let canonical = CanonicalLoroValue::Object(reverse);
-        let bytes = zerompk::to_msgpack_vec(&canonical).expect("canonical map encoding");
-        let decoded: nodedb_types::Value = zerompk::from_msgpack(&bytes).expect("public decode");
-        let nodedb_types::Value::Object(fields) = decoded else {
-            panic!("canonical map must decode as public object");
+    fn post_image_bytes_do_not_depend_on_map_order() {
+        let forward = LoroValue::Map(
+            std::collections::HashMap::from([
+                ("a".to_string(), LoroValue::String("first".into())),
+                ("z".to_string(), LoroValue::I64(1)),
+            ])
+            .into(),
+        );
+        let reverse = LoroValue::Map(
+            std::collections::HashMap::from([
+                ("z".to_string(), LoroValue::I64(1)),
+                ("a".to_string(), LoroValue::String("first".into())),
+            ])
+            .into(),
+        );
+        let encode = |raw: &LoroValue| {
+            zerompk::to_msgpack_vec(&Some(loro_to_value(raw).expect("decode")))
+                .expect("image encoding")
+        };
+        let bytes = encode(&forward);
+        assert_eq!(bytes, encode(&reverse));
+        let decoded: Option<nodedb_types::Value> =
+            zerompk::from_msgpack(&bytes).expect("public decode");
+        let Some(nodedb_types::Value::Object(fields)) = decoded else {
+            panic!("the image decodes as an object");
         };
         assert_eq!(
             fields.get("a"),
             Some(&nodedb_types::Value::String("first".into()))
         );
         assert_eq!(fields.get("z"), Some(&nodedb_types::Value::Integer(1)));
-
-        let mut forward = BTreeMap::new();
-        forward.insert("a".into(), CanonicalLoroValue::String("first".into()));
-        forward.insert("z".into(), CanonicalLoroValue::Integer(1));
-        assert_eq!(
-            bytes,
-            zerompk::to_msgpack_vec(&CanonicalLoroValue::Object(forward))
-                .expect("stable key ordering")
-        );
     }
 
     #[test]
@@ -747,21 +670,12 @@ mod tests {
             counter: 11,
             container_type: ContainerType::Map,
         });
-        assert_eq!(loro_to_value(&raw), nodedb_types::Value::Null);
-        assert!(matches!(
-            CanonicalLoroValue::from(&raw),
-            CanonicalLoroValue::Null
-        ));
-        let bytes = zerompk::to_msgpack_vec(&Some(CanonicalLoroValue::from(&raw)))
-            .expect("container canonical encoding");
+        let value = loro_to_value(&raw).expect("decode");
+        assert_eq!(value, nodedb_types::Value::Null);
+        let bytes = zerompk::to_msgpack_vec(&Some(value)).expect("container encoding");
         let decoded: Option<nodedb_types::Value> =
             zerompk::from_msgpack(&bytes).expect("public container decode");
         assert_eq!(decoded, Some(nodedb_types::Value::Null));
-        assert_eq!(
-            bytes,
-            zerompk::to_msgpack_vec(&Some(CanonicalLoroValue::Null))
-                .expect("null canonical encoding")
-        );
     }
 
     #[test]

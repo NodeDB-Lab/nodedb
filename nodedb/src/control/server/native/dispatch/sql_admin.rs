@@ -118,6 +118,15 @@ pub(super) async fn handle_explain(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -
         ),
     };
     let database_id = ctx.database_id();
+    // EXPLAIN plans with the session's planning overrides, as a planned
+    // statement does, so it describes the plan the statement runs.
+    crate::control::server::shared::planning_overrides::apply_planning_session_overrides(
+        ctx.query_ctx,
+        ctx.sessions,
+        ctx.state,
+        ctx.peer_addr,
+        ctx.tenant_id(),
+    );
     match ctx
         .query_ctx
         .plan_sql_with_rls_metadata(crate::control::planner::context::PlanSqlWithRlsParams {

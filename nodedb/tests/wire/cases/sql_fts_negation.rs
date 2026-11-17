@@ -21,6 +21,9 @@ async fn make_fixture(collection: &str) -> TestServer {
     ))
     .await
     .expect("create collection");
+    srv.exec(&format!("CREATE SEARCH INDEX ON {collection} (body)"))
+        .await
+        .expect("declare the body search index");
     srv.exec(&format!(
         "INSERT INTO {collection} {{ id: 'd1', body: 'rust python programming language' }}"
     ))
@@ -107,6 +110,9 @@ async fn multiple_negations_exclude_all_negated_terms() {
     ))
     .await
     .expect("create collection");
+    srv.exec(&format!("CREATE SEARCH INDEX ON {col} (body)"))
+        .await
+        .expect("declare the body search index");
     srv.exec(&format!(
         "INSERT INTO {col} {{ id: 'd1', body: 'rust python programming' }}"
     ))
@@ -189,6 +195,9 @@ async fn not_with_synonym_excludes_expanded_terms() {
     ))
     .await
     .expect("create collection");
+    srv.exec(&format!("CREATE SEARCH INDEX ON {col} (body)"))
+        .await
+        .expect("declare the body search index");
 
     // d1: contains the raw synonym abbreviation 'py'
     srv.exec(&format!(
@@ -250,6 +259,9 @@ async fn not_nonexistent_term_does_not_remove_results() {
     ))
     .await
     .expect("create collection");
+    srv.exec(&format!("CREATE SEARCH INDEX ON {col} (body)"))
+        .await
+        .expect("declare the body search index");
     srv.exec(&format!(
         "INSERT INTO {col} {{ id: 'd1', body: 'rust programming' }}"
     ))

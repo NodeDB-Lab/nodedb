@@ -11,7 +11,6 @@ pub mod delete_cascade;
 pub mod scan;
 pub mod txn_match;
 pub mod update;
-pub mod update_persist;
 pub mod update_project;
 
 pub(in crate::data::executor) use admission::BulkAdmission;

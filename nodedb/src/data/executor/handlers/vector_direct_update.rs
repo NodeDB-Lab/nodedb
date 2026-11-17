@@ -214,6 +214,14 @@ impl CoreLoop {
             }
         }
 
+        // Every post-image is held to the row image limit before the first
+        // row is written.
+        if let Err(e) =
+            self.check_vector_update_rows(&index_key, collection, field, new_vector, &planned)
+        {
+            return self.response_error(task, e);
+        }
+
         let mut written: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(planned.len());
         for row in planned {
             if let Err(e) =
@@ -274,6 +282,34 @@ impl CoreLoop {
             return Ok(None);
         };
         merge_vector_direct_update_row(patch, surrogate, stored, &self.crs_context()).map(Some)
+    }
+
+    /// Refuse an update whose planned post-image in `planned` is over the
+    /// row image limit. A row keeps its stored vector unless `new_vector`
+    /// re-embeds it.
+    pub(in crate::data::executor) fn check_vector_update_rows(
+        &self,
+        index_key: &VectorIndexKey,
+        collection: &str,
+        field: &str,
+        new_vector: Option<&[f32]>,
+        planned: &[VectorPlannedRow],
+    ) -> crate::Result<()> {
+        let dim = new_vector.map(<[f32]>::len).unwrap_or_else(|| {
+            self.vector_collections
+                .get(index_key)
+                .map_or(0, |collection| collection.dim())
+        });
+        planned.iter().try_for_each(|row| {
+            crate::data::executor::row_image_native::check_vector_row(
+                collection,
+                || row.surrogate.as_u32().to_string(),
+                field,
+                dim,
+                &row.fields,
+                row.sidecar.len(),
+            )
+        })
     }
 
     /// Rewrite one row. With `new_vector` the old row is removed and a fresh

@@ -11,7 +11,7 @@ use nodedb::data::executor::core_loop::CoreLoop;
 use nodedb::types::*;
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinResolved, DocumentOp, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
+    CalvinInstall, DocumentOp, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
 };
 use nodedb_types::QualifiedCollection;
 use nodedb_types::Surrogate;
@@ -43,12 +43,14 @@ pub(super) fn make_core() -> (
     let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
     let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
     let core = CoreLoop::open(
-        0,
-        req_rx,
-        resp_tx,
-        dir.path(),
-        Arc::new(nodedb_types::OrdinalClock::new()),
-        nodedb::data::executor::core_loop::test_governor(),
+        nodedb::data::executor::core_loop::CoreOpenParams::unencrypted(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            Arc::new(nodedb_types::OrdinalClock::new()),
+            nodedb::data::executor::core_loop::test_governor(),
+        ),
     )
     .unwrap();
     (core, req_tx, resp_rx, dir)
@@ -110,7 +112,7 @@ pub(super) fn resolved_install(
         core,
         tx,
         rx,
-        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+        nodedb_test_support::calvin_resolve::whole_calvin_resolve(epoch, 0),
         vshard,
         None,
     );
@@ -129,10 +131,11 @@ pub(super) fn stamped_install(
     resolved: &Response,
     collections: Vec<String>,
 ) -> PhysicalPlan {
-    let answer: CalvinResolved =
-        zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer");
+    let (redo, reply) = nodedb_test_support::calvin_resolve::decode_whole_calvin_resolve(
+        resolved.payload.as_bytes(),
+    );
     PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
-        redo: answer.redo,
+        redo,
         collections,
         sum_targets: Vec::new(),
         origin: RedoOrigin::Commit,
@@ -140,7 +143,7 @@ pub(super) fn stamped_install(
             epoch,
             position: 0,
             epoch_system_ms: 0,
-            reply: answer.reply,
+            reply,
             user_write: true,
             mirror: false,
         }),
@@ -186,10 +189,7 @@ pub(super) fn commit_calvin(
         core,
         tx,
         rx,
-        PhysicalPlan::Meta(MetaOp::CalvinResolve {
-            epoch: seed.epoch,
-            position: 0,
-        }),
+        nodedb_test_support::calvin_resolve::whole_calvin_resolve(seed.epoch, 0),
         seed.vshard,
         None,
     );
@@ -251,6 +251,7 @@ pub(super) fn doc_insert(coll: &str, document_id: &str, surrogate: u32) -> Physi
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
         deferred_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
     })
 }
 

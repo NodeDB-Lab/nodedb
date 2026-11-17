@@ -219,6 +219,7 @@ impl CoreLoop {
         let mut batch = carry_source_ordinals(batch, parsed.lines())?;
         batch.emits_events = emits_events;
         let payload = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             collection,
             payload: &batch.to_bytes()?,
             provenance: None,

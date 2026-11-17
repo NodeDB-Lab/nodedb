@@ -14,7 +14,9 @@ use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::catalog::StoredRedactionPolicy;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::security::redaction::{RedactionMode, RedactionPolicy, RedactionRule};
+use crate::control::security::redaction::{
+    MAX_REDACTION_MASK_BYTES, RedactionMode, RedactionPolicy, RedactionRule,
+};
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
@@ -56,6 +58,17 @@ fn compile_rules(specs: &[RedactionRuleSpec]) -> Result<Vec<RedactionRule>, DdlE
                         "42601",
                         "MASK requires a replacement literal",
                     ))?;
+                    if literal.len() > MAX_REDACTION_MASK_BYTES {
+                        return Err(DdlError::new(
+                            "54000",
+                            format!(
+                                "MASK literal for field '{}' is {} bytes, over the limit of \
+                                 {MAX_REDACTION_MASK_BYTES} bytes; use a shorter mask",
+                                spec.field,
+                                literal.len()
+                            ),
+                        ));
+                    }
                     RedactionMode::Mask(literal)
                 }
                 other => {
@@ -188,5 +201,17 @@ mod tests {
                 .sqlstate,
             "42601"
         );
+    }
+
+    #[test]
+    fn a_mask_over_the_cap_is_refused() {
+        let at_cap = "*".repeat(MAX_REDACTION_MASK_BYTES);
+        let rules = compile_rules(&[spec("email", "MASK", Some(&at_cap))]).expect("at the cap");
+        assert!(
+            matches!(&rules[0].mode, RedactionMode::Mask(m) if m.len() == MAX_REDACTION_MASK_BYTES)
+        );
+        let over = "*".repeat(MAX_REDACTION_MASK_BYTES + 1);
+        let error = compile_rules(&[spec("email", "MASK", Some(&over))]).unwrap_err();
+        assert_eq!(error.sqlstate, "54000");
     }
 }

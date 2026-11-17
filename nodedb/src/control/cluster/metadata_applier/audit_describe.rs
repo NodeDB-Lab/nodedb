@@ -33,6 +33,9 @@ pub(crate) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
         ),
         E::PurgeCollection { name, .. } => (name.clone(), 0, String::new()),
         E::RecordWalTombstone { collection, .. } => (collection.clone(), 0, String::new()),
+        E::PruneCollectionPurgeLog { cutoff_ms } => {
+            (format!("purge_log<{cutoff_ms}"), 0, String::new())
+        }
         E::PutSequence(s) => (
             s.name.clone(),
             s.descriptor_version,

@@ -9,7 +9,9 @@
 
 use nodedb::bridge::envelope::Status;
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
-use nodedb_test_support::tx_batch_helpers::{commit_plans, with_unique_refusal};
+use nodedb_test_support::tx_batch_helpers::{
+    commit_plans, doc_body, doc_text, with_unique_refusal,
+};
 
 use super::helpers::*;
 
@@ -34,6 +36,7 @@ fn transaction_edge_put_committed() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
     send_ok(
@@ -52,6 +55,7 @@ fn transaction_edge_put_committed() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -73,6 +77,7 @@ fn transaction_edge_put_committed() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Graph(GraphOp::EdgePut {
                 collection: nodedb_types::QualifiedCollection::new(
@@ -132,6 +137,7 @@ fn a_refused_transaction_leaves_no_edge() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
     send_ok(
@@ -150,6 +156,7 @@ fn a_refused_transaction_leaves_no_edge() {
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -217,12 +224,13 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
                 "nodes",
             ),
             document_id: "n1".into(),
-            value: b"original_n1".to_vec(),
+            value: doc_body("original_n1"),
             surrogate: nodedb_types::Surrogate::new(1),
             pk_bytes: b"n1".to_vec(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
     send_ok(
@@ -235,12 +243,13 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
                 "nodes",
             ),
             document_id: "n2".into(),
-            value: b"original_n2".to_vec(),
+            value: doc_body("original_n2"),
             surrogate: nodedb_types::Surrogate::new(2),
             pk_bytes: b"n2".to_vec(),
             returning: None,
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }),
     );
 
@@ -256,12 +265,13 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
                     "nodes",
                 ),
                 document_id: "n1".into(),
-                value: b"modified_n1".to_vec(),
+                value: doc_body("modified_n1"),
                 surrogate: nodedb_types::Surrogate::new(1),
                 pk_bytes: b"n1".to_vec(),
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Graph(GraphOp::EdgePut {
                 collection: nodedb_types::QualifiedCollection::new(
@@ -301,7 +311,7 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
         }),
     );
     assert_eq!(r.status, Status::Ok);
-    assert_eq!(&*r.payload, b"original_n1");
+    assert_eq!(doc_text(&r.payload).as_deref(), Some("original_n1"));
 
     // The edge never landed (no neighbors).
     let n = send_raw(

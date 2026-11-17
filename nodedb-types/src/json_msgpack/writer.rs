@@ -48,12 +48,87 @@ pub fn ordered_map_to_msgpack(fields: &[(&str, &crate::Value)]) -> zerompk::Resu
     zerompk::to_msgpack_vec(&OrderedMapRef(fields))
 }
 
+/// Serialize a `nodedb_types::Value` to plain msgpack that keeps every typed
+/// scalar typed: [`value_to_msgpack`], except a UUID is the UUID ext and a
+/// decimal the decimal ext (see `scalar_ext`), at any depth.
+///
+/// For a single value a write applies as is, such as an `UPDATE` literal,
+/// where a UUID or decimal written as text would be stored as text.
+pub fn value_to_typed_msgpack(value: &crate::Value) -> zerompk::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(&TypedRef(value))
+}
+
+/// Whether the plain msgpack of [`value_to_msgpack`] keeps `value`'s type
+/// at every depth. A UUID and a decimal that is not a `uint64` are written
+/// as text there, so a value holding either is `false`.
+pub fn plain_msgpack_keeps_type(value: &crate::Value) -> bool {
+    match value {
+        crate::Value::Uuid(_) => false,
+        crate::Value::Decimal(d) => crate::Value::decimal_as_wide_u64(d).is_some(),
+        crate::Value::Array(items) | crate::Value::Set(items) => {
+            items.iter().all(plain_msgpack_keeps_type)
+        }
+        crate::Value::Object(fields) => fields.values().all(plain_msgpack_keeps_type),
+        _ => true,
+    }
+}
+
+/// The stored-body encoding of a document object: the plain msgpack map
+/// when it keeps every field's type ([`plain_msgpack_keeps_type`]), else the
+/// native object, which keeps a UUID and a decimal typed. Every document
+/// reader decodes both.
+pub fn value_to_document_body(value: &crate::Value) -> zerompk::Result<Vec<u8>> {
+    if plain_msgpack_keeps_type(value) {
+        value_to_msgpack(value)
+    } else {
+        zerompk::to_msgpack_vec(value)
+    }
+}
+
 /// A borrowed `Value` written in its plain msgpack form.
 struct NativeRef<'a>(&'a crate::Value);
 
 impl zerompk::ToMessagePack for NativeRef<'_> {
     fn write<W: Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         write_native_value(writer, self.0)
+    }
+}
+
+/// A borrowed `Value` written in plain msgpack with typed scalar exts.
+struct TypedRef<'a>(&'a crate::Value);
+
+impl zerompk::ToMessagePack for TypedRef<'_> {
+    fn write<W: Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        write_typed_value(writer, self.0)
+    }
+}
+
+fn write_typed_value<W: Write>(writer: &mut W, value: &crate::Value) -> zerompk::Result<()> {
+    match value {
+        crate::Value::Decimal(d) if crate::Value::decimal_as_wide_u64(d).is_some() => {
+            write_native_value(writer, value)
+        }
+        crate::Value::Uuid(_) | crate::Value::Decimal(_) => {
+            match super::scalar_ext::scalar_ext(value) {
+                Some((ext_type, payload)) => writer.write_ext(ext_type, &payload),
+                None => write_native_value(writer, value),
+            }
+        }
+        crate::Value::Array(items) => {
+            writer.write_array_len(items.len())?;
+            items
+                .iter()
+                .try_for_each(|item| write_typed_value(writer, item))
+        }
+        crate::Value::Object(map) => {
+            writer.write_map_len(map.len())?;
+            for (key, item) in map {
+                writer.write_string(key)?;
+                write_typed_value(writer, item)?;
+            }
+            Ok(())
+        }
+        other => write_native_value(writer, other),
     }
 }
 
@@ -163,6 +238,56 @@ fn write_instant_ext<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_document_body_is_plain_unless_a_field_needs_the_native_object() {
+        let plain = crate::Value::Object([("n".to_string(), crate::Value::Integer(1))].into());
+        assert_eq!(
+            value_to_document_body(&plain).expect("encode"),
+            value_to_msgpack(&plain).expect("encode")
+        );
+        let typed = crate::Value::Object(
+            [(
+                "m".to_string(),
+                crate::Value::Object(
+                    [(
+                        "u".to_string(),
+                        crate::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+                    )]
+                    .into(),
+                ),
+            )]
+            .into(),
+        );
+        assert!(!plain_msgpack_keeps_type(&typed));
+        let body = value_to_document_body(&typed).expect("encode");
+        assert_eq!(
+            crate::object_msgpack::decode_object(&body).expect("decode"),
+            typed
+        );
+    }
+
+    #[test]
+    fn typed_msgpack_reads_back_typed_and_renders_json_text() {
+        let value = crate::Value::Array(vec![
+            crate::Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
+            crate::Value::Decimal("12.50".parse().expect("decimal")),
+            crate::Value::Integer(1),
+        ]);
+        let bytes = value_to_typed_msgpack(&value).expect("encode");
+        assert_eq!(
+            crate::json_msgpack::value_from_msgpack(&bytes).expect("decode"),
+            value
+        );
+        assert_eq!(
+            crate::json_msgpack::json_from_msgpack(&bytes).expect("json"),
+            serde_json::json!(["550e8400-e29b-41d4-a716-446655440000", "12.50", 1])
+        );
+        assert_eq!(
+            crate::json_msgpack::msgpack_to_json_string(&bytes).expect("json text"),
+            r#"["550e8400-e29b-41d4-a716-446655440000","12.50",1]"#
+        );
+    }
 
     #[test]
     fn an_ordered_map_keeps_its_key_order_and_reads_back() {

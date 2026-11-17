@@ -315,13 +315,16 @@ async fn framed_aggregate_over_expression_argument_averages_evaluated_values() {
 
     assert_eq!(rows.len(), 5, "rows: {rows:?}");
 
-    // Argument n*2 = 2,4,6,8,10; running means = 2,3,4,5,6.
-    let expected = [2.0, 3.0, 4.0, 5.0, 6.0];
-    for (i, &want) in expected.iter().enumerate() {
-        let got = col(&rows, i, 1);
-        assert!(
-            (got - want).abs() < 1e-9,
-            "row {i}: got {got}, want {want}; rows={rows:?}"
-        );
+    // Argument n*2 = 2,4,6,8,10; running means = 2,3,4,5,6. PostgreSQL's
+    // avg over integers is numeric with 16 fractional digits here.
+    let expected = [
+        "2.0000000000000000",
+        "3.0000000000000000",
+        "4.0000000000000000",
+        "5.0000000000000000",
+        "6.0000000000000000",
+    ];
+    for (i, want) in expected.iter().enumerate() {
+        assert_eq!(rows[i][1], *want, "row {i}; rows={rows:?}");
     }
 }

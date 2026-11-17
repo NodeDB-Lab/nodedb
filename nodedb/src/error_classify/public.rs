@@ -24,11 +24,6 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::RejectedAuthz { resource, .. } => {
             NodeDbError::authorization_denied(resource.clone())
         }
-        // `54000` on the SQL surfaces, the class `TxnOverlayMemoryExceeded`
-        // has as a Data-Plane code.
-        Error::TxnOverlayMemoryExceeded { .. } => {
-            NodeDbError::program_limit_exceeded(e.to_string())
-        }
         Error::BackupTenantMismatch { expected, actual } => {
             NodeDbError::backup_tenant_mismatch(*expected, *actual)
         }
@@ -210,14 +205,22 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::NumericValueOutOfRange { detail } => {
             NodeDbError::numeric_value_out_of_range(detail.clone())
         }
-        // The public class `code_for_sqlstate` gives `22P02`, `22007`,
-        // `22008` and `42804`.
-        Error::InvalidTextRepresentation { detail }
-        | Error::InvalidDatetimeFormat { detail }
-        | Error::DatetimeFieldOverflow { detail } => NodeDbError::data_exception(detail.clone()),
-        Error::DatatypeMismatch { detail } => {
-            NodeDbError::from_wire(nodedb_types::error::ErrorCode::BAD_REQUEST, detail.clone())
+        Error::InvalidArgumentForLogarithm { detail } => {
+            NodeDbError::invalid_argument_for_logarithm(detail.clone())
         }
+        Error::InvalidArgumentForPowerFunction { detail } => {
+            NodeDbError::invalid_argument_for_power_function(detail.clone())
+        }
+        Error::InvalidTextRepresentation { detail } => {
+            NodeDbError::invalid_text_representation(detail.clone())
+        }
+        Error::InvalidDatetimeFormat { detail } => {
+            NodeDbError::invalid_datetime_format(detail.clone())
+        }
+        Error::DatetimeFieldOverflow { detail } => {
+            NodeDbError::datetime_field_overflow(detail.clone())
+        }
+        Error::DatatypeMismatch { detail } => NodeDbError::datatype_mismatch(detail.clone()),
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())
         }
@@ -237,10 +240,12 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::CommittedResultUnavailable { .. }
         | Error::ProposalOutcomeUnknown { .. }
         | Error::MetadataGroupGone { .. } => NodeDbError::internal(e.to_string()),
-        Error::MetadataLeaderUnavailable => NodeDbError::dispatch(
-            "metadata raft group has no reachable leader; retry exhausted".to_string(),
+        // The code renders `40001`, the SQLSTATE pgwire gives the variant.
+        // The DDL changed nothing, so the client retries the statement.
+        Error::MetadataDdlSuperseded { .. } => NodeDbError::from_wire(
+            nodedb_types::error::ErrorCode::WRITE_CONFLICT,
+            e.to_string(),
         ),
-        Error::MetadataDdlSuperseded { .. } => NodeDbError::dispatch(e.to_string()),
         // The code renders `55P03`, the SQLSTATE pgwire gives the variant, so
         // the class survives a node hop as a bare numeric code.
         Error::AuthorizationStateBehind { .. } | Error::LinearizableReadRefused { .. } => {
@@ -249,14 +254,17 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
                 e.to_string(),
             )
         }
-        // The code renders `55P03`, the SQLSTATE pgwire gives both variants.
-        // Nothing was applied, and a retry succeeds once a majority answers.
+        // The code renders `55P03`, the SQLSTATE pgwire gives each variant.
+        // Nothing was applied, and a retry succeeds once a leader with a
+        // majority answers.
         Error::GroupQuorumUnavailable { .. }
         | Error::GroupMarksUnavailable { .. }
-        | Error::BackupCaptureMoved { .. } => {
+        | Error::BackupCaptureMoved { .. }
+        | Error::MetadataLeaderUnavailable => {
             NodeDbError::from_wire(nodedb_types::error::ErrorCode::NO_LEADER, e.to_string())
         }
-        Error::ExecutionLimitExceeded { detail } => NodeDbError::bad_request(detail),
+        // A resource limit, `54000` as PostgreSQL reports one.
+        Error::ExecutionLimitExceeded { detail } => NodeDbError::program_limit_exceeded(detail),
         Error::LimitExceeded {
             limit_name,
             value,
@@ -294,7 +302,6 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::RemoteTyped { code, message } => NodeDbError::remote_typed(*code, message.clone()),
         Error::DescriptorVersionAnomaly { .. } => NodeDbError::internal(e.to_string()),
         Error::CatalogIntegrityViolation { .. } => NodeDbError::internal(e.to_string()),
-        Error::CollectionPurgeRowMissing { .. } => NodeDbError::internal(e.to_string()),
         Error::CollectionUnstamped { .. } => NodeDbError::internal(e.to_string()),
         Error::Promql(promql_err) => NodeDbError::bad_request(promql_err.to_string()),
         Error::DependentObjectsExist {
@@ -529,6 +536,12 @@ mod tests {
             refused_by: vec![2],
         };
         assert_eq!(classify(&marks).code(), ErrorCode::NO_LEADER);
+        assert_eq!(
+            classify(&Error::MetadataLeaderUnavailable).code(),
+            ErrorCode::NO_LEADER
+        );
+        let superseded = Error::MetadataDdlSuperseded { log_index: 7 };
+        assert_eq!(classify(&superseded).code(), ErrorCode::WRITE_CONFLICT);
         let behind = Error::AuthorizationStateBehind {
             detail: "roles".to_owned(),
         };

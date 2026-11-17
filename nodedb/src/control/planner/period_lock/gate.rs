@@ -8,7 +8,7 @@ use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget};
 /// The source collection a period lock would gate this op's write against,
 /// or `None` for an op `check_period_lock` never runs against. Exhaustive so
 /// a new `DocumentOp` variant must state which side it is on.
-pub(super) fn period_lock_gated_collection(op: &DocumentOp) -> Option<&str> {
+pub(crate) fn period_lock_gated_collection(op: &DocumentOp) -> Option<&str> {
     match op {
         DocumentOp::PointPut { collection, .. }
         | DocumentOp::PointInsert { collection, .. }

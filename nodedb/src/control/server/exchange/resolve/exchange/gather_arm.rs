@@ -5,7 +5,7 @@
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use crate::control::server::exchange::full_scan::{ScanSide, full_scan_plan_for_collection};
+use crate::control::server::exchange::full_scan::{ScanSide, read_set_scan_plan};
 use crate::control::server::exchange::gather::{gather_all_vshards, outcome_to_response};
 use crate::control::server::exchange::gather_outcome::GatherOutcome;
 use crate::control::server::exchange::resolve::capture::DistributedReadCapture;
@@ -110,14 +110,14 @@ pub(super) async fn resolve_gather(
     // `HashJoin` plan will otherwise collapse to the left collection
     // alone via `extract_collection` and miss the build side (captured
     // separately in `join_input`).
-    if let Some(coll) = probe_collection
-        && let Some(scan_plan) = full_scan_plan_for_collection(
+    // A collection the catalog no longer holds records an absence read.
+    if let Some(coll) = probe_collection {
+        let scan_plan = read_set_scan_plan(
             state,
             database_id,
             tenant_id,
             ScanSide::read_set_only(&coll),
-        )?
-    {
+        )?;
         captures.push(DistributedReadCapture {
             scan_plan,
             read_vshards: outcome.read_vshards.clone(),

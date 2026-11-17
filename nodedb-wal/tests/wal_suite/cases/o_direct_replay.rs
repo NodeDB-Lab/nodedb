@@ -18,7 +18,7 @@ use nodedb_wal::align::{DEFAULT_ALIGNMENT, is_aligned};
 use nodedb_wal::lazy_reader::LazyWalReader;
 use nodedb_wal::mmap_reader::MmapWalReader;
 use nodedb_wal::reader::{StopReason, WalReader};
-use nodedb_wal::record::RecordType;
+use nodedb_wal::record::{HEADER_SIZE, RecordType};
 use nodedb_wal::recovery::recover;
 use nodedb_wal::writer::{WalWriter, WalWriterConfig};
 
@@ -187,4 +187,59 @@ fn padding_is_never_surfaced_as_a_record() {
         );
         assert_ne!(record.header.lsn, 0, "padding LSN leaked into replay");
     }
+}
+
+/// Damage the padding record that closes the segment's last batch, as a
+/// crash that tears only that block's tail leaves it. Returns the offset of
+/// the padding record.
+fn tear_trailing_padding(path: &Path, records: &[&[u8]]) -> u64 {
+    use std::os::unix::fs::FileExt as _;
+
+    let padding_at: usize = records.iter().map(|r| HEADER_SIZE + r.len()).sum();
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(&[0u8; HEADER_SIZE], padding_at as u64)
+        .unwrap();
+    file.sync_all().unwrap();
+    padding_at as u64
+}
+
+/// A crash tears only the padding of the last batch, whose final record
+/// ends mid-block. Recovery ends at that record, the writer resumes on the
+/// block boundary below it, and its next write keeps the record's tail. A
+/// writer that rounded down and wrote from there overwrote that tail.
+#[test]
+fn a_torn_padding_block_keeps_the_record_tail_it_shares() {
+    let path = target_dir().join("direct_torn_padding.wal");
+    let Some(mut writer) = open_direct(&path) else {
+        return;
+    };
+    let spanning = vec![0x5Au8; DEFAULT_ALIGNMENT + 1000];
+    let small = b"second".to_vec();
+    for payload in [&spanning, &small] {
+        writer
+            .append(RecordType::Put as u32, 1, 0, 0, payload)
+            .unwrap();
+    }
+    writer.sync().unwrap();
+    drop(writer);
+    let _ = std::fs::remove_file(path.with_extension("dwb"));
+
+    let padding_at = tear_trailing_padding(&path, &[&spanning, &small]);
+    let info = recover(&path).unwrap();
+    assert_eq!(info.end_offset, padding_at);
+    assert!(!is_aligned(padding_at as usize, DEFAULT_ALIGNMENT));
+
+    let mut writer = WalWriter::open(&path, direct_config()).unwrap();
+    assert_eq!(writer.next_lsn(), 3);
+    writer
+        .append(RecordType::Put as u32, 1, 0, 0, b"third")
+        .unwrap();
+    writer.sync().unwrap();
+    drop(writer);
+
+    assert_eq!(
+        read_all(&path),
+        vec![spanning, small, b"third".to_vec()],
+        "every record survives the resumed write"
+    );
 }

@@ -94,8 +94,9 @@ pub async fn propose_catalog_batch_async(
                 group_id: METADATA_GROUP_ID,
                 through: log_index,
             }],
-            crate::control::server::shared::session::StatementDeadline::of_statement(shared)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(
+                shared,
+            ),
         )
         .await?;
     }
@@ -126,6 +127,12 @@ async fn propose_replicated(
         else {
             return Ok::<_, Error>(None);
         };
+        // Under the lease no other full-text record commits, so records
+        // that agree here still agree when the batch applies.
+        crate::control::server::shared::ddl::neutral::collection::text_analysis::check_entries(
+            &entries,
+            shared.credentials.catalog(),
+        )?;
         let audit = crate::control::server::shared::session::audit_context::current();
         super::audit_intent::record_ddl_intents(
             shared,

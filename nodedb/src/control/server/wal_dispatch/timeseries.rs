@@ -63,6 +63,7 @@ pub(super) fn wal_append_timeseries_op(
             payload,
             format,
             provenance,
+            rls_write_check,
             ..
         } => {
             let now_ms = match now_override {
@@ -97,6 +98,7 @@ pub(super) fn wal_append_timeseries_op(
                     collection: collection.as_str(),
                     payload,
                     provenance: provenance.as_ref(),
+                    rls_write_check,
                     format,
                     default_timestamp_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
                 })?;
@@ -178,6 +180,7 @@ pub(crate) struct TimeseriesIngestRecord<'a> {
     pub collection: &'a str,
     pub payload: &'a [u8],
     pub provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     /// The payload's ingest format: payload bytes alone cannot distinguish ILP
     /// from row MessagePack.
     pub format: &'a str,
@@ -186,8 +189,8 @@ pub(crate) struct TimeseriesIngestRecord<'a> {
 }
 
 /// Encode a timeseries ingest's `TimeseriesBatch` WAL record or redo
-/// sub-record: the six-element tuple `("timeseries", collection, payload,
-/// provenance, format, default_timestamp_ms)`. Every timeseries ingest record
+/// sub-record: the seven-element tuple `("timeseries", collection, payload,
+/// provenance, format, default_timestamp_ms, rls_write_check)`. Every timeseries ingest record
 /// takes this shape. Replay stamps untimed rows with the carried instant, so
 /// they store the rows the live apply stored.
 pub(crate) fn encode_timeseries_ingest_payload(
@@ -199,6 +202,7 @@ pub(crate) fn encode_timeseries_ingest_payload(
         provenance,
         format,
         default_timestamp_ms,
+        rls_write_check,
     } = record;
     zerompk::to_msgpack_vec(&(
         "timeseries",
@@ -207,6 +211,7 @@ pub(crate) fn encode_timeseries_ingest_payload(
         provenance,
         format,
         default_timestamp_ms,
+        rls_write_check,
     ))
     .map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
@@ -426,6 +431,10 @@ mod tests {
         let decoded = crate::wal::decode_batch_record(&record.payload).expect("decode");
         assert_eq!(decoded.default_timestamp_ms, Some(1_700_000_000_123));
         assert_eq!(decoded.format.as_deref(), Some("ilp"));
+        assert_eq!(
+            decoded.rls_write_check,
+            nodedb_types::RlsWriteCheck::pending_injection()
+        );
     }
 
     /// A `wal=false` ingest appends no batch record. Under a proposal's apply

@@ -263,6 +263,12 @@ async fn reserve_buffered(
         buffered.iter().map(|item| &item.entry),
         state.credentials.catalog(),
     )?;
+    // The same lease holds back every other full-text record of the batch's
+    // collections, so the records never land in disagreement.
+    crate::control::server::shared::ddl::neutral::collection::text_analysis::check_entries(
+        buffered.iter().map(|item| &item.entry),
+        state.credentials.catalog(),
+    )?;
 
     for item in &buffered {
         if let Some((descriptor_id, prior_version)) =
@@ -468,6 +474,7 @@ pub(super) fn reverse_create(entry: &CatalogEntry) -> crate::Result<CatalogEntry
             tenant_id: stored.tenant_id,
             name: stored.name.clone(),
             collection: stored.collection.clone(),
+            kind: stored.kind,
         }),
         CatalogEntry::PutMaterializedView(stored) => Ok(CatalogEntry::DeleteMaterializedView {
             database_id: stored.database_id,

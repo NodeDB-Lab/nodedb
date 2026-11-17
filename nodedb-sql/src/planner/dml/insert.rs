@@ -25,6 +25,26 @@ pub fn plan_insert(
     functions: &crate::functions::registry::FunctionRegistry,
     temporal: crate::TemporalScope,
 ) -> Result<Vec<SqlPlan>> {
+    let plans = plan_insert_rows(ins, catalog, functions, temporal)?;
+    let alias = ins
+        .table_alias
+        .as_ref()
+        .map(|alias| crate::reserved::check_ast_identifier(&alias.alias))
+        .transpose()?;
+    crate::planner::returning::attach_returning(
+        plans,
+        ins.returning.as_deref(),
+        alias.as_deref(),
+        catalog,
+    )
+}
+
+fn plan_insert_rows(
+    ins: &ast::Insert,
+    catalog: &dyn SqlCatalog,
+    functions: &crate::functions::registry::FunctionRegistry,
+    temporal: crate::TemporalScope,
+) -> Result<Vec<SqlPlan>> {
     let (table_name, info) = resolve_target(ins, "INSERT", catalog)?;
     let target_scope = target_scope(&table_name, &info)?;
 
@@ -210,6 +230,7 @@ mod tests {
             vector_primary: None,
             partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
             open_schema: CollectionInfo::open_schema_for(engine),
+            text_indexes: None,
         }
     }
 

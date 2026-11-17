@@ -58,7 +58,10 @@ fn relation_scan_filters<'a>(plan: &'a SqlPlan, relation: &str) -> Option<&'a [F
     if let SqlPlan::Join {
         left, join_type, ..
     } = plan
-        && matches!(join_type, JoinType::Semi | JoinType::Anti | JoinType::Cross)
+        && matches!(
+            join_type,
+            JoinType::Semi | JoinType::Anti | JoinType::AntiNullAware | JoinType::Cross
+        )
     {
         return relation_scan_filters(left, relation);
     }

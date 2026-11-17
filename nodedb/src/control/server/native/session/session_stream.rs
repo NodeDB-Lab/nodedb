@@ -15,7 +15,9 @@ use crate::control::server::conn_stream::ConnStream;
 use crate::control::server::response_shape::compose::shape_decoded_rows;
 use crate::control::server::response_shape::redaction::RedactionCtx;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::data::executor::response_codec::decode_payload_value;
+use crate::data::executor::response_codec::{
+    RowContext, decode_payload_value, decode_row_payload_value,
+};
 
 use super::codec::{self, FrameFormat};
 use super::dispatch::{self, SqlStream, to_native_columns_rows};
@@ -33,23 +35,30 @@ use super::dispatch::{self, SqlStream, to_native_columns_rows};
 /// deliberately not called here, matching pgwire's own streamed responses,
 /// which likewise only ever get column projection, never kv_wrap/vector.
 ///
-/// A payload that decodes as neither msgpack nor JSON falls back to a single
-/// "result" text column holding its lossy UTF-8 text, the shape this decoder
-/// produces for an undecodable batch.
+/// Rows decode in row context, so a native object row keeps its field types.
+/// A native row that does not decode fails the batch. A payload that decodes
+/// as neither msgpack nor JSON falls back to a single "result" text column
+/// holding its lossy UTF-8 text, the shape this decoder produces for an
+/// undecodable batch.
 fn decode_batch_to_columns_rows(
     payload: &[u8],
+    row_context: RowContext,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     crs_set: &nodedb_crs::CustomCrsSet,
 ) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
-    match decode_payload_value(payload) {
+    match decode_row_payload_value(payload, row_context) {
         Ok(decoded) => {
             // A streamed plan never carries Control-Plane computed columns:
             // `try_open_sql_stream` declines those, so no session access
             // is needed per batch.
-            let shaped = shape_decoded_rows(decoded, projection, redaction, None, crs_set)?;
+            let shaped =
+                shape_decoded_rows(decoded, row_context, projection, redaction, None, crs_set)?;
             Ok(to_native_columns_rows(&shaped))
         }
+        // Readable msgpack or JSON whose row decode failed holds a corrupt
+        // native row: that is an error, never shown as text.
+        Err(error) if decode_payload_value(payload).is_ok() => Err(error),
         Err(_) => Ok((
             vec!["result".into()],
             vec![vec![Value::String(
@@ -85,6 +94,7 @@ pub(super) async fn emit_sql_stream(
         projection,
         redaction,
         lease_scope,
+        row_context,
     } = sql_stream;
 
     let mut emitted: usize = 0;
@@ -131,6 +141,7 @@ pub(super) async fn emit_sql_stream(
         // shaped under the same policy.
         let (cols, mut batch_rows) = decode_batch_to_columns_rows(
             &batch.payload,
+            row_context,
             projection.as_ref(),
             redaction.as_ref().map(|r| r.ctx(&state.redaction)),
             &crate::control::crs_context::crs_set_for(state),
@@ -283,6 +294,7 @@ mod tests {
                 projection: None,
                 redaction,
                 lease_scope: None,
+                row_context: RowContext::Flat,
             };
             emit_sql_stream(
                 &mut conn,

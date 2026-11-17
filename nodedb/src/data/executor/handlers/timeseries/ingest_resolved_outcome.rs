@@ -9,9 +9,8 @@
 //! - A by-name install of a batch whose events some consumer reads writes
 //!   its durable outcome (`install_outcome`) before the first row lands, so
 //!   WAL catch-up rebuilds exactly the events the install emits.
-//! - A committed redo install records its counts and landed images in the
-//!   open apply scope, so the apply answers the counts and a Calvin install
-//!   renders its `RETURNING` rows from the stored rows.
+//! - A committed redo install records its counts in the open apply scope,
+//!   so the apply answers them.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::redo_apply::{RedoApplyPass, TsInstalled};
@@ -90,11 +89,11 @@ impl CoreLoop {
     /// Record in the open install scope what one committed redo install of a
     /// resolved batch stored. Outside an install pass there is no scope to
     /// record in.
-    pub(super) fn note_redo_ts_install(&mut self, count: TsInstallCount, images: Vec<Vec<u8>>) {
+    pub(super) fn note_redo_ts_install(&mut self, count: TsInstallCount) {
         if let Some(scope) = self.redo_apply.scope.as_mut()
             && scope.pass == RedoApplyPass::Install
         {
-            scope.ts_installs.push(TsInstalled { count, images });
+            scope.ts_installs.push(TsInstalled { count });
         }
     }
 }

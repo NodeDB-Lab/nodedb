@@ -102,7 +102,17 @@ impl std::fmt::Display for StorageKey {
 ///
 /// A minted row renders its surrogate in decimal. A row with a declared
 /// `PRIMARY KEY` carries the user's own value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct RowIdentity(String);
 
 impl RowIdentity {
@@ -124,7 +134,7 @@ impl RowIdentity {
         declared_primary_key: Option<&str>,
         key: StorageKey,
     ) -> RowIdentity {
-        match crate::value_from_msgpack(body) {
+        match crate::decode_object(body) {
             Ok(row) => Self::of_row_value(&row, declared_primary_key, key),
             Err(_) => key.to_identity(),
         }
@@ -192,13 +202,11 @@ pub fn declared_key(primary_key: Option<&str>) -> Option<&str> {
 
 /// Extract the stringified value of `field` from a MessagePack row body.
 ///
-/// Returns `None` when the body is not an object, lacks `field`, or the
-/// value has no primary-key string form.
+/// The body is an object: a plain map or a native object, read through
+/// [`crate::ObjectView`]. Returns `None` when the body is not an object,
+/// lacks `field`, or the value has no primary-key string form.
 pub fn extract_pk_value(body: &[u8], field: &str) -> Option<String> {
-    let Value::Object(obj) = crate::value_from_msgpack(body).ok()? else {
-        return None;
-    };
-    value_to_pk_string(obj.get(field)?)
+    value_to_pk_string(&crate::ObjectView::new(body).ok()?.get(field).ok()??)
 }
 
 /// Stringify a scalar value into its primary-key form.
@@ -207,7 +215,8 @@ pub fn extract_pk_value(body: &[u8], field: &str) -> Option<String> {
 /// path. Non-scalar values have no primary-key form and yield `None`.
 pub fn value_to_pk_string(v: &Value) -> Option<String> {
     match v {
-        Value::String(s) => Some(s.clone()),
+        // A UUID / ULID is its text, as its plain msgpack form reads.
+        Value::String(s) | Value::Uuid(s) | Value::Ulid(s) => Some(s.clone()),
         Value::Integer(n) => Some(n.to_string()),
         Value::Float(f) => Some(f.to_string()),
         Value::Bool(b) => Some(b.to_string()),
@@ -260,6 +269,35 @@ mod tests {
             RowIdentity::of_stored_row(&body, Some("sku"), key).as_str(),
             "9"
         );
+    }
+
+    /// A native body names the same identity its plain form names. A UUID
+    /// key is its text.
+    #[test]
+    fn a_native_body_names_its_identity_as_its_plain_form() {
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let fields = [
+            ("sku", Value::Uuid(uuid.into())),
+            ("tags", Value::Array(vec![Value::Integer(7)])),
+        ];
+        let plain = body(&fields);
+        let native = zerompk::to_msgpack_vec(&Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        ))
+        .expect("encode native");
+        for bytes in [&plain, &native] {
+            assert_eq!(extract_pk_value(bytes, "sku").as_deref(), Some(uuid));
+            assert_eq!(
+                RowIdentity::of_stored_row(bytes, Some("sku"), key).as_str(),
+                uuid
+            );
+        }
+        let malformed = [0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
+        assert_eq!(extract_pk_value(&malformed, "a"), None);
     }
 
     #[test]

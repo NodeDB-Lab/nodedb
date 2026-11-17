@@ -38,6 +38,8 @@ impl Scheduler {
         let inbox = Arc::clone(self.inbox.inbox());
         // Woken when the data-group apply loop buffers a barrier entry.
         let read_results = Arc::clone(&self.read_results);
+        // Woken when the data-group apply loop stores a frozen reply.
+        let frozen_replies = self.shared.calvin.frozen_replies.vshard(self.vshard_id);
         // Woken when a cut's barrier is proposed or applied on this node.
         let shared = Arc::clone(&self.shared);
         // Woken when the sequencer defers or drops an input for this vShard
@@ -81,6 +83,7 @@ impl Scheduler {
                 self.retry_redo_proposals();
             }
             self.drain_read_results();
+            self.vote_stored_frozen_replies();
             self.propose_due_read_timeouts();
             self.check_awaiting_verdict_stalls();
             self.restage_due();
@@ -145,10 +148,20 @@ impl Scheduler {
                     self.handle_verdict_signal(signal);
                 }
 
+                // A `RETURNING` evaluation finished: cast the vote it held.
+                Some(evaluated) = self.returning_evals.recv() => {
+                    self.finish_returning_eval(evaluated);
+                }
+
                 // The apply loop buffered a barrier entry. Drained in every
                 // state, so a held txn keeps every entry of its log.
                 () = read_results.pushed() => {
                     self.drain_read_results();
+                }
+
+                // The apply loop stored a frozen reply: cast the vote it held.
+                () = frozen_replies.stored() => {
+                    self.vote_stored_frozen_replies();
                 }
 
                 maybe_promoted = self.promotion_rx.recv() => {
@@ -235,6 +248,11 @@ impl Scheduler {
                     // install already reported is never proposed again.
                     self.drain_inbox();
                     self.retry_redo_proposals();
+                    // Propose again every frozen-reply entry not in the log.
+                    self.retry_frozen_proposals();
+                    // Send again the stored sequence changes of every txn
+                    // this leader holds after its vote.
+                    self.resend_stored_sequence_effects();
                     // A barrier entry the apply loop buffered after the
                     // scheduler finished its txn is spent.
                     let ledger = Arc::clone(&self.ledger);
@@ -244,6 +262,9 @@ impl Scheduler {
                     // So is a stored row of a finished txn its finish did
                     // not remove.
                     self.sweep_finished_barrier_rows();
+                    // And a frozen reply of a finished txn its finish did not
+                    // remove.
+                    self.sweep_finished_frozen_replies();
                     // The top-of-loop check_awaiting_verdict_stalls /
                     // propose_due_read_timeouts and the deferred re-send
                     // pass run on every wake; this arm guarantees the loop wakes

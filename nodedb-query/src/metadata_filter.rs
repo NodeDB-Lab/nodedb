@@ -4,8 +4,8 @@
 //!
 //! One evaluator serves every document shape: a field lookup closure
 //! resolves top-level fields. Adapters cover JSON documents (shape sync,
-//! vector post-filter), field maps (Lite edge properties) and plain-msgpack
-//! maps (Origin edge properties).
+//! vector post-filter), field maps (Lite edge properties) and stored
+//! property objects (Origin edge properties).
 //!
 //! Semantics:
 //! - `Eq` on a missing field matches only a `Null` value. `Ne` negates `Eq`.
@@ -31,15 +31,14 @@ use std::convert::Infallible;
 use nodedb_types::Value;
 use nodedb_types::filter::MetadataFilter;
 
-use crate::msgpack_scan::FieldIndex;
-use crate::msgpack_scan::reader::read_value;
 use crate::value_ops::{coerced_eq, involves_instant, numeric_order};
 
-/// A plain-msgpack property map the evaluator cannot read.
+/// A stored property object the evaluator cannot read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PropertyMapError {
-    /// The bytes are not one well-formed MessagePack map.
-    #[error("property bytes are not a well-formed MessagePack map")]
+    /// The bytes are not one well-formed object: a native tagged object or a
+    /// plain MessagePack map.
+    #[error("property bytes are not a well-formed MessagePack object")]
     NotAMap,
     /// The map holds `field`, but its value does not decode.
     #[error("property field '{field}' does not decode")]
@@ -166,11 +165,13 @@ pub fn matches_all_fields(fields: &HashMap<String, Value>, filters: &[MetadataFi
     filters.iter().all(|f| matches_metadata_fields(fields, f))
 }
 
-/// Every filter of `filters` against a plain-msgpack map. Decodes only the
-/// fields a filter names. Empty bytes evaluate as `{}`. An empty filter list
-/// admits without reading `doc`.
+/// Every filter of `filters` against a stored property object: a native
+/// tagged object or a plain-msgpack map, read through
+/// [`nodedb_types::ObjectView`]. Decodes only the fields a filter names.
+/// Empty bytes evaluate as `{}`. An empty filter list admits without reading
+/// `doc`.
 ///
-/// Bytes that are not one well-formed map, and a named field whose value
+/// Bytes that are not one well-formed object, and a named field whose value
 /// does not decode, are an error: a property map the predicate cannot read
 /// is not a map the predicate admitted.
 pub fn matches_all_msgpack(
@@ -180,25 +181,27 @@ pub fn matches_all_msgpack(
     if filters.is_empty() {
         return Ok(true);
     }
-    let index = if doc.is_empty() {
-        FieldIndex::empty()
+    let view = if doc.is_empty() {
+        None
     } else {
-        FieldIndex::build(doc, 0).ok_or(PropertyMapError::NotAMap)?
+        Some(nodedb_types::ObjectView::new(doc).map_err(|_| PropertyMapError::NotAMap)?)
     };
     let lookup = |name: &str| -> Result<Option<Cow<'static, Value>>, PropertyMapError> {
-        let Some((start, end)) = index.get(name) else {
+        let Some(view) = view else {
             return Ok(None);
         };
-        let decoded = read_value(doc, start).or_else(|| {
-            doc.get(start..end)
-                .and_then(|bytes| nodedb_types::json_msgpack::value_from_msgpack(bytes).ok())
-        });
-        match decoded {
-            Some(value) => Ok(Some(Cow::Owned(value))),
-            None => Err(PropertyMapError::Field {
-                field: name.to_owned(),
-            }),
+        for entry in view.fields() {
+            let (key, bytes) = entry.map_err(|_| PropertyMapError::NotAMap)?;
+            if key == name {
+                return view
+                    .decode_value(bytes)
+                    .map(|value| Some(Cow::Owned(value)))
+                    .map_err(|_| PropertyMapError::Field {
+                        field: name.to_owned(),
+                    });
+            }
         }
+        Ok(None)
     };
     for filter in filters {
         if !try_matches_metadata_filter_with(&lookup, filter)? {
@@ -465,6 +468,33 @@ mod tests {
                 "{filters:?}"
             );
         }
+    }
+
+    /// A native tagged object filters on its typed values: a Decimal compares
+    /// as a number, a UUID as text.
+    #[test]
+    fn a_native_object_filters_on_its_typed_values() {
+        let id = Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into());
+        let fields = HashMap::from([
+            (
+                "price".to_owned(),
+                Value::Decimal("12.50".parse().expect("decimal")),
+            ),
+            ("id".to_owned(), id.clone()),
+        ]);
+        let bytes = zerompk::to_msgpack_vec(&Value::Object(fields)).expect("encode");
+        assert_eq!(
+            matches_all_msgpack(&bytes, &[gt("price", Value::Integer(12))]),
+            Ok(true)
+        );
+        assert_eq!(
+            matches_all_msgpack(&bytes, &[gt("price", Value::Integer(13))]),
+            Ok(false)
+        );
+        assert_eq!(
+            matches_all_msgpack(&bytes, &[MetadataFilter::eq("id", id)]),
+            Ok(true)
+        );
     }
 
     #[test]

@@ -555,8 +555,8 @@ mod tests {
         let mut erased_found = false;
         for (_, buf) in m.iter() {
             let tile = buf.materialise(&s).unwrap();
-            for i in 0..tile.row_kinds.len() {
-                match RowKind::from_u8(tile.row_kinds[i]).unwrap() {
+            for &kind in &tile.row_kinds {
+                match RowKind::from_u8(kind).unwrap() {
                     RowKind::Live => live_found = true,
                     RowKind::Tombstone => tombstone_found = true,
                     RowKind::GdprErased => erased_found = true,

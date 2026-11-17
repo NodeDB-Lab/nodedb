@@ -83,7 +83,6 @@ mod tests {
                 constraint: "unique".into(),
                 detail: "duplicate key".into(),
             },
-            Error::TxnOverlayMemoryExceeded { limit: 1 << 20 },
             Error::UndefinedFunction {
                 name: "no_such_fn".into(),
             },

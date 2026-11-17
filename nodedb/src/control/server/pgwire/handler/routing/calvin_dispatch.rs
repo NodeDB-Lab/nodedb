@@ -10,22 +10,26 @@ use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::planner::calvin::{
-    TxnDispatchPosition, dispatch_authorized_dependent_edge_recon,
+    CrossShardTxnMode, TxnDispatchPosition, dispatch_authorized_dependent_edge_recon,
     dispatch_authorized_tasks_to_calvin, is_edge_recon_plan,
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::calvin_fold::{
-    CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
+    CalvinBatchFold, CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
+use crate::control::server::shared::quota_admission::admit_quota_for_tasks;
+use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::command_tag::push_folded_tag;
-use super::super::super::types::{dml_fold_error_to_pg, error_to_pg, error_to_sqlstate};
+use super::super::super::types::{
+    dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, sqlstate_error,
+};
 use super::super::core::NodeDbPgHandler;
 
 /// Meter one Calvin task once the batch has committed — Calvin applies the
@@ -67,6 +71,21 @@ fn resolve_calvin_metering_scope<'a>(
         .map_err(|e| error_to_pg(&e))
 }
 
+/// Refuse the batch when a covering scope's hard quota is spent, before it is
+/// submitted. Calvin dispatches no task alone, so the dispatch loop's
+/// per-task admission never runs for it. `scope` is `None` when metering is
+/// disabled.
+fn admit_calvin_quota(
+    state: &crate::control::state::SharedState,
+    scope: Option<&RequestAuthScope<'_>>,
+    tasks: &[PhysicalTask],
+) -> PgWireResult<()> {
+    let Some(scope) = scope else {
+        return Ok(());
+    };
+    admit_quota_for_tasks(state, scope, tasks).map_err(|e| sqlstate_error("53400", &e.to_string()))
+}
+
 /// Who issued the statement and how its rows must be encoded back.
 ///
 /// Bundled because these are the connection's identity and result contract,
@@ -76,13 +95,14 @@ pub(super) struct CalvinDispatchSession<'a> {
     pub identity: &'a AuthenticatedIdentity,
     pub session_id: SessionId,
     pub result_formats: &'a pgwire::api::portal::Format,
-    pub auth: &'a crate::control::security::auth_context::AuthContext,
     /// The statement's announced output columns, when it announced any.
     pub projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
 }
 
 impl NodeDbPgHandler {
-    /// Drive Calvin strict multi-shard dispatch for the given task set.
+    /// Drive Calvin strict multi-shard dispatch for the given task set. It
+    /// also commits a statement on one vShard that holds settlement reads, an
+    /// implicit-edge predicate, or a `RETURNING` list that can fail.
     ///
     /// Returns the response vec on success: the statement's RETURNING rows
     /// (if any) and its one command tag. The caller returns this immediately
@@ -98,10 +118,13 @@ impl NodeDbPgHandler {
             identity,
             session_id,
             result_formats,
-            auth,
             projection,
         } = session;
-        let cross_shard_mode = self.sessions.cross_shard_txn_mode(session_id);
+        // Every caller commits the statement atomically. A best-effort
+        // session reaches here only with a `RETURNING` list that can fail,
+        // which needs the vote, or with one vShard, where the mode decides
+        // nothing.
+        let cross_shard_mode = CrossShardTxnMode::Strict;
         let tx_state = self.sessions.transaction_state(session_id);
         let database_id = self
             .sessions
@@ -151,15 +174,19 @@ impl NodeDbPgHandler {
                 TxnDispatchPosition::Autocommit
             };
             let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
+            admit_calvin_quota(&self.state, metering_scope.as_ref(), &tasks)?;
             let authorized = self.authorize_tasks(identity, &tasks)?;
-            let apply_resp = dispatch_authorized_tasks_to_calvin(
-                &self.state,
-                authorized,
-                tenant_id,
-                cross_shard_mode,
-                position,
-                reads,
-                None,
+            let apply_resp = with_announced_returning(
+                projection,
+                dispatch_authorized_tasks_to_calvin(
+                    &self.state,
+                    authorized,
+                    tenant_id,
+                    cross_shard_mode,
+                    position,
+                    reads,
+                    None,
+                ),
             )
             .await
             .map_err(|e| {
@@ -177,8 +204,6 @@ impl NodeDbPgHandler {
                 CalvinBatchShaping {
                     metering_scope,
                     result_formats,
-                    auth,
-                    projection,
                     tenant_id,
                     database_id,
                     session_id,
@@ -212,14 +237,18 @@ impl NodeDbPgHandler {
         // list survives to shape the per-task responses afterwards: a RETURNING
         // task emits its rows, every other task its command tag.
         let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
+        admit_calvin_quota(&self.state, metering_scope.as_ref(), &tasks)?;
         let authorized = self.authorize_tasks(identity, &tasks)?;
-        let outcome = dispatch_authorized_dependent_edge_recon(
-            &self.state,
-            authorized,
-            identity,
-            tenant_id,
-            database_id,
-            reads,
+        let outcome = with_announced_returning(
+            projection,
+            dispatch_authorized_dependent_edge_recon(
+                &self.state,
+                authorized,
+                identity,
+                tenant_id,
+                database_id,
+                reads,
+            ),
         )
         .await
         .map_err(|e| {
@@ -237,8 +266,6 @@ impl NodeDbPgHandler {
             CalvinBatchShaping {
                 metering_scope,
                 result_formats,
-                auth,
-                projection,
                 tenant_id,
                 database_id,
                 session_id,
@@ -259,45 +286,39 @@ impl NodeDbPgHandler {
         let CalvinBatchShaping {
             metering_scope,
             result_formats,
-            auth,
-            projection,
             tenant_id,
             database_id,
             session_id,
         } = shaping;
-        // A RETURNING expression resolves `nextval`/`currval` against this
-        // session, as the single-shard dispatch loop does.
-        let sequences = SessionSequenceAccess::for_session(
+        // The session takes the sequence values the frozen RETURNING rows
+        // drew, as the single-shard dispatch loop's evaluation records them,
+        // in the database the writes ran in.
+        let write_database = tasks.first().map_or(database_id, |task| task.database_id);
+        let session = SessionSequenceAccess::for_session(
             &self.state,
             self.sessions.sequence_values(session_id),
-            database_id,
+            write_database,
             tenant_id,
         );
         let plans: Vec<&crate::bridge::envelope::PhysicalPlan> =
             tasks.iter().map(|task| &task.plan).collect();
-        let fold = fold_calvin_batch(
-            &plans,
-            apply_resp,
-            &CalvinFoldCtx {
-                projection,
-                state: &self.state,
-                tenant_id,
-                database_id,
-                auth,
-                sequences: Some(&sequences),
-            },
-        )
-        .map_err(|e| match e {
-            CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
-            CalvinFoldError::Shape(e) => error_to_pg(&e),
-        })?;
+        let fold = fold_calvin_batch(&plans, apply_resp, &CalvinFoldCtx { session: &session })
+            .map_err(|e| match e {
+                CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
+                CalvinFoldError::Shape(e) => error_to_pg(&e),
+            })?;
         for task in tasks {
             meter_calvin_task(&self.state, metering_scope.as_ref(), task);
         }
         let mut responses: Vec<Response> = Vec::with_capacity(2);
-        if let Some(shaped) = fold.rows {
-            let (response, _notice) =
+        // The statement answers one result set, as the per-task loop folds
+        // its tasks' rows.
+        if let Some(shaped) = CalvinBatchFold::one_result_set(fold.rows) {
+            let (response, notice) =
                 super::super::shape_encode::shaped_query_response(shaped, result_formats);
+            if let Some(notice) = notice {
+                self.sessions.push_notice(session_id, notice);
+            }
             responses.push(response);
         }
         push_folded_tag(&mut responses, fold.tag);
@@ -311,10 +332,8 @@ struct CalvinBatchShaping<'a> {
     /// batch was submitted. `None` when metering is disabled.
     metering_scope: Option<RequestAuthScope<'a>>,
     result_formats: &'a pgwire::api::portal::Format,
-    auth: &'a crate::control::security::auth_context::AuthContext,
-    projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
     tenant_id: TenantId,
     database_id: DatabaseId,
-    /// The session whose sequence values a RETURNING expression reads.
+    /// The session that takes the sequence values the RETURNING rows drew.
     session_id: SessionId,
 }

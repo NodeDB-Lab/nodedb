@@ -336,7 +336,7 @@ pub async fn resolve_shuffle_aggregate(
     // apply to the merged rows, as they do on a single-node aggregate.
     let merged = crate::util::row_rename::rename_row_keys(
         &encode_msgpack_array(&elements),
-        &crate::util::row_rename::group_key_renames(&group_by, &group_key_aliases),
+        &crate::util::row_rename::group_key_renames(&group_by, &group_key_aliases, &aggregates),
     )?;
 
     // The producers report the source collection's versions at read time on

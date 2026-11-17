@@ -25,8 +25,10 @@ use tokio::sync::Notify;
 
 use crate::control::wal_replication::encode::RedoEntryTarget;
 use crate::types::Lsn;
-use crate::wal::manager::{RedoChunkPlacement, WalFloorHold};
-use crate::wal::{CalvinPositionId, RedoChunkHeader, RedoStreamId, WalManager};
+use crate::wal::manager::{ChunkLsns, RedoChunkPlacement, WalFloorHold};
+use crate::wal::{
+    CalvinPositionId, RedoChunkHeader, RedoChunkRef, RedoStreamId, WalManager, chunk_crc,
+};
 
 use super::error::RedoChunkError;
 use super::stream::OpenStream;
@@ -203,7 +205,7 @@ impl RedoChunkStore {
             .wait_durable(lsns.last)
             .await
             .map_err(|e| RedoChunkError::storage(chunk.stream, e))?;
-        self.hold_chunk(chunk, lsns.first);
+        self.hold_chunk(chunk, lsns);
         Ok(())
     }
 
@@ -257,18 +259,25 @@ impl RedoChunkStore {
         Ok(())
     }
 
-    /// Hold a durable chunk whose first record is at `first`.
-    fn hold_chunk(&self, chunk: ChunkApply, first: Lsn) {
-        let mut state = self.lock();
+    /// Hold the reference of a durable chunk whose records sit at `lsns`.
+    fn hold_chunk(&self, chunk: ChunkApply, lsns: ChunkLsns) {
         let held = chunk.bytes.len() as u64;
+        let reference = RedoChunkRef {
+            index: chunk.index,
+            first_lsn: lsns.first.as_u64(),
+            last_lsn: lsns.last.as_u64(),
+            len: held,
+            crc: chunk_crc(&chunk.bytes),
+        };
+        let mut state = self.lock();
         match state.streams.get_mut(&chunk.stream) {
             Some(open) => {
                 open.held += held;
-                open.chunks.push(chunk.bytes);
+                open.chunks.push(reference);
             }
             None => {
                 state.pending.remove(&chunk.stream);
-                let hold = self.wal.floor_holds().hold(first);
+                let hold = self.wal.floor_holds().hold(lsns.first);
                 state.streams.insert(
                     chunk.stream,
                     OpenStream {
@@ -276,7 +285,7 @@ impl RedoChunkStore {
                         group_id: chunk.group_id,
                         term: chunk.term,
                         len: chunk.len,
-                        chunks: vec![chunk.bytes],
+                        chunks: vec![reference],
                         held,
                         hold,
                     },
@@ -304,6 +313,20 @@ impl RedoChunkStore {
             group_id,
             _hold: hold,
         });
+    }
+
+    /// Release a taken stream whose final entry applied durably. The marker
+    /// the outcome appended reads the stream's chunk records back at every
+    /// boot, so the records stay until a truncation's checkpoint passes
+    /// `past`, the LSN below which every record of the outcome sits.
+    pub fn retire(&self, open: OpenStream, past: Lsn) {
+        let hold = open.into_hold();
+        // The checkpoint hold lands before the guard drops, so the floor
+        // never lapses in between.
+        self.wal
+            .floor_holds()
+            .hold_until_checkpoint(hold.lsn(), past);
+        drop(hold);
     }
 
     /// Drop `stream` for its abandon entry, and make the drop durable under
@@ -403,6 +426,21 @@ pub(super) mod tests {
         }
     }
 
+    /// The content of `open`, which must hold `count` chunks of `len`
+    /// bytes in all, read back from `wal` through its chunk references.
+    pub(in super::super) fn read_back(
+        wal: &WalManager,
+        open: &OpenStream,
+        count: u32,
+        len: u64,
+    ) -> crate::Result<Vec<u8>> {
+        let reference = open.stream_ref(count, len)?;
+        wal.fetch_stream_content(&reference)?
+            .ok_or_else(|| crate::Error::Internal {
+                detail: format!("chunks of {:?} lie below the retained WAL", open.stream()),
+            })
+    }
+
     fn limits(max_open_bytes: u64) -> RedoChunkLimits {
         RedoChunkLimits {
             max_entry_bytes: 64 * 1024,
@@ -424,12 +462,46 @@ pub(super) mod tests {
         assert_eq!(store.open_streams(), 1);
         assert_eq!(store.open_bytes(), 7);
         let open = store.take_for_final(&stream).expect("open stream");
-        assert_eq!(open.assemble(3, 7).expect("assembles"), b"abcdefg".to_vec());
+        let reference = open.stream_ref(3, 7).expect("references every chunk");
+        let indexes: Vec<u32> = reference.chunks.iter().map(|chunk| chunk.index).collect();
+        assert_eq!(indexes, vec![0, 1, 2]);
+        // The stream holds no bytes: the content reads back from the WAL.
+        let content = store
+            .wal
+            .fetch_stream_content(&reference)
+            .expect("reads")
+            .expect("records retained");
+        assert_eq!(content, b"abcdefg".to_vec());
         assert_eq!(store.open_streams(), 0);
         // The floor holds the stream's first record until the stream drops.
         assert!(store.wal.floor_holds().lowest().is_some());
         drop(open);
         assert_eq!(store.wal.floor_holds().lowest(), None);
+    }
+
+    #[tokio::test]
+    async fn a_retired_stream_keeps_its_records_until_a_checkpoint_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = RedoChunkStore::new(wal(&dir), limits(1 << 20));
+        let stream = session(9);
+        store
+            .apply_chunk(chunk(stream, 0, 3, b"abc"))
+            .await
+            .expect("chunk applies");
+        let open = store.take_for_final(&stream).expect("open stream");
+        let first = open.hold.lsn();
+        let past = store.wal.next_lsn();
+        store.retire(open, past);
+        // The guard dropped, but the checkpoint hold keeps the records.
+        let holds = store.wal.floor_holds();
+        assert_eq!(holds.lowest(), Some(first));
+        // A checkpoint at `past` has not passed it yet.
+        assert_eq!(holds.clamp(past), first);
+        assert_eq!(holds.lowest(), Some(first));
+        // A checkpoint past it releases the records.
+        let beyond = Lsn::new(past.as_u64() + 1);
+        assert_eq!(holds.clamp(beyond), beyond);
+        assert_eq!(holds.lowest(), None);
     }
 
     #[tokio::test]
@@ -451,7 +523,7 @@ pub(super) mod tests {
             })
         ));
         let open = store.take_for_final(&stream).expect("open stream");
-        let refused = open.assemble(2, 6);
+        let refused = open.stream_ref(2, 6);
         assert!(matches!(refused, Err(RedoChunkError::Mismatch { .. })));
         let error = crate::Error::from(refused.expect_err("refused"));
         assert!(matches!(

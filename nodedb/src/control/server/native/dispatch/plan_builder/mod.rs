@@ -22,6 +22,7 @@ pub(crate) mod text;
 pub(crate) mod timeseries;
 pub(crate) mod vector;
 mod vector_filter;
+mod vector_row;
 
 pub(crate) use dispatch::build_plan;
 pub(super) use helpers::{

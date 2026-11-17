@@ -14,10 +14,27 @@ keywords = ["crs", "epsg", "projection", "geodesy", "proj"]
 categories = ["science::geo"]
 
 [features]
-default = []
+default = ["epsg"]
+# Every EPSG CRS, about 108 KB compressed. Without it the built-in table holds
+# WGS 84 (4326), Web Mercator (3857), the WGS 84 UTM and UPS grids, and
+# NodeDB's own codes. Every other EPSG code answers `UnknownSrid::Undefined`.
+# A library crate depends on this one with default features off, so the final
+# binary picks.
+epsg = ["dep:ruzstd"]
 
 [dependencies]
 nodedb-srid = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 zerompk = { workspace = true }
+# Pure-Rust zstd decoder for the compressed full EPSG table.
+ruzstd = { workspace = true, optional = true }
+
+# Both suites read CRSs outside the always-built-in set.
+[[test]]
+name = "gdm2020"
+required-features = ["epsg"]
+
+[[test]]
+name = "proj_reference"
+required-features = ["epsg"]

@@ -217,12 +217,7 @@ fn time_column(schema: &ColumnarSchema) -> Result<&str, MergeIncompatibility> {
 }
 
 fn empty_column(ty: ColumnType) -> ColumnData {
-    match ty {
-        ColumnType::Timestamp(_) => ColumnData::Timestamp(Vec::new()),
-        ColumnType::Float64 => ColumnData::Float64(Vec::new()),
-        ColumnType::Int64 => ColumnData::Int64(Vec::new()),
-        ColumnType::Symbol | ColumnType::Text => ColumnData::Symbol(Vec::new()),
-    }
+    ColumnData::nulls(ty, 0)
 }
 
 /// Append `rows` nulls, as a memtable backfills a column it gains.
@@ -235,6 +230,9 @@ fn push_nulls(column: &mut ColumnData, rows: usize) {
             ids.extend(std::iter::repeat_n(NULL_SYMBOL_ID, rows));
             valid.extend(std::iter::repeat_n(false, rows));
         }
+        ColumnData::Decimal(v) => v.extend(std::iter::repeat_n(None, rows)),
+        ColumnData::Uuid(v) => v.extend(std::iter::repeat_n(None, rows)),
+        ColumnData::Bool(v) => v.extend(std::iter::repeat_n(None, rows)),
     }
 }
 
@@ -245,6 +243,9 @@ fn append(column: &mut ColumnData, data: &ColumnData, name: &str) -> crate::Resu
         | (ColumnData::Int64(a), ColumnData::Int64(b)) => a.extend_from_slice(b),
         (ColumnData::Float64(a), ColumnData::Float64(b)) => a.extend_from_slice(b),
         (ColumnData::Symbol(a), ColumnData::Symbol(b)) => a.extend_from_slice(b),
+        (ColumnData::Decimal(a), ColumnData::Decimal(b)) => a.extend_from_slice(b),
+        (ColumnData::Uuid(a), ColumnData::Uuid(b)) => a.extend_from_slice(b),
+        (ColumnData::Bool(a), ColumnData::Bool(b)) => a.extend_from_slice(b),
         _ => {
             return Err(corrupt(format!(
                 "column '{name}' read back in a form its schema type does not store"
@@ -321,6 +322,9 @@ fn permute(column: &mut ColumnData, order: &[usize]) {
             apply(ids, order);
             apply(valid, order);
         }
+        ColumnData::Decimal(v) => apply(v, order),
+        ColumnData::Uuid(v) => apply(v, order),
+        ColumnData::Bool(v) => apply(v, order),
     }
 }
 

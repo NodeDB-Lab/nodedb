@@ -145,7 +145,8 @@ pub(crate) async fn execute_plan_all_local_cores(
             // every core, it stages, resolves, or applies on each of them.
             MetaOp::StageWrite { .. } => Err(fanned_scoped_plan("StageWrite")),
             MetaOp::DropTxnOverlay { .. } => Err(fanned_scoped_plan("DropTxnOverlay")),
-            MetaOp::ResolveTxn { .. } => Err(fanned_scoped_plan("ResolveTxn")),
+            MetaOp::ResolveTxnPart { .. } => Err(fanned_scoped_plan("ResolveTxnPart")),
+            MetaOp::ReadRedoStreamPage { .. } => Err(fanned_scoped_plan("ReadRedoStreamPage")),
             MetaOp::MarkSavepoint { .. } => Err(fanned_scoped_plan("MarkSavepoint")),
             MetaOp::RollbackToSavepoint { .. } => Err(fanned_scoped_plan("RollbackToSavepoint")),
             MetaOp::TransactionBatch { .. } => Err(fanned_scoped_plan("TransactionBatch")),

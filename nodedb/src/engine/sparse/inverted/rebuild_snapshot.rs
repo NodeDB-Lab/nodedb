@@ -1,75 +1,78 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The off-core half of a collection rebuild: read the pinned snapshot and
-//! derive the canonical rows of every index of the collection from it.
+//! The handles of one collection rebuild of the inverted index.
 //!
-//! Every type here is `Send` and touches no `!Send` engine state. The redb
-//! read transaction was opened on the owning core by
-//! `InvertedIndex::begin_rebuild`, in the same step that opened the write
-//! journal, so the snapshot and the journal meet with no gap.
+//! [`FtsRebuildTicket`] pins a redb read snapshot of the whole sparse
+//! database: the collection's stored document versions, its stored sync
+//! frames, and its analyzer rows. `InvertedIndex::begin_rebuild` opens it on
+//! the owning core, in the same step that opens the write journal, so the
+//! snapshot and the journal meet with no gap. The ticket is `Send`: the
+//! rebuild thread reads the snapshot and derives the collection's index
+//! into a scratch database.
+//!
+//! [`FtsRebuilt`] carries the scratch database back to the owning core,
+//! which cuts it over with `InvertedIndex::install_rebuild`.
+//!
+//! [`FtsCatchUp`] hands a pass whose journal passed its bound back to a
+//! rebuild thread: a fresh snapshot, the scratch database of the pass, and
+//! the documents written during the pass.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use redb::ReadTransaction;
+use redb::{Durability, ReadTransaction, ReadableDatabase as _};
+use roaring::RoaringBitmap;
 
-use nodedb_fts::posting::Posting;
-
+use super::core::InvertedIndex;
 use super::errors::inverted_err;
-use crate::engine::sparse::fts_redb::backend::posting_rows;
-use crate::engine::sparse::fts_redb::scan;
-use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
+use crate::engine::durability_gate::GatedDatabase;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::backend::rebuild_copy::{
+    CollectionCopy, copy_collection_rows, copy_config_meta,
+};
+use crate::engine::storage_bytes::StorageDelta;
 
-/// A pinned snapshot of one collection's index, ready to read.
+/// A pinned snapshot of one collection, ready to read on any thread.
 pub struct FtsRebuildTicket {
     token: u64,
     database_id: u64,
     tid: u64,
     collection: String,
     txn: ReadTransaction,
+    /// 0 for the first pass, then one per catch-up round.
+    round: u32,
 }
 
-/// One index's postings and document lengths as the snapshot holds them.
-struct SnapshotScope {
-    postings: Vec<(String, Vec<Posting>)>,
-    doc_lengths: Vec<(u32, u32)>,
+/// A rebuild pass whose journal passed its bound, ready for a catch-up
+/// round on any thread.
+pub struct FtsCatchUp {
+    /// The fresh snapshot, pinned in the same step as the fresh journal.
+    pub ticket: FtsRebuildTicket,
+    /// The scratch database the ended pass derived.
+    pub previous: FtsRebuilt,
+    /// Every document written during the ended pass.
+    pub touched: RoaringBitmap,
 }
 
-/// Every index of one collection as the snapshot holds it, keyed by field
-/// key (empty for the whole-document index).
-pub struct FtsSnapshot {
-    token: u64,
-    database_id: u64,
-    tid: u64,
-    collection: String,
-    scopes: BTreeMap<String, SnapshotScope>,
+impl std::fmt::Debug for FtsCatchUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FtsCatchUp")
+            .field("token", &self.ticket.token)
+            .field("round", &self.ticket.round)
+            .field("touched", &self.touched.len())
+            .finish()
+    }
 }
 
-/// The canonical rows of one index, derived from a snapshot.
-pub(super) struct RebuiltScope {
-    /// Field key: empty for the whole-document index.
-    pub(super) field: String,
-    /// One list per term, one posting per document, ordered by surrogate.
-    pub(super) postings: Vec<(String, Vec<Posting>)>,
-    /// `(surrogate, token count)` per indexed document.
-    pub(super) doc_lengths: Vec<(u32, u32)>,
-    /// `(surrogate, distinct terms)` per document with a posting.
-    pub(super) doc_terms: Vec<(u32, Vec<String>)>,
-    /// Number of indexed documents.
-    pub(super) doc_count: u32,
-    /// Sum of the indexed documents' token counts.
-    pub(super) total_tokens: u64,
-}
-
-/// The canonical rows of every index of one collection.
+/// A collection's index derived into a scratch database, ready to cut
+/// over on the owning core.
 pub struct FtsRebuilt {
     pub(super) token: u64,
     pub(super) database_id: u64,
     pub(super) tid: u64,
     pub(super) collection: String,
-    /// One entry per index, whole-document index first.
-    pub(super) scopes: Vec<RebuiltScope>,
-    /// `(surrogate, field names)` per document holding any field index.
-    pub(super) doc_fields: Vec<(u32, Vec<String>)>,
+    pub(super) scratch: Arc<GatedDatabase>,
+    scratch_path: PathBuf,
 }
 
 impl FtsRebuildTicket {
@@ -79,6 +82,7 @@ impl FtsRebuildTicket {
         tid: u64,
         collection: String,
         txn: ReadTransaction,
+        round: u32,
     ) -> Self {
         Self {
             token,
@@ -86,6 +90,7 @@ impl FtsRebuildTicket {
             tid,
             collection,
             txn,
+            round,
         }
     }
 
@@ -94,134 +99,105 @@ impl FtsRebuildTicket {
         self.token
     }
 
-    /// Read every index's postings and document lengths of the collection
-    /// from the pinned snapshot. Runs on any thread. The snapshot is released
-    /// on return.
-    pub fn read(self) -> crate::Result<FtsSnapshot> {
-        let (db, t) = (self.database_id, self.tid);
-        let mut scopes: BTreeMap<String, SnapshotScope> = BTreeMap::new();
-
-        let postings_table = self
-            .txn
-            .open_table(POSTINGS)
-            .map_err(|e| inverted_err("rebuild open postings", e))?;
-        // Rows arrive grouped by field, then term, then surrogate, so each
-        // term's list is the run of consecutive rows sharing its field and
-        // term.
-        for row in scan::posting_rows(&postings_table, db, t, &self.collection)
-            .map_err(|e| inverted_err("rebuild postings range", e))?
-        {
-            let (posting, _) = posting_rows::decode(row.surrogate, &row.value)?;
-            let lists = &mut scope_entry(&mut scopes, row.field).postings;
-            match lists.last_mut() {
-                Some((term, list)) if *term == row.term => list.push(posting),
-                Some(_) | None => lists.push((row.term, vec![posting])),
-            }
-        }
-
-        let lengths_table = self
-            .txn
-            .open_table(DOC_LENGTHS)
-            .map_err(|e| inverted_err("rebuild open doc_lengths", e))?;
-        for row in scan::doc_rows(&lengths_table, db, t, &self.collection)
-            .map_err(|e| inverted_err("rebuild doc_lengths range", e))?
-        {
-            let len: u32 = zerompk::from_msgpack(&row.value)
-                .map_err(|e| inverted_err("rebuild decode doc_length", e))?;
-            scope_entry(&mut scopes, row.field)
-                .doc_lengths
-                .push((row.surrogate, len));
-        }
-
-        Ok(FtsSnapshot {
-            token: self.token,
-            database_id: self.database_id,
-            tid: self.tid,
-            collection: self.collection,
-            scopes,
-        })
-    }
-}
-
-fn scope_entry(scopes: &mut BTreeMap<String, SnapshotScope>, field: String) -> &mut SnapshotScope {
-    scopes.entry(field).or_insert_with(|| SnapshotScope {
-        postings: Vec::new(),
-        doc_lengths: Vec::new(),
-    })
-}
-
-impl FtsSnapshot {
-    /// The token that ties this rebuild to its journal.
-    pub fn token(&self) -> u64 {
-        self.token
+    /// The pass this snapshot serves: 0 for the first, then one per
+    /// catch-up round.
+    pub fn round(&self) -> u32 {
+        self.round
     }
 
-    /// Derive the canonical rows of every index: one posting per document per
-    /// term, the term set of each document, corpus stats counted from the
-    /// document lengths, and each document's field set. Runs on any thread.
-    pub fn compact(self) -> FtsRebuilt {
-        let mut fields_by_doc: BTreeMap<u32, Vec<String>> = BTreeMap::new();
-        let mut scopes = Vec::with_capacity(self.scopes.len());
-        // The BTreeMap yields the empty (whole-document) key first.
-        for (field, scope) in self.scopes {
-            if !field.is_empty() {
-                for &(doc, _) in &scope.doc_lengths {
-                    fields_by_doc.entry(doc).or_default().push(field.clone());
-                }
-            }
-            scopes.push(compact_scope(field, scope));
-        }
+    /// The database the collection belongs to.
+    pub fn database_id(&self) -> u64 {
+        self.database_id
+    }
+
+    /// The tenant the collection belongs to.
+    pub fn tid(&self) -> u64 {
+        self.tid
+    }
+
+    /// The collection this rebuild covers.
+    pub fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    /// The pinned snapshot: every row committed before the journal opened.
+    pub fn snapshot(&self) -> &ReadTransaction {
+        &self.txn
+    }
+
+    /// Bind the collection's analyzer, language and fuzzy rows from the
+    /// snapshot into `scratch`, so it analyzes text as the live index does.
+    pub fn seed_scratch_config(&self, scratch: &InvertedIndex) -> crate::Result<()> {
+        let txn = scratch
+            .backend()
+            .db()
+            .begin_write()
+            .map_err(|e| inverted_err("rebuild scratch config txn", e))?;
+        copy_config_meta(
+            &self.txn,
+            &txn,
+            self.database_id,
+            self.tid,
+            &self.collection,
+        )?;
+        txn.commit()
+            .map_err(|e| inverted_err("rebuild scratch config commit", e))
+    }
+
+    /// Release the snapshot and hand the scratch database at `scratch_path`
+    /// to the cutover.
+    pub fn finish(self, scratch: Arc<GatedDatabase>, scratch_path: PathBuf) -> FtsRebuilt {
         FtsRebuilt {
             token: self.token,
             database_id: self.database_id,
             tid: self.tid,
             collection: self.collection,
-            scopes,
-            doc_fields: fields_by_doc.into_iter().collect(),
+            scratch,
+            scratch_path,
         }
     }
 }
 
-/// Canonical rows of one index.
-fn compact_scope(field: String, scope: SnapshotScope) -> RebuiltScope {
-    let mut postings = Vec::with_capacity(scope.postings.len());
-    let mut terms_by_doc: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    for (term, mut list) in scope.postings {
-        list.sort_unstable_by(|a, b| {
-            a.doc_id
-                .as_u32()
-                .cmp(&b.doc_id.as_u32())
-                .then(b.term_freq.cmp(&a.term_freq))
-        });
-        list.dedup_by_key(|p| p.doc_id.as_u32());
-        if list.is_empty() {
-            continue;
-        }
-        for posting in &list {
-            terms_by_doc
-                .entry(posting.doc_id.as_u32())
-                .or_default()
-                .insert(term.clone());
-        }
-        postings.push((term, list));
-    }
-    let doc_terms = terms_by_doc
-        .into_iter()
-        .map(|(doc, terms)| (doc, terms.into_iter().collect()))
-        .collect();
-    let doc_count = u32::try_from(scope.doc_lengths.len()).unwrap_or(u32::MAX);
-    let total_tokens = scope
-        .doc_lengths
-        .iter()
-        .map(|&(_, len)| u64::from(len))
-        .sum();
-    RebuiltScope {
-        field,
-        postings,
-        doc_lengths: scope.doc_lengths,
-        doc_terms,
-        doc_count,
-        total_tokens,
+impl FtsCatchUp {
+    /// Copy every row of the collection the ended pass derived into
+    /// `scratch`, except the rows of the documents written during it. A
+    /// catch-up round derives those again from the fresh snapshot.
+    ///
+    /// `on_row` runs once per copied row. Its error ends the copy.
+    pub fn carry_rows(
+        &self,
+        scratch: &InvertedIndex,
+        on_row: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        let previous = self
+            .previous
+            .scratch
+            .begin_read()
+            .map_err(|e| inverted_err("catch-up previous scratch read txn", e))?;
+        let mut txn = scratch
+            .backend()
+            .db()
+            .begin_write()
+            .map_err(|e| inverted_err("catch-up scratch txn", e))?;
+        // The scratch database is disposable and read in the same process.
+        txn.set_durability(Durability::None)
+            .map_err(|e| inverted_err("catch-up scratch durability", e))?;
+        let mut delta = StorageDelta::default();
+        copy_collection_rows(
+            &previous,
+            &txn,
+            CollectionCopy {
+                database_id: self.ticket.database_id,
+                tid: self.ticket.tid,
+                collection: &self.ticket.collection,
+                skip: &self.touched,
+                on_row,
+            },
+            &mut delta,
+        )?;
+        delta.apply(&txn, SPARSE_COUNTER)?;
+        txn.commit()
+            .map_err(|e| inverted_err("catch-up scratch commit", e))
     }
 }
 
@@ -234,5 +210,11 @@ impl FtsRebuilt {
     /// The collection this rebuild covers.
     pub fn collection(&self) -> &str {
         &self.collection
+    }
+
+    /// The file of the scratch database. The cutover's caller removes it
+    /// once the rebuild is dropped.
+    pub fn scratch_path(&self) -> &Path {
+        &self.scratch_path
     }
 }

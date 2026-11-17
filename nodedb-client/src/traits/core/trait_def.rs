@@ -64,10 +64,18 @@ pub trait NodeDb: NodeDbGraph {
         allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>>;
 
-    /// Insert a vector with optional metadata into `collection`.
+    /// Upsert the row `id` of `collection` with a vector and optional
+    /// metadata.
+    ///
+    /// Each metadata field is a field of the row, so a `MetadataFilter`
+    /// names it. Every field keeps its exact type.
     ///
     /// On Lite: HNSW insert + CRDT delta + persist to local storage.
-    /// On Remote: `INSERT INTO collection (id, embedding, metadata) VALUES (...)`.
+    /// On Native: `OpCode::VectorInsert` with the metadata as a native object
+    /// in `data`.
+    /// On Remote: `UPSERT INTO collection (<key>, embedding, <fields>) VALUES
+    /// (...)` with each field a typed parameter. A UUID, an instant or bytes
+    /// needs a column the collection declares of that type.
     async fn vector_insert(
         &self,
         collection: &str,
@@ -90,7 +98,10 @@ pub trait NodeDb: NodeDbGraph {
     /// On Lite: direct Loro state read.
     /// On Remote: `SELECT to_jsonb(*) AS document FROM <collection> WHERE
     /// <key column> = '<id>'` on the simple-query protocol. The row object
-    /// decodes field by field to the values the native client returns.
+    /// decodes field by field to the values the native client returns. A
+    /// field the collection declares `DECIMAL`, `UUID`, `TIMESTAMP` or
+    /// `TIMESTAMPTZ` decodes from its exact JSON text to that type, read from
+    /// `DESCRIBE`. An undeclared string field stays a string.
     async fn document_get(&self, collection: &str, id: &str) -> NodeDbResult<Option<Document>>;
 
     /// Put (insert or replace) a document into `collection`.
@@ -189,8 +200,11 @@ pub trait NodeDb: NodeDbGraph {
     /// list order.
     ///
     /// On Lite: `nodedb_crdt::list_ops::list_insert_container` + CRDT delta.
+    /// Every field keeps its exact type: see `nodedb_crdt::loro_value` for
+    /// how each kind is stored in the block.
+    ///
     /// On Native: `OpCode::CrdtListInsert` with `list_path` / `list_index` /
-    /// `list_fields_json`.
+    /// `list_fields` (a tagged `Value::Object`).
     async fn list_insert(
         &self,
         collection: &str,
@@ -337,7 +351,12 @@ pub trait NodeDb: NodeDbGraph {
     ///
     /// On Lite: requires the `sql` feature. Without it, returns
     /// `NodeDbError::SqlNotEnabled`.
-    /// On Remote: pass-through to Origin via pgwire.
+    /// On Remote: pass-through to Origin via pgwire. Cells decode by their
+    /// RowDescription column type for a parameterized statement and for a
+    /// parameterless row query (`SELECT`, `WITH`, `VALUES`, `TABLE`, or a
+    /// write with `RETURNING`). Every other parameterless statement runs on
+    /// the simple-query protocol, whose cells arrive as text.
+    /// On Native: cells arrive as typed values.
     ///
     /// The typed methods above cover most agent workloads. Use this for BI
     /// tools, ORMs, and ad-hoc queries.
@@ -371,6 +390,15 @@ pub trait NodeDb: NodeDbGraph {
 
     /// Register a handler fired when a collection the caller synced is purged
     /// on Origin and the local copy is removed.
+    ///
+    /// Delivery is at-least-once. The same purge fires again when it is
+    /// replayed: after a crash before the client stored its sync watermark,
+    /// or when an online notice is followed by a reconnect that replays it
+    /// from Origin's purge log. [`CollectionPurgedEvent::purge_index`]
+    /// identifies the purge, so a handler that must act once dedupes on
+    /// `(name, purge_index)`.
+    ///
+    /// [`CollectionPurgedEvent::purge_index`]: crate::traits::document::CollectionPurgedEvent::purge_index
     ///
     /// The default returns `NodeDbError::storage` ("not supported").
     /// Implementations with a sync client (Lite) override it. A stateless

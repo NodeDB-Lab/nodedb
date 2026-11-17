@@ -96,7 +96,7 @@ pub(super) fn describe_text(op: &TextOp) -> PlanKind {
         | TextOp::FtsIndexDoc { .. }
         | TextOp::FtsDeleteDoc { .. } => PlanKind::MultiRow,
 
-        // Config write: opaque status.
-        TextOp::SetTextConfig { .. } => PlanKind::Execution,
+        // Config write and index rebuild: opaque status.
+        TextOp::SetTextConfig { .. } | TextOp::RebuildIndex { .. } => PlanKind::Execution,
     }
 }

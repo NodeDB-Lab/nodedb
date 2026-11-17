@@ -23,7 +23,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::bulk_dml::{TxnPrediction, decode_bulk_filters};
 use crate::data::executor::handlers::generated;
-use crate::data::executor::handlers::transaction::overlay::MAX_TXN_OVERLAY_BYTES;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TxnId};
@@ -131,6 +130,15 @@ impl CoreLoop {
                 declared_primary_key,
                 *row_key,
             );
+            if let Err(e) = self.stage_check_row_image(
+                database_id.as_u64(),
+                tid,
+                collection,
+                &identity,
+                &new_body,
+            ) {
+                return self.response_error(task, e);
+            }
             if let Err(e) = self.stage_admit_write(
                 rls_write_check,
                 &new_body,
@@ -169,9 +177,7 @@ impl CoreLoop {
             if returning.is_some() {
                 staged.push((identity.clone(), new_body.clone()));
             }
-            if let Err(e) =
-                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, new_body)
-            {
+            if let Err(e) = self.stage_bulk_put(txn_id, &coll_key, surrogate, &identity, new_body) {
                 return self.response_error(task, e);
             }
             affected += 1;
@@ -201,15 +207,10 @@ impl CoreLoop {
         }
     }
 
-    /// Stage a bulk-matched row's new body after enforcing the same
-    /// per-transaction overlay memory cap point writes enforce
-    /// (`stage_put_capped` in `dispatch.rs`): reject with the identical
-    /// [`crate::Error::TxnOverlayMemoryExceeded`] once the cumulative staged
-    /// byte total would exceed [`MAX_TXN_OVERLAY_BYTES`]. Rows staged before
-    /// the row that trips the cap remain staged — the same
-    /// stage-then-fail-on-overflow behavior `stage_put_capped` exhibits for a
-    /// single point write, applied per matched row here.
-    pub(in crate::data::executor) fn stage_bulk_put_capped(
+    /// Stage a bulk-matched row's new body. Past `[tuning.query]
+    /// max_txn_overlay_bytes` of hot entries the overlay spills, so a bulk
+    /// statement of any size stages whole.
+    pub(in crate::data::executor) fn stage_bulk_put(
         &mut self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
@@ -217,18 +218,7 @@ impl CoreLoop {
         doc_id: &RowIdentity,
         body: Vec<u8>,
     ) -> crate::Result<()> {
-        let current = self
-            .txn_overlays
-            .get(&txn_id)
-            .map(|o| o.memory_size_estimate())
-            .unwrap_or(0);
-        if current.saturating_add(body.len()) > MAX_TXN_OVERLAY_BYTES {
-            return Err(crate::Error::TxnOverlayMemoryExceeded {
-                limit: MAX_TXN_OVERLAY_BYTES,
-            });
-        }
         self.txn_overlay_mut(txn_id)
-            .insert_put(coll_key.clone(), surrogate, doc_id, body);
-        Ok(())
+            .insert_put(coll_key.clone(), surrogate, doc_id, body)
     }
 }

@@ -15,7 +15,9 @@ use crate::row_decode::{HitSource, decode_search_hits};
 use crate::sql_escape::quote_identifier;
 
 use super::super::sql::{build_vector_search_sql, render_metadata_filter_public};
-use super::core::NodeDbRemote;
+use super::core::{NodeDbRemote, pg_error_detail};
+use super::identity::identity_column_of;
+use super::vector_bind::{VectorColumn, vector_upsert};
 
 impl NodeDbRemote {
     pub(super) async fn vector_search_impl(
@@ -61,18 +63,8 @@ impl NodeDbRemote {
     ) -> NodeDbResult<()> {
         // The vector lands on the column the caller names, not on whichever
         // vector column the planner picks when the column name is omitted.
-        let key = self.identity_column(collection).await?;
-        let metadata_param = metadata.as_ref().map(|_| "$2");
-        let sql = vector_insert_sql(collection, &key, field_name, embedding, metadata_param);
-
-        if let Some(d) = metadata {
-            let meta_json = sonic_rs::to_string(&d)
-                .map_err(|e| NodeDbError::storage(format!("metadata serialization: {e}")))?;
-            self.execute_raw(&sql, &[&id, &meta_json]).await?;
-        } else {
-            self.execute_raw(&sql, &[&id]).await?;
-        }
-        Ok(())
+        self.vector_row_upsert(collection, field_name, id, embedding, metadata)
+            .await
     }
 
     pub(super) async fn vector_search_field_impl(
@@ -123,20 +115,46 @@ impl NodeDbRemote {
         embedding: &[f32],
         metadata: Option<Document>,
     ) -> NodeDbResult<()> {
-        let key = self.identity_column(collection).await?;
-        let meta_json = match metadata {
-            Some(d) => sonic_rs::to_string(&d)
-                .map_err(|e| NodeDbError::storage(format!("metadata serialization: {e}")))?,
-            None => "{}".into(),
-        };
-        let sql = vector_insert_sql(
-            collection,
-            &key,
-            DEFAULT_VECTOR_COLUMN,
+        self.vector_row_upsert(collection, DEFAULT_VECTOR_COLUMN, id, embedding, metadata)
+            .await
+    }
+
+    /// Upsert the row `id` with `embedding` under `column` and each metadata
+    /// field as its own typed column. See [`vector_upsert`].
+    async fn vector_row_upsert(
+        &self,
+        collection: &str,
+        column: &str,
+        id: &str,
+        embedding: &[f32],
+        metadata: Option<Document>,
+    ) -> NodeDbResult<()> {
+        let (describe_columns, describe_rows) = self.describe(collection).await?;
+        let key = identity_column_of(collection, &describe_columns, &describe_rows)?;
+        let mut row = Document::new(id);
+        if let Some(metadata) = metadata {
+            row.fields = metadata.fields;
+        }
+        let vector = VectorColumn {
+            name: column,
             embedding,
-            Some("$2::jsonb"),
-        );
-        self.execute_raw(&sql, &[&id, &meta_json]).await?;
+        };
+        let upsert = vector_upsert(collection, &key, &vector, &row)?;
+        let failed = |step: &str, e: &tokio_postgres::Error| {
+            NodeDbError::storage(format!(
+                "vector_insert '{collection}'/'{id}' {step} failed: {}",
+                pg_error_detail(e)
+            ))
+        };
+        let client = self.client.lock().await;
+        let statement = client
+            .prepare_typed(&upsert.sql, &upsert.types())
+            .await
+            .map_err(|e| failed("prepare", &e))?;
+        client
+            .execute(&statement, &upsert.values())
+            .await
+            .map_err(|e| failed("upsert", &e))?;
         Ok(())
     }
 
@@ -154,46 +172,3 @@ impl NodeDbRemote {
 
 /// The vector column a field-less `vector_insert` writes.
 const DEFAULT_VECTOR_COLUMN: &str = "embedding";
-
-/// `INSERT INTO <collection> (<key>, <field>[, metadata]) VALUES ($1,
-/// ARRAY[...][, <metadata>])`.
-///
-/// `key` is the collection's identity column, which holds the id bound as
-/// `$1`. `metadata` is the SQL expression of the metadata parameter, or
-/// `None` for no metadata column.
-fn vector_insert_sql(
-    collection: &str,
-    key: &str,
-    field: &str,
-    embedding: &[f32],
-    metadata: Option<&str>,
-) -> String {
-    let collection = quote_identifier(collection);
-    let key = quote_identifier(key);
-    let field = quote_identifier(field);
-    let vector = format_vector_array(embedding);
-    match metadata {
-        Some(param) => format!(
-            "INSERT INTO {collection} ({key}, {field}, metadata) VALUES ($1, {vector}, {param})"
-        ),
-        None => format!("INSERT INTO {collection} ({key}, {field}) VALUES ($1, {vector})"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_vector_insert_writes_the_id_under_the_identity_column() {
-        assert_eq!(
-            vector_insert_sql("vecs", "sku", "embedding", &[1.0, 0.5], Some("$2::jsonb")),
-            "INSERT INTO \"vecs\" (\"sku\", \"embedding\", metadata) \
-             VALUES ($1, ARRAY[1,0.5], $2::jsonb)"
-        );
-        assert_eq!(
-            vector_insert_sql("vecs", "id", "img", &[2.0], None),
-            "INSERT INTO \"vecs\" (\"id\", \"img\") VALUES ($1, ARRAY[2])"
-        );
-    }
-}

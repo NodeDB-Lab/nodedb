@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Library code propagates errors; tests may unwrap.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! Columnar segment format and memtable for NodeDB analytical storage.
 //!
 //! Provides the shared segment format used by all columnar profiles

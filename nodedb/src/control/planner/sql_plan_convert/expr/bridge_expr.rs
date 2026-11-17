@@ -96,16 +96,10 @@ fn convert_expr_inner(expr: &SqlExpr, qualify: bool) -> crate::bridge::expr_eval
                 .map(|e| Box::new(convert_expr_inner(e, qualify))),
         },
         SqlExpr::Cast { expr, to_type } => {
-            let cast_type = match to_type.to_uppercase().as_str() {
-                "INT" | "INTEGER" | "BIGINT" | "SMALLINT" => {
-                    crate::bridge::expr_eval::CastType::Int
-                }
-                "FLOAT" | "DOUBLE" | "REAL" | "NUMERIC" | "DECIMAL" => {
-                    crate::bridge::expr_eval::CastType::Float
-                }
-                "BOOL" | "BOOLEAN" => crate::bridge::expr_eval::CastType::Bool,
-                _ => crate::bridge::expr_eval::CastType::String,
-            };
+            // A name no runtime cast covers casts to text. A `DECIMAL(p,s)`
+            // typmod the resolver refused never reaches here.
+            let cast_type = crate::bridge::expr_eval::CastType::from_type_name(to_type)
+                .unwrap_or(crate::bridge::expr_eval::CastType::String);
             BExpr::Cast {
                 expr: Box::new(convert_expr_inner(expr, qualify)),
                 to_type: cast_type,
@@ -301,6 +295,29 @@ mod tests {
                 .eval(&row(), &nodedb_crs::CrsContext::builtin_only())
                 .expect("eval"),
             Value::Array(vec![Value::Integer(7), Value::Integer(1)])
+        );
+    }
+
+    #[test]
+    fn a_column_cast_to_uuid_or_decimal_evaluates_typed() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let row = Value::Object(HashMap::from([
+            ("u".to_string(), Value::String(uuid.into())),
+            ("d".to_string(), Value::String("12.345".into())),
+        ]));
+        let cast = |name: &str, to_type: &str| SqlExpr::Cast {
+            expr: Box::new(col(name)),
+            to_type: to_type.into(),
+        };
+        let eval = |e: SqlExpr| {
+            sql_expr_to_bridge_expr(&e)
+                .eval(&row, &nodedb_crs::CrsContext::builtin_only())
+                .expect("eval")
+        };
+        assert_eq!(eval(cast("u", "UUID")), Value::Uuid(uuid.into()));
+        assert_eq!(
+            eval(cast("d", "NUMERIC(5,2)")),
+            Value::Decimal("12.35".parse().expect("decimal"))
         );
     }
 

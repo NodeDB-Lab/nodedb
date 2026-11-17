@@ -50,6 +50,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
             &mut self,
             collection: &str,
             rows: &[Vec<(String, nodedb_sql::types_expr::SqlValue)>],
+            _returning: Option<&nodedb_sql::types::ResolvedReturning>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::scan::convert_timeseries_ingest(
                 collection,

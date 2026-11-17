@@ -316,8 +316,17 @@ impl MutationEngine {
 
     // -- Internal helpers --
 
+    /// Require a schema key before indexed row operations.
+    pub(super) fn require_primary_key(&self) -> Result<(), ColumnarError> {
+        if self.pk_col_indices.is_empty() {
+            return Err(ColumnarError::MissingPrimaryKey);
+        }
+        Ok(())
+    }
+
     /// Extract PK bytes from a row of values.
     pub(super) fn extract_pk_bytes(&self, values: &[Value]) -> Result<Vec<u8>, ColumnarError> {
+        self.require_primary_key()?;
         if values.len() != self.schema.columns.len() {
             return Err(ColumnarError::SchemaMismatch {
                 expected: self.schema.columns.len(),

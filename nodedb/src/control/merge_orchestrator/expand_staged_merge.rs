@@ -33,8 +33,8 @@ use crate::control::target_identity::{
 };
 
 /// Resolve one in-transaction `DocumentOp::Merge` task into the concrete,
-/// surrogate-carrying `PointInsert` / `PointPut` / `PointDelete` tasks its three
-/// arms expand to.
+/// surrogate-carrying `PointPut` / `PointInsert` / `PointDelete` tasks its three
+/// arms expand to, in the join's output order.
 ///
 /// `task.txn_id` must be the active transaction so the RESOLVE pass folds
 /// earlier-staged rows. Emitted ops carry the same `txn_id` and a recomputed
@@ -213,12 +213,67 @@ async fn emit_arms(
     arms: ResolvedMergeArms,
     out: &mut Vec<PhysicalTask>,
 ) -> crate::Result<()> {
+    let rls_write_check =
+        task.plan
+            .sole_rls_write_check()
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: "MERGE expansion carries no write policy".into(),
+            })?;
+    // Each arm answers the statement's `RETURNING` from the row it stages,
+    // under the target's read policy: an updated or inserted row's new
+    // image, a removed row's old image. The rows stage in the join's output
+    // order, so they answer in the order PostgreSQL answers them.
+    let PhysicalPlan::Document(DocumentOp::Merge {
+        returning,
+        rls_filters,
+        ..
+    }) = &task.plan
+    else {
+        return Err(crate::Error::PlanError {
+            detail: "emit_arms: non-MERGE task".into(),
+        });
+    };
+    let ResolvedMergeArms {
+        updates,
+        deletes,
+        inserts,
+        ordinals,
+    } = arms;
+    let mut ordered: Vec<(u64, PhysicalTask)> =
+        Vec::with_capacity(updates.len() + deletes.len() + inserts.len());
+    for ((_doc_id, surrogate_u32, body, _old_body), ordinal) in
+        updates.into_iter().zip(ordinals.updates)
+    {
+        // The wire surrogate is never absent: every matched MERGE UPDATE row
+        // is a storage-keyed row.
+        let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
+        let document_id = derive_document_id(target_pk, &body, surrogate);
+        let pk_bytes = document_id.clone().into_bytes();
+        ordered.push((
+            ordinal,
+            point_task(
+                task,
+                vshard_id,
+                PhysicalPlan::Document(DocumentOp::PointPut {
+                    collection: nodedb_types::QualifiedCollection::from_stored(
+                        task.database_id,
+                        target_collection.to_string(),
+                    )?,
+                    document_id,
+                    value: body,
+                    surrogate,
+                    pk_bytes,
+                    returning: returning.clone(),
+                    rls_filters: rls_filters.clone(),
+                    rls_write_check: rls_write_check.clone(),
+                    resolved_sum_targets: Vec::new(),
+                }),
+            ),
+        ));
+    }
+
     // Every inserted row's surrogate in one batch at the target's home.
-    let insert_bodies: Vec<&[u8]> = arms
-        .inserts
-        .iter()
-        .map(|(_, body)| body.as_slice())
-        .collect();
+    let insert_bodies: Vec<&[u8]> = inserts.iter().map(|(_, body)| body.as_slice()).collect();
     let insert_surrogates = assign_target_surrogates(
         state,
         nodedb_types::CollectionKey::from_qualified_str(task.database_id, target_collection)?,
@@ -227,81 +282,67 @@ async fn emit_arms(
         &insert_bodies,
     )
     .await?;
-    for ((_join_key, body), surrogate) in arms.inserts.into_iter().zip(insert_surrogates) {
+    for (((_join_key, body), surrogate), ordinal) in inserts
+        .into_iter()
+        .zip(insert_surrogates)
+        .zip(ordinals.inserts)
+    {
         let document_id = derive_document_id(target_pk, &body, surrogate);
-        out.push(point_task(
-            task,
-            vshard_id,
-            PhysicalPlan::Document(DocumentOp::PointInsert {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    task.database_id,
-                    target_collection.to_string(),
-                )?,
-                document_id,
-                value: body,
-                if_absent: false,
-                surrogate,
-                // The MERGE itself owns the statement's projection; the ops it
-                // expands into are internal writes that answer no client.
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-                deferred_sum_targets: Vec::new(),
-            }),
+        ordered.push((
+            ordinal,
+            point_task(
+                task,
+                vshard_id,
+                PhysicalPlan::Document(DocumentOp::PointInsert {
+                    collection: nodedb_types::QualifiedCollection::from_stored(
+                        task.database_id,
+                        target_collection.to_string(),
+                    )?,
+                    document_id,
+                    value: body,
+                    if_absent: false,
+                    surrogate,
+                    returning: returning.clone(),
+                    rls_filters: rls_filters.clone(),
+                    rls_write_check: rls_write_check.clone(),
+                    resolved_sum_targets: Vec::new(),
+                    deferred_sum_targets: Vec::new(),
+                }),
+            ),
         ));
     }
 
-    for (_doc_id, surrogate_u32, body, _old_body) in arms.updates {
-        // The wire surrogate is never absent: every matched MERGE UPDATE row
-        // is a storage-keyed row.
-        let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
-        let document_id = derive_document_id(target_pk, &body, surrogate);
-        let pk_bytes = document_id.clone().into_bytes();
-        out.push(point_task(
-            task,
-            vshard_id,
-            PhysicalPlan::Document(DocumentOp::PointPut {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    task.database_id,
-                    target_collection.to_string(),
-                )?,
-                document_id,
-                value: body,
-                surrogate,
-                pk_bytes,
-                // See the insert arm above.
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-            }),
-        ));
-    }
-
-    for (doc_id, surrogate_u32, body) in arms.deletes {
+    for ((doc_id, surrogate_u32, body), ordinal) in deletes.into_iter().zip(ordinals.deletes) {
         let surrogate = require_surrogate(surrogate_u32, &doc_id, "MERGE")?;
         let document_id = derive_document_id(target_pk, &body, surrogate);
         let pk_bytes = document_id.clone().into_bytes();
-        out.push(point_task(
-            task,
-            vshard_id,
-            PhysicalPlan::Document(DocumentOp::PointDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    task.database_id,
-                    target_collection.to_string(),
-                )?,
-                document_id,
-                surrogate: Some(surrogate),
-                pk_bytes,
-                returning: None,
-                rls_filters: Vec::new(),
-                // Already decided against the merge's write predicate by
-                // `admit_compiled_write_image` above; this op removes that
-                // same row, so re-checking re-runs the same test.
-                rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
-                resolved_sum_targets: Vec::new(),
-            }),
+        ordered.push((
+            ordinal,
+            point_task(
+                task,
+                vshard_id,
+                PhysicalPlan::Document(DocumentOp::PointDelete {
+                    collection: nodedb_types::QualifiedCollection::from_stored(
+                        task.database_id,
+                        target_collection.to_string(),
+                    )?,
+                    document_id,
+                    surrogate: Some(surrogate),
+                    pk_bytes,
+                    returning: returning.clone(),
+                    rls_filters: rls_filters.clone(),
+                    // Already decided against the merge's write predicate by
+                    // `admit_compiled_write_image` above; this op removes that
+                    // same row, so re-checking re-runs the same test.
+                    rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
+                    resolved_sum_targets: Vec::new(),
+                }),
+            ),
         ));
     }
+    // Stable: rows of one ordinal keep their arm order.
+    ordered.sort_by_key(|(ordinal, _)| *ordinal);
+    out.extend(ordered.into_iter().map(|(_, op)| op));
     Ok(())
 }
 

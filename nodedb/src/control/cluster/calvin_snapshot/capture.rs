@@ -17,7 +17,7 @@ use std::time::Duration;
 use nodedb_cluster::calvin::SequencerEntry;
 
 use crate::Error;
-use crate::control::cluster::calvin::scheduler::barrier_store;
+use crate::control::cluster::calvin::scheduler::{barrier_store, frozen_replies};
 use crate::control::cluster::calvin_snapshot::cut_barriers::capture_cut_barriers;
 use crate::control::security::catalog::calvin_base::CalvinBase;
 use crate::control::state::SharedState;
@@ -151,11 +151,13 @@ pub fn capture_calvin_cut(
     });
     let vshards = local.chain(mirrored).collect();
     let barrier_logs = barrier_store::capture_group(shared, &ids)?;
+    let frozen_replies = frozen_replies::capture_group(shared, &ids)?;
     let (cut_barriers, cut_floors) = capture_cut_barriers(shared, group_id, cut_index)?;
     Ok(GroupCalvinCut {
         through,
         vshards,
         barrier_logs,
+        frozen_replies,
         cut_barriers,
         cut_floors,
     })

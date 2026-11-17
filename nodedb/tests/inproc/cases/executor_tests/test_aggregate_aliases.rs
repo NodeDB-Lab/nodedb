@@ -42,6 +42,7 @@ fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -104,7 +105,9 @@ fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["department"], "tools");
     assert_eq!(rows[0]["dept_count"].as_u64(), Some(2));
-    assert_eq!(rows[0]["avg_score"].as_f64(), Some(15.0));
+    // PostgreSQL: avg over integers {10, 20} is numeric 15.0000000000000000,
+    // which a JSON path renders as its exact text.
+    assert_eq!(rows[0]["avg_score"], "15.0000000000000000");
     assert!(rows[0].get("count(*)").is_none());
     assert!(rows[0].get("avg(score)").is_none());
 }
@@ -206,6 +209,7 @@ fn aggregate_cache_separates_user_facing_output_aliases() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -261,6 +265,7 @@ fn aggregate_cache_separates_computed_group_expressions() {
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         );
     }
@@ -312,6 +317,7 @@ fn aggregate_cache_separates_limit_and_sort_shape() {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
+                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 }),
             );
             surrogate += 1;

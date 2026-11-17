@@ -1,59 +1,50 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The MERGE DELETE arms, applied after the put transaction has committed.
-//!
-//! Its own file because it obeys a different transaction rule to the
-//! UPDATE/INSERT arms it follows. Those share one redb write transaction and
-//! are all-or-nothing across the whole set; each DELETE arm instead takes its
-//! own transaction and commits on its own, which is what lets the arm's
-//! post-commit bookkeeping (affected count, RETURNING pre-image, redo
-//! write-set entry, delete event) observe a removal that is already durable.
-//! Keeping the two phases in separate files stops a later edit from folding a
-//! delete into the put phase's transaction, which would change when each
-//! removal becomes durable relative to the event it emits.
+//! MERGE deletions participate in the statement's source transaction and undo.
+
+use redb::WriteTransaction;
 
 use crate::bridge::envelope::{Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::redo_image::removed_row_image;
-use crate::data::executor::enforcement::chain_guard::{AbandonedWrite, abandon_write};
+use crate::data::executor::enforcement::balanced::BalancedEntry;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::RowIdentity;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
-use super::apply_support::returning_doc;
+use super::abort::MergeAbort;
+use super::apply_support::{MergeEvent, gate_merge_row, retain_target_writes};
 use super::plan::MergeDelete;
 
-/// The DELETE arms to apply and the context they apply against.
 pub(super) struct MergeDeleteArms<'a> {
     pub(super) task: &'a ExecutionTask,
     pub(super) database_id: u64,
     pub(super) tid: u64,
     pub(super) collection: &'a str,
     pub(super) deletes: &'a [MergeDelete],
-    /// Whether the statement carries a `RETURNING` projection.
     pub(super) returning: bool,
-    /// Join-key VALUE → target row surrogate, resolved on the Control Plane.
     pub(super) resolved_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
-    /// The target's declared `PRIMARY KEY` column, when it has one. Names
-    /// each removed row in its event and redo entry.
     pub(super) declared_primary_key: Option<&'a str>,
+    pub(super) rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
-/// The statement-wide accumulators these arms contribute to, shared with the
-/// UPDATE/INSERT phase that ran before them.
 pub(super) struct MergeDeleteTally<'a> {
     pub(super) affected: &'a mut u64,
+    pub(super) applied_keys: &'a mut Vec<(String, StorageKey)>,
+    pub(super) undo_log: &'a mut Vec<UndoEntry>,
+    pub(super) events: &'a mut Vec<MergeEvent>,
     pub(super) write_set: &'a mut Vec<WriteSetEntry>,
+    pub(super) balanced_entries: &'a mut Vec<BalancedEntry>,
     pub(super) returned_docs: &'a mut Vec<nodedb_types::Value>,
 }
 
 impl CoreLoop {
-    /// Apply every DELETE arm. `Err(response)` is the terminating error response
-    /// the caller must return as-is; the put phase has already committed by this
-    /// point, so there is nothing left to unwind.
+    /// Apply actual deletions without committing or publishing statement effects.
     pub(super) fn apply_merge_delete_arms(
         &mut self,
+        txn: &WriteTransaction,
         arms: MergeDeleteArms<'_>,
         tally: MergeDeleteTally<'_>,
     ) -> Result<(), Response> {
@@ -66,137 +57,185 @@ impl CoreLoop {
             returning,
             resolved_targets,
             declared_primary_key,
+            rls_write_check,
         } = arms;
         let MergeDeleteTally {
             affected,
+            applied_keys,
+            undo_log,
+            events,
             write_set,
+            balanced_entries,
             returned_docs,
         } = tally;
         let identity_column = self.identity_column(database_id, tid, collection);
-
         for del in deletes {
             let surrogate = del.key.surrogate();
-            // The identity INSERT minted for this row, from the plan's
-            // captured MessagePack body: the declared primary key, else the
-            // decimal surrogate.
-            let row_identity = RowIdentity::of_stored_row(&del.body, declared_primary_key, del.key);
-            // One write txn per arm: the removal and its index cascades
-            // commit together, and a failing arm drops the txn
-            // un-committed so it leaves nothing behind.
-            let txn = match self.sparse.begin_write() {
-                Ok(txn) => txn,
-                Err(e) => return Err(self.response_error(task, e)),
-            };
-            match self.apply_point_delete(
-                &txn,
+            let identity = RowIdentity::of_stored_row(&del.body, declared_primary_key, del.key);
+            let source_position = applied_keys.len();
+            applied_keys.push((collection.to_owned(), del.key));
+            let mut outcome = match self.apply_point_delete(
+                txn,
                 PointDeleteParams {
                     database_id,
                     tid,
                     collection,
-                    document_id: row_identity.as_str(),
+                    document_id: identity.as_str(),
                     surrogate,
                     user_roles: &task.request.user_roles,
                     enforce: true,
                     resolved_targets,
                 },
             ) {
-                Ok(mut outcome) => {
-                    // An abort below drops `txn` uncommitted, which reverses
-                    // the durable writes only. `abandon_write` reverses the
-                    // arm's in-memory cascades.
-                    let memory_undo = std::mem::take(&mut outcome.memory_undo);
-                    // A DELETE arm takes the removed row's contribution
-                    // back off its target, folded inside THIS arm's
-                    // transaction so the debit and the removal commit
-                    // together. The pre-image is the plan's captured
-                    // body — the only image a delete has.
-                    let target_writes = match write_hook::run(
-                        self,
-                        &txn,
-                        &write_hook::HookCtx {
-                            database_id,
-                            tid,
-                            collection,
-                            resolved_targets,
-                            deferred_sum_targets: &[],
-                            wal_lsn: task.wal_lsn(),
-                        },
-                        write_hook::WriteImages::Delete {
-                            old: write_hook::ImageBody::Submitted(&del.body),
-                        },
-                    ) {
-                        // The arm's BALANCED contribution is NOT settled
-                        // here: these arms commit one transaction each,
-                        // after the caller's phase-A commit, so a
-                        // violation found here could no longer be
-                        // undone. The caller accounts every delete
-                        // arm's pre-image before phase A runs and
-                        // judges the whole MERGE there.
-                        Ok(enforcement) => enforcement.target_writes,
-                        // Dropping `txn` un-committed reverses the
-                        // removal and every target it had debited.
-                        Err(e) => {
-                            let e = abandon_write(
-                                self,
-                                AbandonedWrite::row(database_id, tid, collection, &del.key)
-                                    .undo(memory_undo),
-                                e,
-                            );
-                            return Err(self.response_error(task, e));
-                        }
-                    };
-                    if let Err(e) = txn.commit() {
-                        let e = abandon_write(
-                            self,
-                            AbandonedWrite::row(database_id, tid, collection, &del.key)
-                                .undo(memory_undo)
-                                .targets(target_writes),
-                            crate::Error::Storage {
-                                engine: "sparse".into(),
-                                detail: format!("merge delete commit: {e}"),
-                            },
-                        );
-                        return Err(self.response_error(task, e));
-                    }
-                    // Journalled only once the arm committed: the removal
-                    // and the target rows its debit rewrote.
-                    // A tombstone ordinal exists exactly when a live row
-                    // was closed.
-                    if let (Some(_), Some(sys_from)) =
-                        (&outcome.prior_value, outcome.version_sys_from)
-                    {
-                        write_set.push(removed_row_image(
-                            surrogate.as_u32(),
-                            row_identity.clone(),
-                            sys_from,
-                        ));
-                    }
-                    write_set.extend(write_hook::target_write_set(&target_writes));
-                    if outcome.prior_value.is_some() {
-                        *affected += 1;
-                        // A DELETE arm returns the PRE-image — the row
-                        // as it was classified, since nothing survives
-                        // the delete to project. Taken from the plan's
-                        // captured body rather than `prior_value`, which
-                        // is the raw stored form (Binary Tuple on a
-                        // strict target) and would need re-decoding.
-                        if returning {
-                            match returning_doc(&del.body, &del.key, &identity_column) {
-                                Ok(doc) => returned_docs.push(doc),
-                                Err(e) => return Err(self.response_error(task, e)),
-                            }
-                        }
-                    }
-                    self.emit_document_delete_event(
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err(self.abort_merge_apply(MergeAbort {
                         task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
+                }
+            };
+            let Some(prior) = outcome.prior_value.as_deref() else {
+                self.doc_cache
+                    .invalidate(database_id, tid, collection, &del.key);
+                let undone = self.undo_memory_effects(
+                    database_id,
+                    tid,
+                    std::mem::take(&mut outcome.memory_undo),
+                );
+                applied_keys.truncate(source_position);
+                if let Err(error) = undone {
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
+                }
+                continue;
+            };
+            undo_log.append(&mut outcome.memory_undo);
+            let prepared = (|| -> crate::Result<_> {
+                let schema = self.strict_schema_for(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    collection,
+                );
+                gate_merge_row(
+                    self,
+                    &crate::data::executor::core_loop::redo_image::WriteSetRow {
+                        database_id,
                         tid,
                         collection,
-                        row_identity,
-                        outcome.prior_value.as_deref(),
+                        identity: identity.clone(),
+                    },
+                    rls_write_check,
+                    prior,
+                    schema.as_ref(),
+                )?;
+                let ordinal = outcome
+                    .version_sys_from
+                    .ok_or_else(|| crate::Error::Storage {
+                        engine: "sparse".into(),
+                        detail: format!(
+                            "MERGE removed row {} without a tombstone ordinal",
+                            identity.as_str()
+                        ),
+                    })?;
+                let old_value = self
+                    .stored_event_image(database_id, tid, collection, identity.as_str(), prior)
+                    .map_err(|_| {
+                        crate::data::executor::strict_format::undecodable_strict_row(
+                            collection,
+                            identity.as_str(),
+                        )
+                    })?;
+                let row = if returning {
+                    let schema = self.strict_schema_for(
+                        task.request.database_id,
+                        crate::types::TenantId::new(tid),
+                        collection,
                     );
+                    Some(crate::data::executor::handlers::returning_doc::from_stored(
+                        prior,
+                        &identity,
+                        schema.as_ref(),
+                        &identity_column,
+                    )?)
+                } else {
+                    None
+                };
+                Ok((ordinal, old_value, row))
+            })();
+            let (ordinal, old_value, returned) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
                 }
-                Err(e) => return Err(self.response_error(task, e)),
+            };
+            write_set.push(removed_row_image(
+                surrogate.as_u32(),
+                identity.clone(),
+                ordinal,
+            ));
+            events.push(MergeEvent::Delete {
+                collection: collection.to_owned(),
+                identity,
+                old_value,
+            });
+            let enforcement = match write_hook::run(
+                self,
+                txn,
+                &write_hook::HookCtx {
+                    database_id,
+                    tid,
+                    collection,
+                    resolved_targets,
+                    deferred_sum_targets: &[],
+                    wal_lsn: task.wal_lsn(),
+                    target_unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
+                },
+                write_hook::WriteImages::Delete {
+                    old: write_hook::ImageBody::Stored(prior),
+                },
+            ) {
+                Ok(enforcement) => enforcement,
+                Err(error) => {
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
+                        database_id,
+                        tid,
+                        applied_keys,
+                        undo_log: std::mem::take(undo_log),
+                        err: error.into(),
+                    }));
+                }
+            };
+            retain_target_writes(
+                enforcement.target_writes,
+                undo_log,
+                applied_keys,
+                events,
+                write_set,
+            );
+            balanced_entries.extend(enforcement.balanced_entries);
+            if let Some(row) = returned {
+                returned_docs.push(row);
             }
+            *affected += 1;
         }
         Ok(())
     }

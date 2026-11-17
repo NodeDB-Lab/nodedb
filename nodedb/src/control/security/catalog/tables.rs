@@ -391,6 +391,14 @@ pub(super) const VECTOR_INDEX_PARAMS: TableDefinition<&str, &[u8]> =
 pub(super) const INDEX_REGISTRY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.index_registry");
 
+/// Table: `(database_id, tenant_id, collection, index_name)` -> empty.
+///
+/// The collection key of every `INDEX_REGISTRY` row. A read of one
+/// collection's index records scans this prefix, never the whole tenant.
+/// Every write of `INDEX_REGISTRY` writes this table in the same transaction.
+pub(super) const INDEX_REGISTRY_BY_COLLECTION: TableDefinition<(u64, u64, &str, &str), ()> =
+    TableDefinition::new("_system.index_registry_by_collection");
+
 /// Table: "{database_id}:{tenant_id}:{collection}:{doc_id}:{checkpoint_name}" -> MessagePack CheckpointRecord.
 pub(super) const CHECKPOINTS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.checkpoints");

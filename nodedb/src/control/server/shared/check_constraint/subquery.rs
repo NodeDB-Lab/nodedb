@@ -3,12 +3,9 @@
 //! Subquery CHECK constraint evaluation using a parsed, restricted AST shape.
 
 use std::collections::HashMap;
-use std::ops::ControlFlow;
 
 use nodedb_types::DatabaseId;
-use sqlparser::ast::{
-    Expr, Query, Select, SelectItem, SetExpr, Statement, Value, VisitMut, VisitorMut,
-};
+use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement, Value};
 
 use crate::control::security::catalog::types::CheckConstraintDef;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -18,7 +15,8 @@ use crate::control::state::SharedState;
 use crate::types::TraceId;
 
 use super::enforce::ddl_err;
-use super::simple::value_to_sql_literal;
+use super::subquery_bind::bind_new_references;
+use super::subquery_match::build_match_query;
 
 const MAX_CHECK_RESPONSE_PAYLOAD_BYTES: usize = 64 * 1024;
 
@@ -88,9 +86,14 @@ pub(super) async fn enforce_subquery_check(
             "CHECK match query response exceeds the 64 KiB limit",
         ));
     }
-    let payload = crate::data::executor::response_codec::decode_payload_to_json(&response.payload);
+    // The match query is a COUNT aggregate: one flat row, plain or native.
+    let payload = crate::data::executor::response_codec::decode_row_payload_value(
+        &response.payload,
+        crate::data::executor::response_codec::RowContext::Flat,
+    )
+    .map_err(|error| evaluation_error(constraint, &error.to_string()))?;
     let has_match =
-        decode_match_count(&payload).map_err(|detail| evaluation_error(constraint, detail))? > 0;
+        decode_match_count(payload).map_err(|detail| evaluation_error(constraint, detail))? > 0;
     let passes = if check.negated { !has_match } else { has_match };
     if passes {
         Ok(())
@@ -201,94 +204,6 @@ fn check_wrapper_expression_mut<'a>(
     Ok(expr)
 }
 
-fn bind_new_references(
-    expression: &mut Expr,
-    fields: &HashMap<String, nodedb_types::Value>,
-    constraint: &CheckConstraintDef,
-) -> Result<(), DdlError> {
-    let mut binder = NewReferenceBinder {
-        fields,
-        error: None,
-    };
-    let _ = expression.visit(&mut binder);
-    match binder.error {
-        Some(detail) => Err(evaluation_error(constraint, &detail)),
-        None => Ok(()),
-    }
-}
-
-struct NewReferenceBinder<'a> {
-    fields: &'a HashMap<String, nodedb_types::Value>,
-    error: Option<String>,
-}
-
-impl VisitorMut for NewReferenceBinder<'_> {
-    type Break = ();
-
-    fn pre_visit_expr(&mut self, expression: &mut Expr) -> ControlFlow<Self::Break> {
-        let Expr::CompoundIdentifier(parts) = expression else {
-            return ControlFlow::Continue(());
-        };
-        if parts.len() != 2
-            || parts.iter().any(|part| part.quote_style.is_some())
-            || !parts[0].value.eq_ignore_ascii_case("NEW")
-        {
-            return ControlFlow::Continue(());
-        }
-        let field_name = parts[1].value.clone();
-        let value = self
-            .fields
-            .iter()
-            .find_map(|(name, value)| name.eq_ignore_ascii_case(&field_name).then_some(value))
-            .cloned()
-            .unwrap_or(nodedb_types::Value::Null);
-        if !is_supported_bound_value(&value) {
-            self.error = Some(format!(
-                "CHECK subquery cannot bind non-scalar NEW field '{field_name}'"
-            ));
-            return ControlFlow::Break(());
-        }
-        match parse_literal_expression(&value) {
-            Ok(literal) => *expression = literal,
-            Err(detail) => {
-                self.error = Some(detail);
-                return ControlFlow::Break(());
-            }
-        }
-        ControlFlow::Continue(())
-    }
-}
-
-fn is_supported_bound_value(value: &nodedb_types::Value) -> bool {
-    matches!(
-        value,
-        nodedb_types::Value::Null
-            | nodedb_types::Value::Bool(_)
-            | nodedb_types::Value::Integer(_)
-            | nodedb_types::Value::Float(_)
-            | nodedb_types::Value::String(_)
-            | nodedb_types::Value::DateTime(_)
-            | nodedb_types::Value::NaiveDateTime(_)
-    )
-}
-
-fn parse_literal_expression(value: &nodedb_types::Value) -> Result<Expr, String> {
-    let literal = value_to_sql_literal(value);
-    // reconstructed-sql: parser-only converts one canonical Value literal into an Expr AST
-    let statements = nodedb_sql::parser::statement::parse_sql(&format!("SELECT {literal}"))
-        .map_err(|error| format!("failed to parse CHECK literal: {error}"))?;
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return Err("CHECK literal did not produce exactly one query".to_string());
-    };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return Err("CHECK literal query is not a SELECT".to_string());
-    };
-    match select.projection.as_slice() {
-        [SelectItem::UnnamedExpr(expression)] => Ok(expression.clone()),
-        _ => Err("CHECK literal query did not produce exactly one expression".to_string()),
-    }
-}
-
 /// Validate the one supported subquery CHECK form at DDL time and runtime.
 pub(crate) fn validate_in_subquery_check(check_sql: &str) -> Result<(), String> {
     let constraint = CheckConstraintDef {
@@ -326,116 +241,17 @@ fn strip_nested(mut expr: &Expr) -> &Expr {
     expr
 }
 
-fn build_match_query(
-    lhs: &Expr,
-    subquery: &Query,
-    negated: bool,
-    constraint: &CheckConstraintDef,
-) -> Result<String, DdlError> {
-    if subquery.with.is_some()
-        || subquery.order_by.is_some()
-        || subquery.limit_clause.is_some()
-        || subquery.fetch.is_some()
-        || !subquery.locks.is_empty()
-    {
-        return Err(evaluation_error(
-            constraint,
-            "IN subquery does not support WITH, ORDER BY, LIMIT, FETCH, or locks",
-        ));
-    }
-    let SetExpr::Select(select) = subquery.body.as_ref() else {
-        return Err(evaluation_error(
-            constraint,
-            "IN subquery must have a SELECT body",
-        ));
-    };
-    validate_subquery_shape(select, constraint)?;
-    let projection = match select.projection.as_slice() {
-        [SelectItem::UnnamedExpr(expr)] => expr,
-        [SelectItem::ExprWithAlias { expr, .. }] => expr,
-        _ => {
-            return Err(evaluation_error(
-                constraint,
-                "IN subquery must select exactly one expression",
-            ));
-        }
-    };
-
-    let projection_sql = canonical_check_expr_sql(projection);
-    let lhs_sql = canonical_check_expr_sql(lhs);
-    let from_sql = canonical_check_from_sql(&select.from[0]);
-    // IN is accepted by CHECK when a row matches or when a NULL row makes the
-    // result UNKNOWN. NOT IN is violated only by an actual equal row; a NULL
-    // without a match also yields UNKNOWN and therefore passes CHECK.
-    match (negated, select.selection.as_ref()) {
-        (true, Some(where_expr)) => Ok(format!(
-            "SELECT COUNT(*) AS cnt FROM {from_sql} WHERE ({projection_sql}) = ({lhs_sql}) AND ({})",
-            canonical_check_expr_sql(where_expr)
-        )),
-        (true, None) => Ok(format!(
-            "SELECT COUNT(*) AS cnt FROM {from_sql} WHERE ({projection_sql}) = ({lhs_sql})"
-        )),
-        (false, Some(where_expr)) => Ok(format!(
-            "SELECT COUNT(*) AS cnt FROM {from_sql} WHERE (({projection_sql}) = ({lhs_sql}) OR ({projection_sql}) IS NULL) AND ({})",
-            canonical_check_expr_sql(where_expr)
-        )),
-        (false, None) => Ok(format!(
-            "SELECT COUNT(*) AS cnt FROM {from_sql} WHERE (({projection_sql}) = ({lhs_sql}) OR ({projection_sql}) IS NULL)"
-        )),
-    }
-}
-
-fn canonical_check_expr_sql(expr: &Expr) -> String {
-    expr.to_string()
-}
-
-fn canonical_check_from_sql(from: &sqlparser::ast::TableWithJoins) -> String {
-    from.to_string()
-}
-
-fn validate_subquery_shape(
-    select: &Select,
-    constraint: &CheckConstraintDef,
-) -> Result<(), DdlError> {
-    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
-        return Err(evaluation_error(
-            constraint,
-            "IN subquery must have exactly one ordinary FROM relation without joins",
-        ));
-    }
-    if !matches!(
-        select.from[0].relation,
-        sqlparser::ast::TableFactor::Table { args: None, .. }
-    ) {
-        return Err(evaluation_error(
-            constraint,
-            "IN subquery FROM must be an ordinary table relation",
-        ));
-    }
-    let has_grouping = match &select.group_by {
-        sqlparser::ast::GroupByExpr::All(_) => true,
-        sqlparser::ast::GroupByExpr::Expressions(expressions, _) => !expressions.is_empty(),
-    };
-    if select.having.is_some() || has_grouping || select.distinct.is_some() {
-        return Err(evaluation_error(
-            constraint,
-            "IN subquery does not support grouping, HAVING, or DISTINCT",
-        ));
-    }
-    Ok(())
-}
-
 fn is_sql_null(expr: &Expr) -> bool {
     matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Null))
 }
 
-fn decode_match_count(payload: &str) -> Result<u64, &'static str> {
-    let value: serde_json::Value = crate::util::bounded_json::from_str(payload)
-        .map_err(|_| "CHECK match query returned malformed JSON")?;
+fn decode_match_count(value: nodedb_types::Value) -> Result<u64, &'static str> {
+    use nodedb_types::Value;
+
     let row = match value {
-        serde_json::Value::Object(row) => row,
-        serde_json::Value::Array(mut rows) if rows.len() == 1 => match rows.remove(0) {
-            serde_json::Value::Object(row) => row,
+        Value::Object(row) => row,
+        Value::Array(mut rows) if rows.len() == 1 => match rows.remove(0) {
+            Value::Object(row) => row,
             _ => return Err("CHECK match query did not return an object row"),
         },
         _ => return Err("CHECK match query did not return exactly one row"),
@@ -444,11 +260,12 @@ fn decode_match_count(payload: &str) -> Result<u64, &'static str> {
         return Err("CHECK match query returned an ambiguous row");
     }
     row.get("cnt")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(Value::as_i64)
+        .and_then(|count| u64::try_from(count).ok())
         .ok_or("CHECK match query did not return a nonnegative integer count")
 }
 
-fn evaluation_error(constraint: &CheckConstraintDef, detail: &str) -> DdlError {
+pub(super) fn evaluation_error(constraint: &CheckConstraintDef, detail: &str) -> DdlError {
     ddl_err(
         "23514",
         &format!(
@@ -556,12 +373,35 @@ mod tests {
         assert_eq!(MAX_CHECK_RESPONSE_PAYLOAD_BYTES, 64 * 1024);
     }
 
+    fn count_of(json: &str) -> Result<u64, &'static str> {
+        decode_match_count(
+            crate::data::executor::response_codec::decode_payload_value(json.as_bytes())
+                .expect("json payload"),
+        )
+    }
+
     #[test]
     fn count_decoder_requires_one_nonnegative_integer_count() {
-        assert_eq!(decode_match_count("{\"cnt\":0}"), Ok(0));
-        assert_eq!(decode_match_count("[{\"cnt\":2}]"), Ok(2));
+        assert_eq!(count_of("{\"cnt\":0}"), Ok(0));
+        assert_eq!(count_of("[{\"cnt\":2}]"), Ok(2));
         for malformed in ["[]", "{\"cnt\":-1}", "{\"cnt\":1.0}", "{\"other\":1}"] {
-            assert!(decode_match_count(malformed).is_err(), "{malformed}");
+            assert!(count_of(malformed).is_err(), "{malformed}");
         }
+    }
+
+    /// A native count row decodes to the count its plain form holds.
+    #[test]
+    fn a_native_count_row_decodes() {
+        use nodedb_types::Value;
+
+        let row = Value::Object([("cnt".to_string(), Value::Integer(3))].into());
+        let native = zerompk::to_msgpack_vec(&row).expect("encode native");
+        let payload = crate::data::executor::response_codec::encode_binary_rows(&[native]);
+        let decoded = crate::data::executor::response_codec::decode_row_payload_value(
+            &payload,
+            crate::data::executor::response_codec::RowContext::Flat,
+        )
+        .expect("native count row decodes");
+        assert_eq!(decode_match_count(decoded), Ok(3));
     }
 }

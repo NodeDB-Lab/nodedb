@@ -7,10 +7,14 @@
 //! its header carrying the entry's idempotency key, and installed through the
 //! WAL replay arms. The key makes the record the entry's applied-marker, so an
 //! entry re-delivered after a restart is recognised by the proposal ledger and
-//! skipped before it reaches here.
+//! skipped before it reaches here. A skipped entry stages its change events
+//! again when the journal lacks them (see [`super::marker_changes`]).
 //!
-//! A chunked body assembles from the `RedoChunk` entries of its stream
-//! (see [`super::redo_chunk`]) and then applies like an inline one.
+//! A chunked body applies as its stream's marker: a record whose only
+//! sub-record names the stream's `RedoChunk` records (see
+//! [`super::redo_chunk`]). The content stays in the WAL. Before the marker
+//! applies, the replica binds the content's identities (see
+//! `transaction_redo::stream_header`).
 //!
 //! A committed Calvin slice's entry claims its position before it applies
 //! and reports its install to the vShard's scheduler (see
@@ -30,7 +34,8 @@ use crate::control::server::dispatch_utils::{ChangeFeedOwner, SubmitOutcome, ref
 use crate::control::wal_replication::decode::{DecodedTransactionRedo, decode_transaction_redo};
 use crate::control::wal_replication::transaction_redo::chunks::OpenStream;
 use crate::control::wal_replication::transaction_redo::{
-    RedoTarget, TransactionRedoPayload, enqueue_transaction_redo, record_cross_shard_key,
+    RedoTarget, StreamedFinal, TransactionRedoPayload, enqueue_transaction_redo,
+    record_cross_shard_key, streamed_payload,
 };
 use crate::control::wal_replication::{CollectionIncarnation, ReplicatedEntry};
 use crate::types::{DatabaseId, TenantId, VShardId};
@@ -38,6 +43,7 @@ use crate::types::{DatabaseId, TenantId, VShardId};
 use super::calvin_redo::{CalvinClaim, ClaimOutcome, claim_inline};
 use super::context::{ApplyContext, EnqueueFuture, FinishedApply, Started, StartedEntry};
 use super::helpers::committed_response_result;
+use super::marker_changes::{changes_unstaged, stage_marker_changes};
 use super::proposal_gate::{EntryOutcome, HoldReason, ledger_outcome};
 use super::start::Prepared;
 
@@ -45,7 +51,7 @@ use super::start::Prepared;
 /// record and hands it to its core. The apply that follows resolves the
 /// propose waiter. Its outcome says whether the entry's effect is durable on
 /// this node, which is what the group's applied prefix records. A chunked
-/// body assembles from its stream first.
+/// body applies as its stream's marker.
 ///
 /// `incarnations` are the entry's collection incarnations, moved out of the
 /// decoded entry.
@@ -90,7 +96,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
                 pos,
                 target,
                 RedoApply {
-                    payload,
+                    content: RedoApplyContent::Ready(Box::new(payload)),
                     incarnations,
                     stream: None,
                     calvin,
@@ -101,7 +107,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
             ctx,
             pos,
             target,
-            chunked,
+            *chunked,
             FinalEntry {
                 incarnations,
                 mirror_database,
@@ -139,12 +145,41 @@ pub(super) struct FinalEntry {
     pub mirror_database: Option<u64>,
 }
 
+/// What a committed redo applies with.
+pub(super) enum RedoApplyContent {
+    /// The payload an inline entry carries.
+    Ready(Box<TransactionRedoPayload>),
+    /// A chunked redo's final entry: its marker payload is built once the
+    /// entry's collections are routed.
+    Streamed(Box<StreamedFinal>),
+}
+
+impl RedoApplyContent {
+    /// The first collection the transaction wrote.
+    fn first_collection(&self) -> Option<String> {
+        match self {
+            Self::Ready(payload) => payload.collections.first().cloned(),
+            Self::Streamed(streamed) => streamed.chunked.collections().first().cloned(),
+        }
+    }
+
+    /// Whether the redo writes a user row: a Calvin slice with no primary
+    /// write writes only derived rows.
+    fn user_write(&self) -> bool {
+        let calvin = match self {
+            Self::Ready(payload) => payload.calvin.as_ref(),
+            Self::Streamed(streamed) => streamed.chunked.calvin(),
+        };
+        calvin.is_none_or(|meta| meta.primary_write)
+    }
+}
+
 /// One committed redo on its way to its core.
 pub(super) struct RedoApply {
-    pub payload: TransactionRedoPayload,
+    pub content: RedoApplyContent,
     /// The entry's collection incarnations, moved out of the decoded entry.
     pub incarnations: Vec<CollectionIncarnation>,
-    /// The chunk stream the payload assembled from.
+    /// The chunk stream the marker names.
     pub stream: Option<OpenStream>,
     /// The Calvin position the entry claimed.
     pub calvin: Option<CalvinClaim>,
@@ -221,7 +256,7 @@ fn held_outcome(
             crate::diag::redo_entry_malformed(pos.group_id, pos.log_index, &error);
         }
         // Each is reported at the site that detects it.
-        HoldReason::BodyMissing | HoldReason::ApplyPanicked => {}
+        HoldReason::BodyMissing | HoldReason::ApplyPanicked | HoldReason::ChangesUnstaged => {}
     }
     ctx.tracker
         .complete(pos.group_id, pos.log_index, pos.applied_key, Err(error));
@@ -231,8 +266,10 @@ fn held_outcome(
 }
 
 /// Release a taken stream once its final entry concluded. A durable outcome
-/// drops it. Any other keeps its records on disk, so the next boot rebuilds
-/// the stream for the entry's re-apply.
+/// retires it: the marker the outcome appended reads the chunk records back
+/// at every boot, so they stay until a checkpoint passes it. Any other
+/// outcome keeps its records on disk, so the next boot rebuilds the stream
+/// for the entry's re-apply.
 fn settle_stream(ctx: ApplyContext<'_>, stream: Option<OpenStream>, outcome: &EntryOutcome) {
     let Some(stream) = stream else {
         return;
@@ -242,6 +279,11 @@ fn settle_stream(ctx: ApplyContext<'_>, stream: Option<OpenStream>, outcome: &En
         EntryOutcome::Held { .. } | EntryOutcome::Applied { durable: false, .. }
     ) {
         ctx.state.redo_chunks.park(stream);
+    } else {
+        // Every record the outcome appended sits below the next LSN.
+        ctx.state
+            .redo_chunks
+            .retire(stream, ctx.state.wal.next_lsn());
     }
 }
 
@@ -255,19 +297,16 @@ pub(super) fn enqueue_payload<'a>(
 ) -> EnqueueFuture<'a> {
     let ApplyContext { state, tracker, .. } = ctx;
     let RedoApply {
-        payload,
+        content,
         incarnations,
         stream,
         calvin,
     } = apply;
     Box::pin(async move {
-        let collection = payload.collections.first().cloned();
+        let collection = content.first_collection();
         // A Calvin slice with no primary write writes only derived rows: it
         // raises no tenant write mark.
-        let user_write = payload
-            .calvin
-            .as_ref()
-            .is_none_or(|meta| meta.primary_write);
+        let user_write = content.user_write();
         // A redo for a collection incarnation this node no longer holds has
         // nothing to mutate. The gates stay held until the redo is enqueued.
         let routed = super::collection_route::route(
@@ -313,6 +352,29 @@ pub(super) fn enqueue_payload<'a>(
                 return StartedEntry::concluded(outcome);
             }
         };
+        // A marker binds its content's identities only once its collections
+        // are routed: a superseded incarnation binds nothing.
+        let (payload, streamed_changes) = match content {
+            RedoApplyContent::Ready(payload) => (*payload, None),
+            RedoApplyContent::Streamed(streamed) => {
+                match streamed_payload(state, target, *streamed).await {
+                    Ok((payload, changes)) => (payload, Some(changes)),
+                    Err(error) => {
+                        if let Some(claim) = &calvin {
+                            let event = claim.not_applied(error.to_string());
+                            claim.report(state, event).await;
+                        }
+                        let outcome = conclude_transaction_redo(tracker, pos, Err(error));
+                        settle_stream(ctx, stream, &outcome);
+                        return StartedEntry {
+                            started: Started::Concluded(outcome),
+                            collection,
+                            user_write,
+                        };
+                    }
+                }
+            }
+        };
         let enqueued = enqueue_transaction_redo(
             state,
             target,
@@ -331,8 +393,30 @@ pub(super) fn enqueue_payload<'a>(
         let started = match enqueued {
             Ok(pending) => Started::Running(Box::pin(async move {
                 let submitted = pending.finish(state).await;
+                let mut unstaged = None;
                 if let Ok(outcome) = &submitted {
                     record_cross_shard_key(state, &payload, outcome);
+                    // A marker's row changes sit in its content: they stage
+                    // once the install applied, page by page, as the funnel
+                    // stages an inline redo's. The stream's floor hold keeps
+                    // its chunks until the entry concludes below.
+                    if let Some(mut changes) = streamed_changes
+                        && outcome.response.status == Status::Ok
+                    {
+                        crate::fail_point!(
+                            crate::fail_point::FailScope::Node(state.node_id),
+                            "redo_chunk::before_marker_changes"
+                        );
+                        unstaged = stage_marker_changes(
+                            state,
+                            target,
+                            pos,
+                            &mut changes,
+                            outcome.change_lsn,
+                        )
+                        .await
+                        .err();
+                    }
                 }
                 // The ledger holds the position before the entry concludes,
                 // so before the group's applied index passes it.
@@ -343,6 +427,12 @@ pub(super) fn enqueue_payload<'a>(
                         .await;
                 }
                 let outcome = conclude_transaction_redo(tracker, pos, submitted);
+                // The install applied and its waiter has its result. An
+                // entry without its change events never settles.
+                let outcome = match unstaged {
+                    Some(error) => changes_unstaged(pos, &error),
+                    None => outcome,
+                };
                 settle_stream(ctx, stream, &outcome);
                 FinishedApply {
                     group_id: pos.group_id,

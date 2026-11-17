@@ -198,17 +198,21 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<RlsPredicate, Predic
 
     if *pos >= tokens.len() {
         // Standalone value — treat as boolean (truthy).
-        let field = match &left_value {
-            PredicateValue::Field(f) => f.clone(),
-            PredicateValue::AuthRef(_) | PredicateValue::AuthFunc { .. } => String::new(),
-            PredicateValue::Literal(_) | PredicateValue::Instant { .. } => {
-                return Ok(RlsPredicate::AlwaysTrue);
+        return Ok(match &left_value {
+            PredicateValue::Field(f) => RlsPredicate::Compare {
+                field: f.clone(),
+                op: CompareOp::IsNotNull,
+                value: left_value,
+            },
+            // A bare session value holds when the session has one.
+            PredicateValue::AuthRef(_) | PredicateValue::AuthFunc { .. } => {
+                RlsPredicate::CompareValues {
+                    left: left_value,
+                    op: CompareOp::IsNotNull,
+                    right: PredicateValue::Literal(serde_json::Value::Null),
+                }
             }
-        };
-        return Ok(RlsPredicate::Compare {
-            field,
-            op: CompareOp::IsNotNull,
-            value: left_value,
+            PredicateValue::Literal(_) | PredicateValue::Instant { .. } => RlsPredicate::AlwaysTrue,
         });
     }
 
@@ -258,11 +262,11 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<RlsPredicate, Predic
                         value: left_value,
                     })
                 }
-                // Auth refs, literals, or functions → evaluate at plan time.
-                _ => Ok(RlsPredicate::Compare {
-                    field: String::new(), // sentinel: plan-time only
+                // Auth refs, literals, or functions: a plan-time verdict.
+                _ => Ok(RlsPredicate::CompareValues {
+                    left: left_value,
                     op: compare_op,
-                    value: right_value,
+                    right: right_value,
                 }),
             }
         }
@@ -377,6 +381,10 @@ pub fn validate_auth_refs(predicate: &RlsPredicate) -> crate::Result<()> {
     fn check(pred: &RlsPredicate, known: &[&str]) -> crate::Result<()> {
         match pred {
             RlsPredicate::Compare { value, .. } => check_value(value, known),
+            RlsPredicate::CompareValues { left, right, .. } => {
+                check_value(left, known)?;
+                check_value(right, known)
+            }
             RlsPredicate::Contains { set, element } => {
                 check_value(set, known)?;
                 check_value(element, known)

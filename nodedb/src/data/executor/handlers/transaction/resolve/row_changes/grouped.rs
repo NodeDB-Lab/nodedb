@@ -14,6 +14,7 @@ use nodedb_array::types::ArrayId;
 use nodedb_physical::physical_plan::{ArrayOp, PhysicalPlan, TimeseriesOp};
 
 use super::super::columnar_image::ColumnarCollections;
+use super::super::sink::ChangeSink;
 use super::entry::ResolveScope;
 use super::keyed::push_truncate;
 use crate::data::executor::core_loop::CoreLoop;
@@ -41,7 +42,7 @@ impl KindsPresent {
     }
 
     /// One `*` entry per kind present, in insert, update, delete order.
-    fn push(self, collection: &str, changes: &mut Vec<RedoRowChange>) {
+    fn push(self, collection: &str, changes: &mut dyn ChangeSink) {
         let kinds = [
             (self.insert, RedoRowKind::Insert),
             (self.update, RedoRowKind::Update),
@@ -66,10 +67,10 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         collections: &ColumnarCollections,
-        changes: &mut Vec<RedoRowChange>,
-    ) {
+        changes: &mut dyn ChangeSink,
+    ) -> crate::Result<()> {
         let Some(overlay) = self.txn_overlays.get(&scope.txn_id) else {
-            return;
+            return Ok(());
         };
         for collection in collections.keys() {
             let key = (
@@ -80,15 +81,20 @@ impl CoreLoop {
             let truncated = overlay.is_truncated(&key);
             push_truncate(collection, truncated, changes);
             let mut kinds = KindsPresent::default();
-            for (surrogate, staged) in overlay.iter_for_collection(&key) {
+            for item in overlay.iter_for_collection(&key) {
+                let (surrogate, staged) = item?;
                 let existed = !truncated
                     && overlay
-                        .base_pk(&key, surrogate)
+                        .base_pk(&key, surrogate)?
                         .is_some_and(|pk| !pk.is_empty());
-                kinds.note(RedoRowKind::net(existed, matches!(staged, Staged::Put(_))));
+                kinds.note(RedoRowKind::net(
+                    existed,
+                    matches!(&*staged, Staged::Put(_)),
+                ));
             }
             kinds.push(collection, changes);
         }
+        Ok(())
     }
 
     /// Arrays, named as every row change names its collection: qualified for
@@ -98,7 +104,7 @@ impl CoreLoop {
         &self,
         scope: ResolveScope,
         plans: &[PhysicalPlan],
-        changes: &mut Vec<RedoRowChange>,
+        changes: &mut dyn ChangeSink,
     ) -> crate::Result<()> {
         let mut arrays: BTreeMap<String, &ArrayId> = BTreeMap::new();
         for plan in plans {
@@ -116,12 +122,13 @@ impl CoreLoop {
         };
         for (name, array_id) in arrays {
             let mut kinds = KindsPresent::default();
-            for (coord, _put) in overlay.staged_cells(array_id) {
-                let existed = self.array_cell_exists(array_id, coord)?;
+            for cell in overlay.staged_cells(array_id) {
+                let (coord, _put) = cell?;
+                let existed = self.array_cell_exists(array_id, &coord)?;
                 kinds.note(RedoRowKind::net(existed, true));
             }
             for coord in overlay.tombstoned_coords(array_id) {
-                let existed = self.array_cell_exists(array_id, coord)?;
+                let existed = self.array_cell_exists(array_id, &coord?)?;
                 kinds.note(RedoRowKind::net(existed, false));
             }
             kinds.push(&name, changes);
@@ -149,7 +156,7 @@ impl CoreLoop {
 /// inserts rows and never updates or deletes one, so every ingest is an
 /// insert. A TRUNCATE deletes every row. Entries follow plan order, one per
 /// collection and kind.
-pub(super) fn timeseries_row_changes(plans: &[PhysicalPlan], changes: &mut Vec<RedoRowChange>) {
+pub(super) fn timeseries_row_changes(plans: &[PhysicalPlan], changes: &mut dyn ChangeSink) {
     let mut seen: Vec<(String, RedoRowKind)> = Vec::new();
     for plan in plans {
         let (collection, kind) = match plan {

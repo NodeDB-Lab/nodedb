@@ -26,3 +26,5 @@ lerc-rs = { workspace = true }
 [dev-dependencies]
 # Builds in-test TIFF fixtures with an independent encoder.
 tiff = { workspace = true }
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

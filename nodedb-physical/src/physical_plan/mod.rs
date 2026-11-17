@@ -28,6 +28,9 @@ pub mod meta_version_purge;
 pub mod plan;
 pub mod query;
 pub mod redo_origin;
+pub mod redo_stream_page;
+pub mod resolve_part;
+pub mod returning_accessor;
 pub mod rls_write_check_accessor;
 pub mod routing;
 pub mod set_op;
@@ -46,21 +49,18 @@ pub use aggregate_functions::{
     AggregateParam, GENERIC_AGGREGATE_FUNCTIONS, PARAMETERIZED_AGGREGATE_FUNCTIONS,
 };
 pub use array::{ArrayBinaryOp, ArrayOp, ArrayReducer};
-pub use calvin_reply::{
-    CalvinInstall, CalvinInstalledTimeseriesSpec, CalvinPostImagesSpec, CalvinReplyRow,
-    CalvinReplySpec, CalvinResolved, CalvinRowEngine,
-};
+pub use calvin_reply::{CalvinInstall, CalvinReplySpec, CalvinResolvedPart};
 pub use cluster_array::ClusterArrayOp;
 pub use cluster_event::{ClusterEventOp, MAX_REMOTE_CDC_COMMITTED_OFFSETS};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};
-pub use crdt::{CrdtOp, CrdtWriteVerb};
+pub use crdt::{CrdtOp, CrdtWriteVerb, decode_fields_body, encode_fields_body};
 pub use document::{
     BalancedDef, DeclaredColumn, DocumentOp, DocumentPageSource, DocumentResolveOutcome,
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
     MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
     RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TimeseriesSchema,
-    UpdateValue, resolved_sum_surrogate,
+    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TextFieldSet,
+    TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;
@@ -78,17 +78,19 @@ pub use meta_restore::{
     RestoredArrayCells, RestoredEdgeVersion, RestoredIdentity, RestoredKvKey, RestoredNodeLabels,
     RestoredRedo, RestoredRow,
 };
-pub use meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
+pub use meta_restore_keys::{RestoredColumnarKey, RestoredSyncedText, RestoredVectorRow};
 pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
 pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHistory};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;
+pub use redo_stream_page::{RedoStreamPage, RedoStreamSection};
+pub use resolve_part::{RejectedLines, ResolvedTxnOpen, ResolvedTxnPart};
 pub use routing::plan_contains_cluster_partitioned_leaf;
 pub use set_op::SetOpKind;
 pub use sort_key::SortKeySpec;
 pub use spatial::{SpatialOp, SpatialPredicate};
-pub use text::{ScoreScanBound, ScoreScanOrder, TextOp, TextScoreSpec};
+pub use text::{ScoreScanBound, ScoreScanOrder, TextOp, TextRebuildProgress, TextScoreSpec};
 pub use tiering::{TierRead, TierSegment, TierSource, TieringError, TieringPlan};
 pub use timeseries::{
     AggregateIncarnation, PartitionsAction, RefreshCut, TimeseriesOp, TimeseriesResolve,

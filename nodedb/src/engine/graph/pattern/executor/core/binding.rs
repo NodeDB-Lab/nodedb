@@ -5,6 +5,7 @@
 
 use crate::engine::graph::csr::CsrIndex;
 use crate::engine::graph::pattern::ast::NodeBinding;
+use crate::engine::graph::pattern::executor::row::{Bound, bind_text, lookup};
 use crate::engine::graph::pattern::executor::types::BindingRow;
 
 /// Resolve a node binding to the set of candidate node ids.
@@ -18,19 +19,16 @@ pub(super) fn resolve_binding(
     row: &BindingRow,
     frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Vec<u32> {
-    if let Some(ref name) = binding.name
-        && let Some(value) = row.get(name)
-    {
-        if let Some(id) = csr.node_id_raw(value) {
-            // Check label constraint if specified.
-            if let Some(ref label) = binding.label
-                && !csr.node_has_label(id, label)
-            {
-                return Vec::new();
-            }
-            return vec![id];
+    if let Some(ref name) = binding.name {
+        let value = match lookup(row, name) {
+            Bound::Unbound => None,
+            // A variable bound to NULL matched nothing: no node continues it.
+            Bound::Null => return Vec::new(),
+            Bound::Text(text) => Some(text),
+        };
+        if let Some(value) = value {
+            return resolve_bound(binding, csr, value);
         }
-        return Vec::new();
     }
     // No binding yet — enumerate all nodes, filtering by label and bitmap.
     let all = 0..csr.node_count() as u32;
@@ -46,6 +44,21 @@ pub(super) fn resolve_binding(
     .collect()
 }
 
+/// The single node `value` names, when it passes the label constraint.
+fn resolve_bound(binding: &NodeBinding, csr: &CsrIndex, value: &str) -> Vec<u32> {
+    match csr.node_id_raw(value) {
+        Some(id)
+            if binding
+                .label
+                .as_ref()
+                .is_none_or(|label| csr.node_has_label(id, label)) =>
+        {
+            vec![id]
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub(in crate::engine::graph::pattern::executor) fn binding_compatible(
     binding: &NodeBinding,
     csr: &CsrIndex,
@@ -58,10 +71,12 @@ pub(in crate::engine::graph::pattern::executor) fn binding_compatible(
     {
         return false;
     }
-    if let Some(ref name) = binding.name
-        && let Some(existing) = row.get(name)
-    {
-        return existing == csr.node_name_raw(node_id);
+    if let Some(ref name) = binding.name {
+        return match lookup(row, name) {
+            Bound::Unbound => true,
+            Bound::Null => false,
+            Bound::Text(existing) => existing == csr.node_name_raw(node_id),
+        };
     }
     true
 }
@@ -73,7 +88,6 @@ pub(in crate::engine::graph::pattern::executor) fn bind_node(
     node_id: u32,
 ) {
     if let Some(ref name) = binding.name {
-        row.entry(name.clone())
-            .or_insert_with(|| csr.node_name_raw(node_id).to_string());
+        bind_text(row, name, csr.node_name_raw(node_id));
     }
 }

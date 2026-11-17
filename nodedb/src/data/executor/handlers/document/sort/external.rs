@@ -11,17 +11,18 @@ use nodedb_physical::physical_plan::SortKeySpec;
 use tracing::debug;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::spill::cleanup::{
+    SpillKind, remove_empty_spill_dir, remove_spill_file,
+};
+use crate::data::executor::handlers::spill::error::SpillError;
 use crate::data::io::uring_seq_reader::UringSeqReader;
 use crate::data::io::uring_writer::UringWriter;
 
 use super::compare::{
-    SortValues, all_column_keys, compare_docs_by_keys_binary, compare_sort_values,
-    decode_sort_values, encode_sort_values, eval_sort_values,
+    SortValues, compare_sort_values, decode_sort_values, encode_sort_values, eval_sort_values,
 };
-use super::in_memory::sort_rows;
 
-/// A row on its way through the sort: the document plus, when the ORDER BY has
-/// a computed key, that row's evaluated key values.
+/// A document and its evaluated native sort keys.
 ///
 /// The evaluated keys travel *with* the row into the spill file and back out
 /// again, so the k-way merge orders runs by exactly the values the in-memory
@@ -65,7 +66,6 @@ impl CoreLoop {
         })?;
 
         let total_rows = rows.len();
-        let computed_keys = !all_column_keys(sort_keys);
 
         // Declared FIRST so it Drops LAST — after the readers below close their
         // fds — guaranteeing the spill files are unlinked only once no reader
@@ -76,21 +76,27 @@ impl CoreLoop {
         };
 
         for (run_idx, chunk) in rows.chunks(self.query_tuning.sort_run_size).enumerate() {
-            let mut run: Vec<(String, Vec<u8>)> = chunk.to_vec();
-            sort_rows(&mut run, sort_keys, decimal_keys, &crs)?;
+            let mut run = chunk
+                .iter()
+                .map(|(id, doc)| {
+                    Ok(SortRecord {
+                        id: id.clone(),
+                        doc: doc.clone(),
+                        keys: eval_sort_values(doc, sort_keys, &crs)?,
+                    })
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            run.sort_by(|a, b| compare_sort_values(&a.keys, &b.keys, sort_keys, decimal_keys));
 
             // Build the framed run into one buffer and write it in a single
             // pass. Writing each tiny frame field separately would be hundreds
             // of thousands of micro io_uring writes.
             let mut framed = Vec::new();
             framed.extend_from_slice(&(run.len() as u32).to_le_bytes());
-            for (id, val) in &run {
-                let key_bytes = if computed_keys {
-                    encode_sort_values(&eval_sort_values(val, sort_keys, &crs)?)?
-                } else {
-                    Vec::new()
-                };
-                let id_bytes = id.as_bytes();
+            for record in &run {
+                let key_bytes = encode_sort_values(&record.keys)?;
+                let val = &record.doc;
+                let id_bytes = record.id.as_bytes();
                 framed.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
                 framed.extend_from_slice(id_bytes);
                 framed.extend_from_slice(&(val.len() as u32).to_le_bytes());
@@ -147,27 +153,63 @@ impl CoreLoop {
             }
         }
 
+        drop(readers);
+        cleanup.finish()?;
         Ok(result)
     }
 }
 
-/// Drop guard that unlinks named sort spill files (and their directory).
+/// Guard that unlinks named sort spill files and their directory.
 ///
 /// Named spill files do not auto-unlink (unlike tempfile handles), so each is
-/// removed explicitly. Declared before the [`RunReader`]s in `external_sort` so
-/// it Drops last — after the readers' fds close. Unlink is a bounded metadata
-/// op, not bulk content I/O, so it stays plain `std::fs`.
+/// removed explicitly. A finished sort calls [`SortSpillCleanup::finish`],
+/// which returns a removal error. A sort that fails part way drops the guard:
+/// the drop removes what it can, and each removal that fails files its
+/// faultbox report while the sort's own error propagates. Unlink is a bounded
+/// metadata op, not bulk content I/O, so it stays plain `std::fs`.
 struct SortSpillCleanup {
     dir: PathBuf,
     paths: Vec<PathBuf>,
 }
 
+impl SortSpillCleanup {
+    /// Remove every run file, then the directory.
+    fn remove(&mut self) -> Result<(), SpillError> {
+        let mut first_error = None;
+        for path in self.paths.drain(..) {
+            if let Err(e) = remove_spill_file(SpillKind::Sort, &path) {
+                first_error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = remove_empty_spill_dir(SpillKind::Sort, &self.dir) {
+            first_error.get_or_insert(e);
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove the sort's spill files. A removal that fails is an error.
+    fn finish(mut self) -> crate::Result<()> {
+        let removed = self.remove();
+        self.paths.clear();
+        removed?;
+        Ok(())
+    }
+}
+
 impl Drop for SortSpillCleanup {
     fn drop(&mut self) {
-        for p in &self.paths {
-            let _ = std::fs::remove_file(p);
+        if self.paths.is_empty() {
+            return;
         }
-        let _ = std::fs::remove_dir(&self.dir);
+        // Reached only when the sort fails part way and returns its own
+        // error. Each removal error files its faultbox report at the
+        // removal site.
+        if let Err(e) = self.remove() {
+            tracing::error!(error = %e, "external sort: spill files left after a failed sort");
+        }
     }
 }
 
@@ -308,24 +350,16 @@ impl PartialOrd for MergeEntry {
 }
 
 impl Ord for MergeEntry {
+    /// Ties order by run: runs are consecutive input chunks, each sorted
+    /// stably, so the merge keeps equal keys in input order.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Rows spilled with evaluated keys are merged by those keys; a
-        // column-only sort carries none and compares straight from the bytes.
-        if self.record.keys.is_empty() && other.record.keys.is_empty() {
-            compare_docs_by_keys_binary(
-                &self.record.doc,
-                &other.record.doc,
-                &self.sort_keys,
-                &self.decimal_keys,
-            )
-        } else {
-            compare_sort_values(
-                &self.record.keys,
-                &other.record.keys,
-                &self.sort_keys,
-                &self.decimal_keys,
-            )
-        }
+        compare_sort_values(
+            &self.record.keys,
+            &other.record.keys,
+            &self.sort_keys,
+            &self.decimal_keys,
+        )
+        .then_with(|| self.run_idx.cmp(&other.run_idx))
     }
 }
 
@@ -338,7 +372,7 @@ mod tests {
     }
 
     /// Build a framed run blob byte-identical to `external_sort`'s spill
-    /// layout, including the trailing (here empty) evaluated-keys field.
+    /// layout, including the trailing evaluated-keys field.
     fn frame(rows: &[(String, Vec<u8>)]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
@@ -348,7 +382,15 @@ mod tests {
             out.extend_from_slice(idb);
             out.extend_from_slice(&(val.len() as u32).to_le_bytes());
             out.extend_from_slice(val);
-            out.extend_from_slice(&0u32.to_le_bytes());
+            let keys = eval_sort_values(
+                val,
+                &[SortKeySpec::column("val", true)],
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("sort keys");
+            let keys = encode_sort_values(&keys).expect("encode keys");
+            out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+            out.extend_from_slice(&keys);
         }
         out
     }
@@ -434,5 +476,29 @@ mod tests {
             reader.next_row().is_err(),
             "truncated run must error, not silently drop rows"
         );
+    }
+
+    /// Equal keys from different runs merge in run order, so the external
+    /// sort keeps ties in input order as the in-memory sort does.
+    #[test]
+    fn merge_breaks_ties_by_run() {
+        let sort_keys = vec![SortKeySpec::column("val", true)];
+        let entry = |id: &str, run_idx: usize| MergeEntry {
+            record: SortRecord {
+                id: id.to_owned(),
+                doc: Vec::new(),
+                keys: vec![nodedb_types::Value::Integer(7)],
+            },
+            run_idx,
+            sort_keys: sort_keys.clone(),
+            decimal_keys: Vec::new(),
+        };
+        let mut heap: BinaryHeap<Reverse<MergeEntry>> = BinaryHeap::new();
+        for (id, run) in [("third", 2), ("first", 0), ("second", 1)] {
+            heap.push(Reverse(entry(id, run)));
+        }
+        let order: Vec<String> =
+            std::iter::from_fn(|| heap.pop().map(|Reverse(e)| e.record.id)).collect();
+        assert_eq!(order, ["first", "second", "third"]);
     }
 }

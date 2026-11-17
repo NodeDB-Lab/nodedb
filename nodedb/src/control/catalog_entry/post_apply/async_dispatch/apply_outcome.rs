@@ -6,19 +6,24 @@ use tracing::warn;
 
 use super::collection::ReclaimFailure;
 
-/// Log a Register that a Data Plane core did not acknowledge. The metadata
-/// applier runs the post-apply lane, and no client waits on it. The batch
-/// advances: the catalog row is durable, and boot seeds every core's config
-/// from it.
-pub(super) fn register_outcome(result: crate::Result<()>, collection: &str) {
-    if let Err(error) = result {
+/// Map a Register result onto the post-apply contract.
+///
+/// A core that did not acknowledge the Register holds a stale config: a write
+/// it applies can index no text field or decode a strict row wrongly. So the
+/// error stops the apply batch at this entry. The metadata applier classifies
+/// it and files a report that names the collection and carries the error.
+/// The applier's durable owed marker makes the re-delivered entry run the
+/// Register again before the watermark passes it, after a restart too.
+pub(super) fn register_outcome(result: crate::Result<()>, collection: &str) -> crate::Result<()> {
+    result.map_err(|error| {
         tracing::error!(
             collection,
             error = %error,
             "catalog_entry: Register barrier failed — one or more Data Plane cores \
-             did not acknowledge the schema update; this node may serve stale schema"
+             did not acknowledge the schema update; the apply batch stops at this entry"
         );
-    }
+        error
+    })
 }
 
 /// Map a reclaim result onto the post-apply contract.

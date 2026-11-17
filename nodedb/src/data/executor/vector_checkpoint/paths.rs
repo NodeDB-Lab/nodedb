@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Filesystem naming for vector checkpoints: directories, generation
-//! directories, per-index filenames, and the inverse parse.
+//! directories, and the per-index checkpoint key.
 //!
 //! The write path, the load path, and reclaim all build every path through
 //! these helpers so the three can never drift. A path divergence between writer
@@ -9,6 +9,7 @@
 
 use nodedb_types::DatabaseId;
 
+use crate::data::executor::checkpoint_key::{CheckpointEngine, CheckpointKey};
 use crate::types::TenantId;
 
 /// Filename of the manifest that names the live generation.
@@ -32,33 +33,32 @@ pub(crate) fn vector_ckpt_gen_dir(
     ckpt_dir.join(format!("gen-{generation}"))
 }
 
-/// The checkpoint filename stem for one index key: `db-{db}-tenant-{tid}-key-`
-/// followed by the hex-encoded `coll_key` (`{collection}` for the default
-/// index, `{collection}:{field}` for a named-field one).
+/// The checkpoint key for one index: `coll_key` is `{collection}` for the
+/// default index and `{collection}:{field}` for a named-field one.
 ///
-/// The single authority on the encoding, shared with reclaim so a DROP can
-/// never miss a file the write path produced. The collection name is hex-encoded
-/// rather than embedded verbatim: a name is user-supplied, and the stem becomes
-/// a path component, so a verbatim `/` or `..` in it would address a file
-/// outside the generation directory. Hex is byte-wise, so a prefix relation
-/// between two names survives the encoding and reclaim can still match every
-/// field index of one collection.
-pub(crate) fn vector_ckpt_stem(db: u64, tid: u64, coll_key: &str) -> String {
-    format!("db-{db}-tenant-{tid}-key-{}", hex::encode(coll_key))
+/// The single authority on the key, shared with reclaim so a DROP can never
+/// miss a file the write path produced. The file name is a fixed-length hash
+/// of this key, so no collection or field name length can overflow it.
+pub(crate) fn vector_ckpt_key(db: u64, tid: u64, coll_key: &str) -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointEngine::Vector,
+        db,
+        tid,
+        vec![coll_key.to_string()],
+    )
 }
 
-/// Parse a stem produced by [`vector_ckpt_stem`] back into the
-/// `(DatabaseId, TenantId, coll_key)` tuple map key.
-///
-/// Returns `None` for any stem this module did not write.
-pub(super) fn parse_vector_ckpt_stem(stem: &str) -> Option<(DatabaseId, TenantId, String)> {
-    let rest = stem.strip_prefix("db-")?;
-    let (db_str, rest) = rest.split_once("-tenant-")?;
-    let db = db_str.parse::<u64>().ok()?;
-    let (tid_str, encoded) = rest.split_once("-key-")?;
-    let tid = tid_str.parse::<u64>().ok()?;
-    let coll_key = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
-    Some((DatabaseId::new(db), TenantId::new(tid), coll_key))
+/// The `(DatabaseId, TenantId, coll_key)` map key a stored vector checkpoint
+/// key restores under, or `None` when the key is not a vector key.
+pub(crate) fn vector_map_key(key: &CheckpointKey) -> Option<(DatabaseId, TenantId, String)> {
+    match (key.engine, key.parts.as_slice()) {
+        (CheckpointEngine::Vector, [coll_key]) => Some((
+            DatabaseId::new(key.database_id),
+            TenantId::new(key.tenant_id),
+            coll_key.clone(),
+        )),
+        _ => None,
+    }
 }
 
 /// Parse a `"{db}:{tid}:{coll_key}"` string (the in-memory `BuildComplete.key`
@@ -106,38 +106,29 @@ mod tests {
     }
 
     #[test]
-    fn stem_roundtrips_through_parse() {
+    fn key_roundtrips_through_map_key() {
         for coll_key in ["docs", "docs:emb", "2/docs", "a-tenant-b", "-key-"] {
-            let stem = vector_ckpt_stem(3, 9, coll_key);
-            let (db, tid, parsed) = parse_vector_ckpt_stem(&stem).expect("stem must parse");
+            let key = vector_ckpt_key(3, 9, coll_key);
+            let (db, tid, parsed) = vector_map_key(&key).expect("vector key");
             assert_eq!(db, DatabaseId::new(3));
             assert_eq!(tid, TenantId::new(9));
             assert_eq!(parsed, coll_key);
         }
     }
 
-    /// The stem is one plain path component whatever the collection is named,
-    /// so the checkpoint write cannot address a file outside its generation
-    /// directory.
+    /// A 255-byte collection with a 200-byte field still gets a short name.
     #[test]
-    fn stem_is_a_plain_path_component() {
-        for coll_key in ["docs", "../../etc/passwd", "a/b", "C:evil", ".."] {
-            let stem = vector_ckpt_stem(0, 1, coll_key);
-            assert!(
-                nodedb_types::is_plain_path_component(&format!("{stem}.ckpt")),
-                "{coll_key:?} produced a non-plain stem: {stem}"
-            );
-        }
+    fn long_names_get_a_short_file_name() {
+        let coll_key = format!("{}:{}", "c".repeat(255), "f".repeat(200));
+        let name = vector_ckpt_key(0, 1, &coll_key).file_name();
+        assert!(name.len() < 64, "{name}");
+        assert!(nodedb_types::is_plain_path_component(&name));
     }
 
-    /// Reclaim matches a collection's field indexes by prefix. Hex is
-    /// byte-wise, so the prefix relation survives the encoding.
     #[test]
-    fn field_stems_extend_the_collection_stem() {
-        let bare = vector_ckpt_stem(0, 1, "docs");
-        let field = vector_ckpt_stem(0, 1, "docs:emb");
-        assert!(field.starts_with(&bare));
-        assert!(!vector_ckpt_stem(0, 1, "docs_archive").starts_with(&format!("{bare}3a")));
+    fn non_vector_key_is_none() {
+        let key = CheckpointKey::new(CheckpointEngine::Crdt, 0, 1, vec!["docs".into()]);
+        assert!(vector_map_key(&key).is_none());
     }
 
     /// A named-field key keeps its `:` in the collection remainder — the parse

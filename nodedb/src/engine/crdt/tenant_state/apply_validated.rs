@@ -25,6 +25,28 @@ pub struct DeltaSigningAdmission {
     pub preverified: bool,
 }
 
+/// The delta a validated apply imports, and where it lands.
+struct ValidatedDelta<'a> {
+    collection: &'a str,
+    delta: &'a [u8],
+    target: ApplyTarget<'a>,
+    peer_id: u64,
+}
+
+/// The state a staged clean apply displaced, held until its caller keeps or
+/// undoes the apply. Dropping it keeps the apply.
+#[must_use = "keep the apply with confirm_install or undo it with rollback_install"]
+pub struct StagedInstall {
+    pub(super) collection: String,
+    /// The authoritative state before the apply. `None`: the collection had
+    /// no state.
+    pub(super) previous: Option<CrdtState>,
+    /// The applied delta, for the displaced state to take on confirm.
+    pub(super) delta: Vec<u8>,
+    /// Whether the delta imports as a local snapshot (a collection target).
+    pub(super) local: bool,
+}
+
 /// Outcome of applying and validating one peer delta.
 #[derive(Debug)]
 pub enum ValidatedApplyOutcome {
@@ -62,6 +84,15 @@ pub enum ValidatedApplyOutcome {
     /// The delta bytes could not be imported (corrupt / undecodable). Treated
     /// as an idempotent no-op so the stream is not wedged.
     Malformed,
+    /// A row the delta writes holds a value that does not decode through
+    /// `nodedb_crdt::loro_value`: a Loro binary that is not a tagged value.
+    /// The candidate is discarded unapplied. The same bytes fail the same
+    /// way forever, so the caller refuses the delta terminally and names the
+    /// value.
+    UndecodableValue {
+        /// The decode error, naming the value.
+        error: nodedb_crdt::CrdtError,
+    },
     /// The delta's causal predecessors are absent from this collection's
     /// document, so Loro buffered its operations as pending and the applied
     /// state did not move.
@@ -125,6 +156,60 @@ impl TenantCrdtEngine {
         admission: DeltaSigningAdmission,
         crs: &nodedb_crs::CrsContext<'_>,
     ) -> ValidatedApplyOutcome {
+        self.apply_validated_inner(
+            ValidatedDelta {
+                collection,
+                delta,
+                target,
+                peer_id,
+            },
+            admission,
+            crs,
+            None,
+        )
+    }
+
+    /// [`Self::apply_committed_delta_authenticated`] that keeps the state a
+    /// clean apply displaced. The caller projects the new state, then keeps
+    /// the apply with [`Self::confirm_install`] or puts the displaced state
+    /// back with [`Self::rollback_install`]. Any other outcome stages nothing.
+    pub fn apply_committed_delta_staged(
+        &mut self,
+        collection: &str,
+        delta: &[u8],
+        target: ApplyTarget<'_>,
+        peer_id: u64,
+        admission: DeltaSigningAdmission,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> (ValidatedApplyOutcome, Option<StagedInstall>) {
+        let mut staged = None;
+        let outcome = self.apply_validated_inner(
+            ValidatedDelta {
+                collection,
+                delta,
+                target,
+                peer_id,
+            },
+            admission,
+            crs,
+            Some(&mut staged),
+        );
+        (outcome, staged)
+    }
+
+    fn apply_validated_inner(
+        &mut self,
+        delta: ValidatedDelta<'_>,
+        admission: DeltaSigningAdmission,
+        crs: &nodedb_crs::CrsContext<'_>,
+        staged: Option<&mut Option<StagedInstall>>,
+    ) -> ValidatedApplyOutcome {
+        let ValidatedDelta {
+            collection,
+            delta,
+            target,
+            peer_id,
+        } = delta;
         self.last_dead_letter = None;
         if admission.required && admission.auth.delta_signature == [0; 32] {
             return ValidatedApplyOutcome::Malformed;
@@ -168,6 +253,13 @@ impl TenantCrdtEngine {
             .any(|(written, row)| written != root || !target.admits_row(row))
         {
             return ValidatedApplyOutcome::Malformed;
+        }
+        // Every value a written row holds must decode, or no reader of the
+        // row can serve it. Checked on the candidate, before it installs.
+        for (_, row) in &write_set {
+            if let Err(error) = candidate.check_row_values(root, row) {
+                return ValidatedApplyOutcome::UndecodableValue { error };
+            }
         }
         // A delta names its root. The engine and its callers name the stored
         // collection, so the write-set leaves here under that name.
@@ -224,7 +316,17 @@ impl TenantCrdtEngine {
         // merge leaves them identical. If that second import somehow does not
         // land, no candidate is retained and the next apply rebuilds one —
         // slower, never wrong.
-        if let Some(previous) = previous
+        //
+        // A staged apply keeps the displaced state for its caller instead, so
+        // a projection that fails can put it back.
+        if let Some(slot) = staged {
+            *slot = Some(StagedInstall {
+                collection: collection.to_owned(),
+                previous,
+                delta: delta.to_vec(),
+                local: matches!(target, ApplyTarget::Collection),
+            });
+        } else if let Some(previous) = previous
             && target.import(&previous, delta).is_ok()
         {
             self.apply_candidates
@@ -687,6 +789,45 @@ mod tests {
         );
         assert!(matches!(imported, ValidatedApplyOutcome::Clean { .. }));
         assert!(engine.row_exists("users", "a") && engine.row_exists("users", "b"));
+    }
+
+    /// A delta whose row holds a binary that is not a tagged value is refused
+    /// before it installs, naming the value, and the row stays absent.
+    #[test]
+    fn an_undecodable_value_is_refused_before_install() {
+        let mut engine = unique_engine();
+        let state = CrdtState::new(7).unwrap();
+        state
+            .upsert(
+                "users",
+                "a",
+                &[
+                    ("email", LoroValue::String("a@y.com".into())),
+                    ("raw", LoroValue::Binary(vec![0xc1].into())),
+                ],
+            )
+            .unwrap();
+        let delta = state.export_snapshot().unwrap();
+        let outcome = engine.apply_committed_delta_validated(
+            "users",
+            &delta,
+            ApplyTarget::Document {
+                document_id: "a",
+                surrogate: nodedb_types::Surrogate::new(2),
+            },
+            7,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+        assert!(
+            matches!(
+                outcome,
+                ValidatedApplyOutcome::UndecodableValue {
+                    error: nodedb_crdt::CrdtError::TypedValueMalformed { .. }
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(!engine.row_exists("users", "a"));
     }
 
     /// A multi-row frame is rejected before its detached candidate can replace

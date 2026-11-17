@@ -128,6 +128,7 @@ pub(super) fn merge_core_snapshots(
             group_proposal_keys,
             group_proposal_keys_complete_from,
             documents_versioned,
+            synced_text,
             indexes_versioned,
             vector_multi_documents,
             vector_versions,
@@ -176,6 +177,7 @@ pub(super) fn merge_core_snapshots(
             .group_proposal_keys_complete_from
             .max(group_proposal_keys_complete_from);
         merged.documents_versioned.extend(documents_versioned);
+        merged.synced_text.extend(synced_text);
         merged.indexes_versioned.extend(indexes_versioned);
         merged.arrays.extend(arrays);
         merged.metadata_floor = merged.metadata_floor.max(metadata_floor);

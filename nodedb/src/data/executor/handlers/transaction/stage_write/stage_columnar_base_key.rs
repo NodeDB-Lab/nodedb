@@ -51,10 +51,7 @@ impl CoreLoop {
         surrogate: u32,
         pk: &Value,
     ) -> crate::Result<()> {
-        let staged_already = self
-            .txn_overlays
-            .get(&txn_id)
-            .is_some_and(|overlay| overlay.get(coll_key, surrogate).is_some());
+        let staged_already = self.staged_row(txn_id, coll_key, surrogate)?.is_some();
         if staged_already {
             return Ok(());
         }
@@ -64,7 +61,6 @@ impl CoreLoop {
                 detail: format!("columnar base key of '{}': {e}", coll_key.2),
             })?;
         self.txn_overlay_mut(txn_id)
-            .note_base_pk(coll_key, surrogate, pk_msgpack);
-        Ok(())
+            .note_base_pk(coll_key, surrogate, pk_msgpack)
     }
 }
