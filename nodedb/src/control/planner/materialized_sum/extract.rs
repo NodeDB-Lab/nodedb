@@ -20,6 +20,8 @@ use memchr::memmem;
 /// present-but-empty string IS a join value and is returned as one — the
 /// emptiness is the caller's to judge. A non-scalar value is not a key.
 ///
+/// A repeated key resolves to its last entry.
+///
 /// A cheap byte pre-filter skips the decode when the column name does not occur
 /// in the body at all.
 pub fn join_value_from_body(value: &[u8], join_column: &str) -> Option<String> {
@@ -106,6 +108,27 @@ mod tests {
             "account_id",
             rmpv::Value::Array(vec![rmpv::Value::Integer(1.into())]),
         )]);
+        assert!(join_value_from_body(&v, "account_id").is_none());
+    }
+
+    #[test]
+    fn repeated_join_key_takes_the_last_value() {
+        let v = doc(&[
+            ("account_id", rmpv::Value::Nil),
+            ("account_id", rmpv::Value::String("acc".into())),
+        ]);
+        assert_eq!(
+            join_value_from_body(&v, "account_id"),
+            Some("acc".to_string())
+        );
+    }
+
+    #[test]
+    fn repeated_join_key_ending_in_null_yields_none() {
+        let v = doc(&[
+            ("account_id", rmpv::Value::String("acc".into())),
+            ("account_id", rmpv::Value::Nil),
+        ]);
         assert!(join_value_from_body(&v, "account_id").is_none());
     }
 }

@@ -249,6 +249,16 @@ impl CoreLoop {
                 updates,
                 declared_primary_key,
             )?;
+            // The collection's state and transition rules judge the pair this
+            // row stages: the matched body and its post-image.
+            self.check_stored_update_transitions(
+                &coll_key,
+                collection,
+                &current_bytes,
+                &new_body,
+                &task.request.user_roles,
+            )
+            .map_err(crate::Error::DataPlane)?;
             // Decide the staged post-image against the write policy: this is
             // the row the stamped redo install writes.
             let identity = stored_row_identity(

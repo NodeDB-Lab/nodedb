@@ -167,6 +167,7 @@ async fn handle_sql_inner(
     )
     .await
     {
+        crate::control::server::shared::ddl::abort_block_on_error(&txn_ctx, &result);
         return resp(super::ddl_result_to_native(seq, result));
     }
 

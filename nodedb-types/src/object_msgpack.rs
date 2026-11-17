@@ -87,14 +87,17 @@ impl<'a> ObjectView<'a> {
         }
     }
 
+    /// The value of `field`. A repeated key resolves to its last entry, as
+    /// [`Self::decode`] resolves it.
     pub fn get(self, field: &str) -> MsgpackResult<Option<Value>> {
+        let mut last = None;
         for entry in self.fields() {
             let (key, bytes) = entry?;
             if key == field {
-                return self.decode_value(bytes).map(Some);
+                last = Some(bytes);
             }
         }
-        Ok(None)
+        last.map(|bytes| self.decode_value(bytes)).transpose()
     }
 
     /// Decode a field using this object's encoding, without guessing from its bytes.
