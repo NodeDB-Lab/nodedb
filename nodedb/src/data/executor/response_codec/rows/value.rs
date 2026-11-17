@@ -77,7 +77,23 @@ fn decode_row(
             Ok((Value::Object(fields), end))
         }
         RowNode::List { count, first } => {
-            let mut rows = Vec::with_capacity(count.min(bytes.len()));
+            // Every row takes at least one byte of what follows the header.
+            let remaining = bytes.len().saturating_sub(first);
+            let capacity = nodedb_types::decode_bounds::checked_decode_capacity(
+                count,
+                std::mem::size_of::<Value>(),
+                remaining,
+                1,
+                count,
+                usize::MAX,
+            )
+            .ok_or_else(|| {
+                row_error(
+                    bytes.len(),
+                    format!("a row array declares {count} rows in {remaining} bytes"),
+                )
+            })?;
+            let mut rows = Vec::with_capacity(capacity);
             let mut at = first;
             for _ in 0..count {
                 if at >= bytes.len() {
