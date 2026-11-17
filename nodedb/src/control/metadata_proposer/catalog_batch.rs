@@ -94,8 +94,9 @@ pub async fn propose_catalog_batch_async(
                 group_id: METADATA_GROUP_ID,
                 through: log_index,
             }],
-            crate::control::server::shared::session::StatementDeadline::of_statement(shared)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(
+                shared,
+            ),
         )
         .await?;
     }

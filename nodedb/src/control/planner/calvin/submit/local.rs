@@ -215,8 +215,7 @@ pub(crate) async fn submit_prepared_and_await(
     if binds_authorization {
         crate::control::security::auth_lease::calvin_write_barrier(
             state,
-            crate::control::server::shared::session::StatementDeadline::of_statement(state)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(state),
         )
         .await?;
     }

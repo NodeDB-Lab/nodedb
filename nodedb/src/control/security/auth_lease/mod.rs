@@ -12,7 +12,7 @@ pub mod table;
 pub mod timing;
 pub mod withheld_warn;
 
-pub use barrier::{authorization_barrier, calvin_write_barrier};
+pub use barrier::{BarrierDeadline, authorization_barrier, calvin_write_barrier};
 pub use calvin_acks::CalvinAckCoverage;
 pub use holder::{LeaseHolder, RenewAttempt};
 pub use service::LeaderLeaseService;

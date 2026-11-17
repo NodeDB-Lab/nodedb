@@ -16,6 +16,16 @@ use crate::control::state::SharedState;
 
 use super::leadership::{metadata_leader, send_to_leader};
 
+/// When an authorization barrier gives up, and the statement budget its
+/// error reports.
+#[derive(Debug, Clone, Copy)]
+pub struct BarrierDeadline {
+    /// The instant the barrier stops waiting.
+    pub at: std::time::Instant,
+    /// The whole budget of the statement the barrier runs in.
+    pub budget: std::time::Duration,
+}
+
 /// Hold the acknowledgement of a change until it binds every node.
 ///
 /// `targets` name the change: per group, the index it committed at. The
@@ -33,13 +43,14 @@ use super::leadership::{metadata_leader, send_to_leader};
 pub async fn authorization_barrier(
     state: &SharedState,
     targets: Vec<GroupCoverage>,
-    deadline: std::time::Instant,
+    deadline: BarrierDeadline,
 ) -> crate::Result<()> {
-    let remaining_until = || deadline.saturating_duration_since(std::time::Instant::now());
-    let budget_ms = crate::control::server::shared::session::statement_total_budget(
-        state.tuning.network.default_deadline_secs,
-    )
-    .as_millis();
+    let remaining_until = || {
+        deadline
+            .at
+            .saturating_duration_since(std::time::Instant::now())
+    };
+    let budget_ms = deadline.budget.as_millis();
     let timing = lease_timing(state)?;
     // A statement whose deadline passed before the barrier starts still asks
     // the leader once: the change may already bind every node.
@@ -121,7 +132,7 @@ fn barrier_wait(
 /// at `deadline`, the caller's statement deadline.
 pub async fn calvin_write_barrier(
     state: &SharedState,
-    deadline: std::time::Instant,
+    deadline: BarrierDeadline,
 ) -> crate::Result<()> {
     lease_timing(state)?;
     let commit_index = state
@@ -198,8 +209,12 @@ mod tests {
         let state = SharedState::new(dispatcher, wal).expect("construct barrier state");
         assert!(state.authorization_fence.install_timing(timing()));
         let budget = state.tuning.network.default_deadline_secs * 1000;
+        let deadline = BarrierDeadline {
+            at: std::time::Instant::now(),
+            budget: std::time::Duration::from_millis(budget),
+        };
 
-        let error = authorization_barrier(&state, Vec::new(), std::time::Instant::now())
+        let error = authorization_barrier(&state, Vec::new(), deadline)
             .await
             .expect_err("no leader releases the barrier");
         let message = error.to_string();

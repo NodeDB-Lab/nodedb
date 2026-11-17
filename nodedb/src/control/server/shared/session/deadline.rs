@@ -130,6 +130,18 @@ impl StatementDeadline {
         Self::with_default(state.tuning.network.default_deadline_secs)
     }
 
+    /// The running statement's deadline and whole budget, for an
+    /// authorization barrier.
+    pub fn barrier_of_statement(
+        state: &crate::control::state::SharedState,
+    ) -> crate::control::security::auth_lease::BarrierDeadline {
+        let default_deadline_secs = state.tuning.network.default_deadline_secs;
+        crate::control::security::auth_lease::BarrierDeadline {
+            at: statement_deadline(default_deadline_secs),
+            budget: statement_total_budget(default_deadline_secs),
+        }
+    }
+
     /// The running statement's deadline, or `default_deadline_secs` from now
     /// outside one.
     pub fn with_default(default_deadline_secs: u64) -> Self {

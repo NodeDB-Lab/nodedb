@@ -29,8 +29,7 @@ pub(super) async fn finish_committed(
     if binds_authorization {
         crate::control::security::auth_lease::calvin_write_barrier(
             state,
-            crate::control::server::shared::session::StatementDeadline::of_statement(state)
-                .instant(),
+            crate::control::server::shared::session::StatementDeadline::barrier_of_statement(state),
         )
         .await?;
     }
