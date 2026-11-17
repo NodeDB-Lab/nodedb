@@ -13,6 +13,8 @@ use crate::control::trigger::dml_hook::classify_dml_write;
 use crate::control::trigger::statement_txn::fires_joined_body;
 use crate::control::trigger::{DmlEvent, TriggerScope};
 
+use super::row_triggers::has_check_constraints;
+
 /// The trigger events a write task can fire. An `UPSERT` is an INSERT or an
 /// UPDATE, decided by its probe. A `MERGE` inserts, updates and deletes.
 pub(super) fn task_events(task: &PhysicalTask) -> Option<(String, Vec<DmlEvent>)> {
@@ -46,13 +48,16 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 }
 
 /// Whether a statement outside a transaction block runs in an implicit
-/// transaction. It does in five cases:
+/// transaction. It does in six cases:
 ///
 /// - It holds a predicate write that follows another write. A request of
 ///   several statements plans as one task set, and each later statement must
 ///   read the rows the earlier ones wrote, which only the block's staging scan
 ///   does.
 /// - It fires a joined body.
+/// - It holds a point UPDATE of a collection with CHECK constraints that an
+///   earlier write of the request writes. Its CHECK then reads the row that
+///   write left, which only the transaction holds.
 /// - It is a `MERGE` into a collection an edge was ever written into. The
 ///   MERGE then stages each removed row with its node's edge tasks, and
 ///   COMMIT applies them together.
@@ -75,6 +80,7 @@ pub fn statement_needs_implicit_txn(
     if holds_ordered_predicate_write(tasks)
         || statement_fires_joined_body(state, tasks)
         || orchestrated_returning_can_fail(state, tasks)
+        || updates_checked_row_after_write(state, tasks)?
     {
         return Ok(true);
     }
@@ -100,6 +106,32 @@ fn holds_ordered_predicate_write(tasks: &[PhysicalTask]) -> bool {
         earlier_write |= is_write_plan(&task.plan) && !is_balance_delta(&task.plan);
     }
     false
+}
+
+/// Whether a point UPDATE of `tasks` writes a collection with CHECK
+/// constraints that an earlier write of `tasks` also writes.
+fn updates_checked_row_after_write(
+    state: &SharedState,
+    tasks: &[PhysicalTask],
+) -> crate::Result<bool> {
+    let mut written: Vec<String> = Vec::new();
+    for task in tasks {
+        let Some(info) = classify_dml_write(&task.plan) else {
+            continue;
+        };
+        let point_update = matches!(
+            task.plan,
+            PhysicalPlan::Document(DocumentOp::PointUpdate { .. })
+        );
+        if point_update
+            && written.contains(&info.collection)
+            && has_check_constraints(state, task.database_id, task.tenant_id, &info.collection)?
+        {
+            return Ok(true);
+        }
+        written.push(info.collection);
+    }
+    Ok(false)
 }
 
 fn is_balance_delta(plan: &PhysicalPlan) -> bool {

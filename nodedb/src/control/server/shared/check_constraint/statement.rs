@@ -184,7 +184,7 @@ pub fn enforce_statement_enum_labels(
 
 /// Extract the collection name and operation type from an INSERT or UPDATE SQL
 /// statement. Returns `None` for any other statement kind.
-fn extract_collection_from_sql(sql: &str) -> Option<(String, bool)> {
+pub(super) fn extract_collection_from_sql(sql: &str) -> Option<(String, bool)> {
     if let Some(after) = strip_prefix_ascii_case_insensitive(sql, "INSERT INTO ") {
         let after = after.trim_start();
         let end = after
