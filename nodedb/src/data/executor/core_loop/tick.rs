@@ -188,8 +188,14 @@ impl CoreLoop {
     /// After processing, update the per-priority queue-depth gauges so the
     /// Prometheus endpoint reflects the post-tick state.
     pub fn tick(&mut self) -> usize {
-        self.poll_build_completions();
-        self.poll_pending_reindex();
+        // While an install fence is armed, the hooks that install indexes
+        // or cut over rebuilds skip, and the aggregate hook folds nothing:
+        // each writes storage or flushes a memtable an install in flight
+        // owns.
+        if !self.has_install_fence() {
+            self.poll_build_completions();
+            self.poll_pending_reindex();
+        }
         self.answer_reindex_waiters();
         // A held refresh wait or aggregate read folds its own backlog here,
         // so it completes without the maintenance pass.
@@ -322,6 +328,62 @@ mod tests {
             resp.inner.error_code.as_deref(),
             Some(&ErrorCode::ExpiredBeforeExecution)
         );
+    }
+
+    #[test]
+    fn the_tick_does_not_poll_build_completions_while_an_install_is_fenced() {
+        let (mut core, _, _, _dir) = make_core();
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            "gone:emb".to_string(),
+        );
+        core.vector_builds.codec_attempts.insert((key, 0), 1);
+
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        core.tick();
+        assert_eq!(
+            core.vector_builds.codec_attempts.len(),
+            1,
+            "the poll that prunes the attempts does not run"
+        );
+
+        core.release_install_fence();
+        core.tick();
+        assert!(
+            core.vector_builds.codec_attempts.is_empty(),
+            "the released tick polls"
+        );
+    }
+
+    #[test]
+    fn the_tick_does_not_cut_over_a_rebuild_while_an_install_is_fenced() {
+        use crate::data::executor::handlers::control::reindex::pending::{
+            PendingBuild, PendingReindex, RebuildTarget,
+        };
+        let (mut core, _, _, _dir) = make_core();
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.maintenance.pending_reindex.push(PendingReindex {
+            target: RebuildTarget {
+                database_id: DatabaseId::DEFAULT,
+                tenant_id: TenantId::new(1),
+                collection: "x".into(),
+            },
+            build: PendingBuild::Csr { token: 1, rx },
+        });
+        drop(tx);
+
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        core.tick();
+        assert_eq!(
+            core.maintenance.pending_reindex.len(),
+            1,
+            "a finished rebuild waits for the release"
+        );
+
+        core.release_install_fence();
+        core.tick();
+        assert!(core.maintenance.pending_reindex.is_empty());
     }
 
     #[test]

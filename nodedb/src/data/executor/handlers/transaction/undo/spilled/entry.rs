@@ -188,6 +188,7 @@ pub(in crate::data::executor) enum SpilledUndo {
         producer_id: u64,
         stream_id: u64,
         prior: Option<u64>,
+        written: u64,
     },
     NodeLabels {
         database_id: u64,

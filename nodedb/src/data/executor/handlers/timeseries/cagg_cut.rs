@@ -222,10 +222,18 @@ impl CoreLoop {
     /// per-tick budget, then answers what is done. So a held request
     /// completes on any loop that runs `tick()`, without the maintenance
     /// pass. With nothing held, the call does nothing.
+    ///
+    /// While an install fence is armed, the fold pass and the read answers
+    /// wait. A refresh wait still answers: that check reads the cut status
+    /// and writes nothing, so a wait past its deadline answers.
     pub fn drive_cagg_waiters(&mut self) {
         if self.maintenance.cagg_refresh_waiters.is_empty()
             && self.maintenance.cagg_read_waiters.is_empty()
         {
+            return;
+        }
+        if self.has_install_fence() {
+            self.answer_cagg_refresh_waiters();
             return;
         }
         let now_ms = self.ingest_now_ms();
@@ -425,6 +433,37 @@ mod tests {
         let resp = rx.try_pop().expect("the wait is answered").inner;
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(totals(&core, "by_host"), (5, SUM_AB));
+        assert!(core.maintenance.cagg_refresh_waiters.is_empty());
+    }
+
+    /// An armed install fence stops the tick's fold of a held wait. The
+    /// release lets the same ticks fold and answer it.
+    #[test]
+    fn the_tick_does_not_fold_a_held_wait_while_an_install_is_fenced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, mut rx) = make_core_with_dir(dir.path());
+        core.ts_tuning.cagg_fold_partitions_per_tick = 1;
+        register(&mut core, host_def("by_host", RefreshPolicy::Manual));
+        core.fold_pending_cagg_partitions(0);
+        assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
+        flush(&mut core);
+        assert_eq!(ingest(&mut core, ROWS_B, 2), Status::Ok);
+        assert_eq!(apply(&mut core, 4), Status::Ok);
+        assert!(core.hold_cagg_refresh_await(await_task(4)).is_none());
+
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        core.tick();
+        core.tick();
+        core.tick();
+        assert!(rx.try_pop().is_err(), "no fold pass runs while fenced");
+        assert_eq!(totals(&core, "by_host"), (0, 0), "nothing folded");
+        assert_eq!(core.maintenance.cagg_refresh_waiters.len(), 1);
+
+        core.release_install_fence();
+        core.tick();
+        core.tick();
+        let resp = rx.try_pop().expect("the wait is answered").inner;
+        assert_eq!(resp.status, Status::Ok);
         assert!(core.maintenance.cagg_refresh_waiters.is_empty());
     }
 

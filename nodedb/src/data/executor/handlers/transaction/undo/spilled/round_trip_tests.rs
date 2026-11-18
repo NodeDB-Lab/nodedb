@@ -311,6 +311,7 @@ fn plain_entries(frames: crate::engine::sparse::inverted::SyncedTextMark) -> Vec
             producer_id: 1,
             stream_id: 2,
             prior: Some(3),
+            written: 4,
         },
         UndoEntry::NodeLabels {
             database_id: 0,

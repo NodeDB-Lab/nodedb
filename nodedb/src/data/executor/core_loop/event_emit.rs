@@ -279,6 +279,7 @@ impl CoreLoop {
     /// the current watermark LSN so the Event Plane can advance its partition
     /// watermark without waiting for user writes.
     pub fn emit_heartbeat(&mut self) {
+        let heartbeat_lsn = self.heartbeat_lsn();
         let producer = match self.events.producer.as_mut() {
             Some(p) => p,
             None => return,
@@ -292,8 +293,9 @@ impl CoreLoop {
             op: crate::event::WriteOp::Heartbeat,
             row_id: crate::event::types::RowId::Heartbeat,
             // watermark = last committed LSN. Correct for heartbeats: uncommitted
-            // writes should NOT advance the Event Plane's watermark.
-            lsn: self.watermark,
+            // writes should NOT advance the Event Plane's watermark. An
+            // install that holds events caps it below its own LSN.
+            lsn: heartbeat_lsn,
             record: None,
             // Heartbeats are synthetic core-liveness markers rather than data writes,
             // so they have no database owner and are excluded from CDC routing.

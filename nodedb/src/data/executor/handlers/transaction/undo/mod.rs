@@ -25,6 +25,7 @@ pub(in crate::data::executor) mod spatial_row;
 pub(in crate::data::executor) mod spilled;
 pub(super) mod stats;
 pub(super) mod sync_hwm;
+pub(in crate::data::executor) mod timer_restore;
 pub(super) mod timeseries;
 pub(in crate::data::executor) mod timeseries_flush;
 pub(super) mod truncate_columnar;
@@ -38,3 +39,4 @@ pub(in crate::data::executor) use entry::{
     UndoEntry,
 };
 pub(in crate::data::executor) use error::UndoError;
+pub(in crate::data::executor) use timer_restore::TimerRestore;

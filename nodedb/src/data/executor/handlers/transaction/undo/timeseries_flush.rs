@@ -25,7 +25,7 @@ use crate::data::executor::timeseries_checkpoint::series_catalog::TS_SERIES_CATA
 use crate::data::executor::timeseries_checkpoint::stamp::{TsCollectionKey, TsReplayStamp};
 use crate::engine::timeseries::partition_registry::{PartitionKey, PartitionRegistry};
 
-use super::{TimeseriesIngestUndo, UndoError};
+use super::{TimerRestore, TimeseriesIngestUndo, UndoError};
 
 /// What one flush of a truncate inside a transaction batch changed.
 pub(in crate::data::executor) struct TimeseriesFlushUndo {
@@ -161,6 +161,7 @@ impl CoreLoop {
         &mut self,
         entry_index: usize,
         undo: TimeseriesFlushUndo,
+        timer: TimerRestore,
     ) -> Result<(), UndoError> {
         let TimeseriesFlushUndo {
             collection_key,
@@ -226,6 +227,6 @@ impl CoreLoop {
         }
         self.restore_ts_stamp(&collection_key, stamp);
         self.restore_ts_reservation(&collection_key, pre_image.reservation_bytes_before);
-        self.restore_timeseries_ingest_preimage(entry_index, pre_image)
+        self.restore_timeseries_ingest_preimage(entry_index, pre_image, timer)
     }
 }

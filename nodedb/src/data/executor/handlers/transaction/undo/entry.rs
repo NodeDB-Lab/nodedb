@@ -318,12 +318,15 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a sync-ingested full-text write by putting the document's index
     /// footprint back.
     FtsDocument(Box<super::fts_doc::FtsDocUndo>),
-    /// Undo the sync high-water-mark advance of a sync-ingested write. `prior
-    /// == None` means the stream had no mark before.
+    /// Undo the sync high-water-mark advance of a sync-ingested write.
+    /// `prior == None` means the stream had no mark before. `written` is the
+    /// mark the write leaves: the undo lowers the mark only while it still
+    /// holds that value.
     SyncHwm {
         producer_id: u64,
         stream_id: u64,
         prior: Option<u64>,
+        written: u64,
     },
     /// Undo a node-label set or removal: each label the op touched goes back
     /// to whether the node carried it before (`true` = it did). The label

@@ -688,4 +688,101 @@ mod tests {
         assert!(has_label(&h.core, "alice", "Admin"));
         assert!(!has_label(&h.core, "alice", "Person"));
     }
+
+    /// A committed redo record at `lsn` with one label set per `(node,
+    /// label, ordinal)`. Each version carries its ordinal, so a version
+    /// written twice lands on one key.
+    fn label_redo_at(lsn: u64, sets: &[(&str, &str, i64)]) -> WalRecord {
+        let ops = sets
+            .iter()
+            .map(|(node, label, ordinal)| crate::wal::RedoSubRecord {
+                record_type: RecordType::GraphNodeLabelSet as u32,
+                payload: crate::wal::NodeLabelRedo {
+                    node_id: (*node).into(),
+                    labels: vec![(*label).into()],
+                    system_from: Some(*ordinal),
+                    exact: false,
+                }
+                .encode()
+                .expect("encode label op"),
+            })
+            .collect();
+        let redo = crate::wal::RedoRecord {
+            version: 1,
+            ops,
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+            sum_targets: Vec::new(),
+        };
+        WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TransactionRedo as u32,
+            lsn,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: redo.to_bytes().expect("encode redo"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record")
+    }
+
+    /// An install's label rollback lowers the store's mark below the mark of
+    /// a record that committed after the install. Restart replay then
+    /// replays both records in LSN order. The later record writes its
+    /// versions again at the same `(node, ordinal)` keys, so no version
+    /// duplicates, and the rolled-back install's labels return.
+    #[test]
+    fn a_label_rollback_below_a_later_mark_replays_idempotently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install = label_redo_at(50, &[("alice", "Person", 5_000)]);
+        let later = label_redo_at(60, &[("bob", "Robot", 6_000)]);
+        {
+            let mut core = open_core_at(dir.path());
+            core.edge_store
+                .put_node_label_version(
+                    DatabaseId::DEFAULT,
+                    TenantId::new(TID),
+                    "carol",
+                    1,
+                    Some(10),
+                    &["City".to_string()],
+                )
+                .expect("seed an earlier version");
+            // The record after the install commits with its mark at 60.
+            replay(&mut core, &later);
+            assert_eq!(version_count(&core), 2);
+            // The install's rollback lowers the mark to the one its first
+            // version commit found, below the later record's mark.
+            core.edge_store
+                .lower_label_lsn_mark(10)
+                .expect("lower the mark");
+        }
+        for restart in 0..2 {
+            let mut core = open_core_at(dir.path());
+            // Restart 0 finds the lowered mark. Restart 1 finds the mark
+            // restart 0's replay raised, so the rollback lowers it again:
+            // both restarts re-version the records.
+            core.edge_store
+                .lower_label_lsn_mark(10)
+                .expect("lower the mark");
+            core.replay_transaction_redo_wal(
+                &[install.clone(), later.clone()],
+                1,
+                &nodedb_wal::TombstoneSet::new(),
+            )
+            .expect("redo replay");
+            assert_eq!(
+                version_count(&core),
+                3,
+                "restart {restart}: no version of the later record duplicates"
+            );
+            assert!(has_label(&core, "alice", "Person"));
+            assert!(has_label(&core, "bob", "Robot"));
+        }
+    }
 }

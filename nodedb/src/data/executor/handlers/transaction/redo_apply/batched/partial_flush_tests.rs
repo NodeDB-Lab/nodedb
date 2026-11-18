@@ -15,6 +15,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::tests::make_core_with_dir;
 use crate::data::executor::enforcement::retention::judged_instant_ms;
 use crate::data::executor::handlers::timeseries::flush_commit::REVERT_FILE;
+use crate::data::executor::handlers::transaction::undo::TimerRestore;
 use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoSubRecord};
 
@@ -507,8 +508,9 @@ fn a_pressed_collection_the_install_has_not_ingested_into_keeps_its_rows_on_roll
         .expect("the install scope");
     let undo = scope.spillable.expect("the batched log");
     let core = &mut node.core;
-    let drained =
-        undo.drain_newest_first(|index, _, entry| core.apply_undo_entry(0, TID, index, entry));
+    let drained = undo.drain_newest_first(|index, _, entry| {
+        core.apply_undo_entry(0, TID, index, entry, TimerRestore::KeepNewer)
+    });
     assert!(drained.is_ok(), "every entry reversed");
     assert_eq!(
         ts_layout(&node.core),

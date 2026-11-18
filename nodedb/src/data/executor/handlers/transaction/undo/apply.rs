@@ -10,7 +10,7 @@ use tracing::error;
 
 use crate::data::executor::core_loop::CoreLoop;
 
-use super::{TimeseriesIngestUndo, UndoEntry, UndoError};
+use super::{TimerRestore, TimeseriesIngestUndo, UndoEntry, UndoError};
 
 impl CoreLoop {
     // ── Vector ───────────────────────────────────────────────────────────────
@@ -244,10 +244,11 @@ impl CoreLoop {
         &mut self,
         entry_index: usize,
         entry: UndoEntry,
+        timer: TimerRestore,
     ) -> Result<(), UndoError> {
         match entry {
             UndoEntry::TimeseriesIngest(token) => {
-                self.restore_timeseries_ingest_preimage(entry_index, token)
+                self.restore_timeseries_ingest_preimage(entry_index, token, timer)
             }
             _ => Err(UndoError::mismatch(
                 entry_index,
@@ -260,6 +261,7 @@ impl CoreLoop {
         &mut self,
         entry_index: usize,
         token: TimeseriesIngestUndo,
+        timer: TimerRestore,
     ) -> Result<(), UndoError> {
         let TimeseriesIngestUndo {
             collection_key,
@@ -339,7 +341,7 @@ impl CoreLoop {
                 self.ts_series_catalogs.remove(&collection_key);
             }
         }
-        self.last_ts_ingest = last_ts_ingest_before;
+        self.last_ts_ingest = timer.resolve(self.last_ts_ingest, last_ts_ingest_before);
         Ok(())
     }
 }
@@ -453,7 +455,7 @@ mod tests {
             ));
         core.last_ts_ingest = Some(std::time::Instant::now());
 
-        core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token))
+        core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token), TimerRestore::Exact)
             .expect("undo");
         assert_eq!(
             core.ts_series_catalogs.get(&key),
@@ -508,7 +510,7 @@ mod tests {
             .insert(key.clone(), LastValueCache::new());
         core.last_ts_ingest = Some(std::time::Instant::now());
 
-        core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token))
+        core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token), TimerRestore::Exact)
             .expect("undo");
         assert!(!core.columnar_memtables.contains_key(&key));
         assert!(!core.ts_last_value_caches.contains_key(&key));
@@ -517,6 +519,71 @@ mod tests {
             "the catalog the ingest created is gone"
         );
         assert!(core.last_ts_ingest.is_none());
+    }
+
+    fn timer_token(
+        key: &(crate::types::DatabaseId, TenantId, String),
+        before: Option<std::time::Instant>,
+    ) -> TimeseriesIngestUndo {
+        TimeseriesIngestUndo {
+            collection_key: key.clone(),
+            memtable_before: None,
+            memtable_config_before: None,
+            memtable_memory_bytes_before: None,
+            last_value_cache_before: None,
+            series_catalog_before: None,
+            last_ts_ingest_before: before,
+            reservation_bytes_before: None,
+        }
+    }
+
+    #[test]
+    fn a_batched_rollback_keeps_a_newer_ingest_timer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key = (
+            crate::types::DatabaseId::new(DB),
+            TenantId::new(TID),
+            "metrics".into(),
+        );
+        let before = std::time::Instant::now();
+        let newer = before + std::time::Duration::from_secs(5);
+
+        // A write that interleaved with the install stamped a newer timer.
+        core.last_ts_ingest = Some(newer);
+        core.apply_undo_entry(
+            DB,
+            TID,
+            0,
+            UndoEntry::TimeseriesIngest(timer_token(&key, Some(before))),
+            TimerRestore::KeepNewer,
+        )
+        .expect("undo");
+        assert_eq!(core.last_ts_ingest, Some(newer), "the newer timer stays");
+
+        // An older current timer moves up to the pre-image.
+        core.last_ts_ingest = None;
+        core.apply_undo_entry(
+            DB,
+            TID,
+            0,
+            UndoEntry::TimeseriesIngest(timer_token(&key, Some(before))),
+            TimerRestore::KeepNewer,
+        )
+        .expect("undo");
+        assert_eq!(core.last_ts_ingest, Some(before));
+
+        // `Exact` restores the pre-image whatever the current timer is.
+        core.last_ts_ingest = Some(newer);
+        core.apply_undo_entry(
+            DB,
+            TID,
+            0,
+            UndoEntry::TimeseriesIngest(timer_token(&key, Some(before))),
+            TimerRestore::Exact,
+        )
+        .expect("undo");
+        assert_eq!(core.last_ts_ingest, Some(before));
     }
 
     #[test]

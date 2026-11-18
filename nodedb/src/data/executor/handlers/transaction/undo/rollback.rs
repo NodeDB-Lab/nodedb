@@ -3,7 +3,7 @@
 //! Rollback driver for the undo log.
 
 use super::graph_node::NodeLabelsUndo;
-use super::{UndoEntry, UndoError};
+use super::{TimerRestore, UndoEntry, UndoError};
 use crate::data::executor::core_loop::CoreLoop;
 
 impl CoreLoop {
@@ -36,7 +36,7 @@ impl CoreLoop {
             // diagnostics (makes it easier to correlate with the sub-plan that
             // produced this undo entry).
             let original_idx = total.saturating_sub(1 + rev_idx);
-            self.apply_undo_entry(did, tid, original_idx, entry)?;
+            self.apply_undo_entry(did, tid, original_idx, entry, TimerRestore::Exact)?;
         }
         Ok(())
     }
@@ -49,6 +49,7 @@ impl CoreLoop {
         tid: u64,
         entry_index: usize,
         entry: UndoEntry,
+        timer: TimerRestore,
     ) -> Result<(), UndoError> {
         match entry {
             UndoEntry::ChainHead { collection, prior } => {
@@ -96,7 +97,7 @@ impl CoreLoop {
                 self.recharge_columnar_history(&collection_key);
                 Ok(())
             }
-            UndoEntry::TimeseriesIngest(_) => self.apply_undo_timeseries(entry_index, entry),
+            UndoEntry::TimeseriesIngest(_) => self.apply_undo_timeseries(entry_index, entry, timer),
             UndoEntry::ColumnarTruncate(undo) => {
                 self.apply_undo_columnar_truncate(entry_index, undo)
             }
@@ -107,7 +108,7 @@ impl CoreLoop {
                 self.apply_undo_ts_ended_install(entry_index, undo)
             }
             UndoEntry::TimeseriesTruncateFlush(undo) => {
-                self.apply_undo_ts_flush(entry_index, *undo)
+                self.apply_undo_ts_flush(entry_index, *undo, timer)
             }
             UndoEntry::TimeseriesInstallFlush(undo) => {
                 self.apply_undo_ts_install_flush(entry_index, *undo)
@@ -158,8 +159,9 @@ impl CoreLoop {
                 producer_id,
                 stream_id,
                 prior,
+                written,
             } => {
-                self.apply_undo_sync_hwm(producer_id, stream_id, prior);
+                self.apply_undo_sync_hwm(producer_id, stream_id, prior, written);
                 Ok(())
             }
             UndoEntry::NodeLabels {

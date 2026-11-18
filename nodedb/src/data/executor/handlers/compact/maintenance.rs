@@ -18,7 +18,22 @@ impl CoreLoop {
     /// Called from the runtime event loop on every idle wake. Tracks the
     /// last maintenance time internally and skips if the interval hasn't
     /// elapsed. Returns `true` if maintenance was executed.
+    ///
+    /// Returns `false` at once while an install fence is armed. Maintenance
+    /// flushes memtables and writes checkpoints, which an install in flight
+    /// must not interleave with. Every timer stays due, and a due pass is
+    /// owed to the fence's release, which runs it before any waiter.
     pub fn maybe_run_maintenance(&mut self) -> bool {
+        if self.has_install_fence() {
+            let compaction_due = self
+                .maintenance
+                .last_maintenance
+                .is_none_or(|last| last.elapsed() >= self.maintenance.compaction_interval);
+            if compaction_due || self.checkpoint_coordinator.tick_is_due() {
+                self.owe_maintenance();
+            }
+            return false;
+        }
         // Checkpoint coordinator tick: incremental dirty page flushing.
         // Runs on its own interval (independent from compaction interval).
         let flush_plan = self.checkpoint_coordinator.tick();
@@ -250,5 +265,63 @@ mod tests {
 
         // Immediate second call should skip.
         assert!(!core.maybe_run_maintenance());
+    }
+
+    #[test]
+    fn maintenance_skips_while_an_install_is_fenced() {
+        use crate::data::executor::handlers::timeseries::cagg_test_support::{ROWS_A, ingest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _req_tx, _resp_rx) =
+            crate::data::executor::core_loop::tests::make_core_with_dir(dir.path());
+        assert_eq!(
+            ingest(&mut core, ROWS_A, 1),
+            crate::bridge::envelope::Status::Ok
+        );
+        // The ingest went idle long enough for the idle flush.
+        core.last_ts_ingest =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10));
+        assert!(core.columnar_memtables.values().any(|mt| !mt.is_empty()));
+
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        assert!(!core.maybe_run_maintenance());
+        assert!(
+            core.maintenance.last_maintenance.is_none(),
+            "the compaction timer stays due"
+        );
+        assert!(
+            core.checkpoint_coordinator.tick_is_due(),
+            "the coordinator's flush plan stays due"
+        );
+        assert!(
+            core.columnar_memtables.values().any(|mt| !mt.is_empty()),
+            "an idle memtable is not flushed while fenced"
+        );
+        assert!(core.last_ts_ingest.is_some());
+
+        core.release_install_fence();
+        assert!(
+            core.maintenance.last_maintenance.is_some(),
+            "the release runs the owed pass"
+        );
+    }
+
+    #[test]
+    fn maintenance_runs_between_back_to_back_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _req_tx, _resp_rx) =
+            crate::data::executor::core_loop::tests::make_core_with_dir(dir.path());
+
+        // The first install holds the fence across a due pass.
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        assert!(!core.maybe_run_maintenance());
+        core.release_install_fence();
+        let ran = core.maintenance.last_maintenance;
+        assert!(ran.is_some(), "the pass ran before the next install armed");
+
+        // The second install arms after it, and the pass does not repeat.
+        core.arm_install_fence(std::collections::BTreeSet::new());
+        core.release_install_fence();
+        assert_eq!(core.maintenance.last_maintenance, ran);
     }
 }

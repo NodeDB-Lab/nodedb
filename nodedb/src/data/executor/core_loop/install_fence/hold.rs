@@ -29,14 +29,48 @@ impl CoreLoop {
         }
     }
 
-    /// Disarm the fence. Its waiters return to the front of the queue in
-    /// arrival order.
+    /// Disarm the fence. Maintenance that came due while it was armed runs
+    /// first, so back-to-back installs never starve it. Its waiters then
+    /// return to the front of the queue in arrival order.
     pub fn release_install_fence(&mut self) {
         let Some(mut fence) = self.install_fence.take() else {
             return;
         };
+        if fence.maintenance_owed && !self.fail_stop.is_stopped() {
+            self.maybe_run_maintenance();
+        }
         for task in fence.take_waiters().into_iter().rev() {
             self.task_queue.push_front(task);
+        }
+    }
+
+    /// Record that maintenance came due while the fence is armed. A no-op
+    /// with no fence armed.
+    pub(in crate::data::executor) fn owe_maintenance(&mut self) {
+        if let Some(fence) = self.install_fence.as_mut() {
+            fence.maintenance_owed = true;
+        }
+    }
+
+    /// Note an install at `lsn` that holds events. Until the fence releases,
+    /// a heartbeat publishes below the lowest such LSN, so no consumer sees
+    /// a watermark past an event still to come. A no-op with no fence armed.
+    pub fn hold_event_floor(&mut self, lsn: u64) {
+        if let Some(fence) = self.install_fence.as_mut() {
+            fence.event_floor = Some(fence.event_floor.map_or(lsn, |floor| floor.min(lsn)));
+        }
+    }
+
+    /// The LSN a heartbeat publishes: the watermark, capped below the lowest
+    /// LSN of an install that holds events.
+    pub(in crate::data::executor) fn heartbeat_lsn(&self) -> crate::types::Lsn {
+        let floor = self
+            .install_fence
+            .as_ref()
+            .and_then(|fence| fence.event_floor);
+        match floor {
+            Some(lsn) => crate::types::Lsn::new(self.watermark.as_u64().min(lsn.saturating_sub(1))),
+            None => self.watermark,
         }
     }
 
@@ -355,5 +389,34 @@ mod tests {
             Some(ErrorCode::CoreFailStopped { .. })
         ));
         assert_eq!(core.fence_waiter_count(), 0);
+    }
+
+    /// A heartbeat never publishes a watermark past an install whose events
+    /// are held, and publishes the full watermark once the fence releases.
+    #[test]
+    fn a_heartbeat_stays_below_an_install_that_holds_events() {
+        let (mut core, _tx, _rx, _dir) = make_core();
+        let (mut producers, mut consumers) =
+            crate::event::bus::create_event_bus_with_capacity(1, 64);
+        core.set_event_producer(producers.pop().expect("producer"));
+        let mut events = consumers.pop().expect("consumer");
+        core.advance_watermark(Lsn::new(100));
+
+        core.emit_heartbeat();
+        assert_eq!(events.try_recv().expect("heartbeat").lsn, Lsn::new(100));
+
+        core.arm_install_fence(keys(&["a"]));
+        core.hold_event_floor(60);
+        core.hold_event_floor(80);
+        core.emit_heartbeat();
+        assert_eq!(
+            events.try_recv().expect("heartbeat").lsn,
+            Lsn::new(59),
+            "the lowest held LSN caps the heartbeat"
+        );
+
+        core.release_install_fence();
+        core.emit_heartbeat();
+        assert_eq!(events.try_recv().expect("heartbeat").lsn, Lsn::new(100));
     }
 }

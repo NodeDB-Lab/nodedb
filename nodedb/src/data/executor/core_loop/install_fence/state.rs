@@ -85,6 +85,12 @@ pub(in crate::data::executor) struct InstallFence {
     pub(in crate::data::executor) waiting: VecDeque<ExecutionTask>,
     /// The union of the waiting tasks' footprints.
     pub(in crate::data::executor) blocked: Blocked,
+    /// Maintenance came due while the fence was armed and skipped. The
+    /// release runs it before any waiter re-enters.
+    pub(in crate::data::executor) maintenance_owed: bool,
+    /// The lowest LSN of an install whose events are still held. A heartbeat
+    /// publishes below it.
+    pub(in crate::data::executor) event_floor: Option<u64>,
 }
 
 impl InstallFence {
@@ -94,6 +100,8 @@ impl InstallFence {
             keys,
             waiting: VecDeque::new(),
             blocked: Blocked::default(),
+            maintenance_owed: false,
+            event_floor: None,
         }
     }
 

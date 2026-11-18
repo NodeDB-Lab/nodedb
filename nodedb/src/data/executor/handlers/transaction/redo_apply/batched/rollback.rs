@@ -18,7 +18,7 @@
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::undo::UndoError;
+use crate::data::executor::handlers::transaction::undo::{TimerRestore, UndoError};
 use crate::wal::RedoStreamId;
 use crate::wal::redo::install_cursor::CursorState;
 
@@ -90,7 +90,13 @@ impl CoreLoop {
                     })?;
             }
             reversing = Some(at);
-            self.apply_undo_entry(database_id, tid, entry_index, entry)
+            self.apply_undo_entry(
+                database_id,
+                tid,
+                entry_index,
+                entry,
+                TimerRestore::KeepNewer,
+            )
         });
         match drained {
             Ok(()) => self.end_batched_rollback(cause, lsn, label_mark_before),
@@ -157,5 +163,64 @@ impl CoreLoop {
             return rollback_end_failed(&cause, "the durable rollback end", &error);
         }
         PassRefusal::RolledBack(cause)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::{DatabaseId, TenantId};
+
+    use super::*;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::handlers::transaction::undo::{TimeseriesIngestUndo, UndoEntry};
+    use crate::wal::redo::replay_arm::RedoArm;
+
+    /// An ingest to another collection stamps a newer timer between the
+    /// install's batches. The rollback reverses the install's ingest and
+    /// leaves that timer in place.
+    #[test]
+    fn a_batched_rollback_keeps_the_timer_of_an_interleaved_ingest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let before = std::time::Instant::now();
+        let interleaved = before + std::time::Duration::from_secs(5);
+
+        let mut undo = SpillableUndo::default();
+        undo.enter(BatchAt {
+            arm: RedoArm::Timeseries,
+            batch: 0,
+        });
+        undo.record([UndoEntry::TimeseriesIngest(TimeseriesIngestUndo {
+            collection_key: (DatabaseId::DEFAULT, TenantId::new(1), "installed".into()),
+            memtable_before: None,
+            memtable_config_before: None,
+            memtable_memory_bytes_before: None,
+            last_value_cache_before: None,
+            series_catalog_before: None,
+            last_ts_ingest_before: Some(before),
+            reservation_bytes_before: None,
+        })]);
+        core.last_ts_ingest = Some(interleaved);
+
+        // The answer depends on the durable end of the rollback, which this
+        // test does not set up. The timer restores before that end.
+        let _ = core.roll_back_batched(
+            BatchedRollback {
+                database_id: DatabaseId::DEFAULT.as_u64(),
+                tid: 1,
+                undo,
+                lsn: 10,
+                stream: RedoStreamId::Session {
+                    vshard: 0,
+                    idempotency_key: 1,
+                },
+                label_mark_before: None,
+                folded: FoldedThrough::default(),
+            },
+            ErrorCode::Internal {
+                detail: "failed install".into(),
+            },
+        );
+        assert_eq!(core.last_ts_ingest, Some(interleaved));
     }
 }

@@ -199,10 +199,12 @@ impl TryFrom<UndoEntry> for SpilledUndo {
                 producer_id,
                 stream_id,
                 prior,
+                written,
             } => Self::SyncHwm {
                 producer_id,
                 stream_id,
                 prior,
+                written,
             },
             UndoEntry::NodeLabels {
                 database_id,

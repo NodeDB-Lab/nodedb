@@ -154,6 +154,13 @@ impl CheckpointCoordinator {
         }
     }
 
+    /// Whether the tick interval has elapsed, so [`Self::tick`] plans a
+    /// flush. Reads the clock and changes nothing.
+    pub fn tick_is_due(&self) -> bool {
+        self.last_tick
+            .is_none_or(|last| last.elapsed() >= self.config.tick_interval)
+    }
+
     /// Execute one checkpoint tick: compute pages to flush per engine.
     ///
     /// Returns `(engine_name, pages_to_flush)` pairs. The caller is

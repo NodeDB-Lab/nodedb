@@ -153,8 +153,11 @@ pub(super) fn run_event_loop(
         // A fail-stopped core publishes nothing: restart rebuilds its state
         // from the WAL, and a checkpoint of the unknown state would stand in
         // for that rebuild.
+        // An armed install fence skips the checkpoint and leaves it due: an
+        // install in flight owns the state a checkpoint would publish.
         let stopped = core.is_fail_stopped();
-        if !stopped && last_checkpoint.elapsed() >= checkpoint_interval {
+        if !stopped && !core.has_install_fence() && last_checkpoint.elapsed() >= checkpoint_interval
+        {
             if let Err(e) = core.checkpoint_vector_indexes() {
                 warn!(
                     core = core_id,
