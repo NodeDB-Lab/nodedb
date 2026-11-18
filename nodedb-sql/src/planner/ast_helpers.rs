@@ -2,7 +2,9 @@
 
 //! Shared AST manipulation helpers for DML planners.
 
-use sqlparser::ast;
+use std::ops::ControlFlow;
+
+use sqlparser::ast::{self, Visit, VisitMut, Visitor, VisitorMut};
 
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
@@ -47,38 +49,92 @@ pub fn rebuild_and_expr(mut conjuncts: Vec<ast::Expr>) -> ast::Expr {
         })
 }
 
+/// Replaces `qualifier.col` with `col` in every expression of a tree.
+///
+/// A subquery body keeps its own qualifiers, so the walk counts query depth
+/// and rewrites only at depth 0.
+struct QualifierStripper<'a> {
+    qualifier: &'a str,
+    query_depth: usize,
+}
+
+impl VisitorMut for QualifierStripper<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, _query: &mut ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth += 1;
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &mut ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth -= 1;
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_expr(&mut self, expr: &mut ast::Expr) -> ControlFlow<Self::Break> {
+        if self.query_depth == 0
+            && let ast::Expr::CompoundIdentifier(parts) = expr
+            && parts.len() == 2
+            && normalize_ident(&parts[0]) == self.qualifier
+        {
+            *expr = ast::Expr::Identifier(parts[1].clone());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 /// Walk an expression and replace every `table.col` compound identifier where
 /// `table == qualifier` with a bare `col` identifier. Lets target-side
 /// predicates like `t.score > 15` be evaluated against documents that store
 /// fields without a table qualifier.
+///
+/// The walk reaches every expression shape (`IN`, `BETWEEN`, `LIKE`, function
+/// arguments, `CASE`, `CAST`), so no predicate keeps a qualified field name
+/// that no stored document has.
 pub fn strip_table_qualifier(expr: &ast::Expr, qualifier: &str) -> ast::Expr {
-    match expr {
-        ast::Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-            if normalize_ident(&parts[0]) == qualifier {
-                ast::Expr::Identifier(parts[1].clone())
-            } else {
-                expr.clone()
+    let mut out = expr.clone();
+    let mut stripper = QualifierStripper {
+        qualifier,
+        query_depth: 0,
+    };
+    // Both `Visit` and `VisitMut` are in scope: name the mutable one.
+    let _ = VisitMut::visit(&mut out, &mut stripper);
+    out
+}
+
+/// Finds the first qualifier of a `table.col` identifier outside every
+/// subquery that is not among `valid`.
+struct ForeignQualifierFinder<'a> {
+    valid: &'a [&'a str],
+    query_depth: usize,
+    found: Option<String>,
+}
+
+impl Visitor for ForeignQualifierFinder<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, _query: &ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth += 1;
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth -= 1;
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &ast::Expr) -> ControlFlow<Self::Break> {
+        if self.query_depth == 0
+            && let ast::Expr::CompoundIdentifier(parts) = expr
+            && parts.len() == 2
+        {
+            let qualifier = normalize_ident(&parts[0]);
+            if !self.valid.contains(&qualifier.as_str()) {
+                self.found = Some(qualifier);
+                return ControlFlow::Break(());
             }
         }
-        ast::Expr::BinaryOp { left, op, right } => ast::Expr::BinaryOp {
-            left: Box::new(strip_table_qualifier(left, qualifier)),
-            op: op.clone(),
-            right: Box::new(strip_table_qualifier(right, qualifier)),
-        },
-        ast::Expr::UnaryOp { op, expr: inner } => ast::Expr::UnaryOp {
-            op: *op,
-            expr: Box::new(strip_table_qualifier(inner, qualifier)),
-        },
-        ast::Expr::Nested(inner) => {
-            ast::Expr::Nested(Box::new(strip_table_qualifier(inner, qualifier)))
-        }
-        ast::Expr::IsNull(inner) => {
-            ast::Expr::IsNull(Box::new(strip_table_qualifier(inner, qualifier)))
-        }
-        ast::Expr::IsNotNull(inner) => {
-            ast::Expr::IsNotNull(Box::new(strip_table_qualifier(inner, qualifier)))
-        }
-        other => other.clone(),
+        ControlFlow::Continue(())
     }
 }
 
@@ -87,25 +143,16 @@ pub fn strip_table_qualifier(expr: &ast::Expr, qualifier: &str) -> ast::Expr {
 /// single-table WHERE planner to reject a table qualifier that refers to
 /// neither the table's name nor its alias (e.g. `WHERE wrong.name = ...`)
 /// with a typed error, instead of silently stripping it into a bare field
-/// lookup that would never match any row.
+/// lookup that would never match any row. The walk reaches every expression
+/// shape outside a subquery body.
 pub fn find_foreign_qualifier(expr: &ast::Expr, valid_qualifiers: &[&str]) -> Option<String> {
-    match expr {
-        ast::Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-            let qualifier = normalize_ident(&parts[0]);
-            if valid_qualifiers.contains(&qualifier.as_str()) {
-                None
-            } else {
-                Some(qualifier)
-            }
-        }
-        ast::Expr::BinaryOp { left, right, .. } => find_foreign_qualifier(left, valid_qualifiers)
-            .or_else(|| find_foreign_qualifier(right, valid_qualifiers)),
-        ast::Expr::UnaryOp { expr: inner, .. }
-        | ast::Expr::Nested(inner)
-        | ast::Expr::IsNull(inner)
-        | ast::Expr::IsNotNull(inner) => find_foreign_qualifier(inner, valid_qualifiers),
-        _ => None,
-    }
+    let mut finder = ForeignQualifierFinder {
+        valid: valid_qualifiers,
+        query_depth: 0,
+        found: None,
+    };
+    let _ = expr.visit(&mut finder);
+    finder.found
 }
 
 /// Reject a `table.col` qualifier in `expr` that matches none of
@@ -214,4 +261,75 @@ pub fn strip_and_convert_filters(
         .collect();
     let rebuilt = rebuild_and_expr(stripped);
     convert_where_to_filters(&rebuilt, scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::statement::parse_sql;
+
+    fn where_of(sql: &str) -> ast::Expr {
+        let ast::Statement::Query(query) = parse_sql(sql).unwrap().into_iter().next().unwrap()
+        else {
+            panic!("not a query");
+        };
+        let ast::SetExpr::Select(select) = *query.body else {
+            panic!("not a SELECT");
+        };
+        select.selection.expect("a WHERE clause")
+    }
+
+    #[test]
+    fn strips_the_qualifier_in_every_predicate_shape() {
+        for predicate in [
+            "t.id IN ('a', 'b')",
+            "t.id NOT IN ('a', 'b')",
+            "t.n BETWEEN 1 AND 2",
+            "t.label LIKE 'x%'",
+            "t.label ILIKE 'x%'",
+            "upper(t.label) = 'X'",
+            "CAST(t.n AS TEXT) = '1'",
+            "CASE WHEN t.n > 1 THEN true ELSE false END",
+        ] {
+            let stripped = strip_table_qualifier(
+                &where_of(&format!("SELECT 1 FROM t WHERE {predicate}")),
+                "t",
+            );
+            assert!(
+                !format!("{stripped}").contains("t."),
+                "{predicate}: {stripped}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_a_qualifier_inside_a_subquery() {
+        let expr = where_of("SELECT 1 FROM t WHERE t.id IN (SELECT t.id FROM u AS t)");
+        let stripped = format!("{}", strip_table_qualifier(&expr, "t"));
+        assert!(stripped.starts_with("id IN"), "{stripped}");
+        assert!(stripped.contains("SELECT t.id"), "{stripped}");
+    }
+
+    #[test]
+    fn finds_a_foreign_qualifier_in_every_predicate_shape() {
+        for predicate in [
+            "wrong.id IN ('a')",
+            "wrong.n BETWEEN 1 AND 2",
+            "wrong.label LIKE 'x%'",
+            "upper(wrong.label) = 'X'",
+        ] {
+            let expr = where_of(&format!("SELECT 1 FROM t WHERE {predicate}"));
+            assert_eq!(
+                find_foreign_qualifier(&expr, &["t"]).as_deref(),
+                Some("wrong"),
+                "{predicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_qualifier_and_a_subquery_qualifier_are_not_foreign() {
+        let expr = where_of("SELECT 1 FROM t WHERE t.id IN (SELECT w.id FROM u AS w)");
+        assert_eq!(find_foreign_qualifier(&expr, &["t"]), None);
+    }
 }
