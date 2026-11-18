@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use super::pg_ops::coerce_json_string;
 use crate::value_ops::value_to_display_string;
 use nodedb_types::Value;
 
@@ -103,18 +104,67 @@ pub(super) fn try_eval(name: &str, args: &[Value]) -> Option<Value> {
             Value::Bool(result)
         }
         "json_merge" | "json_patch" => {
-            let mut base = match args.first() {
-                Some(Value::Object(m)) => m.clone(),
-                _ => HashMap::new(),
-            };
-            if let Some(Value::Object(overlay)) = args.get(1) {
-                for (k, v) in overlay {
-                    base.insert(k.clone(), v.clone());
+            let base = args.first().map(coerce_json_string);
+            let overlay = args.get(1).map(coerce_json_string);
+            match (base.as_deref(), overlay.as_deref()) {
+                (Some(Value::Object(base)), Some(Value::Object(overlay))) => {
+                    let mut merged = base.clone();
+                    for (k, v) in overlay {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    Value::Object(merged)
                 }
+                _ => Value::Null,
             }
-            Value::Object(base)
         }
         _ => return None,
     };
     Some(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(s: &str) -> Value {
+        Value::String(s.into())
+    }
+
+    fn merged(name: &str, base: Value, overlay: Value) -> Value {
+        try_eval(name, &[base, overlay]).expect("known function")
+    }
+
+    fn keys(v: &Value) -> Vec<String> {
+        let Value::Object(m) = v else {
+            panic!("expected an object, got {v:?}");
+        };
+        let mut k: Vec<String> = m.keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    #[test]
+    fn merge_and_patch_combine_two_json_texts() {
+        for name in ["json_merge", "json_patch"] {
+            let out = merged(name, text(r#"{"a": 1}"#), text(r#"{"b": 2}"#));
+            assert_eq!(keys(&out), ["a", "b"], "{name}");
+        }
+    }
+
+    #[test]
+    fn overlay_wins_a_shared_key() {
+        let Value::Object(m) = merged("json_merge", text(r#"{"a": 1}"#), text(r#"{"a": 2}"#))
+        else {
+            panic!("expected an object");
+        };
+        assert_eq!(m.get("a"), Some(&Value::Integer(2)));
+    }
+
+    #[test]
+    fn a_null_argument_answers_null() {
+        for name in ["json_merge", "json_patch"] {
+            assert_eq!(merged(name, Value::Null, text(r#"{"b": 2}"#)), Value::Null);
+            assert_eq!(merged(name, text(r#"{"a": 1}"#), Value::Null), Value::Null);
+        }
+    }
 }
