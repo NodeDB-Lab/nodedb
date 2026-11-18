@@ -22,8 +22,12 @@
 //!
 //! ## Recovery
 //!
-//! [`recover_interrupted_flushes`] runs before the registry loads. A manifest
-//! is rolled forward: every rename it names that has not happened happens,
+//! A transaction that rolls back a flush takes it back through a revert
+//! manifest (`flush.revert`, [`revert_flush`]) that names every directory
+//! the flush wrote, so its partitions go together too.
+//!
+//! [`recover_interrupted_flushes`] runs before the registry loads. A revert
+//! manifest is finished first. A commit manifest is rolled forward: every rename it names that has not happened happens,
 //! and the manifest goes. Every staged directory no manifest names belongs to
 //! a flush that never committed, and goes. Its rows are in no partition and no
 //! stamp names their records, so replay applies them once.
@@ -41,6 +45,9 @@ pub(in crate::data::executor) const PENDING_PREFIX: &str = "pending-";
 /// File name of the commit manifest in a collection directory. It does not
 /// start with `ts-`, so the partition scan passes over it.
 pub(in crate::data::executor) const MANIFEST_FILE: &str = "flush.commit";
+/// File name of the revert manifest of a rolled-back flush. It does not
+/// start with `ts-` either.
+pub(in crate::data::executor) const REVERT_FILE: &str = "flush.revert";
 /// Leading byte of an encoded manifest.
 const MANIFEST_FORMAT_VERSION: u8 = 1;
 
@@ -158,13 +165,122 @@ pub(in crate::data::executor) fn install_flush(
     nodedb_wal::segment::fsync_directory(ts_dir).map_err(|e| storage(ts_dir, "fsync", &e))
 }
 
-/// Roll the committed flush in `ts_dir` forward, then remove every staged
-/// partition no committed flush names.
+/// Finish an interrupted revert, roll the committed flush in `ts_dir`
+/// forward, then remove every staged partition no committed flush names.
 pub(in crate::data::executor) fn recover_interrupted_flushes(ts_dir: &Path) -> crate::Result<()> {
+    if let Some(revert) = read_revert(ts_dir)? {
+        finish_revert(ts_dir, &revert)?;
+    }
     if let Some(manifest) = read_manifest(ts_dir)? {
         install_flush(ts_dir, &manifest)?;
     }
     remove_staged(ts_dir)
+}
+
+/// The partitions a rolled-back flush filed, which go together.
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub(in crate::data::executor) struct FlushRevert {
+    /// Every directory the flush wrote: installed partitions, and the staged
+    /// and installed names of each partition its commit manifest names.
+    pub dirs: Vec<String>,
+    /// Whether the flush's commit manifest goes too.
+    pub drop_commit: bool,
+}
+
+/// Take back a flush: the partitions it filed and the commit manifest it
+/// left.
+///
+/// Every partition of a flush carries the stamp that names every record the
+/// flush holds, so no partition may stay once another went: a survivor would
+/// name records whose rows only the removed ones held, and replay would skip
+/// them. So the revert manifest, naming every directory, lands first in one
+/// atomic write. From there a crash finishes the revert at the next open
+/// (`recover_interrupted_flushes`) before any partition loads.
+pub(in crate::data::executor) fn revert_flush(
+    ts_dir: &Path,
+    revert: &FlushRevert,
+) -> crate::Result<()> {
+    if revert.dirs.is_empty() && !revert.drop_commit {
+        return Ok(());
+    }
+    if let Some(dir) = revert
+        .dirs
+        .iter()
+        .find(|dir| !nodedb_types::is_plain_path_component(dir))
+    {
+        return Err(storage(
+            &ts_dir.join(REVERT_FILE),
+            "revert",
+            &format!("'{dir}' is not one plain path component"),
+        ));
+    }
+    let mut bytes = vec![MANIFEST_FORMAT_VERSION];
+    let body = zerompk::to_msgpack_vec(revert).map_err(|e| crate::Error::Codec {
+        detail: format!("encode flush revert in {}: {e}", ts_dir.display()),
+    })?;
+    bytes.extend_from_slice(&body);
+    nodedb_wal::segment::atomic_write_fsync(ts_dir, REVERT_FILE, &bytes)
+        .map_err(|e| storage(&ts_dir.join(REVERT_FILE), "write", &e))?;
+    finish_revert(ts_dir, revert)
+}
+
+/// Remove what `revert` names, then the revert manifest. Idempotent: a
+/// directory already removed is skipped.
+fn finish_revert(ts_dir: &Path, revert: &FlushRevert) -> crate::Result<()> {
+    if revert.drop_commit {
+        remove_file(&ts_dir.join(MANIFEST_FILE))?;
+    }
+    for (index, dir) in revert.dirs.iter().enumerate() {
+        if !nodedb_types::is_plain_path_component(dir) {
+            return Err(storage(
+                &ts_dir.join(REVERT_FILE),
+                "revert",
+                &"an entry is not one plain path component",
+            ));
+        }
+        remove_dir_tree(&ts_dir.join(dir))?;
+        if index + 1 < revert.dirs.len() {
+            crate::fail_point_err!(
+                "timeseries::flush_revert::between_removals",
+                |detail: String| storage(&ts_dir.join(dir), "revert", &detail)
+            );
+        }
+    }
+    nodedb_wal::segment::fsync_directory(ts_dir).map_err(|e| storage(ts_dir, "fsync", &e))?;
+    remove_file(&ts_dir.join(REVERT_FILE))?;
+    nodedb_wal::segment::fsync_directory(ts_dir).map_err(|e| storage(ts_dir, "fsync", &e))
+}
+
+/// The revert manifest of `ts_dir`, or `None`.
+fn read_revert(ts_dir: &Path) -> crate::Result<Option<FlushRevert>> {
+    let path = ts_dir.join(REVERT_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(storage(&path, "read", &e)),
+    };
+    let Some((&version, body)) = bytes.split_first() else {
+        return Err(storage(&path, "decode", &"the file is empty"));
+    };
+    if version != MANIFEST_FORMAT_VERSION {
+        return Err(storage(
+            &path,
+            "decode",
+            &format!("format version {version}, expected {MANIFEST_FORMAT_VERSION}"),
+        ));
+    }
+    zerompk::from_msgpack(body)
+        .map(Some)
+        .map_err(|e| storage(&path, "decode", &e))
+}
+
+/// Remove the file at `path`. An absent file is already removed.
+fn remove_file(path: &Path) -> crate::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(storage(path, "remove", &e)),
+    }
 }
 
 /// Remove every staged partition directory under `ts_dir`. Call only while no

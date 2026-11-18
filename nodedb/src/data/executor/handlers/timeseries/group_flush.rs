@@ -19,6 +19,15 @@
 //! the memtable back under budget, with a stamp that names the whole record
 //! (`settle_redo_timeseries` live, `CoreLoop::settle_ts_replayed_record` in
 //! restart replay).
+//!
+//! A batched install hands the arm one batch of the record per call, so the
+//! arm cannot measure the record whole, and runs no flush of its own. The
+//! stream validate measures the record instead (`stream_load`), and the
+//! install's driver flushes by that measure once, before the arm's first
+//! batch. After each batch the driver flushes every pressed memtable of the
+//! record, and that flush's stamp names the record's ops below the batch's
+//! end (`install_flush`): the one flush between two parts of a record, and
+//! it names the part it holds. The settle flush names the whole record.
 
 use std::collections::HashMap;
 
@@ -150,8 +159,9 @@ impl CoreLoop {
     /// Called by the timeseries replay arm at `records[index]`, a record
     /// routed to this core. When it starts a new record, restart replay
     /// settles the previous one, and every writing pass flushes the
-    /// memtables that cannot take the new record whole. The validate pass of
-    /// a committed-redo apply writes nothing and passes through.
+    /// memtables that cannot take the new record whole, unless a batched
+    /// install's driver runs the record's flushes. The validate pass of a
+    /// committed-redo apply writes nothing and passes through.
     pub(in crate::data::executor) fn begin_ts_record(
         &mut self,
         records: &[WalRecord],
@@ -170,7 +180,9 @@ impl CoreLoop {
             self.end_ts_record(previous);
         }
         let loads = ts_record_loads(records, index, num_cores, self.core_id);
-        if let Err(e) = self.flush_ts_for_record(&loads) {
+        if !self.installing_batched()
+            && let Err(e) = self.flush_ts_for_record(&loads)
+        {
             self.report_ts_record_flush_error(lsn, e);
         }
         *current = Some(TsRecordInProgress {
@@ -195,7 +207,7 @@ impl CoreLoop {
     /// rolls back: it can retry. Restart replay must apply the committed
     /// record all the same; its rows stay in the memtable over budget, and
     /// the next checkpoint flush retries and clamps its reported LSN.
-    fn report_ts_record_flush_error(&mut self, lsn: u64, error: crate::Error) {
+    pub(super) fn report_ts_record_flush_error(&mut self, lsn: u64, error: crate::Error) {
         if let Some(scope) = self.redo_apply.scope.as_mut() {
             scope.record_error(error);
             return;
@@ -548,6 +560,60 @@ mod tests {
             0,
             "every record is named: none replays"
         );
+    }
+
+    // ── Governor pressure ────────────────────────────────────────────────────
+
+    /// Per-engine budget of the pressure tests' governor.
+    const PRESSURE_BUDGET: usize = 1 << 20;
+
+    /// A core whose memtable holds one row, under a governor whose
+    /// timeseries budget holds `percent` of its limit in a reservation the
+    /// memtable does not own, as another core's memtables hold it. The
+    /// reservation lives as long as the returned token.
+    fn core_under_pressure(
+        dir: &std::path::Path,
+        percent: usize,
+    ) -> (Booted, nodedb_mem::ReservationToken) {
+        let (mut core, req, resp) = make_core_with_dir(dir);
+        install(&mut core, 5, &redo(&[SEED]));
+        assert_eq!(memtable_rows(&core), 1);
+        let governor = std::sync::Arc::new(
+            nodedb_mem::MemoryGovernor::new(nodedb_mem::GovernorConfig {
+                global_ceiling: PRESSURE_BUDGET * nodedb_mem::EngineId::ALL.len() * 2,
+                engine_limits: nodedb_mem::EngineLimits::uniform(PRESSURE_BUDGET),
+            })
+            .expect("governor"),
+        );
+        let held = nodedb_mem::ScopedMemory::new(
+            governor.clone(),
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            nodedb_mem::EngineId::Timeseries,
+        )
+        .charge(PRESSURE_BUDGET * percent / 100);
+        core.governor = governor;
+        ((core, req, resp), held)
+    }
+
+    /// The governor reports the timeseries budget at `Critical` pressure:
+    /// the memtable must flush, however few bytes it holds.
+    #[test]
+    fn a_memtable_under_governor_pressure_is_pressed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ((core, _req, _resp), _held) = core_under_pressure(dir.path(), 90);
+        assert!(core.ts_engine_pressed());
+        assert!(core.ts_memtable_pressed(&key()));
+    }
+
+    /// The timeseries budget has headroom, and the memtable is under its
+    /// own budget: it need not flush.
+    #[test]
+    fn a_memtable_with_governor_headroom_is_not_pressed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ((core, _req, _resp), _held) = core_under_pressure(dir.path(), 50);
+        assert!(!core.ts_engine_pressed());
+        assert!(!core.ts_memtable_pressed(&key()));
     }
 
     /// Restart replay: the record's sub-records are only in the WAL. The

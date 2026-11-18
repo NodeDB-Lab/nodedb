@@ -55,6 +55,15 @@ impl From<nodedb_query::msgpack_scan::KvBodyError> for Error {
     }
 }
 
+impl From<crate::wal::redo::install_cursor::RedoInstallError> for Error {
+    fn from(e: crate::wal::redo::install_cursor::RedoInstallError) -> Self {
+        Self::Storage {
+            engine: "redo_install".into(),
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::ilp::IlpError> for Error {
     fn from(e: crate::engine::timeseries::ilp::IlpError) -> Self {
         Self::BadRequest {

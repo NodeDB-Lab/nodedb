@@ -30,6 +30,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::data::panic_payload::panic_payload_to_string;
 use crate::wal::redo::replay_arm::RedoArm;
 
+use super::batched::ActiveArms;
 use super::state::{ArmError, RedoApplyPass, RedoApplyScope};
 
 /// Why a pass refused the record.
@@ -41,13 +42,17 @@ pub(super) enum PassRefusal {
     /// The install pass failed and its rollback failed too. The core's state
     /// is unknown, and the `RollbackFailed` code fail-stops the core.
     RollbackFailed(ErrorCode),
+    /// A batched install could not store its durable progress. The core
+    /// fail-stopped, nothing was rolled back, and restart replay completes
+    /// the record.
+    Unpersisted(ErrorCode),
 }
 
 impl PassRefusal {
     /// The code the apply responds with.
     pub(super) fn into_code(self) -> ErrorCode {
         match self {
-            Self::Invalid(code) | Self::RollbackFailed(code) => code,
+            Self::Invalid(code) | Self::RollbackFailed(code) | Self::Unpersisted(code) => code,
             Self::RolledBack(cause) => ErrorCode::RetryableRefusal {
                 reason: format!(
                     "the committed redo record failed part way through its install and every \
@@ -79,7 +84,7 @@ impl CoreLoop {
     ) -> Result<(), PassRefusal> {
         let mut batches = ValidateBatches::open(sum_targets, target.origin);
         self.validate_redo_batch(&mut batches, target)?;
-        batches.finish(target.sub_records)
+        batches.finish(target.sub_records).map(drop)
     }
 
     /// Run the validate pass over one batch of a record's sub-records,
@@ -98,11 +103,13 @@ impl CoreLoop {
                 detail: "a batched validate pass ran on after it lost its apply scope".into(),
             }));
         };
+        let batch_index = scope.batch;
         let (applied, mut scope) = self.run_redo_arms(batch, scope)?;
         // The reconstitution precedes every arm, so its error ranks first.
         let error = match applied {
             Err(code) => Some(ArmError {
                 arm: RedoArm::Reconstitute,
+                batch: batch_index,
                 code,
             }),
             Ok(()) => scope.take_arm_error(),
@@ -130,25 +137,49 @@ impl CoreLoop {
             return Ok(scope);
         };
         let undo = std::mem::take(&mut scope.undo);
-        Err(self.roll_back_redo(target, undo, cause))
+        Err(self.roll_back_redo(
+            target.database_id,
+            target.tid,
+            undo,
+            cause,
+            scope.label_mark_before,
+        ))
     }
 
-    /// Reverse `undo` after a pass failed with `cause`.
+    /// Reverse `undo`, the log of a whole-record install, after a pass
+    /// failed with `cause`. `label_mark_before` is the node-label LSN mark
+    /// the install's version commit found, which the rollback restores.
+    ///
+    /// Under a root journal the reversal persists with the task's write set
+    /// commit. With none, every reverse write commits durably.
     pub(super) fn roll_back_redo(
         &mut self,
-        target: &RedoTarget<'_>,
+        database_id: u64,
+        tid: u64,
         undo: Vec<UndoEntry>,
         cause: ErrorCode,
+        label_mark_before: Option<u64>,
     ) -> PassRefusal {
-        match self.rollback_undo_log(target.database_id, target.tid, undo) {
-            Ok(()) => PassRefusal::RolledBack(cause),
-            Err(mut undo_error) => {
-                undo_error.action = format!(
-                    "rolling back a committed redo install that failed with {cause:?}: {}",
-                    undo_error.action
-                );
-                PassRefusal::RollbackFailed(ErrorCode::from(undo_error))
-            }
+        if let Err(mut undo_error) = self.rollback_undo_log(database_id, tid, undo) {
+            undo_error.action = format!(
+                "rolling back a committed redo install that failed with {cause:?}: {}",
+                undo_error.action
+            );
+            return PassRefusal::RollbackFailed(ErrorCode::from(undo_error));
+        }
+        if let Err(error) = self.restore_label_mark(label_mark_before) {
+            return rollback_end_failed(&cause, "restoring the node-label LSN mark", &error);
+        }
+        PassRefusal::RolledBack(cause)
+    }
+
+    /// Lower the node-label LSN mark to `label_mark_before`, the mark a
+    /// rolled-back install's first version commit found. Restart replay of
+    /// the record, when it applies, then writes the versions again.
+    pub(super) fn restore_label_mark(&self, label_mark_before: Option<u64>) -> crate::Result<()> {
+        match label_mark_before {
+            Some(mark) => self.edge_store.lower_label_lsn_mark(mark),
+            None => Ok(()),
         }
     }
 
@@ -178,24 +209,57 @@ impl CoreLoop {
         match (applied, scope) {
             (Ok(applied), Some(scope)) => Ok((applied.map_err(ErrorCode::from), scope)),
             (Err(payload), Some(mut scope)) => {
-                let cause = ErrorCode::Internal {
-                    detail: format!(
-                        "panic while applying a committed redo record: {}",
-                        panic_payload_to_string(payload.as_ref())
-                    ),
-                };
+                let cause = arm_panic(payload.as_ref());
                 let undo = std::mem::take(&mut scope.undo);
-                Err(self.roll_back_redo(target, undo, cause))
+                Err(self.roll_back_redo(
+                    target.database_id,
+                    target.tid,
+                    undo,
+                    cause,
+                    scope.label_mark_before,
+                ))
             }
-            // The scope held the undo log. Without it nothing can be rolled
-            // back, so the core's state is unknown.
-            (_, None) => Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
-                entry_index: 0,
-                detail: "committed transaction redo lost its apply scope and its undo log".into(),
-                cause: None,
-            })),
+            (_, None) => Err(lost_scope()),
         }
     }
+}
+
+/// The cause a panic in a replay arm refuses the record with: it is no
+/// verdict on the record's bytes.
+pub(super) fn arm_panic(payload: &(dyn std::any::Any + Send)) -> ErrorCode {
+    ErrorCode::Internal {
+        detail: format!(
+            "panic while applying a committed redo record: {}",
+            panic_payload_to_string(payload)
+        ),
+    }
+}
+
+/// The refusal of a rollback whose undo entries all reversed and whose end
+/// `step` failed with `error`.
+pub(super) fn rollback_end_failed(
+    cause: &ErrorCode,
+    step: &str,
+    error: &crate::Error,
+) -> PassRefusal {
+    PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+        entry_index: 0,
+        detail: format!(
+            "rolling back a committed redo install that failed with {cause:?}: {step} failed: \
+             {error}"
+        ),
+        cause: None,
+    })
+}
+
+/// The refusal of a pass that lost its scope. The scope held the undo log.
+/// Without it nothing can be rolled back, so the core's state is unknown.
+pub(super) fn lost_scope() -> PassRefusal {
+    PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+        entry_index: 0,
+        detail: "committed transaction redo lost its apply scope and its undo log".into(),
+        cause: None,
+    })
 }
 
 /// A validate pass driven over a record batch by batch: one Validate scope
@@ -205,7 +269,7 @@ impl CoreLoop {
 /// A whole-record pass runs every arm over every sub-record, arm by arm. Its
 /// first error is the one of the earliest arm that hit one, and among that
 /// arm's errors, the one of the earliest sub-record. So the batches rank
-/// their errors by arm, and an earlier batch wins a tie.
+/// their errors by `(arm, batch)`.
 pub(super) struct ValidateBatches {
     scope: Option<RedoApplyScope>,
     first: Option<ArmError>,
@@ -227,22 +291,33 @@ impl ValidateBatches {
         }
     }
 
-    /// Keep `error` when it ranks before the kept one. Batches rank in the
-    /// order they ran, so a tie keeps the kept error.
+    /// Name the batch the next [`CoreLoop::validate_redo_batch`] runs
+    /// over. Its errors rank by it.
+    pub(super) fn enter_batch(&mut self, batch: u32) {
+        if let Some(scope) = self.scope.as_mut() {
+            scope.batch = batch;
+        }
+    }
+
+    /// Keep `error` when it ranks before the kept one. A tie keeps the kept
+    /// error: the earlier sub-record of one batch recorded it.
     fn rank(&mut self, error: ArmError) {
         match &self.first {
-            Some(kept) if kept.arm <= error.arm => {}
+            Some(kept) if (kept.arm, kept.batch) <= (error.arm, error.batch) => {}
             _ => self.first = Some(error),
         }
     }
 
     /// End the pass over a record of `sub_records` sub-records: its first
-    /// error refuses it, and so does a sub-record no arm claimed.
-    pub(super) fn finish(self, sub_records: usize) -> Result<(), PassRefusal> {
+    /// error refuses it, and so does a sub-record no arm claimed. `Ok`
+    /// holds the sub-records each arm claimed.
+    pub(super) fn finish(self, sub_records: usize) -> Result<ActiveArms, PassRefusal> {
         if let Some(error) = self.first {
             return Err(PassRefusal::Invalid(final_refusal(error.code)));
         }
-        let claimed = self.scope.map_or(0, |scope| scope.claimed);
+        let (claimed, arms) = self.scope.map_or((0, ActiveArms::default()), |scope| {
+            (scope.claimed, scope.arm_claims)
+        });
         if claimed != sub_records {
             return Err(PassRefusal::Invalid(ErrorCode::RejectedPrevalidation {
                 reason: format!(
@@ -251,7 +326,7 @@ impl ValidateBatches {
                 ),
             }));
         }
-        Ok(())
+        Ok(arms)
     }
 }
 
@@ -292,9 +367,10 @@ mod tests {
 
     use super::*;
 
-    fn refusal(arm: RedoArm, reason: &str) -> ArmError {
+    fn refusal(arm: RedoArm, batch: u32, reason: &str) -> ArmError {
         ArmError {
             arm,
+            batch,
             code: ErrorCode::RejectedPrevalidation {
                 reason: reason.into(),
             },
@@ -305,7 +381,7 @@ mod tests {
         match batches.finish(0) {
             Err(PassRefusal::Invalid(ErrorCode::RejectedPrevalidation { reason })) => reason,
             Err(other) => panic!("expected a validate refusal, got {:?}", other.into_code()),
-            Ok(()) => panic!("expected a validate refusal"),
+            Ok(_) => panic!("expected a validate refusal"),
         }
     }
 
@@ -314,9 +390,9 @@ mod tests {
     #[test]
     fn an_earlier_arm_ranks_before_an_earlier_batch() {
         let mut batches = ValidateBatches::open(&[], RedoOrigin::Commit);
-        batches.rank(refusal(RedoArm::Kv, "kv in batch one"));
-        batches.rank(refusal(RedoArm::Document, "document in batch two"));
-        batches.rank(refusal(RedoArm::Timeseries, "timeseries in batch three"));
+        batches.rank(refusal(RedoArm::Kv, 0, "kv in batch one"));
+        batches.rank(refusal(RedoArm::Document, 1, "document in batch two"));
+        batches.rank(refusal(RedoArm::Timeseries, 2, "timeseries in batch three"));
         assert_eq!(refused_reason(batches), "document in batch two");
     }
 
@@ -324,9 +400,19 @@ mod tests {
     #[test]
     fn a_tie_keeps_the_earlier_batch() {
         let mut batches = ValidateBatches::open(&[], RedoOrigin::Commit);
-        batches.rank(refusal(RedoArm::Document, "batch one"));
-        batches.rank(refusal(RedoArm::Document, "batch two"));
+        batches.rank(refusal(RedoArm::Document, 0, "batch one"));
+        batches.rank(refusal(RedoArm::Document, 1, "batch two"));
         assert_eq!(refused_reason(batches), "batch one");
+    }
+
+    /// The batch index decides between two errors of one arm, whatever
+    /// order they reach the ranking in.
+    #[test]
+    fn an_earlier_batch_ranks_first_in_one_arm() {
+        let mut batches = ValidateBatches::open(&[], RedoOrigin::Commit);
+        batches.rank(refusal(RedoArm::Document, 3, "batch four"));
+        batches.rank(refusal(RedoArm::Document, 1, "batch two"));
+        assert_eq!(refused_reason(batches), "batch two");
     }
 
     /// A pass with no error refuses a record its arms did not claim whole.

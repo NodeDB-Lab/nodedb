@@ -28,7 +28,8 @@ pub(in crate::data::executor) enum TimeseriesApplyMode {
     /// before the record's first sub-record, as in `Replay`; the ingest
     /// records the pre-image its undo restores. No flush, budget recharge or
     /// timer update runs after the rows land: the apply settles those once
-    /// the whole record installed (`settle_redo_timeseries`).
+    /// the whole record installed (`settle_redo_timeseries`). A batched
+    /// install's driver flushes between batches (`install_flush`).
     RedoInstall,
 }
 

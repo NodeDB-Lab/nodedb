@@ -87,6 +87,17 @@ impl ArrayEngine {
     pub fn needs_flush(&self, id: &ArrayId) -> ArrayEngineResult<bool> {
         Ok(self.store(id)?.memtable.stats().cell_count >= self.cfg.flush_cell_threshold)
     }
+
+    /// Whether `incoming` more cells can bring the array's memtable, which
+    /// holds at least one entry, to `flush_cell_threshold` live cells. A
+    /// memtable with no entry never does: a flush cannot make room there.
+    pub fn may_fill(&self, id: &ArrayId, incoming: usize) -> ArrayEngineResult<bool> {
+        let memtable = &self.store(id)?.memtable;
+        if memtable.is_empty() {
+            return Ok(false);
+        }
+        Ok(memtable.stats().cell_count.saturating_add(incoming) >= self.cfg.flush_cell_threshold)
+    }
 }
 
 /// Shared memtable-stamping core for puts. Recovery routes through here

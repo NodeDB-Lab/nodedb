@@ -31,20 +31,23 @@ use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::retention::judged_instant_ms;
 use crate::data::executor::handlers::spill::cleanup::SpillKind;
 use crate::data::executor::task::ExecutionTask;
+use crate::data::io::uring_wal_cursor::UringWalCursor;
 use crate::engine::document::store::{CollectionConfig, IndexPath};
 use crate::types::{Lsn, TxnId, VShardId};
 use crate::wal::manager::{RedoChunkPlacement, WalManager};
-use crate::wal::redo::frame::{RedoContentHeader, RedoFrameTag, push_frame};
+use crate::wal::redo::frame::{
+    FrameBatcher, FramedRedoBuilder, RedoContentHeader, RedoFrameTag, push_frame,
+};
 use crate::wal::{
-    RedoChunkHeader, RedoChunkRef, RedoRecord, RedoStreamId, RedoStreamRef, RedoSubRecord,
-    chunk_crc,
+    RedoChunkHeader, RedoChunkRef, RedoRecord, RedoStreamId, RedoStreamReader, RedoStreamRef,
+    RedoSubRecord, chunk_crc,
 };
 
 use super::super::clone_copy::clone_probe_unreadable;
 use super::super::entry::CommittedRedo;
 use super::super::install_refusal_tests as refusal;
-use super::super::passes::{RedoTarget, redo_wal_record};
-use super::super::streamed::STREAM_BATCH_BYTES;
+use super::super::passes::{RedoTarget, final_refusal, redo_wal_record};
+use super::super::streamed::unreadable;
 use super::super::sub_ops::{document_ops, kv_ops};
 use super::super::sync_refusal_tests as sync;
 use super::super::test_commit::{doc_put_sub_record, failing_install_sub_record};
@@ -52,22 +55,29 @@ use super::super::unique_handover_tests as handover;
 use super::super::validate::CommitBoundary;
 use super::{StreamLimits, StreamValidateInput};
 
-const TID: u64 = 1;
-const LSN: u64 = 900;
+pub(in crate::data::executor::handlers::transaction::redo_apply) const TID: u64 = 1;
+pub(in crate::data::executor::handlers::transaction::redo_apply) const LSN: u64 = 900;
 /// Bytes of each chunk the tests write: chunks cut records apart.
 const CHUNK_BYTES: usize = 97;
 /// A batch bound that puts about one record in each batch.
 const SMALL_BATCH_BYTES: usize = 64;
 
+/// The batch a stream install holds by default.
+fn default_batch_bytes() -> usize {
+    nodedb_types::config::tuning::CalvinTuning::default().redo_stream_batch_bytes
+}
+
 /// The core's WAL, which the tests append chunk records to.
-struct StreamWal {
+pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamWal {
     wal: WalManager,
     next_stream: u64,
     next_key: u64,
 }
 
 impl StreamWal {
-    fn open(core: &CoreLoop) -> Self {
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn open(
+        core: &CoreLoop,
+    ) -> Self {
         Self {
             wal: WalManager::open_for_testing(&core.wal_source().dir).expect("open wal"),
             next_stream: 0,
@@ -75,8 +85,18 @@ impl StreamWal {
         }
     }
 
+    /// The WAL the chunks go to.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn manager(
+        &self,
+    ) -> &WalManager {
+        &self.wal
+    }
+
     /// Append `content` as one stream's chunks, and return its reference.
-    fn write(&mut self, content: &[u8]) -> RedoStreamRef {
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn write(
+        &mut self,
+        content: &[u8],
+    ) -> RedoStreamRef {
         self.next_stream += 1;
         let stream = RedoStreamId::Session {
             vshard: 0,
@@ -121,7 +141,9 @@ impl StreamWal {
     }
 }
 
-fn record(ops: Vec<RedoSubRecord>) -> RedoRecord {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn record(
+    ops: Vec<RedoSubRecord>,
+) -> RedoRecord {
     RedoRecord {
         version: 1,
         ops,
@@ -137,7 +159,7 @@ fn record(ops: Vec<RedoSubRecord>) -> RedoRecord {
 
 /// `redo` as framed content: the header, the publishes and the reads,
 /// then the row sources, the ops and the row changes.
-fn framed(
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn framed(
     redo: &RedoRecord,
     sum_targets: &[RedoSumTargets],
     reads: &[VersionedReadEntry],
@@ -173,7 +195,8 @@ fn framed_ops(ops: Vec<RedoSubRecord>) -> Vec<u8> {
     framed(&record(ops), &[], &[])
 }
 
-fn default_task() -> ExecutionTask {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn default_task() -> ExecutionTask
+{
     let mut task = make_default_task();
     task.wal_lsn = Some(Lsn::new(LSN));
     task
@@ -198,6 +221,33 @@ impl Run {
     }
 }
 
+/// The record the stream marker `marker` installs as, read whole back from
+/// the core's WAL, and the sum targets and reads its content carries. A read
+/// that fails is retryable. Content that does not decode refuses alike on
+/// every replica.
+fn decoded_content(
+    core: &CoreLoop,
+    marker: &RedoRecord,
+    reference: &RedoStreamRef,
+) -> Result<(RedoRecord, Vec<RedoSumTargets>, Vec<VersionedReadEntry>), ErrorCode> {
+    let refuse = |error: crate::Error| final_refusal(error.into());
+    let reader = RedoStreamReader::<UringWalCursor>::open(core.wal_source(), reference.clone())
+        .map_err(|error| unreadable(reference, error))?;
+    let mut batcher = FrameBatcher::new(reader, default_batch_bytes());
+    let mut builder = FramedRedoBuilder::default();
+    while let Some(batch) = batcher
+        .next_batch()
+        .map_err(|error| unreadable(reference, error))?
+    {
+        builder.push(&batch).map_err(refuse)?;
+    }
+    let mut framed = builder.finish().map_err(refuse)?;
+    let sum_targets = std::mem::take(&mut framed.header.sum_targets);
+    let reads = std::mem::take(&mut framed.reads);
+    let redo = framed.into_installed(marker, reference).map_err(refuse)?;
+    Ok((redo, sum_targets, reads))
+}
+
 /// The checks `install_redo_into` runs over a marker's decoded content
 /// before it writes, in its order.
 fn whole_verdict(
@@ -208,9 +258,10 @@ fn whole_verdict(
     judged_at_ms: i64,
 ) -> Result<(), ErrorCode> {
     let task = &run.task;
-    let content = core.streamed_content(marker, reference.clone())?;
-    let redo = content.record;
-    let carried = content.carried;
+    let (redo, sum_targets, reads) = decoded_content(core, marker, reference)?;
+    let bytes = redo
+        .to_bytes()
+        .map_err(|error| final_refusal(error.into()))?;
     let database_id = task.request.database_id.as_u64();
     let doc_ops = core
         .without_skipped_clone_copies(database_id, TID, document_ops(&redo.ops))
@@ -221,13 +272,13 @@ fn whole_verdict(
         tid: TID,
         documents: &doc_ops,
         kv: &kv,
-        sum_targets: &carried.sum_targets,
+        sum_targets: &sum_targets,
         origin: run.origin,
         user_roles: &redo.user_roles,
         judged_at_ms,
     })
     .map_err(ErrorCode::from)?;
-    let record = redo_wal_record(task, Lsn::new(LSN), carried.bytes.clone())?;
+    let record = redo_wal_record(task, Lsn::new(LSN), bytes)?;
     let target = RedoTarget {
         record: &record,
         sub_records: redo.ops.len(),
@@ -235,10 +286,10 @@ fn whole_verdict(
         tid: TID,
         origin: run.origin,
     };
-    core.validate_redo_pass(&target, &carried.sum_targets)
+    core.validate_redo_pass(&target, &sum_targets)
         .map_err(|refusal| refusal.into_code())?;
     if let Some(ordinal) = run.snapshot {
-        core.check_redo_snapshot(task, TID, &carried.reads, &redo.ops, ordinal)?;
+        core.check_redo_snapshot(task, TID, &reads, &redo.ops, ordinal)?;
     }
     Ok(())
 }
@@ -279,7 +330,7 @@ fn parity(
     let judged_at_ms = judged_instant_ms(None, run.task.request.system_ordinal);
     let whole = whole_verdict(core, run, &marker, &reference, judged_at_ms);
     for spill_threshold in [0, usize::MAX] {
-        for batch_bytes in [SMALL_BATCH_BYTES, STREAM_BATCH_BYTES] {
+        for batch_bytes in [SMALL_BATCH_BYTES, default_batch_bytes()] {
             let limits = StreamLimits {
                 batch_bytes,
                 spill_threshold,
@@ -310,14 +361,16 @@ fn is_unique_violation(verdict: &Result<(), ErrorCode>) -> bool {
 }
 
 /// A core with its bridge ends, data directory and WAL kept alive.
-struct Hold {
-    core: CoreLoop,
-    wal: StreamWal,
+pub(in crate::data::executor::handlers::transaction::redo_apply) struct Hold {
+    pub(in crate::data::executor::handlers::transaction::redo_apply) core: CoreLoop,
+    pub(in crate::data::executor::handlers::transaction::redo_apply) wal: StreamWal,
     _ends: Box<dyn std::any::Any>,
     _dir: tempfile::TempDir,
 }
 
-fn hold(setup: impl FnOnce(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>)) -> Hold {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn hold(
+    setup: impl FnOnce(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>),
+) -> Hold {
     let dir = tempfile::tempdir().expect("tempdir");
     let (core, ends) = setup(dir.path());
     let wal = StreamWal::open(&core);
@@ -329,7 +382,9 @@ fn hold(setup: impl FnOnce(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any
     }
 }
 
-fn plain_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn plain_core(
+    dir: &std::path::Path,
+) -> (CoreLoop, Box<dyn std::any::Any>) {
     let (core, req, resp) = make_core_with_dir(dir);
     (core, Box::new((req, resp)))
 }
@@ -667,14 +722,18 @@ fn balanced_sums_accumulate_across_batches() {
 
 // ── Materialized-sum folds ───────────────────────────────────────────────
 
-const CHARGES: &str = "charges";
-const BALANCES: &str = "balances";
-const A1: Surrogate = Surrogate(4242);
-const A2: Surrogate = Surrogate(4243);
+pub(in crate::data::executor::handlers::transaction::redo_apply) const CHARGES: &str = "charges";
+pub(in crate::data::executor::handlers::transaction::redo_apply) const BALANCES: &str = "balances";
+pub(in crate::data::executor::handlers::transaction::redo_apply) const A1: Surrogate =
+    Surrogate(4242);
+pub(in crate::data::executor::handlers::transaction::redo_apply) const A2: Surrogate =
+    Surrogate(4243);
 
 /// A core where `charges` sums `amount` into `balances.balance`, which is
 /// UNIQUE. Account `a1` holds 10 and `a2` holds 20.
-fn fold_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn fold_core(
+    dir: &std::path::Path,
+) -> (CoreLoop, Box<dyn std::any::Any>) {
     let (mut core, ends) = plain_core(dir);
     let mut target = CollectionConfig::new(BALANCES);
     target.index_paths.push(IndexPath {
@@ -718,7 +777,8 @@ fn fold_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
     (core, ends)
 }
 
-fn fold_targets() -> Vec<RedoSumTargets> {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn fold_targets()
+-> Vec<RedoSumTargets> {
     vec![RedoSumTargets {
         collection: CHARGES.to_string(),
         resolved: vec![
@@ -728,7 +788,11 @@ fn fold_targets() -> Vec<RedoSumTargets> {
     }]
 }
 
-fn charge(surrogate: u32, account: &str, amount: i64) -> RedoSubRecord {
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn charge(
+    surrogate: u32,
+    account: &str,
+    amount: i64,
+) -> RedoSubRecord {
     let body = doc_format::encode_to_msgpack(&serde_json::json!({
         "account_id": account,
         "amount": amount,

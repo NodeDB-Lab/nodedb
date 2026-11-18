@@ -24,6 +24,11 @@ pub struct SridGeometry {
 }
 
 impl SridGeometry {
+    /// Heap bytes the shape's coordinates and its Z and M ordinates hold.
+    pub fn heap_bytes(&self) -> usize {
+        self.geometry.heap_bytes() + self.ordinates.heap_bytes()
+    }
+
     /// An XY geometry.
     pub fn new(srid: Srid, geometry: Geometry) -> Self {
         Self {

@@ -7,6 +7,9 @@
 //! memtable before the record's first sub-record when it could not take the
 //! whole record (`group_flush`). The pre-image is recorded after that flush,
 //! so the undo restores a memtable that holds nothing the flush moved to disk.
+//! A batched install also flushes between its batches (`install_flush`). The
+//! undo of each such flush takes its partitions back before the pre-image
+//! applies, so the restored rows are on no partition.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
@@ -24,19 +27,33 @@ impl CoreLoop {
         key: &(DatabaseId, TenantId, String),
         lines: &[ilp::IlpLine<'_>],
     ) -> bool {
-        let governor_pressure = self
-            .governor
-            .try_reserve(key.0, key.1, nodedb_mem::EngineId::Timeseries, 0)
-            .is_err();
+        let max_tag_cardinality = self.ts_tuning.max_tag_cardinality;
+        self.ts_memtable_pressed(key)
+            || self
+                .columnar_memtables
+                .get(key)
+                .is_some_and(|mt| !admission::has_tag_headroom(mt, lines, max_tag_cardinality))
+    }
+
+    /// Whether the governor reports the timeseries engine budget at
+    /// `Critical` pressure or above: the level at which every engine runs
+    /// its own flush (`check_engine_pressure`).
+    pub(super) fn ts_engine_pressed(&self) -> bool {
+        self.governor
+            .engine_pressure(nodedb_mem::EngineId::Timeseries)
+            >= nodedb_mem::PressureLevel::Critical
+    }
+
+    /// Whether the memtable of `key` must flush before any row lands in it:
+    /// it is at its soft or hard limit, or the timeseries engine budget is
+    /// under pressure (`ts_engine_pressed`). An absent memtable is not.
+    pub(super) fn ts_memtable_pressed(&self, key: &(DatabaseId, TenantId, String)) -> bool {
+        let governor_pressure = self.ts_engine_pressed();
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
         let hard_limit = self.ts_tuning.memtable_hard_limit_bytes;
-        let max_tag_cardinality = self.ts_tuning.max_tag_cardinality;
         self.columnar_memtables.get(key).is_some_and(|mt| {
             let resident = mt.memory_bytes();
-            resident >= soft_limit
-                || resident >= hard_limit
-                || governor_pressure
-                || !admission::has_tag_headroom(mt, lines, max_tag_cardinality)
+            resident >= soft_limit || resident >= hard_limit || governor_pressure
         })
     }
 

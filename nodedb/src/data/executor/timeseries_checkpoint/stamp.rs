@@ -14,6 +14,12 @@
 //! skips a named truncate: re-applying it would end rows that applied after
 //! it.
 //!
+//! [`TsReplayStamp::partial`] names the records a partition holds in part.
+//! A batched install flushes between two batches of its record, so the
+//! partition holds the record's ops below the batch's end. Replay skips
+//! exactly those ops of the record (`ts_partial_replay_skips`). An entry
+//! goes once `rows` names its record.
+//!
 //! ## Where it lives
 //!
 //! - Every partition directory carries the collection stamp as of its flush,
@@ -40,6 +46,7 @@ use std::path::Path;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::timeseries::partition_registry::PartitionRegistry;
+use crate::types::partial_record::{PartialRecord, PartialRecords};
 use crate::types::replay_stamp::ReplayStamp;
 use crate::types::{DatabaseId, Lsn, TenantId};
 
@@ -63,13 +70,18 @@ pub(in crate::data::executor) struct TsReplayStamp {
     pub rows: ReplayStamp,
     /// Truncates of the collection that took effect.
     pub truncates: ReplayStamp,
+    /// Records whose ops below `ops_through` a partition holds, and that
+    /// `rows` does not name.
+    pub partial: PartialRecords,
 }
 
 impl TsReplayStamp {
     /// A stamp naming what `self` or `other` names.
     pub(in crate::data::executor) fn union(&self, other: &TsReplayStamp) -> TsReplayStamp {
+        let rows = self.rows.union(&other.rows);
         TsReplayStamp {
-            rows: self.rows.union(&other.rows),
+            partial: self.partial.union(&other.partial).pruned(&rows),
+            rows,
             truncates: self.truncates.union(&other.truncates),
         }
     }
@@ -124,6 +136,10 @@ pub(in crate::data::executor) fn decode_ts_stamp(
         .truncates
         .validate()
         .map_err(|e| stamp_error(path, "validate the truncate stamp of", &e))?;
+    stamp
+        .partial
+        .validate()
+        .map_err(|e| stamp_error(path, "validate the partial records of", &e))?;
     Ok(stamp)
 }
 
@@ -176,6 +192,28 @@ impl CoreLoop {
             .is_some_and(|stamp| stamp.rows.skips(lsn))
     }
 
+    /// Whether restart replay skips op `op` of the record at `lsn` for
+    /// `key`: a partition holds that op. A committed-redo apply never skips,
+    /// and returns before the lookup. A record with no op index skips
+    /// nothing here.
+    pub(in crate::data::executor) fn ts_partial_replay_skips(
+        &self,
+        key: &TsCollectionKey,
+        lsn: u64,
+        op: Option<u64>,
+    ) -> bool {
+        let Some(op) = op else {
+            return false;
+        };
+        if self.applying_committed_redo() {
+            return false;
+        }
+        self.ts_replay
+            .stamps
+            .get(key)
+            .is_some_and(|stamp| stamp.partial.skips(lsn, op))
+    }
+
     /// Whether `key`'s collection stamp names the truncate at `lsn` as taken
     /// effect.
     pub(in crate::data::executor) fn ts_truncate_named(
@@ -206,13 +244,29 @@ impl CoreLoop {
     ) -> crate::Result<TsReplayStamp> {
         let applied = TsReplayStamp {
             rows: self.ts_applied_stamp()?,
-            truncates: ReplayStamp::default(),
+            ..TsReplayStamp::default()
         };
         Ok(self
             .ts_replay
             .stamps
             .get(key)
             .map_or_else(|| applied.clone(), |stamp| stamp.union(&applied)))
+    }
+
+    /// The stamp a flush of `key` between two batches of a batched install
+    /// carries: [`Self::ts_flush_stamp`], which does not name the record
+    /// the install writes, plus the ops of it `partial` names.
+    pub(in crate::data::executor) fn ts_partial_flush_stamp(
+        &self,
+        key: &TsCollectionKey,
+        partial: PartialRecord,
+    ) -> crate::Result<TsReplayStamp> {
+        let mut stamp = self.ts_flush_stamp(key)?;
+        stamp.partial = stamp
+            .partial
+            .union(&PartialRecords::naming(partial))
+            .pruned(&stamp.rows);
+        Ok(stamp)
     }
 
     /// Record that a timeseries record at `lsn` applied. A flush after this
@@ -264,6 +318,10 @@ mod tests {
         let stamp = TsReplayStamp {
             rows: named(5, &[9, 12]),
             truncates: named(0, &[7]),
+            partial: PartialRecords::naming(PartialRecord {
+                lsn: 20,
+                ops_through: 4,
+            }),
         };
         write_ts_stamp(dir.path(), &stamp).expect("write");
         assert_eq!(read_ts_stamp(dir.path()).expect("read"), Some(stamp));
@@ -290,6 +348,7 @@ mod tests {
             &TsReplayStamp {
                 rows: named(3, &[]),
                 truncates: named(0, &[2]),
+                partial: PartialRecords::default(),
             },
         )
         .expect("collection stamp");
@@ -303,7 +362,7 @@ mod tests {
                 &partition,
                 &TsReplayStamp {
                     rows: stamp,
-                    truncates: ReplayStamp::default(),
+                    ..TsReplayStamp::default()
                 },
             )
             .expect("partition stamp");

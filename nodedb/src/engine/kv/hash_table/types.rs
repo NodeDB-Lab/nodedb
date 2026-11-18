@@ -29,7 +29,7 @@ pub struct EntryMeta {
 /// including the `surrogate`, without which the restored row would lose its
 /// stable cross-engine identity and no longer be reachable from a vector / FTS /
 /// spatial bitmap intersection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct KvExportEntry {
     /// Primary key bytes.
     pub key: Vec<u8>,

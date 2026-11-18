@@ -103,9 +103,9 @@ impl CoreLoop {
 
     /// Truncate for good every collection a committed install detached,
     /// removing the mmap files of its sealed segments.
-    pub(in crate::data::executor) fn finalize_vector_truncates(
+    pub(in crate::data::executor) fn finalize_vector_truncates<'a>(
         &mut self,
-        undo_log: &mut [UndoEntry],
+        undo_log: impl IntoIterator<Item = &'a mut UndoEntry>,
     ) {
         for entry in undo_log {
             if let UndoEntry::VectorTruncate(undo) = entry

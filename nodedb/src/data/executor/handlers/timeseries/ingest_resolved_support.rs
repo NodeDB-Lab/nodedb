@@ -47,10 +47,7 @@ impl CoreLoop {
     /// pressure, it cannot also hold the bytes the batch took at resolve, or
     /// its tag dictionaries have no room for the batch's tags.
     pub(super) fn ts_resolved_needs_flush(&self, key: &CollKey, batch: &ResolvedTsBatch) -> bool {
-        let governor_pressure = self
-            .governor
-            .try_reserve(key.0, key.1, nodedb_mem::EngineId::Timeseries, 0)
-            .is_err();
+        let governor_pressure = self.ts_engine_pressed();
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
         let hard_limit = self.ts_tuning.memtable_hard_limit_bytes;
         self.columnar_memtables.get(key).is_some_and(|mt| {

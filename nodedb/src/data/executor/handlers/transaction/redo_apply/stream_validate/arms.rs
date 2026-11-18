@@ -2,15 +2,16 @@
 
 //! The arms' validate pass over a stream, one batch at a time.
 //!
-//! Each batch's ops form a record that holds only them, with the content's
-//! header fields and the marker's Calvin stamp, at the marker's LSN. The
-//! pass runs over it through [`ValidateBatches`], which keeps one scope
-//! across the batches and ranks their errors as a whole-record pass does.
+//! Each batch's ops form a record that holds only them (see
+//! `batched::batch_record`). The pass runs over it through
+//! `ValidateBatches`, which keeps one scope across the batches and ranks
+//! their errors as a whole-record pass does.
 
+use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::wal::RedoRecord;
 
-use super::super::passes::{RedoTarget, final_refusal, redo_wal_record};
+use super::super::batched::{BatchStamps, batch_wal_record};
+use super::super::passes::RedoTarget;
 use super::verdict::Rank;
 use super::walk::{StreamValidateInput, StreamWalk};
 
@@ -31,27 +32,21 @@ impl CoreLoop {
         let Some(header) = &walk.header else {
             return;
         };
+        let Ok(batch_index) = u32::try_from(batch) else {
+            walk.verdict.offer(
+                Rank::Record(batch),
+                ErrorCode::RejectedPrevalidation {
+                    reason: format!(
+                        "the committed redo stream holds more than {} batches",
+                        u32::MAX
+                    ),
+                },
+            );
+            return;
+        };
         let sub_records = ops.len();
-        let redo = RedoRecord {
-            version: header.version,
-            ops,
-            calvin_stamp: input.marker.calvin_stamp.clone(),
-            cross_shard_applied: input.marker.cross_shard_applied.clone(),
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-            user_roles: header.user_roles.clone(),
-            sum_targets: Vec::new(),
-        };
-        let payload = match redo.to_bytes() {
-            Ok(payload) => payload,
-            Err(error) => {
-                walk.verdict
-                    .offer(Rank::Record(batch), final_refusal(error.into()));
-                return;
-            }
-        };
-        let record = match redo_wal_record(input.task, input.lsn, payload) {
+        let stamps = BatchStamps::of(input.marker);
+        let record = match batch_wal_record(input.task, input.lsn, header, &stamps, ops) {
             Ok(record) => record,
             Err(code) => {
                 walk.verdict.offer(Rank::Record(batch), code);
@@ -64,6 +59,7 @@ impl CoreLoop {
         let Some(batches) = walk.batches.as_mut() else {
             return;
         };
+        batches.enter_batch(batch_index);
         let target = RedoTarget {
             record: &record,
             sub_records,

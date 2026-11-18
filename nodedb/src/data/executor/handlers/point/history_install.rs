@@ -43,7 +43,9 @@ pub(in crate::data::executor) struct HistorySlot {
 }
 
 /// The index entries a history install wrote at its successor's ordinal.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 pub(in crate::data::executor) struct SuccessorIndexWrites {
     /// The successor's ordinal.
     pub sys_from: i64,

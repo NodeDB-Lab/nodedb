@@ -17,6 +17,10 @@
 //! - A crash after it leaves the effects and the stored write set. Boot
 //!   journals the parts the WAL lacks from it, and replay rebuilds any edge
 //!   the crash rolled back.
+//! - A batched install of a committed stream marker makes each batch
+//!   durable before that commit, with its install cursor. Its marker is
+//!   durable before the install starts. Boot completes the record forward
+//!   (see `handlers::transaction::redo_apply::batched::cursor`).
 //!
 //! Boot does both in `crate::bootstrap::write_group_settle`.
 
@@ -24,12 +28,12 @@ use std::collections::HashMap;
 
 use crate::bridge::dispatch::{JournalGroup, WriteSetJournal};
 use crate::bridge::envelope::{Response, Status, WriteSetEntry};
-use crate::event::WriteEvent;
 use crate::wal::{CapturedEntry, OriginAppend, WriteSetCapture};
 use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan};
 
 use super::CoreLoop;
 use super::fail_stop::FailStopCause;
+use super::held_events::{HeldEvents, HeldSpillAt};
 use crate::data::executor::task::ExecutionTask;
 
 /// The journal side of a core.
@@ -43,7 +47,21 @@ pub(in crate::data::executor) struct WriteSetJournalState {
     running: Option<RunningJournal>,
     /// The events of the running journalled tasks, sent once their write
     /// sets are stored. `None` outside a journalled task.
-    pub(in crate::data::executor) held_events: Option<Vec<WriteEvent>>,
+    pub(in crate::data::executor) held_events: Option<HeldEvents>,
+    /// The number the next held-event spill directory takes.
+    held_dirs: u64,
+}
+
+/// The batched install rows a write set commit removes.
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) enum InstallRows<'a> {
+    None,
+    /// The fold ledger, fold target rows and cursor of each record: the
+    /// commit ends a live install.
+    Ended(&'a [u64]),
+    /// The fold ledger and fold target rows of each record. Boot replay
+    /// drops the cursors once every arm replayed the records.
+    Folded(&'a [u64]),
 }
 
 /// Authorization belongs only to the root redo dispatch that started the journal.
@@ -119,9 +137,15 @@ impl CoreLoop {
     pub(in crate::data::executor) fn begin_journalled(&mut self) {
         self.sparse.db().defer();
         self.edge_store.db().defer();
-        self.write_set_journal
-            .held_events
-            .get_or_insert_with(Vec::new);
+        if self.write_set_journal.held_events.is_none() {
+            let number = self.write_set_journal.held_dirs;
+            self.write_set_journal.held_dirs += 1;
+            self.write_set_journal.held_events = Some(HeldEvents::new(HeldSpillAt {
+                core_id: self.core_id,
+                number,
+                threshold: self.query_tuning.max_txn_overlay_bytes,
+            }));
+        }
     }
 
     /// Start the root task's journal and authorize only a root redo installer.
@@ -180,18 +204,43 @@ impl CoreLoop {
     }
 
     /// Persist source effects and their capture before irreversible settlement.
+    /// The same durable commit removes the batched install rows of each
+    /// record in `drop_installs`, its cursor included.
     pub(in crate::data::executor) fn persist_redo_capture(
         &mut self,
         capture: (u64, Vec<u8>),
         write_set: &[WriteSetEntry],
+        drop_installs: &[u64],
     ) -> crate::Result<()> {
         let write_set = write_set.to_vec();
-        if let Err(error) = self.store_encoded_write_sets(std::slice::from_ref(&capture)) {
+        if let Err(error) = self.store_encoded_write_sets(
+            std::slice::from_ref(&capture),
+            InstallRows::Ended(drop_installs),
+        ) {
             self.fail_journalled(&error);
             return Err(error);
         }
         self.write_set_journal.running = Some(RunningJournal::Durable { write_set });
         Ok(())
+    }
+
+    /// Fence the journal and stop the core: the held events of the running
+    /// journal could not be kept, so the tasks' events cannot all leave.
+    /// The held set keeps the failure, and the journal's end answers every
+    /// task it holds with an error (see [`Self::held_events_failure`]).
+    pub(in crate::data::executor) fn fail_held_events(&mut self, error: &crate::Error) {
+        self.seal_journalled();
+        self.fail_stop_core(FailStopCause::HeldEventsUnkept, &error.to_string());
+    }
+
+    /// The error the journal answers with when its held events could not
+    /// be kept. `None` while they are kept.
+    fn held_events_failure(&self) -> Option<crate::Error> {
+        let failure = self.write_set_journal.held_events.as_ref()?.failure()?;
+        Some(crate::Error::Storage {
+            engine: "journal".into(),
+            detail: format!("the journalled write's events could not be held: {failure}"),
+        })
     }
 
     /// Mark unknown durability and suppress every held event.
@@ -219,11 +268,13 @@ impl CoreLoop {
         }
         self.sparse.db().resume();
         self.edge_store.db().resume();
-        if let Some(events) = self.write_set_journal.held_events.take()
+        if let Some(mut events) = self.write_set_journal.held_events.take()
             && healthy
         {
-            for event in events {
-                self.send_write_event(event);
+            // A held event that does not read back stops the ones after
+            // it: the core fail-stops, and restart rebuilds its state.
+            if let Err(error) = events.drain(|event| self.send_write_event(event)) {
+                self.fail_stop_core(FailStopCause::HeldEventsUnkept, &error.to_string());
             }
         }
     }
@@ -233,6 +284,13 @@ impl CoreLoop {
         &mut self,
         captures: &[WriteSetCapture],
     ) -> crate::Result<()> {
+        // A journal that lost its held events stores no write set: the
+        // tasks answer an error, and nothing they wrote becomes durable.
+        if let Some(error) = self.held_events_failure() {
+            self.end_journalled(false);
+            self.write_set_journal.running = None;
+            return Err(error);
+        }
         let stored = self.store_write_sets(captures);
         if let Err(error) = &stored {
             self.fail_journalled(error);
@@ -339,19 +397,27 @@ impl CoreLoop {
             .iter()
             .map(|capture| Ok((capture.origin, capture.to_bytes()?)))
             .collect::<crate::Result<Vec<_>>>()?;
-        self.store_encoded_write_sets(&encoded)
+        self.store_encoded_write_sets(&encoded, InstallRows::None)
     }
 
     /// Store `captures` in one durable sparse commit, which persists every
-    /// deferred commit before it, then persist the edge store.
+    /// deferred commit before it, then persist the edge store. The same
+    /// commit removes `installs`, the batched install rows of the records
+    /// whose write sets it stores.
     pub(in crate::data::executor) fn store_encoded_write_sets(
         &mut self,
         captures: &[(u64, Vec<u8>)],
+        installs: InstallRows<'_>,
     ) -> crate::Result<()> {
         let settled = std::mem::take(&mut self.write_set_journal.settled);
         let txn = self.sparse.begin_durable_write()?;
         self.sparse
             .remove_write_set_captures_in_txn(&txn, &settled)?;
+        match installs {
+            InstallRows::None => {}
+            InstallRows::Ended(lsns) => self.sparse.remove_redo_install_in_txn(&txn, lsns)?,
+            InstallRows::Folded(lsns) => self.sparse.remove_fold_rows_in_txn(&txn, lsns)?,
+        }
         for (origin, bytes) in captures {
             self.sparse
                 .put_write_set_capture_in_txn(&txn, *origin, bytes)?;

@@ -40,7 +40,7 @@ use nodedb_types::Surrogate;
 /// Keys are zerompk-encoded coordinates (`Vec<u8>`). Values are either an
 /// encoded `CellPayload` or `CELL_TOMBSTONE_SENTINEL`. Using the encoded form
 /// as the key avoids the need for `Ord` or `Hash` on `CoordValue`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct TileBuffer {
     /// coord_key → payload bytes. coord_key = zerompk of `Vec<CoordValue>`.
     entries: HashMap<Vec<u8>, Vec<u8>>,

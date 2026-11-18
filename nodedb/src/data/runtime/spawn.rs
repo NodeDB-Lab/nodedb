@@ -133,9 +133,14 @@ pub fn spawn_core(
             // refuses a commit whose snapshot trails its ordinal past it.
             core.set_commit_snapshot_window(compaction_config.commit_snapshot_window);
 
+            // The batch a chunked redo's install validates and applies at a
+            // time, before any apply.
+            core.set_redo_stream_batch_bytes(compaction_config.redo_stream_batch_bytes);
+
             // 2h. The committed records whose install never became durable,
-            // before replay: replay folds each one this core owns.
-            core.set_never_durable_redos(&never_durable);
+            // before replay: replay folds each one this core owns. A fold
+            // ledger that cannot be read fails the replay below.
+            let fold_gate = core.set_never_durable_redos(&never_durable);
 
             // 3 → 3b → 4. Boot recovery runs in exactly this order and no other:
             // restore the checkpoints, THEN seed the catalog state, THEN replay
@@ -154,13 +159,15 @@ pub fn spawn_core(
                 &columnar_schema_seed,
                 &crs_set_seed,
             );
-            let replayed = replay_wal_and_rebuild_indexes(
-                &mut core,
-                &wal_records,
-                num_cores,
-                &tombstones,
-                &vector_index_param_seed,
-            );
+            let replayed = fold_gate.and_then(|()| {
+                replay_wal_and_rebuild_indexes(
+                    &mut core,
+                    &wal_records,
+                    num_cores,
+                    &tombstones,
+                    &vector_index_param_seed,
+                )
+            });
 
             // Replay is complete: every in-memory index (HNSW, etc.) has been
             // rebuilt from the WAL. Signal boot so the client gateway is not

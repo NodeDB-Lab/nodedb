@@ -70,7 +70,7 @@ impl CoreLoop {
         }
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
         if let Some(scope) = self.redo_apply.scope.as_mut() {
-            scope.doc_writes.push(AppliedDocWrite {
+            scope.hold_doc_write(AppliedDocWrite {
                 collection: row.collection.clone(),
                 identity: RowIdentity::from_user_key(row.document_id),
                 op: if row.event.old_value.is_some() {

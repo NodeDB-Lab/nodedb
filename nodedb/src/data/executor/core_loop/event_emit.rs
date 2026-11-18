@@ -244,7 +244,7 @@ impl CoreLoop {
             && scope.pass
                 == crate::data::executor::handlers::transaction::redo_apply::RedoApplyPass::Install
         {
-            scope.pending_events.push(event);
+            scope.hold_event(event);
             return;
         }
         self.send_write_event(event);
@@ -252,13 +252,17 @@ impl CoreLoop {
 
     /// Number `event` with the next sequence and hand it to the Event Plane.
     /// A journalled task's events wait until its write set is stored (see
-    /// `write_set_journal`).
+    /// `write_set_journal`). An event that cannot be held fail-stops the
+    /// core: the journal drops every held event and answers its tasks with
+    /// an error.
     pub(in crate::data::executor) fn send_write_event(
         &mut self,
         mut event: crate::event::WriteEvent,
     ) {
         if let Some(held) = self.write_set_journal.held_events.as_mut() {
-            held.push(event);
+            if let Err(error) = held.push(event, &self.data_dir) {
+                self.fail_held_events(&error);
+            }
             return;
         }
         let Some(producer) = self.events.producer.as_mut() else {

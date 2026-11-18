@@ -256,7 +256,7 @@ impl CoreLoop {
         }
     }
 
-    fn restore_timeseries_ingest_preimage(
+    pub(super) fn restore_timeseries_ingest_preimage(
         &mut self,
         entry_index: usize,
         token: TimeseriesIngestUndo,

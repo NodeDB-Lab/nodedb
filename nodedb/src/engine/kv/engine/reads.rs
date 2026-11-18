@@ -20,7 +20,7 @@ pub struct KvKeyRef<'a> {
 /// the surrogate bound to it, and the ordinal that set it. A rollback
 /// reinstalls it exactly, so the key keeps its TTL instant, its identity,
 /// and its place in system time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct KvEntryImage {
     pub value: Vec<u8>,
     /// Absolute expiry instant in ms since epoch, [`NO_EXPIRY`] for none.

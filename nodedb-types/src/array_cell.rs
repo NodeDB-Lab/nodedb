@@ -44,6 +44,17 @@ pub struct ArrayCell {
     pub system_time: Option<i64>,
 }
 
+impl ArrayCell {
+    /// Heap bytes the coordinates and the attributes hold.
+    pub fn heap_bytes(&self) -> usize {
+        self.coords
+            .iter()
+            .chain(&self.attrs)
+            .map(|value| std::mem::size_of::<Value>() + value.heap_bytes())
+            .sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

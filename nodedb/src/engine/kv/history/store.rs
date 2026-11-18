@@ -22,7 +22,7 @@ const HISTORY_KEY_FIXED_BYTES: usize = 64;
 
 /// One ended version of a KV row: visible at every ordinal `S` with
 /// `sys_from <= S < sys_to`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct HistoryVersion {
     /// Ordinal of the write that set this version.
     pub sys_from: i64,

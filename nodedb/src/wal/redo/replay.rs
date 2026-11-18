@@ -55,11 +55,15 @@
 //! none and fails on any error.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::{RecordStamp, RecordType, WalRecordArgs};
 
+use super::install_cursor::{InstallCursors, RedoInstallError};
+use super::op_index::RedoOpIndex;
 use super::replay_arm::RedoArm;
+use super::replay_arms::ArmReplayInput;
 use super::replay_origin::GroupedReplayOrigins;
 use super::stream_expand::StreamContents;
 use super::{RedoRecord, RedoStreamRef, WriteGroupRecord, read_stream_content};
@@ -68,6 +72,9 @@ use crate::data::io::uring_wal_cursor::UringWalCursor;
 
 struct ReconstitutedReplay {
     records: Vec<WalRecord>,
+    /// Parallel to `records`: each sub-record's index among its
+    /// `TransactionRedo` record's ops. A write-group part carries none.
+    op_tags: Vec<Option<u64>>,
     grouped_origins: GroupedReplayOrigins,
     /// The sum targets each committed record's install folded with, by the
     /// record's LSN. Only records that carry targets appear.
@@ -107,24 +114,42 @@ struct ReconstitutedReplay {
 /// A stream marker reconstitutes from the content its chunk records hold
 /// (see [`super::stream_expand`]). A marker whose chunks lie below the
 /// oldest retained segment was checkpointed by every engine, so it
-/// reconstitutes no sub-record.
+/// reconstitutes no sub-record. A marker in `cursors` has an install that
+/// ended part way, which no checkpoint passed: its chunks missing is
+/// [`RedoInstallError::ChunksMissing`].
 ///
 /// A committed record's sum targets come from where its install read them:
 /// a whole record's WAL copy, or a stream marker's content header.
+///
+/// A `TransactionRedo` sub-record is tagged with its index among the
+/// record's ops, the index the fold ledger counts. A continuation of a split
+/// record carries the record's next ops, so its sub-records continue the
+/// origin's count in continuation order: the order the live install applies
+/// the whole record in. A part journalled after apply is tagged with none:
+/// it is no op of the record at its origin.
 fn reconstitute_redo_records(
     records: &[WalRecord],
     contents: &mut StreamContents<'_, '_, '_>,
+    cursors: &InstallCursors,
 ) -> crate::Result<ReconstitutedReplay> {
     let mut out = Vec::new();
+    let mut op_tags = Vec::new();
     let mut grouped_origins = GroupedReplayOrigins::default();
     let mut sum_targets = Vec::new();
+    let mut continued: HashMap<u64, ContinuedOps> = HashMap::new();
     for record in records {
-        let (lsn, ops) = match RecordType::from_raw(record.logical_record_type()) {
+        let (lsn, ops, first_op) = match RecordType::from_raw(record.logical_record_type()) {
             Some(RecordType::TransactionRedo) => {
                 let redo = RedoRecord::from_bytes(&record.payload)?;
                 let installed = match RedoStreamRef::of_marker(&redo)? {
                     Some(reference) => match contents.installed(&redo, &reference)? {
                         Some(installed) => installed,
+                        None if cursors.contains(record.header.lsn) => {
+                            return Err(RedoInstallError::ChunksMissing {
+                                lsn: record.header.lsn,
+                            }
+                            .into());
+                        }
                         None => continue,
                     },
                     None => redo,
@@ -132,7 +157,14 @@ fn reconstitute_redo_records(
                 if !installed.sum_targets.is_empty() {
                     sum_targets.push((record.header.lsn, installed.sum_targets));
                 }
-                (record.header.lsn, installed.ops)
+                continued.insert(
+                    record.header.lsn,
+                    ContinuedOps {
+                        next_op: installed.ops.len() as u64,
+                        next_continuation: 1,
+                    },
+                );
+                (record.header.lsn, installed.ops, Some(0))
             }
             Some(RecordType::WriteGroup) => {
                 let group = WriteGroupRecord::from_bytes(&record.payload)?;
@@ -146,7 +178,8 @@ fn reconstitute_redo_records(
                         sub.payload = installed.resolve(&group.schemas)?.encode()?;
                     }
                 }
-                (group.group.origin_at(record.header.lsn), ops)
+                let first_op = continuation_first_op(&mut continued, &group.group, ops.len())?;
+                (group.group.origin_at(record.header.lsn), ops, first_op)
             }
             _ => continue,
         };
@@ -157,7 +190,8 @@ fn reconstitute_redo_records(
             system_ordinal: record.header.system_ordinal,
             ..RecordStamp::NONE
         };
-        for sub in ops {
+        for (index, sub) in ops.into_iter().enumerate() {
+            op_tags.push(first_op.map(|first| first + index as u64));
             out.push(WalRecord::new_stamped(
                 WalRecordArgs {
                     record_type: sub.record_type,
@@ -175,9 +209,54 @@ fn reconstitute_redo_records(
     }
     Ok(ReconstitutedReplay {
         records: out,
+        op_tags,
         grouped_origins,
         sum_targets,
     })
+}
+
+/// The op count of a `TransactionRedo` record its continuations extend.
+struct ContinuedOps {
+    /// The record op index of the next continuation's first sub-record.
+    next_op: u64,
+    /// The index (from 1) of the record's next continuation.
+    next_continuation: u32,
+}
+
+/// The record op index of the first sub-record of the `WriteGroup` record
+/// `group`, which holds `len` sub-records. `None` unless it is a
+/// continuation whose origin record this read holds: a part journalled
+/// after apply is no op of the record, and a continuation without its
+/// origin replays no fold.
+///
+/// A continuation out of order is refused: its ops would apply in another
+/// order than the live install applied them.
+fn continuation_first_op(
+    continued: &mut HashMap<u64, ContinuedOps>,
+    group: &super::WriteGroup,
+    len: usize,
+) -> crate::Result<Option<u64>> {
+    let is_continuation = group.opens() && group.origin != 0 && group.parts > 0;
+    if !is_continuation {
+        return Ok(None);
+    }
+    let Some(ops) = continued.get_mut(&group.origin) else {
+        return Ok(None);
+    };
+    if group.parts != ops.next_continuation {
+        return Err(crate::Error::Internal {
+            detail: format!(
+                "continuation {} of the transaction record at lsn {} follows continuation {}",
+                group.parts,
+                group.origin,
+                ops.next_continuation.saturating_sub(1)
+            ),
+        });
+    }
+    let first = ops.next_op;
+    ops.next_op = first.saturating_add(len as u64);
+    ops.next_continuation = ops.next_continuation.saturating_add(1);
+    Ok(Some(first))
 }
 
 /// Merge the standalone records with the reconstituted redo sub-records into
@@ -190,16 +269,52 @@ fn reconstitute_redo_records(
 /// intra-transaction order the resolver emitted them in: they all carry the
 /// enclosing record's LSN and nothing else distinguishes them. The enclosing
 /// `TransactionRedo` record itself stays in the sequence at that same LSN and
-/// simply matches no engine arm.
-fn merge_by_lsn<'a>(standalone: &'a [WalRecord], redo_ops: &[WalRecord]) -> Cow<'a, [WalRecord]> {
-    if redo_ops.is_empty() {
-        return Cow::Borrowed(standalone);
+/// matches no engine arm.
+///
+/// The same stable sort carries `redo_op_tags`, parallel to `redo_ops`, into
+/// the merged order. A standalone record carries no op index. Tags that do
+/// not match `redo_ops` one to one are an error.
+fn merge_by_lsn<'a>(
+    standalone: &'a [WalRecord],
+    redo_ops: &[WalRecord],
+    redo_op_tags: &[Option<u64>],
+) -> crate::Result<MergedReplay<'a>> {
+    if redo_op_tags.len() != redo_ops.len() {
+        return Err(crate::Error::Internal {
+            detail: format!(
+                "{} op tags name {} reconstituted redo sub-records",
+                redo_op_tags.len(),
+                redo_ops.len()
+            ),
+        });
     }
-    let mut ordered = Vec::with_capacity(standalone.len() + redo_ops.len());
-    ordered.extend_from_slice(standalone);
-    ordered.extend_from_slice(redo_ops);
-    ordered.sort_by_key(|record| record.header.lsn);
-    Cow::Owned(ordered)
+    if redo_ops.is_empty() {
+        return Ok(MergedReplay {
+            records: Cow::Borrowed(standalone),
+            ops: RedoOpIndex::default(),
+        });
+    }
+    let mut tagged: Vec<(&WalRecord, Option<u64>)> =
+        Vec::with_capacity(standalone.len() + redo_ops.len());
+    tagged.extend(standalone.iter().map(|record| (record, None)));
+    tagged.extend(redo_ops.iter().zip(redo_op_tags.iter().copied()));
+    tagged.sort_by_key(|(record, _)| record.header.lsn);
+    let ops = RedoOpIndex::new(tagged.iter().map(|(_, op)| *op).collect());
+    Ok(MergedReplay {
+        records: Cow::Owned(
+            tagged
+                .into_iter()
+                .map(|(record, _)| record.clone())
+                .collect(),
+        ),
+        ops,
+    })
+}
+
+/// The merged replay stream and the op index parallel to it.
+struct MergedReplay<'a> {
+    records: Cow<'a, [WalRecord]>,
+    ops: RedoOpIndex,
 }
 
 impl CoreLoop {
@@ -230,8 +345,9 @@ impl CoreLoop {
     ///
     /// One arm takes the STANDALONE slice rather than the merged one:
     /// `replay_graph_node_label_wal`, whose redo counterpart is
-    /// `replay_graph_node_labels_redo` below; handing both the merged stream
-    /// applies every label delta twice.
+    /// `replay_graph_node_labels_redo`; handing both the merged stream
+    /// applies every label delta twice. [`RedoArm::DISPATCH`] is the arm
+    /// order, and `replay_one_arm` holds each arm's body.
     ///
     /// Returns `Err` when a committed redo group cannot be reconstituted; that
     /// is unrecoverable data loss, not a skippable record, and recovery must
@@ -242,6 +358,64 @@ impl CoreLoop {
         records: &[WalRecord],
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
+    ) -> crate::Result<()> {
+        self.replay_reconstituted(records, num_cores, tombstones, |core, input| {
+            for arm in RedoArm::DISPATCH {
+                core.replay_one_arm(arm, input);
+                // A committed-redo apply stops at the first arm error: the
+                // apply answers it, and a batched install stops there too.
+                if core.committed_redo_failed() {
+                    break;
+                }
+                match arm {
+                    RedoArm::Vector => {
+                        crate::fail_point!(core.fail_scope(), "replay::between_engine_passes");
+                    }
+                    RedoArm::GraphNodeLabel => {
+                        crate::fail_point!(
+                            core.fail_scope(),
+                            "replay::between_standalone_and_redo"
+                        );
+                    }
+                    RedoArm::Reconstitute
+                    | RedoArm::VectorExtended
+                    | RedoArm::Document
+                    | RedoArm::Kv
+                    | RedoArm::Timeseries
+                    | RedoArm::Array
+                    | RedoArm::Crdt
+                    | RedoArm::Fts
+                    | RedoArm::Spatial
+                    | RedoArm::Graph
+                    | RedoArm::GraphNodeLabelRedo => {}
+                }
+            }
+        })
+    }
+
+    /// Replay the one arm `arm` over `records`, reconstituted and merged
+    /// as [`Self::replay_engines_in_lsn_order`] does. A batched install runs
+    /// each arm over each batch of a record this way, so the arms see the
+    /// record's ops in the order a whole-record pass hands them.
+    pub(crate) fn replay_arm_in_lsn_order(
+        &mut self,
+        arm: RedoArm,
+        records: &[WalRecord],
+        num_cores: usize,
+        tombstones: &nodedb_wal::TombstoneSet,
+    ) -> crate::Result<()> {
+        self.replay_reconstituted(records, num_cores, tombstones, |core, input| {
+            core.replay_one_arm(arm, input);
+        })
+    }
+
+    /// Reconstitute and merge `records`, then hand the arms' input to `run`.
+    fn replay_reconstituted(
+        &mut self,
+        records: &[WalRecord],
+        num_cores: usize,
+        tombstones: &nodedb_wal::TombstoneSet,
+        run: impl FnOnce(&mut Self, &ArmReplayInput<'_>),
     ) -> crate::Result<()> {
         // A stream marker's chunks the slice lacks are read back through this
         // core's io_uring cursor.
@@ -254,60 +428,27 @@ impl CoreLoop {
         self.enter_redo_arm(RedoArm::Reconstitute);
         let ReconstitutedReplay {
             records: redo_ops,
+            op_tags,
             grouped_origins,
             sum_targets,
-        } = reconstitute_redo_records(records, &mut contents)?;
+        } = reconstitute_redo_records(records, &mut contents, self.boot_install_cursors())?;
         // A never-durable record folds with the targets its install used.
         self.keep_replay_fold_targets(sum_targets);
-        let ordered = merge_by_lsn(records, &redo_ops);
+        let MergedReplay {
+            records: ordered,
+            ops,
+        } = merge_by_lsn(records, &redo_ops, &op_tags)?;
 
-        self.enter_redo_arm(RedoArm::Vector);
-        self.replay_vector_wal(&ordered, num_cores, tombstones, &grouped_origins);
-        crate::fail_point!(self.fail_scope(), "replay::between_engine_passes");
-        self.enter_redo_arm(RedoArm::VectorExtended);
-        self.replay_vector_extended_wal(&ordered, num_cores, tombstones);
-        // Every document row the WAL names, standalone and redo alike, in LSN
-        // order.
-        self.enter_redo_arm(RedoArm::Document);
-        self.replay_document_redo(&ordered, num_cores, tombstones);
-        self.enter_redo_arm(RedoArm::Kv);
-        self.replay_kv_wal(&ordered, num_cores, tombstones);
-        self.enter_redo_arm(RedoArm::Timeseries);
-        self.replay_timeseries_wal_with_origins(&ordered, num_cores, tombstones, &grouped_origins);
-        self.enter_redo_arm(RedoArm::Array);
-        self.replay_array_wal(&ordered, num_cores, tombstones);
-        // CRDT deltas and document/list intents share Loro state, so replay
-        // them together in global LSN order: the standalone records and the
-        // intents a committed transaction journalled as redo sub-records.
-        self.enter_redo_arm(RedoArm::Crdt);
-        self.replay_crdt_wal_ordered(&ordered, num_cores, tombstones);
-        self.enter_redo_arm(RedoArm::Fts);
-        self.replay_fts_wal(&ordered, num_cores, tombstones, &grouped_origins);
-        self.enter_redo_arm(RedoArm::Spatial);
-        self.replay_spatial_wal(&ordered, num_cores, tombstones, &grouped_origins);
-        // Graph node labels have no redb-backed durability (unlike edges,
-        // rebuilt into the CSR from the `EdgeStore` before this sequence runs) —
-        // a WAL record is their only durable backing.
-        self.enter_redo_arm(RedoArm::GraphNodeLabel);
-        self.replay_graph_node_label_wal(records, num_cores);
-
-        crate::fail_point!(self.fail_scope(), "replay::between_standalone_and_redo");
-
-        // Every graph edge version the WAL names, standalone and redo alike, in
-        // LSN order. The edges' CSR is rebuilt from the `EdgeStore` at open, so
-        // a restart re-applies versions it already holds at their exact keys,
-        // and a point-in-time restore applies the versions its base lacks.
-        self.enter_redo_arm(RedoArm::Graph);
-        self.replay_graph_redo(&ordered, num_cores, tombstones);
-        // Node-label deltas staged inside a transaction resolve to the same
-        // `GraphNodeLabelSet` / `GraphNodeLabelRemove` sub-record shape the
-        // autocommit path produces (`resolve/graph.rs`'s
-        // `serialize_node_label_deltas`); this is the ONLY decoder that
-        // routes them from a reconstituted `TransactionRedo` record, mirroring
-        // `replay_vector_extended_wal`'s role for the vector engine's extended
-        // sub-records above.
-        self.enter_redo_arm(RedoArm::GraphNodeLabelRedo);
-        self.replay_graph_node_labels_redo(&redo_ops, num_cores);
+        let input = ArmReplayInput {
+            standalone: records,
+            ordered: &ordered,
+            ops: &ops,
+            redo_ops: &redo_ops,
+            grouped_origins: &grouped_origins,
+            num_cores,
+            tombstones,
+        };
+        run(self, &input);
         Ok(())
     }
 

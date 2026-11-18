@@ -33,6 +33,10 @@ pub struct WalAppendOutcome {
     /// write's `expire_at_ms`, or a timeseries ingest's untimed rows. `None`
     /// for every other write.
     pub resolved_now_ms: Option<u64>,
+    /// The record is a stream marker. Its batched install makes effects
+    /// durable before the write's ack barrier, so the record must be durable
+    /// before the install starts.
+    pub stream_marker: bool,
 }
 
 /// Inputs for [`wal_append`]: the write's target coordinates, the plan whose
@@ -127,6 +131,7 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
     } = req;
     let wal = wal.with_event_source(event_source);
     let mut resolved_now_ms: Option<u64> = None;
+    let mut stream_marker = false;
     // Every engine routes through one exhaustive per-engine match (no `_`
     // catch-all anywhere, enforced by `deny(wildcard_enum_match_arm)`), so a
     // future write variant of any engine fails to compile until its durability
@@ -193,12 +198,16 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
             redo,
             sum_targets,
             ..
-        }) => Some(wal.append_transaction_redo_bytes(
-            tenant_id,
-            vshard_id,
-            database_id,
-            &super::redo_marker::redo_wal_payload(redo, sum_targets)?,
-        )?),
+        }) => {
+            let payload = super::redo_marker::redo_wal_payload(redo, sum_targets)?;
+            stream_marker = payload.stream_marker;
+            Some(wal.append_transaction_redo_bytes(
+                tenant_id,
+                vshard_id,
+                database_id,
+                &payload.bytes,
+            )?)
+        }
         // NotAWrite — reads / query ops / control commands. `Meta` durable
         // writes (WAL append, transaction batch, Calvin apply) are logged on
         // their own dedicated paths, never through this autocommit oracle;
@@ -214,6 +223,7 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
     Ok(WalAppendOutcome {
         lsn: appended,
         resolved_now_ms,
+        stream_marker,
     })
 }
 

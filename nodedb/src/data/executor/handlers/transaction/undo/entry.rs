@@ -78,6 +78,7 @@ pub(in crate::data::executor) struct TimeseriesTruncateUndo {
 
 /// The ended partition `install_ts_ended_partition` filed, so a rollback
 /// removes it from the registry and from disk.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct TimeseriesEndedInstallUndo {
     pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
     pub partition_key: crate::engine::timeseries::partition_registry::PartitionKey,
@@ -406,6 +407,21 @@ pub(in crate::data::executor) enum UndoEntry {
     TimeseriesTruncate(Box<TimeseriesTruncateUndo>),
     /// Undo the install of an ended timeseries partition by removing it.
     TimeseriesEndedInstall(TimeseriesEndedInstallUndo),
+    /// Undo the flush a timeseries `TRUNCATE` runs: remove the partitions it
+    /// filed and put the memtable, its reservation, the registry, the stamp
+    /// and the schema and catalog files back. Recorded before the
+    /// truncate's own entry, so it applies after it.
+    TimeseriesTruncateFlush(Box<super::timeseries_flush::TimeseriesFlushUndo>),
+    /// Undo a batched install's timeseries flush between two batches:
+    /// take its partitions back through a revert manifest, and put back
+    /// the registry entries, the stamp, the reservation and, for the
+    /// install's first flush of the collection, the schema and catalog
+    /// files.
+    TimeseriesInstallFlush(Box<super::ts_install_flush::TsInstallFlushUndo>),
+    /// Undo a batched install's array flush between two batches: publish
+    /// the manifest without its segment and with the stamps before it, then
+    /// remove the segment file.
+    ArrayInstallFlush(Box<super::array_install_flush::ArrayInstallFlushUndo>),
     /// Undo a column-stats observe by restoring the pre-image captured before
     /// the read-modify-write.
     ///

@@ -15,7 +15,9 @@
 //!
 //! The record applies all or nothing (see `passes`): a validate pass checks
 //! every sub-record before any arm writes, and the install pass rolls every
-//! write back when one fails.
+//! write back when one fails. A stream marker's content validates batch by
+//! batch as the stream pages in (see `stream_validate`), then installs batch
+//! by batch through the same arms (see `batched`).
 //!
 //! Around the arms the apply adds what a live commit owes and restart replay
 //! does not:
@@ -34,22 +36,23 @@
 use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets};
 use nodedb_types::calvin::VersionedReadEntry;
 
+use std::collections::HashSet;
+
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
-use crate::data::executor::enforcement::write_hook::target_write_set;
+use crate::data::executor::handlers::spill::run::BlockReader;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::TenantId;
+use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoStreamRef};
 
+use super::batched::{InstallFinish, StreamInstallInput};
 use super::clone_copy::clone_probe_unreadable;
 use super::passes::{RedoTarget, final_refusal, redo_wal_record};
 use super::state::TsInstalled;
 use super::stream_validate::{StreamLimits, StreamValidateInput};
-use super::streamed::STREAM_BATCH_BYTES;
 use super::sub_ops::{document_ops, kv_ops, label_ops};
 use super::validate::CommitBoundary;
-use crate::engine::timeseries::install_counts::TsInstallCounts;
 
 /// The `MetaOp::ApplyTransactionRedo` fields the handler reads.
 pub(in crate::data::executor) struct CommittedRedo<'a> {
@@ -83,9 +86,30 @@ pub(super) struct CalvinBoundary {
     pub epoch_system_ms: i64,
 }
 
+/// The refusal of an install of the record at `lsn` that `folds`
+/// materialized sums with nothing `recorded` to keep its folds: no root
+/// journal stores its write set, and no deferred store holds the folds
+/// until one does. Its folds would be durable with no write set, so every
+/// boot would judge the record never durable and fold it again. The funnel
+/// journals every committed redo it installs, so the record is refused
+/// before any write.
+pub(super) fn unrecorded_fold(lsn: Lsn, folds: bool, recorded: bool) -> Option<ErrorCode> {
+    (folds && !recorded).then(|| ErrorCode::Internal {
+        detail: format!(
+            "the committed redo at lsn {} folds materialized sums with no root journal to store \
+             its write set",
+            lsn.as_u64()
+        ),
+    })
+}
+
 impl CoreLoop {
     /// Apply one committed redo record. The request carries the LSN of the
     /// `TransactionRedo` WAL record the funnel appended for it.
+    ///
+    /// A record that folds installs under a root journal, as the funnel
+    /// installs every committed redo. A test that opened a journal itself
+    /// keeps it.
     #[cfg(test)]
     pub(in crate::data::executor) fn execute_apply_transaction_redo(
         &mut self,
@@ -93,7 +117,41 @@ impl CoreLoop {
         tid: u64,
         committed: CommittedRedo<'_>,
     ) -> Response {
-        self.install_redo(task, tid, committed, RedoOrigin::Commit)
+        let Some(lsn) = task.wal_lsn() else {
+            return self.install_redo(task, tid, committed, RedoOrigin::Commit);
+        };
+        if committed.sum_targets.is_empty() || self.sparse.db().is_deferred() {
+            return self.install_redo(task, tid, committed, RedoOrigin::Commit);
+        }
+        let mut request = task.request.clone();
+        request.wal_lsn = Some(lsn);
+        request.plan = crate::bridge::envelope::PhysicalPlan::Meta(
+            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo {
+                redo: committed.redo.to_vec(),
+                collections: committed.collections.to_vec(),
+                sum_targets: committed.sum_targets.to_vec(),
+                origin: RedoOrigin::Commit,
+                calvin: None,
+                reads: Vec::new(),
+                snapshot_ordinal: None,
+            },
+        );
+        let root = ExecutionTask::new(request);
+        let group = crate::bridge::dispatch::JournalGroup {
+            origin: lsn,
+            collection: committed.collections.first().cloned().unwrap_or_default(),
+            apply_key: 0,
+            commit_hlc: None,
+            change_position: None,
+        };
+        let permit = self.begin_task_journal(&root, group);
+        let mut response =
+            self.install_redo_authorized(&root, tid, committed, RedoOrigin::Commit, None, permit);
+        if let Err(error) = self.finish_journalled_task(&root, &mut response) {
+            response.status = crate::bridge::envelope::Status::Error;
+            response.error_code = Some(Box::new(ErrorCode::from(error)));
+        }
+        response
     }
 
     /// [`Self::install_redo_authorized`] for a committed record from `origin` that also
@@ -181,7 +239,7 @@ impl CoreLoop {
 
     /// Install one committed redo record from `origin`. When the record
     /// stored resolved timeseries batches, the response payload carries
-    /// their [`TsInstallCounts`] and `ts_installs` receives what each stored.
+    /// their `TsInstallCounts` and `ts_installs` receives what each stored.
     fn install_redo_into(
         &mut self,
         task: &ExecutionTask,
@@ -226,53 +284,49 @@ impl CoreLoop {
         // with every check the whole-record path runs below, and the same
         // first error. The validate and the install run in this one
         // synchronous task on this core, with no yield between them, so no
-        // write lands between the verdict and the install. `stream_validated`
-        // holds the validate's spill directory until the install ran.
-        let stream_validated = match &reference {
-            Some(reference) => {
-                let input = StreamValidateInput {
+        // write lands between the verdict and the install.
+        if let Some(reference) = &reference {
+            let limits = StreamLimits {
+                batch_bytes: self.redo_apply.stream_batch_bytes,
+                spill_threshold: self.query_tuning.max_txn_overlay_bytes,
+            };
+            let input = StreamValidateInput {
+                task,
+                tid,
+                marker: &redo,
+                reference,
+                origin,
+                snapshot: snapshot.map(|snapshot| snapshot.ordinal),
+                judged_at_ms,
+                lsn,
+                limits,
+            };
+            let validated = match self.validate_redo_stream(&input) {
+                Ok(validated) => validated,
+                Err(code) => return self.response_error(task, code),
+            };
+            return self.install_redo_stream(
+                StreamInstallInput {
                     task,
                     tid,
                     marker: &redo,
                     reference,
                     origin,
-                    snapshot: snapshot.map(|snapshot| snapshot.ordinal),
-                    judged_at_ms,
                     lsn,
-                    limits: StreamLimits {
-                        batch_bytes: STREAM_BATCH_BYTES,
-                        spill_threshold: self.query_tuning.max_txn_overlay_bytes,
-                    },
-                };
-                match self.validate_redo_stream(&input) {
-                    Ok(validated) => Some(validated),
-                    Err(code) => return self.response_error(task, code),
-                }
-            }
-            None => None,
-        };
-        // A stream marker installs the content its chunk records hold, with
-        // the sum targets and reads the content carries.
-        let (redo, streamed) = match reference {
-            Some(reference) => match self.streamed_content(&redo, reference) {
-                Ok(content) => (content.record, Some(content.carried)),
-                Err(code) => return self.response_error(task, code),
-            },
-            None => (redo, None),
-        };
-        let redo_bytes = streamed
-            .as_ref()
-            .map_or(committed.redo, |carried| carried.bytes.as_slice());
-        let sum_targets = streamed.as_ref().map_or(committed.sum_targets, |carried| {
-            carried.sum_targets.as_slice()
-        });
-        let snapshot = match (&streamed, snapshot) {
-            (Some(carried), Some(snapshot)) => Some(RedoSnapshot {
-                reads: &carried.reads,
-                ordinal: snapshot.ordinal,
-            }),
-            (_, snapshot) => snapshot,
-        };
+                    limits,
+                    permit,
+                    collections: committed.collections,
+                },
+                validated,
+                ts_installs,
+            );
+        }
+        // A whole record's folds persist with its write set under a root
+        // journal, or wait in an open journal's deferred commits.
+        let recorded = permit.is_some() || self.sparse.db().is_deferred();
+        if let Some(refusal) = unrecorded_fold(lsn, !committed.sum_targets.is_empty(), recorded) {
+            return self.response_error(task, refusal);
+        }
         let database_id = task.request.database_id.as_u64();
 
         // A clone copy over a row the target holds writes nothing, so no
@@ -286,24 +340,22 @@ impl CoreLoop {
         // is final on every replica. A role-guarded transition is judged
         // against the roles the record carries.
         let kv_writes = kv_ops(&redo.ops);
-        if stream_validated.is_none()
-            && let Err(error) = self.check_commit_boundary(&CommitBoundary {
-                database_id,
-                tid,
-                documents: &doc_ops,
-                kv: &kv_writes,
-                sum_targets,
-                origin,
-                user_roles: &redo.user_roles,
-                judged_at_ms,
-            })
-        {
+        if let Err(error) = self.check_commit_boundary(&CommitBoundary {
+            database_id,
+            tid,
+            documents: &doc_ops,
+            kv: &kv_writes,
+            sum_targets: committed.sum_targets,
+            origin,
+            user_roles: &redo.user_roles,
+            judged_at_ms,
+        }) {
             return self.response_error(task, error);
         }
         let kv_images = self.kv_prior_images(database_id, tid, kv_writes);
         let labels = label_ops(&redo.ops);
 
-        let record = match redo_wal_record(task, lsn, redo_bytes.to_vec()) {
+        let record = match redo_wal_record(task, lsn, committed.redo.to_vec()) {
             Ok(record) => record,
             Err(code) => return self.response_error(task, code),
         };
@@ -314,18 +366,16 @@ impl CoreLoop {
             tid,
             origin,
         };
-        if stream_validated.is_none() {
-            if let Err(refusal) = self.validate_redo_pass(&target, sum_targets) {
-                return self.response_error(task, refusal.into_code());
-            }
-            // A snapshot transaction commits only while nothing it read or
-            // replaces moved past its snapshot. Nothing is written yet.
-            if let Some(snapshot) = snapshot
-                && let Err(refusal) =
-                    self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
-            {
-                return self.response_error(task, refusal);
-            }
+        if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
+            return self.response_error(task, refusal.into_code());
+        }
+        // A snapshot transaction commits only while nothing it read or
+        // replaces moved past its snapshot. Nothing is written yet.
+        if let Some(snapshot) = snapshot
+            && let Err(refusal) =
+                self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
+        {
+            return self.response_error(task, refusal);
         }
         // The replay arms install the record. Each write they apply takes the
         // record's stamp: its vShard and its LSN.
@@ -336,128 +386,58 @@ impl CoreLoop {
         // own version in place and leaves no history.
         let apply_ordinal = self.kv_apply_ordinal();
         let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
-        let installed = self.install_redo_pass(&target, sum_targets);
+        let installed = self.install_redo_pass(&target, committed.sum_targets);
         self.kv_engine.close_write_scope(kv_scope);
-        // The install ran over the validated content: its spill directory
-        // goes.
-        drop(stream_validated);
         self.record_stamps.remove(lsn);
         let mut scope = match installed {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
-        // A crash test kills the process here: the install folded its sums
-        // into deferred store commits, and its write set is not stored. Each
-        // collection the record writes has its own point, taken in name
-        // order.
-        #[cfg(feature = "failpoints")]
-        {
-            let mut collections: Vec<&String> = committed.collections.iter().collect();
-            collections.sort();
-            for collection in collections {
-                crate::fail_point!(
-                    self.fail_scope,
-                    &format!("redo_apply::after_install_pass::{collection}")
-                );
-            }
-        }
-        let write_set = target_write_set(&scope.target_writes);
-        if let Some(permit) = permit {
-            let capture = match self.prepare_redo_capture(task, permit, &write_set) {
-                Ok(capture) => capture,
-                Err(error) => {
-                    let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
-                    let detail = error.to_string();
-                    let refusal = self.roll_back_redo(
-                        &target,
-                        std::mem::take(&mut scope.undo),
-                        ErrorCode::from(error),
-                    );
-                    self.kv_engine.close_write_scope(kv_scope);
-                    let error = crate::Error::Storage {
-                        engine: "journal".into(),
-                        detail,
-                    };
-                    let code = refusal.into_code();
-                    self.fail_stop_on_rollback_code(&code);
-                    self.fail_journalled(&error);
-                    return self.response_error(task, code);
-                }
-            };
-            if let Err(error) = self.persist_redo_capture(capture, &write_set) {
-                let mut response = self.response_error(task, error);
-                response.write_set = write_set;
-                return response;
-            }
-        }
-        // The install applied the record: every flush the settle runs, and
-        // every later checkpoint, names it. No artifact written before this
-        // point names it: its stamp prefix is an outcome floor the record was
-        // above, since the record's dispatcher window held the floor below it
-        // until this apply answers, and its applied ranges name only records
-        // applied before. So restart replay applies it, and nothing written
-        // earlier needs publishing again.
-        self.floors.applied_prefix.note_applied(lsn);
-        // The settle cannot be rolled back once it started, so a failure
-        // leaves live state restart replay does not rebuild: the core
-        // fail-stops. The funnel keeps the record for restart replay.
-        if let Err(error) = self.settle_redo_install(task, &mut scope) {
-            return self.fail_after_install(task, lsn, error, write_set);
-        }
-        // Write notes and the watermark move only once the record is
-        // settled.
-        let notes = std::mem::take(&mut scope.deferred_notes);
-        if let Err(error) = self.publish_deferred_notes(notes) {
-            return self.fail_after_install(task, lsn, error, write_set);
-        }
-        // Events leave only once the record is settled.
-        let rows = crate::wal::RowSourceIndex::new(&redo.row_sources);
-        self.send_held_events(task, std::mem::take(&mut scope.pending_events), &rows, lsn);
-        // Edge writes count only once the record settled: a rolled-back
-        // install applied none.
-        self.publish_edge_writes(scope.edge_writes);
-
-        let tenant = TenantId::new(tid);
-        // The arms noted every document and KV row by key, which folded
-        // those collections into the newest-ordinal cache. Every other
-        // collection's note forgets its cached newest ordinal.
-        let keyed: std::collections::HashSet<&str> = doc_ops
+        // The arms note every document and KV row by key. The set borrows
+        // its names: a KV collection's from the record's collection list,
+        // since the images move into the spools below. A KV collection the
+        // list does not name is never asked about.
+        let keyed: HashSet<&str> = doc_ops
             .iter()
             .map(|op| op.collection())
-            .chain(kv_images.iter().map(|image| image.collection.as_str()))
+            .chain(kv_images.iter().filter_map(|image| {
+                committed
+                    .collections
+                    .iter()
+                    .find(|collection| **collection == image.collection)
+                    .map(String::as_str)
+            }))
             .collect();
-        for collection in committed.collections {
-            if keyed.contains(collection.as_str()) {
-                self.publish_applied(stamp);
-            } else if let Err(error) =
-                self.note_settled_collection(task.request.database_id, tenant, collection, stamp)
-            {
-                return self.fail_after_install(task, lsn, error, write_set);
-            }
+        // The whole record sits in RAM already, so its spools never spill.
+        for image in kv_images {
+            scope.held.kv_priors.push(image);
         }
-        self.emit_committed_redo_events(task, scope.doc_writes, kv_images, labels, &rows);
-        self.emit_committed_publishes(task, &redo.publishes);
-
-        let mut response = self.response_ok(task);
-        response.write_set = write_set;
-        // The writer reports each resolved batch's apply count, not its
-        // resolve's: the install rejected the rows that conflict with the
-        // schema at this record's position.
-        let counts = TsInstallCounts::new(
-            scope
-                .ts_installs
-                .iter()
-                .map(|installed| installed.count.clone())
-                .collect(),
-        );
-        if !counts.is_empty() {
-            match counts.to_bytes() {
-                Ok(bytes) => response.payload = crate::bridge::envelope::Payload::from_vec(bytes),
-                Err(error) => response.error_code = Some(Box::new(ErrorCode::from(error))),
-            }
+        for label in labels {
+            scope.held.labels.push(label);
         }
-        ts_installs.append(&mut scope.ts_installs);
-        response
+        for group in redo.row_sources {
+            scope.held.row_sources.add(group);
+        }
+        for publish in redo.publishes {
+            scope.held.publishes.push(publish);
+        }
+        let reader = BlockReader::default();
+        self.finish_redo_install(
+            InstallFinish {
+                task,
+                tid,
+                lsn,
+                stamp,
+                apply_ordinal,
+                permit,
+                collections: committed.collections,
+                keyed: &keyed,
+                reader: &reader,
+                batched: None,
+            },
+            scope,
+            ts_installs,
+        )
     }
 }
 

@@ -17,7 +17,8 @@
 //! Constraint checks ran before the first write (see `validate`), so the
 //! writes run with `enforce = false`. In the install pass every written row
 //! records the undo entries that reverse it and the target rows it folded
-//! into.
+//! into. Under a batched install the row's transaction also records the
+//! fold ledger and the target rows (see `fold_ledger`).
 
 use nodedb_types::Surrogate;
 use redb::WriteTransaction;
@@ -37,7 +38,7 @@ use crate::engine::document::store::{RowIdentity, StorageKey};
 use crate::event::WriteOp;
 use crate::types::Lsn;
 
-use super::state::{AppliedDocWrite, target_doc_write};
+use super::state::AppliedDocWrite;
 
 /// One document row a committed redo record writes.
 pub(in crate::data::executor) struct CommittedDocWrite<'a> {
@@ -48,6 +49,9 @@ pub(in crate::data::executor) struct CommittedDocWrite<'a> {
     pub document_id: &'a str,
     pub surrogate: u32,
     pub record_lsn: u64,
+    /// The row's index among its record's ops. `None` for a row that is no
+    /// op of a redo record.
+    pub op: Option<u64>,
     /// The write is a clone copy: a source row's version, which changes
     /// nothing a reader of the clone sees, so it emits no event.
     pub clone_copy: bool,
@@ -229,7 +233,10 @@ impl CoreLoop {
                 ));
             }
         };
-        if let Err(error) = commit_row(txn) {
+        if let Err(error) = self
+            .write_fold_ledger_in_txn(&txn, row, &target_writes)
+            .and_then(|()| commit_row(txn))
+        {
             return Err(abort_after_apply(
                 self,
                 &mut chain,
@@ -326,7 +333,10 @@ impl CoreLoop {
             },
             _ => Vec::new(),
         };
-        if let Err(error) = commit_row(txn) {
+        if let Err(error) = self
+            .write_fold_ledger_in_txn(&txn, row, &target_writes)
+            .and_then(|()| commit_row(txn))
+        {
             let undo = std::mem::take(&mut outcome.memory_undo);
             return Err(abandon_write(
                 self,
@@ -384,7 +394,7 @@ impl CoreLoop {
 
     fn record_committed_doc_write(&mut self, write: AppliedDocWrite) {
         if let Some(scope) = self.redo_apply.scope.as_mut() {
-            scope.doc_writes.push(write);
+            scope.hold_doc_write(write);
         }
     }
 
@@ -395,12 +405,7 @@ impl CoreLoop {
         targets: Vec<crate::data::executor::enforcement::materialized_sum::apply::TargetWrite>,
     ) {
         match self.redo_apply.scope.as_mut() {
-            Some(scope) => {
-                for target in targets {
-                    scope.doc_writes.push(target_doc_write(&target));
-                    scope.target_writes.push(target);
-                }
-            }
+            Some(scope) => scope.hold_targets(&targets),
             None => self.record_replay_fold_targets(targets),
         }
     }

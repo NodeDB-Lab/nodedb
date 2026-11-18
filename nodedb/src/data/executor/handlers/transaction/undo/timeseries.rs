@@ -15,6 +15,48 @@ use crate::types::{DatabaseId, TenantId};
 
 use super::{TimeseriesEndedInstallUndo, TimeseriesIngestUndo, TimeseriesTruncateUndo, UndoError};
 
+impl TimeseriesIngestUndo {
+    /// Heap bytes the pre-image holds: the memtable copy, the last-value
+    /// cache and the series catalog.
+    pub(in crate::data::executor) fn held_bytes(&self) -> usize {
+        self.memtable_memory_bytes_before.unwrap_or(0)
+            + self
+                .last_value_cache_before
+                .as_ref()
+                .map_or(0, |cache| cache.heap_bytes())
+            + self
+                .series_catalog_before
+                .as_ref()
+                .map_or(0, |catalog| catalog.memory_bytes())
+    }
+}
+
+impl TimeseriesTruncateUndo {
+    /// Heap bytes the pre-image holds: the partitions it ended, the
+    /// aggregate image, the last-value cache and the series catalog.
+    pub(in crate::data::executor) fn held_bytes(&self) -> usize {
+        let ended = self
+            .ended
+            .iter()
+            .map(|partition| {
+                partition.key.dir_name.len()
+                    + partition.dir_name.len()
+                    + std::mem::size_of_val(partition)
+            })
+            .sum::<usize>();
+        ended
+            + self.cagg_image.as_ref().map_or(0, Vec::len)
+            + self
+                .last_value_cache
+                .as_ref()
+                .map_or(0, |cache| cache.heap_bytes())
+            + self
+                .series_catalog
+                .as_ref()
+                .map_or(0, |catalog| catalog.memory_bytes())
+    }
+}
+
 impl CoreLoop {
     /// The complete in-memory pre-image of a timeseries collection before an
     /// ingest mutates it: the memtable, its config and resident footprint,

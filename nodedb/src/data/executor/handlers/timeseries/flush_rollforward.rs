@@ -26,6 +26,7 @@ use crate::engine::timeseries::columnar_memtable::ColumnarDrainResult;
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 use crate::engine::timeseries::partition_registry::{PartitionEntry, PartitionRegistry};
 
+use super::flush::TsPartitionFold;
 use super::flush_commit::{FlushManifest, current_dir, install_flush, read_manifest};
 use super::partition_read::{partition_corrupt, read_ts_partition};
 
@@ -63,7 +64,7 @@ impl CoreLoop {
         };
         let committed =
             read_committed_flush(&ts_dir, manifest, self.segment_keks.ts_segment_kek.as_ref())?;
-        self.install_committed_flush(key, &ts_dir, committed, now_ms)?;
+        self.install_committed_flush(key, &ts_dir, committed, now_ms, TsPartitionFold::Now)?;
         Ok(true)
     }
 
@@ -90,19 +91,27 @@ impl CoreLoop {
 
     /// Install `committed` and apply it to this core's state: the memtable
     /// rows it holds leave, its stamp joins the collection stamp, and its
-    /// partitions are registered and folded.
+    /// partitions are registered and folded as `fold` says.
     pub(in crate::data::executor) fn install_committed_flush(
         &mut self,
         key: &TsCollectionKey,
         ts_dir: &Path,
         committed: CommittedFlush,
         now_ms: i64,
+        fold: TsPartitionFold,
     ) -> crate::Result<()> {
         let CommittedFlush {
             manifest,
             partitions,
             stamp,
         } = committed;
+        // A test fails the install here, once the flush committed.
+        crate::fail_point_err!("timeseries::flush::before_install", |detail: String| {
+            crate::Error::Storage {
+                engine: "timeseries".into(),
+                detail,
+            }
+        });
         if let Err(e) = install_flush(ts_dir, &manifest) {
             crate::diag::timeseries_flush_not_installed(&e, key.0.as_u64(), key.1.as_u64(), &key.2);
             return Err(e);
@@ -160,14 +169,7 @@ impl CoreLoop {
         // and takes no row-level-security gate, as the flush's fold takes
         // none.
         for partition in &partitions {
-            self.continuous_agg_mgr.on_flush(
-                key.0.as_u64(),
-                key.1.as_u64(),
-                &key.2,
-                &partition.name,
-                &partition.rows,
-                now_ms,
-            );
+            self.fold_flushed_partition(key, &partition.name, &partition.rows, now_ms, fold);
         }
         tracing::info!(
             collection = %key.2,

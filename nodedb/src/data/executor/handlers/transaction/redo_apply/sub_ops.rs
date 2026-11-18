@@ -12,6 +12,7 @@
 
 use nodedb_wal::record::RecordType;
 
+use crate::data::executor::handlers::spill::tiered::SpillWeight;
 use crate::wal::{DocumentDeleteRedo, DocumentPutRedo, RedoSubRecord};
 
 /// A document write inside a redo record.
@@ -129,11 +130,18 @@ fn restored_live_put(payload: &[u8]) -> Option<RedoKvOp> {
 }
 
 /// A graph node-label delta inside a redo record.
+#[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(super) struct RedoLabelOp {
     pub node_id: String,
     pub labels: Vec<String>,
     /// `true` for a label set, `false` for a removal.
     pub is_set: bool,
+}
+
+impl SpillWeight for RedoLabelOp {
+    fn spill_weight(&self) -> usize {
+        self.node_id.spill_weight() + self.labels.spill_weight() + 1
+    }
 }
 
 /// The node-label deltas in `ops`, in record order.
@@ -243,5 +251,17 @@ mod tests {
             .expect("encode bitemporal delete");
         let docs = document_ops(&[sub(RecordType::Delete, payload)]);
         assert!(matches!(docs[0], RedoDocOp::Delete { surrogate: 4, .. }));
+    }
+
+    #[test]
+    fn a_label_op_round_trips() {
+        let op = RedoLabelOp {
+            node_id: "n1".into(),
+            labels: vec!["Person".into(), "Admin".into()],
+            is_set: false,
+        };
+        let bytes = zerompk::to_msgpack_vec(&op).expect("encode");
+        let back: RedoLabelOp = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(back, op);
     }
 }

@@ -25,7 +25,7 @@ use crate::engine::graph::edge_store::stats::table::{GRAPH_STATS, SummaryRow, su
 use crate::engine::graph::edge_store::store::{EDGES, EdgeStore, redb_err};
 
 /// One edge whose current state a cut changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct EdgeFlip {
     pub src: String,
     pub label: String,
@@ -39,7 +39,7 @@ pub struct EdgeFlip {
 }
 
 /// What one cut install changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct EdgeCutInstall {
     pub collection: String,
     pub cut: i64,

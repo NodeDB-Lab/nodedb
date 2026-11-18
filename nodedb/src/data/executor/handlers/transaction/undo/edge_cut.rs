@@ -14,6 +14,7 @@ use crate::engine::graph::edge_store::EdgeCutInstall;
 use crate::types::{DatabaseId, TenantId};
 
 /// What one cut install changed.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct EdgeCutUndo {
     pub database_id: u64,
     pub tid: u64,

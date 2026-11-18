@@ -5,6 +5,7 @@ pub mod convert;
 pub mod core;
 pub mod display;
 pub mod float_text;
+pub mod heap;
 pub mod json;
 pub mod msgpack;
 pub mod raw_bytes;

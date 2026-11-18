@@ -121,6 +121,8 @@ pub struct GroupOriginAppend {
     pub origin: GroupOrigin,
     /// See `WalAppendOutcome::resolved_now_ms`.
     pub resolved_now_ms: Option<u64>,
+    /// See `WalAppendOutcome::stream_marker`.
+    pub stream_marker: bool,
 }
 
 /// Append the origin of the group of `req.plan`, a write that journals rows
@@ -156,6 +158,7 @@ pub fn append_group_origin(req: WalAppendRequest<'_>) -> crate::Result<GroupOrig
         return Ok(GroupOriginAppend {
             origin: GroupOrigin { lsn },
             resolved_now_ms: None,
+            stream_marker: false,
         });
     }
     let outcome = wal_append(req)?;
@@ -169,6 +172,7 @@ pub fn append_group_origin(req: WalAppendRequest<'_>) -> crate::Result<GroupOrig
     Ok(GroupOriginAppend {
         origin: GroupOrigin { lsn },
         resolved_now_ms: outcome.resolved_now_ms,
+        stream_marker: outcome.stream_marker,
     })
 }
 

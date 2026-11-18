@@ -3,7 +3,7 @@
 use super::*;
 use crate::bridge::envelope::Status;
 use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
-use crate::types::Lsn;
+use crate::types::{Lsn, TenantId};
 use crate::wal::RedoSubRecord;
 use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{StorageKey, Surrogate};

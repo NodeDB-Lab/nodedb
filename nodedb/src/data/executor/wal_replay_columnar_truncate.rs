@@ -124,10 +124,13 @@ impl TruncateFloors {
 impl CoreLoop {
     /// Replay one truncate record of either columnar-family engine. `record`
     /// is a `ColumnarTruncate` or `TimeseriesTruncate` record already routed
-    /// to this core; the record type picks the engine.
+    /// to this core; the record type picks the engine. `op` is the record's
+    /// op index in its committed redo record, when it is a sub-record of
+    /// one.
     pub(in crate::data::executor) fn replay_truncate_record(
         &mut self,
         record: &WalRecord,
+        op: Option<u64>,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
         let database_id = DatabaseId::new(record.header.database_id);
@@ -142,7 +145,7 @@ impl CoreLoop {
                 tombstones,
             )
         } else {
-            self.replay_timeseries_truncate(record, database_id, tombstones)
+            self.replay_timeseries_truncate(record, op, database_id, tombstones)
         }
     }
 
@@ -237,10 +240,13 @@ impl CoreLoop {
     /// Replay one `TimeseriesTruncate` record through the live handler, at
     /// the ordinal the record carries. Gated by the collection's replay
     /// stamp: a truncate it names already took effect, and re-applying it
-    /// would end rows that applied after it.
+    /// would end rows that applied after it. A truncate that is op `k` of a
+    /// committed record is named by op, through `k + 1`, in the stamp's
+    /// partial records, or whole with its record.
     pub(in crate::data::executor) fn replay_timeseries_truncate(
         &mut self,
         wal_record: &WalRecord,
+        op: Option<u64>,
         database_id: DatabaseId,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
@@ -268,7 +274,15 @@ impl CoreLoop {
         }
         let tid = TenantId::new(tenant_id);
         let key = (database_id, tid, record.collection.clone());
-        if self.replay_watermark_skips(self.ts_truncate_named(&key, record_lsn)) {
+        // A truncate that is an op of a committed record is named by op: a
+        // record can truncate a collection twice. One named whole with its
+        // record took effect too. A standalone truncate is named by LSN.
+        let named = match op {
+            Some(_) => self.ts_rows_named(&key, record_lsn),
+            None => self.ts_truncate_named(&key, record_lsn),
+        };
+        if self.replay_watermark_skips(named) || self.ts_partial_replay_skips(&key, record_lsn, op)
+        {
             return false;
         }
         if self.claim_for_validation() {
@@ -302,10 +316,19 @@ impl CoreLoop {
         let mut undo = Vec::new();
         let recording = self.recording_redo_undo();
         let outer = self.enter_record_ordinal(wal_record);
-        let response = self.execute_timeseries_truncate(
+        // A truncate inside a committed record flushes the record's ops
+        // before it, and its stamps name those ops in part.
+        let before =
+            self.record_op(op)
+                .map(|ops_through| crate::types::partial_record::PartialRecord {
+                    lsn: record_lsn,
+                    ops_through,
+                });
+        let response = self.execute_timeseries_truncate_in_record(
             &task,
             &record.collection,
             recording.then_some(&mut undo),
+            before,
         );
         self.apply_scope.replicated_ordinal = outer;
         self.record_redo_undo(undo);

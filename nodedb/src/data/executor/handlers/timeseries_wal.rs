@@ -5,8 +5,10 @@
 //! On startup, replays `TimeseriesBatch` records into the per-core
 //! columnar memtable. A record the collection's replay stamp names is in a
 //! partition already, and is skipped
-//! (`timeseries_checkpoint::stamp`). A committed-redo apply runs the same arm
-//! without that skip (`replay_policy`).
+//! (`timeseries_checkpoint::stamp`). So is each op of a record the stamp
+//! names in part: a batched install flushed it between two batches. A
+//! committed-redo apply runs the same arm without either skip
+//! (`replay_policy`).
 //!
 //! Restart replay walks the records in LSN order and sets the replay cursor
 //! to the last LSN it passed. A flush or truncate during the pass stamps
@@ -90,15 +92,20 @@ impl CoreLoop {
     ) {
         self.replay_timeseries_wal_with_origins(
             records,
+            &crate::wal::redo::op_index::RedoOpIndex::default(),
             num_cores,
             tombstones,
             &crate::wal::redo::replay_origin::GroupedReplayOrigins::default(),
         );
     }
 
+    /// [`Self::replay_timeseries_wal`] over a merged stream. `ops` holds the
+    /// op index of each record of `records`: a record a partition holds in
+    /// part skips the ops the partition holds (`ts_partial_replay_skips`).
     pub(crate) fn replay_timeseries_wal_with_origins(
         &mut self,
         records: &[nodedb_wal::WalRecord],
+        ops: &crate::wal::redo::op_index::RedoOpIndex,
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
         grouped_origins: &crate::wal::redo::replay_origin::GroupedReplayOrigins,
@@ -151,7 +158,7 @@ impl CoreLoop {
             self.begin_ts_record(records, index, num_cores, &mut current);
 
             if is_truncate {
-                if self.replay_truncate_record(record, tombstones) {
+                if self.replay_truncate_record(record, ops.of(index), tombstones) {
                     replayed += 1;
                 } else {
                     skipped += 1;
@@ -308,6 +315,12 @@ impl CoreLoop {
             // A partition holds this record. A
             // restart gate only: see `replay_policy`.
             if self.ts_replay_skips(&key, record_lsn) {
+                skipped += 1;
+                continue;
+            }
+            // A partition holds this op of a record a batched install
+            // flushed in part. A restart gate only.
+            if self.ts_partial_replay_skips(&key, record_lsn, ops.of(index)) {
                 skipped += 1;
                 continue;
             }

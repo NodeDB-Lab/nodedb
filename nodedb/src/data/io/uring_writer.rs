@@ -102,6 +102,27 @@ impl UringWriter {
         Self::create(path, DEFAULT_BUF_SIZE)
     }
 
+    /// Open the spill file at `path` for writes from `offset` on, creating
+    /// it when absent. Bytes at and past `offset` are written over, never
+    /// truncated first. `None` when io_uring is unavailable or the file
+    /// cannot be opened.
+    pub fn open_at(path: &Path, offset: u64) -> Option<Self> {
+        let ring = io_uring::IoUring::new(QUEUE_DEPTH).ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .ok()?;
+        Some(Self {
+            ring,
+            file,
+            path: path.to_path_buf(),
+            staging: Vec::with_capacity(DEFAULT_BUF_SIZE),
+            offset,
+        })
+    }
+
     /// Append `data` to the spill file at the current offset.
     ///
     /// Issues `IORING_OP_WRITE` at `self.offset` and loops on short writes:
@@ -212,6 +233,11 @@ impl UringWriter {
 
     /// io_uring spill writing is Linux-only. Non-Linux builds return `None`.
     pub fn new(_path: &Path) -> Option<Self> {
+        None
+    }
+
+    /// io_uring spill writing is Linux-only. Non-Linux builds return `None`.
+    pub fn open_at(_path: &Path, _offset: u64) -> Option<Self> {
         None
     }
 

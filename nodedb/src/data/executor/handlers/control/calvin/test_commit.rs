@@ -2,7 +2,8 @@
 
 //! Test driver for a committed Calvin transaction on one core: stage the
 //! plans, resolve them into the redo record, and install the record as the
-//! slice's stamped `ApplyTransactionRedo`.
+//! slice's stamped `ApplyTransactionRedo`. A slice that folds installs
+//! under a root journal, as the funnel installs it.
 
 use nodedb_physical::physical_plan::{CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin};
 
@@ -111,9 +112,33 @@ impl CoreLoop {
             reads: Vec::new(),
             snapshot_ordinal: None,
         });
+        let folds = !redo_sum_targets(plans).is_empty();
         let mut request = task.request.clone();
         request.wal_lsn = Some(Lsn::new(lsn));
+        if !folds || self.sparse.db().is_deferred() {
+            let install_task = ExecutionTask::new(request);
+            return self.execute_plan(&install_task, &install);
+        }
+        // A slice that folds installs under a root journal, as the funnel
+        // installs every committed redo on every replica.
+        request.plan = install;
         let install_task = ExecutionTask::new(request);
-        self.execute_plan(&install_task, &install)
+        let group = crate::bridge::dispatch::JournalGroup {
+            origin: Lsn::new(lsn),
+            collection: written_collections(plans)
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+            apply_key: 0,
+            commit_hlc: None,
+            change_position: None,
+        };
+        let permit = self.begin_task_journal(&install_task, group);
+        let mut response = self.execute_with_journal(&install_task, permit);
+        if let Err(error) = self.finish_journalled_task(&install_task, &mut response) {
+            response.status = Status::Error;
+            response.error_code = Some(Box::new(crate::bridge::envelope::ErrorCode::from(error)));
+        }
+        response
     }
 }

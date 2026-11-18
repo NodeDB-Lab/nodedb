@@ -36,13 +36,16 @@
 //! `remove_node_label` never vivifies (it no-ops on an unknown node or unknown
 //! label), so it is identical to live.
 //!
-//! ## One record, one version commit
+//! ## One batch, one version commit
 //!
 //! A committed transaction's redo record carries one sub-record per staged
-//! node delta, all at the record's LSN. The versions of all of them commit in
-//! one storage transaction with the record's LSN mark. A crash therefore
-//! leaves the record versioned whole or not at all, and replay never skips a
-//! version of a record whose mark landed.
+//! node delta, all at the record's LSN. The versions of one pass over them
+//! commit in one storage transaction with the record's LSN mark: the whole
+//! record, or one batch of a batched install. A crash after a batch leaves
+//! the mark and part of the versions. That install's cursor survives the
+//! crash, and replay versions every op of a record with a cursor again, at
+//! the ordinal the op carries. A rollback lowers the mark back to what the
+//! install found, so replay versions a rolled-back record that applies.
 
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
@@ -130,10 +133,14 @@ impl CoreLoop {
         }
         match self
             .edge_store
-            .put_node_label_versions(&versions, Some(lsn))
+            .put_node_label_versions_marked(&versions, Some(lsn))
         {
-            Ok(replaced) => {
+            Ok(put) => {
+                let replaced = put.replaced;
                 if recording {
+                    if let Some(scope) = self.redo_apply.scope.as_mut() {
+                        scope.label_mark_before.get_or_insert(put.mark_before);
+                    }
                     let undo: Vec<_> = versions
                         .iter()
                         .zip(replaced)

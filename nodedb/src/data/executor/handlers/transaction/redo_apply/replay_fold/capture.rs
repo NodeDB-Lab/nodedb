@@ -7,18 +7,28 @@
 //! group's parts exactly as it journals a live install's stored write set.
 //! The record's WAL copy already holds its origin, so the stored plan never
 //! journals the origin again. It names the record as its WAL copy holds it.
+//!
+//! A batched install of the record stored the target row writes its
+//! durable batches made, in write order. The write set holds them, then the
+//! writes replay folds for the ops above the ledger. That is the entry
+//! sequence the record's whole install produces: one entry per target
+//! write.
 
 use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets};
 
+use crate::bridge::envelope::WriteSetEntry;
 use crate::data::executor::enforcement::write_hook::target_write_set;
 use crate::wal::{CapturedEntry, OriginAppend, WriteSetCapture};
 
 use super::state::OpenFold;
 
-/// The write set of the record `open` folded. `targets` are its sum targets.
+/// The write set of the record `open` folded. `targets` are its sum
+/// targets. `installed` are the target row writes a batched install of the
+/// record stored, in write order, all before every write `open` holds.
 pub(super) fn fold_capture(
     open: &OpenFold,
     targets: Vec<RedoSumTargets>,
+    installed: Vec<WriteSetEntry>,
 ) -> crate::Result<WriteSetCapture> {
     let collections: Vec<String> = targets
         .iter()
@@ -39,8 +49,9 @@ pub(super) fn fold_capture(
         detail: format!("replay fold write set plan encode: {e}"),
     })?;
     let mut schemas = Vec::new();
-    let entries = target_write_set(&open.target_writes)
+    let entries = installed
         .iter()
+        .chain(target_write_set(&open.target_writes).iter())
         .map(|entry| CapturedEntry::from_entry(entry, &mut schemas))
         .collect::<crate::Result<Vec<_>>>()?;
     Ok(WriteSetCapture {

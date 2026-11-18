@@ -19,7 +19,7 @@ use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 
-use super::state::{CollectionKey, DeferredNote, DeferredNoteKind, RedoApplyPass, RedoApplyScope};
+use super::state::{CollectionKey, RedoApplyPass, RedoApplyScope};
 
 impl CoreLoop {
     /// Answer `error` for the record at `lsn`, which installed and then
@@ -47,22 +47,6 @@ impl CoreLoop {
         let mut response = self.response_error(task, error);
         response.write_set = write_set;
         response
-    }
-
-    /// Publish the write notes the install held back until the record
-    /// settled.
-    pub(super) fn publish_deferred_notes(&mut self, notes: Vec<DeferredNote>) -> crate::Result<()> {
-        for note in notes {
-            match note.kind {
-                DeferredNoteKind::Wipe => {
-                    self.publish_collection_wipe(note.db, note.tenant, &note.collection, note.stamp)
-                }
-                DeferredNoteKind::Row(key) => {
-                    self.publish_write(note.db, note.tenant, &note.collection, key, note.stamp)
-                }
-            }?;
-        }
-        Ok(())
     }
 
     /// Record that the install wrote rows into the columnar collection `key`.

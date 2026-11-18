@@ -3,6 +3,7 @@
 //! Undo log types and rollback logic for transaction batches.
 
 pub(super) mod apply;
+pub(in crate::data::executor) mod array_install_flush;
 pub(super) mod columnar_insert;
 pub(in crate::data::executor) mod crdt_collection;
 pub(super) mod document;
@@ -21,10 +22,13 @@ pub(super) mod rollback;
 pub(in crate::data::executor) mod row_version;
 pub(super) mod spatial;
 pub(in crate::data::executor) mod spatial_row;
+pub(in crate::data::executor) mod spilled;
 pub(super) mod stats;
 pub(super) mod sync_hwm;
 pub(super) mod timeseries;
+pub(in crate::data::executor) mod timeseries_flush;
 pub(super) mod truncate_columnar;
+pub(in crate::data::executor) mod ts_install_flush;
 pub(in crate::data::executor) mod vector_payload;
 pub(in crate::data::executor) mod vector_truncate;
 pub(in crate::data::executor) mod vector_write;

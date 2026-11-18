@@ -117,6 +117,12 @@ impl CoreLoop {
         self.maintenance.version_purge.commit_window_ns = super::version_purge::window_ns(window);
     }
 
+    /// Set the bytes of whole framed records one batch of a chunked redo's
+    /// install holds.
+    pub fn set_redo_stream_batch_bytes(&mut self, bytes: usize) {
+        self.redo_apply.stream_batch_bytes = bytes;
+    }
+
     pub fn set_vector_tuning(&mut self, tuning: nodedb_types::config::tuning::VectorTuning) {
         self.vector_tuning = tuning;
     }

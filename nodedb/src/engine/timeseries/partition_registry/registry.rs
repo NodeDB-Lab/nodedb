@@ -17,6 +17,7 @@ use super::rate::RateEstimator;
 const DAY_MS: u64 = 86_400_000;
 
 /// Registry of all partitions for one timeseries collection.
+#[derive(Clone)]
 pub struct PartitionRegistry {
     /// Partitions keyed by `min_ts` and directory name.
     pub(super) partitions: BTreeMap<PartitionKey, PartitionEntry>,

@@ -22,25 +22,42 @@ use nodedb_physical::physical_plan::RedoSumTargets;
 
 use crate::wal::{RedoRecord, RedoStreamRef};
 
+/// What the WAL record of a committed redo holds.
+pub(super) struct RedoWalPayload<'a> {
+    pub bytes: Cow<'a, [u8]>,
+    /// The redo is a stream marker.
+    pub stream_marker: bool,
+}
+
 /// The bytes the WAL record of the redo `redo` holds. `sum_targets` is the
 /// resolution the install of `redo` folds with.
 pub(super) fn redo_wal_payload<'a>(
     redo: &'a [u8],
     sum_targets: &[RedoSumTargets],
-) -> crate::Result<Cow<'a, [u8]>> {
+) -> crate::Result<RedoWalPayload<'a>> {
     let mut record = RedoRecord::from_bytes(redo)?;
     if RedoStreamRef::of_marker(&record)?.is_some() {
-        if record.row_changes.is_empty() {
-            return Ok(Cow::Borrowed(redo));
-        }
-        record.row_changes = Vec::new();
-        return Ok(Cow::Owned(record.to_bytes()?));
+        let bytes = if record.row_changes.is_empty() {
+            Cow::Borrowed(redo)
+        } else {
+            record.row_changes = Vec::new();
+            Cow::Owned(record.to_bytes()?)
+        };
+        return Ok(RedoWalPayload {
+            bytes,
+            stream_marker: true,
+        });
     }
-    if record.sum_targets.as_slice() == sum_targets {
-        return Ok(Cow::Borrowed(redo));
-    }
-    record.sum_targets = sum_targets.to_vec();
-    Ok(Cow::Owned(record.to_bytes()?))
+    let bytes = if record.sum_targets.as_slice() == sum_targets {
+        Cow::Borrowed(redo)
+    } else {
+        record.sum_targets = sum_targets.to_vec();
+        Cow::Owned(record.to_bytes()?)
+    };
+    Ok(RedoWalPayload {
+        bytes,
+        stream_marker: false,
+    })
 }
 
 #[cfg(test)]
@@ -104,9 +121,9 @@ mod tests {
             .expect("marker")
             .to_bytes()
             .expect("encode");
-        let stored =
-            RedoRecord::from_bytes(&redo_wal_payload(&marker, &targets()).expect("payload"))
-                .expect("decode");
+        let payload = redo_wal_payload(&marker, &targets()).expect("payload");
+        assert!(payload.stream_marker);
+        let stored = RedoRecord::from_bytes(&payload.bytes).expect("decode");
         assert!(stored.row_changes.is_empty());
         assert!(
             stored.sum_targets.is_empty(),
@@ -121,10 +138,9 @@ mod tests {
     #[test]
     fn an_inline_redo_with_no_targets_is_stored_verbatim() {
         let inline = inline().to_bytes().expect("encode");
-        assert!(matches!(
-            redo_wal_payload(&inline, &[]).expect("payload"),
-            Cow::Borrowed(_)
-        ));
+        let payload = redo_wal_payload(&inline, &[]).expect("payload");
+        assert!(!payload.stream_marker);
+        assert!(matches!(payload.bytes, Cow::Borrowed(_)));
     }
 
     /// A whole record's WAL copy carries the targets its install folds with,
@@ -134,7 +150,7 @@ mod tests {
         let record = inline();
         let bytes = record.to_bytes().expect("encode");
         let stored =
-            RedoRecord::from_bytes(&redo_wal_payload(&bytes, &targets()).expect("payload"))
+            RedoRecord::from_bytes(&redo_wal_payload(&bytes, &targets()).expect("payload").bytes)
                 .expect("decode");
         assert_eq!(stored.sum_targets, targets());
         assert_eq!(stored.ops, record.ops);

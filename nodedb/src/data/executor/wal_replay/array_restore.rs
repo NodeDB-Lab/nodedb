@@ -11,7 +11,8 @@
 //! every restored version.
 //!
 //! The arm honours the array manifest's replay stamp as every array record
-//! does: a record a flushed segment already holds replays nothing.
+//! does: a record a flushed segment already holds replays nothing, and an
+//! op of a record the manifest names in part replays nothing either.
 
 use nodedb_wal::WalRecord;
 
@@ -31,10 +32,12 @@ pub(super) enum RestoreReplay {
 }
 
 impl CoreLoop {
-    /// Install the restored cells `redo` of `record`.
+    /// Install the restored cells `redo` of `record`, the op `op` of its
+    /// committed redo record when it is a sub-record of one.
     pub(super) fn replay_array_restore(
         &mut self,
         record: &WalRecord,
+        op: Option<u64>,
         redo: ArrayRestoreRedo,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> RestoreReplay {
@@ -76,7 +79,9 @@ impl CoreLoop {
                 return RestoreReplay::Skipped;
             }
         }
-        if self.array_replay_skips(&array_id, record_lsn) {
+        if self.array_replay_skips(&array_id, record_lsn)
+            || self.array_partial_replay_skips(&array_id, record_lsn, op)
+        {
             return RestoreReplay::Skipped;
         }
         if self.claim_for_validation() {

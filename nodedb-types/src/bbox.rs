@@ -19,7 +19,8 @@ use zerompk::{FromMessagePack, ToMessagePack};
 /// Derived from the kind of the SRID of the geometries it bounds
 /// ([`BboxSpace::of`]). Union and enlargement depend on it: only
 /// geographic longitude wraps at ±180°.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ToMessagePack, FromMessagePack)]
+#[msgpack(c_enum)]
 pub enum BboxSpace {
     /// Longitude / latitude degrees. Longitude wraps at the anti-meridian.
     #[default]

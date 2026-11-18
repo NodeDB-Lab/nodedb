@@ -52,6 +52,16 @@ impl SpillSpace {
         )
     }
 
+    /// Whether a spill created the directory.
+    pub(in crate::data::executor) fn created(&self) -> bool {
+        self.created
+    }
+
+    /// The directory the spills write into.
+    pub(in crate::data::executor) fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
     pub(in crate::data::executor) fn threshold(&self) -> usize {
         self.threshold
     }

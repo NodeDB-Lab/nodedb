@@ -4,6 +4,6 @@ mod capture;
 mod state;
 mod step;
 #[cfg(test)]
-mod tests;
+pub(in crate::data::executor::handlers::transaction::redo_apply) mod tests;
 
 pub(in crate::data::executor) use state::ReplayFolds;

@@ -26,11 +26,29 @@ use crate::engine::sparse::fts_redb::tables::POSTINGS;
 use crate::engine::storage_bytes::StorageDelta;
 
 /// The analyzed token streams one document is indexed with, one per index.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct FtsDocImage {
     /// `(field_key, tokens)` per index the document holds postings in. The
     /// empty field key is the whole-document index.
     scopes: Vec<(String, Vec<String>)>,
+}
+
+impl FtsDocImage {
+    /// Heap bytes the field keys and their token lists hold.
+    pub fn heap_bytes(&self) -> usize {
+        let header = std::mem::size_of::<String>();
+        self.scopes
+            .iter()
+            .map(|(field, tokens)| {
+                std::mem::size_of::<(String, Vec<String>)>()
+                    + field.len()
+                    + tokens
+                        .iter()
+                        .map(|token| header + token.len())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
 }
 
 impl InvertedIndex {

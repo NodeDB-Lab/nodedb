@@ -8,9 +8,9 @@
 //! (`document::committed_document_put`), with the sum targets the record's
 //! WAL copy carries.
 //!
-//! The record's store commits run deferred, as the install's did. Once its
-//! last document write ran, one durable commit stores the record's write
-//! set and persists every deferred commit before it. That write set is the
+//! The record's store commits run deferred, as a whole-record install's
+//! did. Once its last document write ran, one durable commit stores the
+//! record's write set and persists every deferred commit before it. That write set is the
 //! record's durable marker:
 //!
 //! - A crash before it reverts every write of the record. The next boot
@@ -25,6 +25,8 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::fail_stop::FailStopCause;
+use crate::data::executor::core_loop::write_set_journal::InstallRows;
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::wal::{NeverDurableRedos, ReplayedCaptures};
 
@@ -32,12 +34,29 @@ use super::capture::fold_capture;
 use super::state::OpenFold;
 
 impl CoreLoop {
-    /// Hand the core the records boot settle judged never durable. Runs
-    /// before replay.
-    pub(crate) fn set_never_durable_redos(&mut self, never_durable: &NeverDurableRedos) {
+    /// Hand the core the records boot settle judged never durable, with the
+    /// fold ledger its batched installs left durable. Runs before replay.
+    ///
+    /// A ledger that cannot be read fail-stops the core: replay without it
+    /// folds an op twice.
+    pub(crate) fn set_never_durable_redos(
+        &mut self,
+        never_durable: &NeverDurableRedos,
+    ) -> crate::Result<()> {
+        let ledger = match self.sparse.load_fold_ledgers() {
+            Ok(ledger) => ledger.into_iter().collect(),
+            Err(error) => {
+                self.fail_stop_core(
+                    FailStopCause::StoreUnreadable,
+                    &format!("the redo fold ledger cannot be read: {error}"),
+                );
+                return Err(error);
+            }
+        };
         self.redo_apply
             .replay_folds
-            .set_never_durable(never_durable.clone());
+            .set_never_durable(never_durable.clone(), ledger);
+        Ok(())
     }
 
     /// The write sets replay stored for the records it folded. Replay
@@ -57,11 +76,11 @@ impl CoreLoop {
         }
     }
 
-    /// Whether the document arm folds the writes of the record at `lsn`:
-    /// under a committed-redo apply, or in restart replay of a
-    /// never-durable record.
-    pub(in crate::data::executor) fn redo_folds(&self, lsn: u64) -> bool {
-        self.redo_apply.scope.is_some() || self.redo_apply.replay_folds.open_lsn() == Some(lsn)
+    /// Whether the document arm folds op `op` of the record at `lsn`: under
+    /// a committed-redo apply, or in restart replay of a never-durable
+    /// record whose fold ledger lies at or below `op`.
+    pub(in crate::data::executor) fn redo_folds_op(&self, lsn: u64, op: Option<u64>) -> bool {
+        self.redo_apply.scope.is_some() || self.redo_apply.replay_folds.folds_op(lsn, op)
     }
 
     /// The sum targets a restart-replay write of the record at `lsn` to
@@ -151,7 +170,11 @@ impl CoreLoop {
     }
 
     /// Store the folded record's write set in one durable commit, which
-    /// persists every deferred commit of the record with it. A halted
+    /// persists every deferred commit of the record with it. The write set
+    /// holds the target row writes a batched install of the record stored,
+    /// then the ones replay folded. The
+    /// same commit removes those rows and the record's fold ledger. The
+    /// record's install cursor stays until every arm replayed it. A halted
     /// replay seals the store instead, so no write of the record becomes
     /// durable without its write set.
     fn close_replay_fold(&mut self) {
@@ -167,11 +190,17 @@ impl CoreLoop {
         // deferred, and its write set is not stored.
         crate::fail_point!(self.fail_scope, "replay_fold::before_write_set");
         let targets = self.redo_apply.replay_folds.record_targets(open.lsn);
-        let stored = fold_capture(&open, targets).and_then(|capture| {
-            let bytes = capture.to_bytes()?;
-            self.store_encoded_write_sets(&[(capture.origin, bytes)])?;
-            Ok(capture)
-        });
+        let stored = self
+            .stored_install_targets(open.lsn)
+            .and_then(|installed| fold_capture(&open, targets, installed))
+            .and_then(|capture| {
+                let bytes = capture.to_bytes()?;
+                self.store_encoded_write_sets(
+                    &[(capture.origin, bytes)],
+                    InstallRows::Folded(&[open.lsn]),
+                )?;
+                Ok(capture)
+            });
         match stored {
             Ok(capture) => {
                 self.sparse.db().resolve_journal();

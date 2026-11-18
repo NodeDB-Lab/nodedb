@@ -18,7 +18,7 @@ pub mod temporal;
 
 pub use node_identity::NodeSurrogateRecord;
 pub use node_label_snapshot::NodeLabelVersionRecord;
-pub use node_labels::{NodeLabelVersion, NodeLabelsAtCut};
+pub use node_labels::{LabelVersionsPut, NodeLabelVersion, NodeLabelsAtCut};
 pub use scan::TenantEdgeScan;
 pub use stats::CollectionStats;
 pub use store::{Direction, Edge, EdgeRecord, EdgeStore};

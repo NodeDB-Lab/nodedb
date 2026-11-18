@@ -50,6 +50,18 @@ pub(in crate::data::executor) enum FailStopCause {
     /// then failed on the CRDT document or left another row than predicted.
     /// The projection is ahead of the document.
     CrdtWriteAfterProjection,
+    /// A durable store that recovery reads before replay cannot be read.
+    /// Replay without it applies the record wrongly.
+    StoreUnreadable,
+    /// A journalled task's held events cannot be spilled or read back, so
+    /// the events its durable writes owe cannot all leave.
+    HeldEventsUnkept,
+    /// A batched install's durable progress cannot be stored or dropped, so
+    /// a crash cannot complete its record.
+    InstallProgressUnpersisted,
+    /// A batched install's cursor names no record the WAL holds. Its durable
+    /// effects have no record to complete them.
+    InstallCursorOrphaned,
 }
 
 impl FailStopCause {
@@ -61,6 +73,10 @@ impl FailStopCause {
             Self::ReplayRecordUnapplied => "replay_record_unapplied",
             Self::WriteSetUnpersisted => "write_set_unpersisted",
             Self::CrdtWriteAfterProjection => "crdt_write_after_projection",
+            Self::StoreUnreadable => "store_unreadable",
+            Self::HeldEventsUnkept => "held_events_unkept",
+            Self::InstallProgressUnpersisted => "install_progress_unpersisted",
+            Self::InstallCursorOrphaned => "install_cursor_orphaned",
         }
     }
 }

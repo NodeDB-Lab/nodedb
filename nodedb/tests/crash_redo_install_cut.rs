@@ -31,10 +31,9 @@ mod crash_harness;
 use std::time::{Duration, Instant};
 
 use crash_harness::log_fields::same_value;
-use crash_harness::vshards::names_on_distinct_vshards;
+use crash_harness::vshards::{name_on_vshard, names_on_distinct_vshards, vshard_of};
 use crash_harness::{CrashHarness, diagnostics};
 use nodedb::wal::{RedoRecord, WalManager};
-use nodedb_types::id::DatabaseId;
 use nodedb_wal::record::RecordType;
 
 /// A checkpoint between the crash and the reads holds the balances
@@ -54,20 +53,6 @@ const ACCOUNT: &str = "acc-1";
 const SEED: &str = "100";
 const AMOUNT: &str = "25";
 const SINGLE_FOLD: &str = "125";
-
-fn vshard_of(name: &str) -> u32 {
-    nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, name)
-        .vshard()
-        .as_u32()
-}
-
-/// The first name `<prefix>_<n>` that homes on `vshard`.
-fn name_on_vshard(prefix: &str, vshard: u32) -> String {
-    (0..1u32 << 16)
-        .map(|i| format!("{prefix}_{i}"))
-        .find(|name| vshard_of(name) == vshard)
-        .unwrap_or_else(|| panic!("no {prefix} name on vShard {vshard} in 65536 tries"))
-}
 
 /// The collections of one test. `pause` sorts before `source`, so an install
 /// that writes both reaches the pause's fail point first.

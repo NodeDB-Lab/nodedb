@@ -9,7 +9,11 @@
 //! header first, the reads as they arrive, and each op as it arrives, and
 //! runs the arms over each batch's ops. Row sources, row changes, publishes
 //! and identities decode, so damaged bytes refuse as the whole-record decode
-//! refuses them, and the install reads them itself.
+//! refuses them. The walk keeps what the install reads after its arms ran:
+//! the row sources, the publishes, the KV key images read before any write,
+//! the node-label deltas and the collections the arms note by key. All but
+//! the collections sit in spools, checked after each batch, which spill
+//! into the install's space past the threshold.
 //!
 //! A decode error anywhere in the stream outranks every check, so the walk
 //! never stops at a check's error: it reads to the end, and stops early only
@@ -27,11 +31,14 @@ use crate::wal::redo::frame::{
 };
 use crate::wal::{RedoPublish, RedoRowChange, RedoRowSource, RedoStreamReader, RedoSubRecord};
 
+use super::super::batched::{ActiveArms, InstallSpace};
+
 use super::super::passes::{ValidateBatches, final_refusal};
 use super::super::streamed::unreadable;
+use super::collection::post_state_failed;
 use super::post_state::PostState;
 use super::verdict::Rank;
-use super::walk::{StreamHeader, StreamValidateInput, StreamValidated, StreamWalk};
+use super::walk::{StreamHeader, StreamValidateInput, StreamValidated, StreamWalk, ValidateSpill};
 
 /// Content that does not decode. Every replica holds the same bytes, so the
 /// refusal is final.
@@ -41,8 +48,8 @@ fn undecodable(error: crate::Error) -> ErrorCode {
 
 impl CoreLoop {
     /// Validate the content of the stream `input` names, before its
-    /// install. `Ok` holds the post-state until the install ran. Nothing is
-    /// written to any engine.
+    /// install. `Ok` holds what the install reads, and the post-state until
+    /// the install ran. Nothing is written to any engine.
     pub(in crate::data::executor::handlers::transaction::redo_apply) fn validate_redo_stream(
         &mut self,
         input: &StreamValidateInput<'_>,
@@ -54,7 +61,17 @@ impl CoreLoop {
         let dir = SpillKind::Txn
             .core_dir(&self.data_dir, self.core_id)
             .join(format!("redo-validate-{}", input.lsn.as_u64()));
-        let mut walk = StreamWalk::new(PostState::new(dir, input.limits.spill_threshold));
+        let space = InstallSpace::new(
+            &self.data_dir,
+            self.core_id,
+            input.lsn,
+            input.limits.spill_threshold,
+        );
+        let mut walk = StreamWalk::new(
+            PostState::new(dir, input.limits.spill_threshold),
+            space,
+            self.kv_read_now_ms(),
+        );
         loop {
             let batch = match batcher.next_batch() {
                 Ok(Some(batch)) => batch,
@@ -63,21 +80,50 @@ impl CoreLoop {
             };
             self.validate_stream_batch(&mut walk, input, &batch)?;
             self.validate_stream_arms(&mut walk, input);
+            if walk.verdict.admits(&Rank::Local)
+                && let Err(error) = walk.held.spill_past_threshold(walk.space.space_mut(), 0)
+            {
+                walk.verdict.offer(Rank::Local, post_state_failed(error));
+            }
         }
         walk.order.finish().map_err(undecodable)?;
         self.flush_stream_reads(&mut walk, input);
         self.finish_stream_collections(&mut walk, input);
+        let mut active_arms = ActiveArms::default();
         if walk.verdict.admits(&Rank::Arms)
             && let Some(batches) = walk.batches.take()
         {
             let ops = usize::try_from(walk.ops).unwrap_or(usize::MAX);
-            if let Err(refusal) = batches.finish(ops) {
-                walk.verdict.offer(Rank::Arms, refusal.into_code());
+            match batches.finish(ops) {
+                Ok(arms) => active_arms = arms,
+                Err(refusal) => walk.verdict.offer(Rank::Arms, refusal.into_code()),
             }
         }
-        let StreamWalk { verdict, post, .. } = walk;
+        let StreamWalk {
+            verdict,
+            post,
+            header,
+            keyed,
+            held,
+            space,
+            ts_loads,
+            array_loads,
+            ..
+        } = walk;
         verdict.into_result()?;
-        Ok(StreamValidated::new(post))
+        let header = header.ok_or(ErrorCode::RejectedPrevalidation {
+            reason: "the committed redo stream holds no content header".into(),
+        })?;
+        Ok(StreamValidated {
+            header,
+            active_arms,
+            keyed,
+            held,
+            space,
+            ts_loads,
+            array_loads,
+            spill: ValidateSpill::new(post),
+        })
     }
 
     /// Walk the records of one batch. `Err` only for content that does not
@@ -114,13 +160,20 @@ impl CoreLoop {
                     self.check_stream_op(walk, input, sub);
                 }
                 RedoFrameTag::RowSource => {
-                    decode_frame::<RedoRowSource>(tag, body).map_err(undecodable)?;
+                    let source: RedoRowSource = decode_frame(tag, body).map_err(undecodable)?;
+                    walk.held.row_sources.add(source);
                 }
                 RedoFrameTag::RowChange => {
                     decode_frame::<RedoRowChange>(tag, body).map_err(undecodable)?;
                 }
                 RedoFrameTag::Publish => {
-                    decode_frame::<RedoPublish>(tag, body).map_err(undecodable)?;
+                    let mut publish: RedoPublish = decode_frame(tag, body).map_err(undecodable)?;
+                    // Every message names the record's place in its
+                    // replicated log.
+                    if let Some(position) = input.reference.publish_position {
+                        publish.position = Some(position);
+                    }
+                    walk.held.publishes.push(publish);
                 }
                 // The Control Plane binds every identity before the install.
                 RedoFrameTag::Identity => {}

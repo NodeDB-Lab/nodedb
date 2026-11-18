@@ -16,6 +16,7 @@ use crate::engine::graph::edge_store::{EdgeRef, EdgeVersionWrite};
 use crate::types::{DatabaseId, TenantId};
 
 /// The pre-image of one edge write.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct EdgeWriteUndo {
     pub database_id: u64,
     pub tid: u64,
@@ -30,7 +31,7 @@ pub(in crate::data::executor) struct EdgeWriteUndo {
 }
 
 /// The CSR state one edge write found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct EdgeCsrPrior {
     /// The edge's weight, `None` when the edge was not live.
     pub weight: Option<f64>,

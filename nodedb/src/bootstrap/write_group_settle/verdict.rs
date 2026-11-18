@@ -13,8 +13,9 @@
 //!   group is present. The fold rows are durable, or the parts carry them.
 //!   Replay applies the record plainly.
 //! - [`RedoVerdict::NeverDurable`]: neither is present. The crash reverted
-//!   the fold. Replay folds every document write of the record into its
-//!   targets, as the install did.
+//!   the fold, or a batched install made it durable through its fold
+//!   ledger. Replay folds every document write of the record at or above
+//!   the ledger into its targets, as the install did.
 
 use std::collections::HashSet;
 

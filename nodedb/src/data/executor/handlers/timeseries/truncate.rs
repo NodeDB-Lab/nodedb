@@ -28,11 +28,22 @@
 //! partitions: no later write applied in between, because this core ran
 //! nothing else.
 //!
+//! A truncate that is one op of a committed record flushes the record's ops
+//! before it into partitions it then ends. The record is not noted applied
+//! yet, so the flush's stamp names those ops as a partial record, and the
+//! collection stamp names them and the truncate itself the same way, by op
+//! index, not by LSN. Restart replay skips them, and applies the ops after
+//! it, a second truncate of the record included: the ops before it stay
+//! ended, as they were.
+//!
 //! ## Inside a transaction batch
 //!
 //! The undo entry carries what the truncate changed: the partitions it
 //! ended, the stamps and the aggregate image before it, the last-value cache
-//! and the series catalog. A rollback reverses each one.
+//! and the series catalog. A rollback reverses each one. The flush of step
+//! 1 records its own entry before it (`TimeseriesFlushUndo`), so the
+//! rollback then removes the partitions the flush filed and puts the
+//! memtable and its reservation back.
 
 use tracing::debug;
 
@@ -44,9 +55,11 @@ use crate::data::executor::timeseries_checkpoint::stamp::{
     TsCollectionKey, TsReplayStamp, read_ts_stamp, write_ts_stamp,
 };
 use crate::engine::timeseries::last_value_cache::LastValueCache;
+use crate::types::partial_record::PartialRecord;
 use crate::types::replay_stamp::ReplayStamp;
 
 use super::TimeseriesApplyMode;
+use super::flush::TsFlushStamp;
 
 /// Remove `dir` and everything below it. A missing directory is already
 /// removed.
@@ -73,6 +86,19 @@ impl CoreLoop {
         collection: &str,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
+        self.execute_timeseries_truncate_in_record(task, collection, undo_log, None)
+    }
+
+    /// [`Self::execute_timeseries_truncate`] for a truncate that is an op
+    /// of a committed record. `before` names the record's ops before it:
+    /// the flush's stamp and the truncate's stamp name them in part.
+    pub(in crate::data::executor) fn execute_timeseries_truncate_in_record(
+        &mut self,
+        task: &ExecutionTask,
+        collection: &str,
+        mut undo_log: Option<&mut Vec<UndoEntry>>,
+        before: Option<PartialRecord>,
+    ) -> Response {
         debug!(core = self.core_id, %collection, "timeseries truncate");
         let db = task.request.database_id;
         let tid = task.request.tenant_id;
@@ -87,7 +113,24 @@ impl CoreLoop {
         let ordinal = self.ts_batch_ordinal(TimeseriesApplyMode::Immediate, now_ms);
 
         // 1. Every row written before the truncate lands in a partition.
-        if let Err(e) = self.flush_ts_collection(tid, db, collection, now_ms) {
+        // Inside a transaction batch the flush records its own undo first,
+        // whatever its outcome, so a rollback takes the partitions it filed
+        // out and puts the memtable back.
+        let flush_undo = if undo_log.is_some() {
+            match self.capture_ts_flush_undo(&key) {
+                Ok(undo) => Some(undo),
+                Err(e) => return self.response_error(task, e),
+            }
+        } else {
+            None
+        };
+        let stamped = before.map_or(TsFlushStamp::Applied, TsFlushStamp::InstallPartial);
+        let flushed = self.flush_ts_collection_stamped(tid, db, collection, now_ms, stamped);
+        if let (Some(log), Some(mut undo)) = (undo_log.as_deref_mut(), flush_undo) {
+            self.note_ts_flush_created(&mut undo);
+            log.push(UndoEntry::TimeseriesTruncateFlush(Box::new(undo)));
+        }
+        if let Err(e) = flushed {
             return self.response_error(task, e);
         }
         if self
@@ -122,7 +165,7 @@ impl CoreLoop {
         };
 
         // 4. The collection stamp names the truncate.
-        let stamps = match self.write_truncate_stamp(&key, task.wal_lsn()) {
+        let stamps = match self.write_truncate_stamp(&key, task.wal_lsn(), before) {
             Ok(stamps) => stamps,
             Err(e) => {
                 let e = self.put_back_after_failed_truncate(&key, &ended, cagg_image.as_deref(), e);
@@ -196,20 +239,38 @@ impl CoreLoop {
     /// Write the collection stamp naming the truncate at `lsn`: every record
     /// this core applied, all of whose rows a partition now holds, and the
     /// truncate. Returns the stamps it replaced.
+    ///
+    /// A truncate that is op `k` of a committed record (`before` names the
+    /// ops below `k`) is named by op, as a partial record through `k + 1`:
+    /// a record can truncate a collection twice, and a name by LSN would
+    /// skip the second truncate on restart once the first took effect. A
+    /// standalone truncate is named by its LSN in `truncates`.
     fn write_truncate_stamp(
         &mut self,
         key: &TsCollectionKey,
         lsn: Option<crate::types::Lsn>,
+        before: Option<PartialRecord>,
     ) -> crate::Result<PriorStamps> {
         let dir = self.ts_dir_of(key);
         let prior = PriorStamps {
             memory: self.ts_replay.stamps.get(key).cloned(),
             file: read_ts_stamp(&dir)?,
         };
-        let mut stamp = self.ts_flush_stamp(key)?;
-        if let Some(lsn) = lsn {
-            stamp.truncates = stamp.truncates.union(&ReplayStamp::naming(lsn.as_u64()));
-        }
+        let stamp = match (before, lsn) {
+            (Some(before), _) => {
+                let through_truncate = PartialRecord {
+                    lsn: before.lsn,
+                    ops_through: before.ops_through.saturating_add(1),
+                };
+                self.ts_partial_flush_stamp(key, through_truncate)?
+            }
+            (None, Some(lsn)) => {
+                let mut stamp = self.ts_flush_stamp(key)?;
+                stamp.truncates = stamp.truncates.union(&ReplayStamp::naming(lsn.as_u64()));
+                stamp
+            }
+            (None, None) => self.ts_flush_stamp(key)?,
+        };
         std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Storage {
             engine: "timeseries".into(),
             detail: format!("create collection directory {}: {e}", dir.display()),
@@ -669,8 +730,12 @@ mod tests {
         );
         let stamp = core.ts_replay.stamps.get(&key()).expect("stamp");
         assert!(
-            stamp.rows.skips(1) && stamp.rows.skips(2),
-            "the flushed records stay named"
+            stamp.rows.skips(1),
+            "the record flushed before the truncate stays named"
+        );
+        assert!(
+            !stamp.rows.skips(2),
+            "the truncate's own flush is undone, so its memtable record is not named"
         );
         assert!(!stamp.truncates.skips(3), "the truncate is no longer named");
         assert_eq!(read_ts_stamp(&ts_dir).expect("read"), file_before);

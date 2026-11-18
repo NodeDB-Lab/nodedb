@@ -95,8 +95,7 @@ pub use raft_apply::{
 pub use read_cut::ordinal_reservation_leaked;
 pub use recovery::{
     batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
-    replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,
-    write_acked_without_durability,
+    strict_row_undecodable, wal_archival_failed_truncation_held, write_acked_without_durability,
 };
 pub use redo_stream::{
     redo_abandon_given_up, redo_changes_unstaged, redo_snapshot_debt_not_recorded,

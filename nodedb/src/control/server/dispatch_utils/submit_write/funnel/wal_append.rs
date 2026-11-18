@@ -40,6 +40,9 @@ pub(super) struct WalAppendOutcome {
     pub change_marker: Option<AppendedMarker>,
     /// The write's change set, staged at the change marker's LSN.
     pub changes: Option<PendingChanges>,
+    /// The write's record is a stream marker (see
+    /// `wal_dispatch::WalAppendOutcome::stream_marker`).
+    pub stream_marker: bool,
 }
 
 /// A change marker the append wrote, and its LSN.
@@ -138,7 +141,7 @@ pub(super) fn authorize_and_append(
     let mut reservation = None;
     let mut change_marker = None;
     let mut pending_changes = None;
-    let (wal_lsn, resolved_now_ms, group_origin) = match durability {
+    let (wal_lsn, resolved_now_ms, group_origin, stream_marker) = match durability {
         WalDurability::AppendHere {
             now_override,
             apply_key,
@@ -203,29 +206,35 @@ pub(super) fn authorize_and_append(
                 credentials: None,
                 now_override,
             };
-            let (lsn, resolved_now_ms, group_origin) = if groups {
+            let (lsn, resolved_now_ms, group_origin, stream_marker) = if groups {
                 let appended = wal_dispatch::append_group_origin(request)?;
                 (
                     Some(appended.origin.lsn),
                     appended.resolved_now_ms,
                     Some(appended.origin),
+                    appended.stream_marker,
                 )
             } else {
                 let outcome = wal_dispatch::wal_append(request)?;
-                (outcome.lsn, outcome.resolved_now_ms, None)
+                (
+                    outcome.lsn,
+                    outcome.resolved_now_ms,
+                    None,
+                    outcome.stream_marker,
+                )
             };
             // Recorded before the enqueue, so it exists before any event of
             // the write reaches the Event Plane.
             if let (Some(position), Some(lsn)) = (change_position, lsn) {
                 shared.cdc_router.positions().record(lsn.as_u64(), position);
             }
-            (lsn, resolved_now_ms, group_origin)
+            (lsn, resolved_now_ms, group_origin, stream_marker)
         }
         WalDurability::CallerSupplied {
             wal_lsn,
             resolved_now_ms,
             ..
-        } => (wal_lsn, resolved_now_ms, None),
+        } => (wal_lsn, resolved_now_ms, None, false),
     };
 
     if let Some(lsn) = wal_lsn {
@@ -242,6 +251,7 @@ pub(super) fn authorize_and_append(
         reservation,
         change_marker,
         changes: pending_changes,
+        stream_marker,
     })
 }
 

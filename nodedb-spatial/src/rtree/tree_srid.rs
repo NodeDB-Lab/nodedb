@@ -8,7 +8,9 @@ use nodedb_types::geometry::Srid;
 
 /// An SRID and its bbox space, resolved once so the tree's hot insert path
 /// never consults a CRS registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 pub struct TreeSrid {
     pub srid: Srid,
     pub space: BboxSpace,

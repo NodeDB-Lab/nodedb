@@ -113,7 +113,7 @@ impl PartitionMeta {
 }
 
 /// Partition interval — how wide each time partition is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToMessagePack, FromMessagePack)]
 #[non_exhaustive]
 pub enum PartitionInterval {
     /// Duration in milliseconds (e.g., 3600000 for 1h, 86400000 for 1d).

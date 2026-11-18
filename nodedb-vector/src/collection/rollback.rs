@@ -21,7 +21,7 @@ use super::lifecycle::VectorCollection;
 use crate::flat::FlatIndex;
 
 /// A collection's state before a write. See the module docs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct VectorWriteMark {
     next_id: u32,
     growing_base_id: u32,
@@ -31,6 +31,24 @@ pub struct VectorWriteMark {
     live: Vec<u32>,
     /// Each named multi-vector document with its node list, if any.
     multi_docs: Vec<(Surrogate, Option<Vec<u32>>)>,
+}
+
+impl VectorWriteMark {
+    /// Heap bytes the mark's bindings, live nodes and multi-vector node
+    /// lists hold.
+    pub fn heap_bytes(&self) -> usize {
+        let node = std::mem::size_of::<u32>();
+        self.bindings.len() * std::mem::size_of::<(Surrogate, Option<u32>)>()
+            + self.live.len() * node
+            + self
+                .multi_docs
+                .iter()
+                .map(|(_, nodes)| {
+                    std::mem::size_of::<(Surrogate, Option<Vec<u32>>)>()
+                        + nodes.as_ref().map_or(0, |nodes| nodes.len() * node)
+                })
+                .sum::<usize>()
+    }
 }
 
 impl VectorCollection {

@@ -23,7 +23,8 @@ use super::keys::{EdgeRef, versioned_edge_key};
 use super::visibility::EDGE_APPLIED;
 
 /// How one write changed the edge counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(c_enum)]
 pub enum EdgeCountChange {
     /// The write made the edge live: it counted one more edge.
     Added,
@@ -32,7 +33,7 @@ pub enum EdgeCountChange {
 }
 
 /// What one versioned edge write changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct EdgeVersionWrite {
     /// The system-time key of the version the write added.
     pub system_from: i64,

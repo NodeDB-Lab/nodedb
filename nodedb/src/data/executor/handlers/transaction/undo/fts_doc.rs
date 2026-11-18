@@ -20,6 +20,7 @@ use crate::types::{DatabaseId, TenantId};
 use super::{UndoEntry, UndoError};
 
 /// The pre-image of one document's index footprint.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct FtsDocUndo {
     pub database_id: u64,
     pub tid: u64,

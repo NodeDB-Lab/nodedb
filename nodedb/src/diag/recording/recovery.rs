@@ -1,38 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Capture sites for the write and replay paths: a record that did not
-//! apply, a write acked without durability, an index update that was lost.
+//! Capture sites for the write path: a write acked without durability, an
+//! index update that was lost.
 
 use faultbox::{Capture, EventKind, error_chain_of};
 
 use super::shared::error_class;
 use crate::diag::context;
-
-/// Report a committed, CRC-valid WAL record that startup replay could not
-/// apply. Called only from `replay_abort`, so a WAL tail that fails
-/// identically on every core files one growing report, not one per core.
-pub fn replay_record_unapplied(
-    engine: &str,
-    stage: &str,
-    core_id: usize,
-    record_lsn: u64,
-    detail: &str,
-) {
-    let ctx = context::ReplayRecordUnapplied {
-        engine,
-        stage,
-        core_id,
-        record_lsn,
-        detail,
-    };
-    let _ = Capture::new(
-        EventKind::Corruption,
-        "WAL replay: a committed record could not be applied",
-    )
-    .domain(&ctx)
-    .with_backtrace()
-    .emit();
-}
 
 /// Report an acknowledged write whose redo record the Control-Plane funnel
 /// was supposed to mint but did not. Called only from the durable-at-ack

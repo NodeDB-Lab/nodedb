@@ -34,16 +34,22 @@ impl CoreLoop {
     ///
     /// `Err` when replay cannot bring the core to the state the WAL holds: a
     /// redo group that does not reconstitute, a committed record an arm
-    /// cannot apply, or a sync HWM stream that does not decode. The core
-    /// applied nothing past the failure, and the caller must not serve it.
+    /// cannot apply, a sync HWM stream that does not decode, or a batched
+    /// install cursor boot cannot settle. The core applied nothing past the
+    /// failure, and the caller must not serve it.
+    ///
+    /// The batched install cursors are read before the passes and dropped
+    /// after them, an empty WAL included: replay completes each cursor's
+    /// record (see `redo_apply::batched::boot`).
     pub fn replay_all_wal(
         &mut self,
         records: &[WalRecord],
         num_cores: usize,
         tombstones: &TombstoneSet,
     ) -> crate::Result<()> {
+        self.load_install_cursors()?;
         if records.is_empty() {
-            return Ok(());
+            return self.finish_replayed_installs(records);
         }
         let core_id = self.core_id;
 
@@ -112,7 +118,7 @@ impl CoreLoop {
                     );
                 }
                 self.install_sync_hwm_maps(maps);
-                Ok(())
+                self.finish_replayed_installs(records)
             }
             Err(e) => {
                 error!(

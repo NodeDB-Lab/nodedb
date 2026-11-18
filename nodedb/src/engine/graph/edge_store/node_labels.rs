@@ -34,6 +34,17 @@ const LABEL_LSN_KEY: &str = "applied";
 /// One node's label set at a cut.
 pub type NodeLabelsAtCut = (String, Vec<String>);
 
+/// What one version commit wrote over.
+#[derive(Debug)]
+pub struct LabelVersionsPut {
+    /// Per version and in order, the label set its key held before.
+    pub replaced: Vec<Option<Vec<String>>>,
+    /// The applied-LSN mark the commit found, when it was given a WAL LSN:
+    /// 0 when no mark was stored. 0 when it was given none, since it then
+    /// reads no mark.
+    pub mark_before: u64,
+}
+
 /// One label version: `node`'s whole label set at `ordinal`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeLabelVersion {
@@ -129,6 +140,17 @@ impl EdgeStore {
         versions: &[NodeLabelVersion],
         lsn: Option<u64>,
     ) -> crate::Result<Vec<Option<Vec<String>>>> {
+        self.put_node_label_versions_marked(versions, lsn)
+            .map(|put| put.replaced)
+    }
+
+    /// [`Self::put_node_label_versions`], which also returns the applied-LSN
+    /// mark the transaction found.
+    pub fn put_node_label_versions_marked(
+        &self,
+        versions: &[NodeLabelVersion],
+        lsn: Option<u64>,
+    ) -> crate::Result<LabelVersionsPut> {
         let mut encoded = Vec::with_capacity(versions.len());
         for version in versions {
             let key = version_key(&version.node, version.ordinal)?;
@@ -140,6 +162,7 @@ impl EdgeStore {
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
         let mut replaced = Vec::with_capacity(encoded.len());
+        let mut mark_before = 0;
         {
             let mut table = write_txn
                 .open_table(NODE_LABEL_VERSIONS)
@@ -161,6 +184,7 @@ impl EdgeStore {
                     .get(LABEL_LSN_KEY)
                     .map_err(|e| redb_err("read node label lsn", e))?
                     .map_or(0, |value| value.value());
+                mark_before = newest;
                 if lsn > newest {
                     marks
                         .insert(LABEL_LSN_KEY, lsn)
@@ -171,7 +195,36 @@ impl EdgeStore {
         write_txn
             .commit()
             .map_err(|e| redb_err("commit node label versions", e))?;
-        Ok(replaced)
+        Ok(LabelVersionsPut {
+            replaced,
+            mark_before,
+        })
+    }
+
+    /// Lower the applied-LSN mark to `mark`, the value a rolled-back
+    /// install's first version commit found. A mark at or below it stays.
+    pub fn lower_label_lsn_mark(&self, mark: u64) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("begin_write", e))?;
+        {
+            let mut marks = write_txn
+                .open_table(NODE_LABEL_LSN)
+                .map_err(|e| redb_err("open node_label_lsn", e))?;
+            let newest = marks
+                .get(LABEL_LSN_KEY)
+                .map_err(|e| redb_err("read node label lsn", e))?
+                .map_or(0, |value| value.value());
+            if newest > mark {
+                marks
+                    .insert(LABEL_LSN_KEY, mark)
+                    .map_err(|e| redb_err("write node label lsn", e))?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| redb_err("commit node label lsn", e))
     }
 
     /// The ordinal of `node`'s newest label version, `None` when it has none.

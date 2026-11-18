@@ -8,7 +8,10 @@
 //! records whose cells are already inside a flushed, on-disk segment. Replay
 //! skips exactly the records that stamp names (`array_replay_skips`). A
 //! record in flight when the flush ran is not named, even when a higher LSN
-//! is, so it replays once.
+//! is, so it replays once. The manifest also names the records its segments
+//! hold in part, flushed between two batches of a batched install: replay
+//! skips exactly the ops it names of such a record
+//! (`array_partial_replay_skips`).
 //!
 //! Re-applying a named record would write its tile version into a second
 //! segment on the next flush. After a bitemporal audit purge it would also
@@ -114,46 +117,27 @@ impl CoreLoop {
         self.record_redo_capture(captured)
     }
 
-    /// Whether restart replay skips the record at `record_lsn` for
-    /// `array_id`: the stamp in the array's manifest names it. A
-    /// committed-redo apply never skips (`replay_watermark_skips`).
-    pub(in crate::data::executor) fn array_replay_skips(
-        &self,
-        array_id: &nodedb_array::types::ArrayId,
-        record_lsn: u64,
-    ) -> bool {
-        self.replay_watermark_skips(self.array_stamp_names(array_id, record_lsn))
-    }
-
-    /// Whether the stamp in `array_id`'s manifest names the record at
-    /// `record_lsn`. An array whose store is not open names nothing, which
-    /// replays the record: the safe direction.
-    pub(in crate::data::executor) fn array_stamp_names(
-        &self,
-        array_id: &nodedb_array::types::ArrayId,
-        record_lsn: u64,
-    ) -> bool {
-        self.array_engine
-            .store(array_id)
-            .is_ok_and(|store| store.manifest().replay.skips(record_lsn))
-    }
-
-    /// Whether `array_id`'s manifest stamp names an LSN above `record_lsn`.
-    /// A replayed record it holds was in flight when the flush that wrote the
-    /// stamp ran.
-    pub(super) fn array_stamp_passes(
-        &self,
-        array_id: &nodedb_array::types::ArrayId,
-        record_lsn: u64,
-    ) -> bool {
-        self.array_engine
-            .store(array_id)
-            .is_ok_and(|store| store.manifest().replay.highest() > record_lsn)
-    }
-
     pub fn replay_array_wal(
         &mut self,
         records: &[nodedb_wal::WalRecord],
+        num_cores: usize,
+        tombstones: &nodedb_wal::TombstoneSet,
+    ) {
+        self.replay_array_wal_with_ops(
+            records,
+            &crate::wal::redo::op_index::RedoOpIndex::default(),
+            num_cores,
+            tombstones,
+        );
+    }
+
+    /// [`Self::replay_array_wal`] over a merged stream. `ops` holds the op
+    /// index of each record of `records`: a record a manifest names in part
+    /// skips the ops its segments hold (`array_partial_replay_skips`).
+    pub(crate) fn replay_array_wal_with_ops(
+        &mut self,
+        records: &[nodedb_wal::WalRecord],
+        ops: &crate::wal::redo::op_index::RedoOpIndex,
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) {
@@ -166,10 +150,11 @@ impl CoreLoop {
         // Records replayed below the highest LSN their array's stamp names.
         let mut in_flight = 0usize;
 
-        for record in records {
+        for (index, record) in records.iter().enumerate() {
             if self.replay_halted() {
                 break;
             }
+            let op = ops.of(index);
             let logical_type = record.logical_record_type();
             let record_type = RecordType::from_raw(logical_type);
             let is_put = record_type == Some(RecordType::ArrayPut);
@@ -193,7 +178,7 @@ impl CoreLoop {
 
             if is_put && let Some(restored) = crate::wal::ArrayRestoreRedo::decode(&record.payload)
             {
-                match self.replay_array_restore(record, restored, tombstones) {
+                match self.replay_array_restore(record, op, restored, tombstones) {
                     RestoreReplay::Applied {
                         cells,
                         in_flight: passed,
@@ -259,7 +244,9 @@ impl CoreLoop {
                         continue;
                     }
                 }
-                if self.array_replay_skips(&payload.array_id, record_lsn) {
+                if self.array_replay_skips(&payload.array_id, record_lsn)
+                    || self.array_partial_replay_skips(&payload.array_id, record_lsn, op)
+                {
                     skipped += 1;
                     continue;
                 }
@@ -378,7 +365,9 @@ impl CoreLoop {
                     continue;
                 }
             }
-            if self.array_replay_skips(&payload.array_id, record_lsn) {
+            if self.array_replay_skips(&payload.array_id, record_lsn)
+                || self.array_partial_replay_skips(&payload.array_id, record_lsn, op)
+            {
                 skipped += 1;
                 continue;
             }

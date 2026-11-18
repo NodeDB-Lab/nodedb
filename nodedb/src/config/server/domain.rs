@@ -26,6 +26,12 @@ pub(super) const MIN_CALVIN_VERDICT_STALL_WARN_MS: u64 = 4;
 /// its bytes, so a smaller entry leaves too little room for the bytes.
 pub(super) const MIN_REDO_ENTRY_BYTES: usize = 64 * 1024;
 
+/// Smallest batch of a chunked redo's install. A batch holds whole framed
+/// records, and a record past the bound forms a batch alone, so a smaller
+/// bound only splits the stream into one-record batches, each with its own
+/// durable commit.
+pub(super) const MIN_REDO_STREAM_BATCH_BYTES: usize = 4 * 1024;
+
 /// Room a redo entry leaves in one RPC frame for the frame header, the
 /// AppendEntries envelope, and the entry's own routing fields.
 pub(super) const REDO_ENTRY_ENVELOPE_BYTES: usize = 1024 * 1024;
@@ -244,8 +250,8 @@ fn validate_calvin(config: &ServerConfig) -> crate::Result<()> {
     validate_redo_sizes(calvin)
 }
 
-/// Checks the redo entry size against one RPC frame, and the open-stream
-/// cap against one entry.
+/// Checks the redo entry size against one RPC frame, the open-stream cap
+/// against one entry, and the stream install's batch against its floor.
 fn validate_redo_sizes(calvin: &nodedb_types::config::tuning::CalvinTuning) -> crate::Result<()> {
     let entry = calvin.max_redo_entry_bytes;
     if !(MIN_REDO_ENTRY_BYTES..=MAX_REDO_ENTRY_BYTES).contains(&entry) {
@@ -263,6 +269,13 @@ fn validate_redo_sizes(calvin: &nodedb_types::config::tuning::CalvinTuning) -> c
             "tuning.calvin.max_open_redo_bytes",
             calvin.max_open_redo_bytes,
             "a size of at least tuning.calvin.max_redo_entry_bytes",
+        ));
+    }
+    if calvin.redo_stream_batch_bytes < MIN_REDO_STREAM_BATCH_BYTES {
+        return Err(reject(
+            "tuning.calvin.redo_stream_batch_bytes",
+            calvin.redo_stream_batch_bytes,
+            &format!("a size of at least {MIN_REDO_STREAM_BATCH_BYTES} bytes"),
         ));
     }
     Ok(())

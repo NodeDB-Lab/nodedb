@@ -19,7 +19,17 @@ pub struct PartitionEntry {
 /// a key, and one never replaces the other. Keys order by time first, so a
 /// walk over the registry visits partitions in time order.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct PartitionKey {
     pub min_ts: i64,

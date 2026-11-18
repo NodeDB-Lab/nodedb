@@ -4,9 +4,11 @@
 //!
 //! Every cell write lands in the memtable tile its coordinate and system
 //! time map to. [`ArrayEngine::snapshot_tiles`] copies those tiles before the
-//! write, and [`ArrayEngine::restore_tiles`] puts them back. The write must
-//! not flush in between. `put_cells` and `delete_cells` never flush, so the
-//! caller holds the flush until the whole record landed.
+//! write, and [`ArrayEngine::restore_tiles`] puts them back. `put_cells` and
+//! `delete_cells` never flush, and a whole-record install holds the flush
+//! until the record landed. A batched install flushes between batches: its
+//! flush's undo withdraws the segment first, and the memtable it drained
+//! held only the install's cells, so the tile snapshots restore it.
 
 use nodedb_array::tile::tile_id_for_cell;
 use nodedb_array::types::coord::value::CoordValue;
@@ -16,9 +18,37 @@ use super::engine::{ArrayEngine, ArrayEngineResult};
 use super::memtable::TileBuffer;
 
 /// The memtable tiles a write touches, as they were before it.
-#[derive(Debug)]
+#[derive(Debug, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct ArrayTileSnapshot {
     tiles: Vec<(TileId, Option<TileBuffer>)>,
+}
+
+impl ArrayTileSnapshot {
+    /// A snapshot of `tiles`, each with the buffer it held.
+    #[cfg(test)]
+    pub fn of_tiles(tiles: Vec<(TileId, Option<TileBuffer>)>) -> Self {
+        Self { tiles }
+    }
+
+    /// Keep only the tiles `keep` accepts.
+    pub fn retain_tiles(&mut self, mut keep: impl FnMut(&TileId) -> bool) {
+        self.tiles.retain(|(tile, _)| keep(tile));
+    }
+
+    /// Whether the snapshot holds no tile.
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Bytes of the coordinate keys and payloads the snapshot holds.
+    pub fn payload_bytes(&self) -> usize {
+        self.tiles
+            .iter()
+            .filter_map(|(_, buffer)| buffer.as_ref())
+            .flat_map(TileBuffer::iter_raw)
+            .map(|(key, value)| key.len() + value.len())
+            .sum()
+    }
 }
 
 impl ArrayEngine {

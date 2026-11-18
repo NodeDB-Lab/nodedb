@@ -7,6 +7,7 @@ pub mod hash_chain;
 pub mod id;
 pub mod installed_document;
 pub mod lsn;
+pub mod partial_record;
 pub mod read_shards;
 pub mod record_home;
 pub mod replay_stamp;

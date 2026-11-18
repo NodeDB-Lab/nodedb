@@ -22,6 +22,7 @@ pub mod registry;
 
 pub use boundary::interval_bounds;
 pub use entry::{PartitionEntry, PartitionKey, format_partition_dir};
+pub use lifecycle::AdaptiveState;
 pub use listing::PartitionListing;
 pub use rate::RateEstimator;
 pub use registry::PartitionRegistry;

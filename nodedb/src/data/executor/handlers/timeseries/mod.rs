@@ -34,6 +34,7 @@ mod ingest_resolved_support;
 #[cfg(test)]
 mod ingest_resolved_test_support;
 mod ingest_schema;
+mod install_flush;
 mod last_value_load;
 pub mod merge_commit;
 mod merge_select;
@@ -56,6 +57,7 @@ mod scan;
 mod series_catalog_install;
 mod sort;
 mod staged_fold;
+mod stream_load;
 mod tier_fold;
 mod tier_route;
 mod time_range;
@@ -64,7 +66,9 @@ pub mod truncate_end;
 mod truncate_purge;
 
 pub(in crate::data::executor) use ingest_dispatch::{TimeseriesApplyMode, TimeseriesIngestExec};
+pub(in crate::data::executor) use install_flush::InstallFlushError;
 pub(in crate::data::executor) use resolve_ingest::{StampedIngest, carry_source_ordinals};
 pub(in crate::data::executor) use resolve_rows::TsResolveInput;
 pub(in crate::data::executor) use rls_gate::{MsgpackBatch, admit_ilp_lines, admit_msgpack_rows};
 pub(in crate::data::executor) use scan::TimeseriesScanParams;
+pub(in crate::data::executor) use stream_load::{TsStreamAt, TsStreamLoads};

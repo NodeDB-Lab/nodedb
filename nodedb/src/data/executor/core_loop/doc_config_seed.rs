@@ -144,7 +144,12 @@ mod tests {
         let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
 
         let surrogate = 42u32;
-        core.replay_document_redo(&[put_record(surrogate)], 1, &TombstoneSet::new());
+        core.replay_document_redo(
+            &[put_record(surrogate)],
+            &crate::wal::redo::op_index::RedoOpIndex::default(),
+            1,
+            &TombstoneSet::new(),
+        );
 
         let stored = core
             .sparse
@@ -185,7 +190,12 @@ mod tests {
         core.seed_doc_configs(&entries);
 
         let surrogate = 42u32;
-        core.replay_document_redo(&[put_record(surrogate)], 1, &TombstoneSet::new());
+        core.replay_document_redo(
+            &[put_record(surrogate)],
+            &crate::wal::redo::op_index::RedoOpIndex::default(),
+            1,
+            &TombstoneSet::new(),
+        );
 
         let stored = core
             .sparse

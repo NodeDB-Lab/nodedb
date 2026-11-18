@@ -615,6 +615,7 @@ mod tests {
                 rows: crate::types::replay_stamp::ReplayStamp::through(5)
                     .union(&crate::types::replay_stamp::ReplayStamp::naming(10)),
                 truncates: crate::types::replay_stamp::ReplayStamp::default(),
+                partial: crate::types::partial_record::PartialRecords::default(),
             },
         );
         let records = [

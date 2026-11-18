@@ -122,6 +122,7 @@ use super::handlers::transaction::overlay::BitemporalStamp;
 use super::handlers::transaction::redo_apply::CommittedDocWrite;
 use super::wal_replay_redo_document_apply::{ReplayDocDelete, ReplayDocPut};
 use crate::data::executor::core_loop::write_note::KeyRepr;
+use crate::wal::redo::op_index::RedoOpIndex;
 use crate::wal::{DocumentDeleteRedo, DocumentPutRedo};
 
 impl CoreLoop {
@@ -132,16 +133,21 @@ impl CoreLoop {
     /// (leading `"kv_*"` discriminator) and graph (map-encoded edge payload)
     /// `Put`/`Delete` records fail the strict decode and are skipped for the
     /// KV / graph arms to handle.
+    ///
+    /// `ops` names each record's index among its redo record's ops. Restart
+    /// replay folds a never-durable record's op only above its fold ledger.
     pub(crate) fn replay_document_redo(
         &mut self,
         records: &[WalRecord],
+        ops: &RedoOpIndex,
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) {
         let mut puts = 0usize;
         let mut deletes = 0usize;
 
-        for record in records {
+        for (position, record) in records.iter().enumerate() {
+            let op = ops.of(position);
             // A never-durable record's writes fold, as its install did.
             self.step_replay_fold(record, num_cores);
             if self.replay_halted() {
@@ -316,7 +322,7 @@ impl CoreLoop {
                     self.observe_bitemporal_ordinal(s.sys_from);
                     self.apply_scope.bitemporal_stamps.insert(surrogate_u32, s);
                 }
-                let folds = self.redo_folds(record_lsn);
+                let folds = self.redo_folds_op(record_lsn, op);
                 let applied = if folds {
                     self.apply_committed_document_put(
                         CommittedDocWrite {
@@ -326,6 +332,7 @@ impl CoreLoop {
                             document_id: &document_id,
                             surrogate: surrogate_u32,
                             record_lsn,
+                            op,
                             clone_copy,
                         },
                         &value,
@@ -410,7 +417,7 @@ impl CoreLoop {
                         },
                     );
                 }
-                let folds = self.redo_folds(record_lsn);
+                let folds = self.redo_folds_op(record_lsn, op);
                 let removed = if folds {
                     self.apply_committed_document_delete(CommittedDocWrite {
                         database_id,
@@ -419,6 +426,7 @@ impl CoreLoop {
                         document_id: &document_id,
                         surrogate: surrogate_u32,
                         record_lsn,
+                        op,
                         clone_copy: false,
                     })
                 } else {

@@ -11,6 +11,7 @@ use nodedb_array::types::{ArrayId, TileId};
 use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult};
 use super::memtable::{Memtable, TileBuffer};
 use super::store::SegmentRef;
+use crate::types::partial_record::PartialRecords;
 use crate::types::replay_stamp::ReplayStamp;
 
 impl ArrayEngine {
@@ -32,12 +33,53 @@ impl ArrayEngine {
         id: &ArrayId,
         stamp: ReplayStamp,
     ) -> ArrayEngineResult<Option<SegmentRef>> {
+        self.flush_with(id, stamp, PartialRecords::default())
+    }
+
+    /// [`Self::flush`], publishing `partial` beside `stamp`: the records
+    /// the memtable holds in part, which `stamp` does not name. A batched
+    /// install flushes between two batches of its record with the ops it
+    /// applied so far.
+    pub fn flush_with(
+        &mut self,
+        id: &ArrayId,
+        stamp: ReplayStamp,
+        partial: PartialRecords,
+    ) -> ArrayEngineResult<Option<SegmentRef>> {
         let Some(prepared) = self.prepare_flush(id)? else {
             return Ok(None);
         };
-        let seg_ref = self.install_flushed_segment(id, prepared, stamp)?;
+        let seg_ref = self.install_flushed_segment(id, prepared, stamp, partial)?;
         self.store_mut(id)?.memtable = Memtable::new();
         Ok(Some(seg_ref))
+    }
+
+    /// Take back the flush that wrote `segment`: the manifest stops naming
+    /// it and goes back to the stamps `replay` and `partial`, then the
+    /// segment file goes. The manifest write is the commit point: a crash
+    /// before it leaves the flush whole, and a crash after it leaves an
+    /// unreferenced file, inert bytes. The directory is fsynced after the
+    /// file goes.
+    ///
+    /// The memtable is left as it is: the caller restores what it held.
+    pub fn withdraw_flushed_segment(
+        &mut self,
+        id: &ArrayId,
+        segment: &str,
+        replay: ReplayStamp,
+        partial: PartialRecords,
+    ) -> ArrayEngineResult<()> {
+        let store = self.store_mut(id)?;
+        store.replace_segments(&[segment.to_string()], Vec::new())?;
+        let manifest = store.manifest_mut();
+        manifest.replay = replay;
+        manifest.partial = partial;
+        store.persist_manifest()?;
+        store.unlink_segment(segment)?;
+        let root = store.root().to_path_buf();
+        nodedb_wal::segment::fsync_directory(&root).map_err(|e| ArrayEngineError::Io {
+            detail: format!("fsync {root:?} after removing segment {segment}: {e}"),
+        })
     }
 
     fn prepare_flush(&mut self, id: &ArrayId) -> ArrayEngineResult<Option<PreparedFlush>> {
@@ -68,6 +110,7 @@ impl ArrayEngine {
         id: &ArrayId,
         prepared: PreparedFlush,
         stamp: ReplayStamp,
+        partial: PartialRecords,
     ) -> ArrayEngineResult<SegmentRef> {
         let store = self.store_mut(id)?;
         let root = store.root().to_path_buf();
@@ -98,12 +141,14 @@ impl ArrayEngine {
         // manifest write below is the commit point for both.
         store.install_segment(seg_ref.clone())?;
         let previous = std::mem::replace(&mut store.manifest_mut().replay, stamp);
+        let previous_partial = std::mem::replace(&mut store.manifest_mut().partial, partial);
         if let Err(e) = store.persist_manifest() {
             // The manifest on disk names neither the segment nor the stamp,
             // and the memtable still holds the cells. Withdraw both from
             // memory too, so reads do not see the cells twice and a later
             // publish does not claim records this one never made durable.
             store.manifest_mut().replay = previous;
+            store.manifest_mut().partial = previous_partial;
             store.replace_segments(std::slice::from_ref(&seg_ref.id), Vec::new())?;
             return Err(e.into());
         }

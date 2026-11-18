@@ -110,7 +110,29 @@ fn install_plan(
 fn run_at(core: &mut CoreLoop, plan: &PhysicalPlan, lsn: u64) -> Response {
     let mut task: ExecutionTask = make_default_task();
     task.wal_lsn = Some(Lsn::new(lsn));
-    core.execute_plan(&task, plan)
+    let folds = matches!(
+        plan,
+        PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { sum_targets, .. })
+            if !sum_targets.is_empty()
+    );
+    if !folds {
+        return core.execute_plan(&task, plan);
+    }
+    // A slice that folds installs under a root journal, as the funnel
+    // installs every committed redo.
+    task.request.plan = plan.clone();
+    let group = crate::bridge::dispatch::JournalGroup {
+        origin: Lsn::new(lsn),
+        collection: super::calvin_fold_tests::SOURCE.to_string(),
+        apply_key: 0,
+        commit_hlc: None,
+        change_position: None,
+    };
+    let permit = core.begin_task_journal(&task, group);
+    let mut response = core.execute_with_journal(&task, permit);
+    core.finish_journalled_task(&task, &mut response)
+        .expect("finish journal");
+    response
 }
 
 fn base_row(core: &CoreLoop, surrogate: u32) -> Option<Vec<u8>> {

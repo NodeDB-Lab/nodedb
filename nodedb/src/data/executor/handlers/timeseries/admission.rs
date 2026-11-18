@@ -164,7 +164,7 @@ pub(super) fn exceeds_tag_ceiling(
 /// Mirrors that function's resolution order exactly — tag first, then string
 /// field, else the empty string. Any divergence would make the headroom check
 /// answer about a different set of values than the ingest actually inserts.
-fn symbol_value<'l, 'a: 'l>(line: &'l IlpLine<'a>, col_name: &str) -> &'l str {
+pub(super) fn symbol_value<'l, 'a: 'l>(line: &'l IlpLine<'a>, col_name: &str) -> &'l str {
     let tag: Option<&'l str> = line
         .tags
         .iter()

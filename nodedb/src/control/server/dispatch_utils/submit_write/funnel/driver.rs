@@ -347,6 +347,19 @@ pub(crate) async fn enqueue_write(
         _ => None,
     };
 
+    // A stream marker's batched install makes each batch durable before the
+    // write's ack barrier runs. Its record is durable first, so every
+    // durable batch has its record at boot.
+    if wal_append_outcome.stream_marker
+        && let Some(lsn) = wal_lsn
+        && let Err(error) = shared.wal.wait_durable(lsn).await
+    {
+        if let Some(minted) = minted {
+            minted.cancel(&shared.wal, owner, 0).await?;
+        }
+        return Err(error);
+    }
+
     // A crash test parks one collection's logged write here: its LSN is
     // minted and no core holds it. A replicated write parks inside its apply
     // entry's enqueue, so no later entry of its Raft group starts until the

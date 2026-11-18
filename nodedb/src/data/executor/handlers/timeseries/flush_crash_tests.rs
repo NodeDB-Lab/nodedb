@@ -384,3 +384,111 @@ fn an_interval_change_governs_only_later_flushes() {
     );
     assert_eq!(stored_rows(&core), (0, 4));
 }
+
+/// The undo of a flush a transaction batch ran, as a `TRUNCATE` inside one
+/// records it: the flush's partitions go together, and the rows go back
+/// into the memtable.
+#[cfg(feature = "failpoints")]
+mod flush_undo {
+    use nodedb_types::fail_point::FailGuard;
+
+    use super::*;
+    use crate::data::executor::handlers::timeseries::flush_commit::REVERT_FILE;
+    use crate::data::executor::handlers::transaction::undo::UndoEntry;
+
+    /// Flush with its undo captured, then roll it back. Returns the flush's
+    /// result and the rollback's.
+    fn flush_and_roll_back(core: &mut CoreLoop) -> (bool, bool) {
+        let mut undo = core.capture_ts_flush_undo(&key()).expect("capture");
+        let flushed = flush(core).is_ok();
+        core.note_ts_flush_created(&mut undo);
+        let rolled_back = core
+            .rollback_undo_log(
+                0,
+                TENANT,
+                vec![UndoEntry::TimeseriesTruncateFlush(Box::new(undo))],
+            )
+            .is_ok();
+        (flushed, rolled_back)
+    }
+
+    /// An install that fails after the commit leaves the manifest and the
+    /// staged partitions. The rollback removes them, so no later flush
+    /// installs the rolled-back rows, and the rows stay in memory once.
+    #[test]
+    fn a_rollback_removes_a_flush_committed_and_not_installed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        apply_record(&mut core, LSN);
+        declare_hourly(&mut core);
+        let (flushed, rolled_back) = {
+            let _fail = FailGuard::fail("timeseries::flush::before_install", "install failed");
+            flush_and_roll_back(&mut core)
+        };
+        assert!(!flushed, "the install failed after the commit");
+        assert!(rolled_back);
+        assert!(
+            !leftovers(&core),
+            "no manifest and no staged partition stay"
+        );
+        assert_eq!(
+            stored_rows(&core),
+            (2, 0),
+            "the rows are back in memory once"
+        );
+        assert_eq!(partition_count(&core), 0);
+
+        core.roll_forward_ts_flushes(1_000);
+        assert_eq!(
+            stored_rows(&core),
+            (2, 0),
+            "nothing is left to roll forward"
+        );
+        flush(&mut core).expect("a later flush");
+        assert_eq!(stored_rows(&core), (0, 2));
+    }
+
+    /// A crash between two partition removals of a rollback: the open
+    /// finishes the revert before any partition loads, and replay stores
+    /// every row once.
+    #[test]
+    fn a_crash_mid_revert_replays_every_row_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        apply_record(&mut core, LSN);
+        declare_hourly(&mut core);
+        let (flushed, rolled_back) = {
+            let _fail = FailGuard::fail(
+                "timeseries::flush_revert::between_removals",
+                "crash mid revert",
+            );
+            flush_and_roll_back(&mut core)
+        };
+        assert!(flushed, "the flush wrote two partitions");
+        assert!(!rolled_back, "the revert stopped between two removals");
+        let segment_dir = segment_dir(&core);
+        assert!(
+            segment_dir.join(REVERT_FILE).exists(),
+            "the revert manifest stays"
+        );
+        drop(core);
+
+        let (mut restarted, _tx, _rx) = make_core_with_dir(dir.path());
+        restarted.load_ts_registries().expect("load registries");
+        assert!(
+            !segment_dir.join(REVERT_FILE).exists(),
+            "the open finished the revert"
+        );
+        assert_eq!(
+            partition_count(&restarted),
+            0,
+            "no partition of the flush stays"
+        );
+        apply_record(&mut restarted, LSN);
+        assert_eq!(
+            stored_rows(&restarted),
+            (2, 0),
+            "replay stores every row once"
+        );
+    }
+}

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use nodedb_array::types::TileId;
 
+use crate::types::partial_record::{InvalidPartialRecords, PartialRecords};
 use crate::types::replay_stamp::{InvalidReplayStamp, ReplayStamp};
 
 /// The manifest file name inside one array's store directory.
@@ -56,6 +57,12 @@ pub struct Manifest {
     /// Compaction and purge rewrite segments without changing which records
     /// they hold, so they leave the stamp alone.
     pub replay: ReplayStamp,
+    /// The records the segments hold in part, which `replay` does not name:
+    /// a batched install flushed the record's ops below a batch's end.
+    /// Restart replay skips exactly those ops. A flush replaces it with
+    /// `replay`, as the stamp is replaced: a later flush's stamp names
+    /// every record a partial entry named.
+    pub partial: PartialRecords,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +78,11 @@ pub enum ManifestError {
         #[source]
         source: InvalidReplayStamp,
     },
+    #[error("manifest carries invalid partial records: {source}")]
+    InvalidPartialRecords {
+        #[source]
+        source: InvalidPartialRecords,
+    },
 }
 
 impl Manifest {
@@ -79,6 +91,7 @@ impl Manifest {
             schema_hash,
             segments: Vec::new(),
             replay: ReplayStamp::default(),
+            partial: PartialRecords::default(),
         }
     }
 
@@ -98,6 +111,9 @@ impl Manifest {
                 m.replay
                     .validate()
                     .map_err(|source| ManifestError::InvalidReplayStamp { source })?;
+                m.partial
+                    .validate()
+                    .map_err(|source| ManifestError::InvalidPartialRecords { source })?;
                 Ok(m)
             }
             Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {

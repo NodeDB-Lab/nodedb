@@ -156,6 +156,29 @@ pub enum Geometry {
 }
 
 impl Geometry {
+    /// Heap bytes the geometry's coordinate lists hold.
+    pub fn heap_bytes(&self) -> usize {
+        let point = std::mem::size_of::<[f64; 2]>();
+        let ring = |ring: &Vec<[f64; 2]>| std::mem::size_of::<Vec<[f64; 2]>>() + ring.len() * point;
+        let rings = |rings: &Vec<Vec<[f64; 2]>>| {
+            std::mem::size_of::<Vec<Vec<[f64; 2]>>>() + rings.iter().map(ring).sum::<usize>()
+        };
+        match self {
+            Geometry::Point { .. } => 0,
+            Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
+                coordinates.len() * point
+            }
+            Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
+                coordinates.iter().map(ring).sum()
+            }
+            Geometry::MultiPolygon { coordinates } => coordinates.iter().map(rings).sum(),
+            Geometry::GeometryCollection { geometries } => geometries
+                .iter()
+                .map(|geometry| std::mem::size_of::<Geometry>() + geometry.heap_bytes())
+                .sum(),
+        }
+    }
+
     /// Create a Point from (x, y).
     pub fn point(lng: f64, lat: f64) -> Self {
         Geometry::Point {

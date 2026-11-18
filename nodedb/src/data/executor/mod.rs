@@ -2,6 +2,7 @@
 
 mod applied_prefix;
 pub(crate) mod array_checkpoint;
+mod array_install_flush;
 #[cfg(test)]
 mod cascade_journal_tests;
 pub(crate) mod checkpoint_decode_error;

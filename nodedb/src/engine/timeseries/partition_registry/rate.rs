@@ -5,7 +5,7 @@
 use nodedb_types::timeseries::PartitionInterval;
 
 /// Exponentially weighted moving average rate estimator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct RateEstimator {
     /// Current estimated rows per second.
     rate: f64,

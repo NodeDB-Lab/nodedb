@@ -57,18 +57,40 @@ impl CoreLoop {
     /// record this core applied. Every row in the view belongs to one of
     /// those records, and every one of those records has its rows here or in
     /// an earlier partition. Restart replay skips exactly the named records.
+    /// A batched install's flush between batches also names the ops of its
+    /// record it holds, and replay skips exactly those ops.
     ///
     /// The ingest path resolves everything that could stop it mid-record
     /// before the first row of a record goes in (its record-boundary admission
     /// gate), and notes a record applied only once its rows all landed. A
     /// flush from between two rows of a record would break the stamp in
-    /// either direction, so no caller may introduce one.
+    /// either direction. The one flush between two parts of a record is a
+    /// batched install's, between two batches, and it names the part it
+    /// holds ([`TsFlushStamp::InstallPartial`]).
     pub(in crate::data::executor) fn flush_ts_collection(
         &mut self,
         tid: TenantId,
         database_id: DatabaseId,
         collection: &str,
         now_ms: i64,
+    ) -> crate::Result<()> {
+        self.flush_ts_collection_stamped(
+            tid,
+            database_id,
+            collection,
+            now_ms,
+            TsFlushStamp::Applied,
+        )
+    }
+
+    /// [`Self::flush_ts_collection`], stamped as `how` says.
+    pub(in crate::data::executor) fn flush_ts_collection_stamped(
+        &mut self,
+        tid: TenantId,
+        database_id: DatabaseId,
+        collection: &str,
+        now_ms: i64,
+        how: TsFlushStamp,
     ) -> crate::Result<()> {
         let key = (database_id, tid, collection.to_string());
         let segment_dir = super::paths::ts_collection_dir(
@@ -95,7 +117,10 @@ impl CoreLoop {
         let interval = self.ts_partition_interval(&key)?;
         let view = mt.flush_view();
 
-        let stamp = self.ts_flush_stamp(&key)?;
+        let stamp = match how {
+            TsFlushStamp::Applied => self.ts_flush_stamp(&key)?,
+            TsFlushStamp::InstallPartial(partial) => self.ts_partial_flush_stamp(&key, partial)?,
+        };
         // Informational: `PartitionMeta` is shared with Lite, and replay reads
         // the stamp file, never this LSN.
         let flush_wal_lsn = stamp.rows.highest();
@@ -127,7 +152,7 @@ impl CoreLoop {
                     kek: ts_kek,
                 })?;
             // ── Commit point passed: the flush is durable ────────────────────
-            return self.install_committed_flush(&key, &segment_dir, committed, now_ms);
+            return self.install_committed_flush(&key, &segment_dir, committed, now_ms, how.fold());
         }
         let (partition_name, meta) = write_single_partition(SinglePartition {
             segment_dir: &segment_dir,
@@ -168,7 +193,7 @@ impl CoreLoop {
             "timeseries columnar flush complete"
         );
 
-        let registry = self.ts_registries.entry(key).or_insert_with(|| {
+        let registry = self.ts_registries.entry(key.clone()).or_insert_with(|| {
             PartitionRegistry::new(
                 nodedb_types::timeseries::TieredPartitionConfig::origin_defaults(),
             )
@@ -205,25 +230,83 @@ impl CoreLoop {
         // on a predicate that cannot be resolved would fail closed and silently
         // stop every continuous aggregate on a governed collection. The rows it
         // derives were already decided by the policy when they were ingested.
-        let refreshed = self.continuous_agg_mgr.on_flush(
-            database_id.as_u64(),
-            tid.as_u64(),
-            collection,
-            &partition_name,
-            &drain,
-            now_ms,
-        );
-        if !refreshed.is_empty() {
-            tracing::debug!(
-                collection,
-                aggregates = ?refreshed,
-                "continuous aggregates refreshed on flush"
-            );
-        }
-
+        self.fold_flushed_partition(&key, &partition_name, &drain, now_ms, how.fold());
         Ok(())
     }
 
+    /// Fold the flushed partition `partition` of `key`, whose rows are
+    /// `drain`, into the aggregates rooted at `key`, as `fold` says.
+    pub(super) fn fold_flushed_partition(
+        &mut self,
+        key: &(DatabaseId, TenantId, String),
+        partition: &str,
+        drain: &crate::engine::timeseries::columnar_memtable::ColumnarDrainResult,
+        now_ms: i64,
+        fold: TsPartitionFold,
+    ) {
+        let (database_id, tid, collection) = (key.0.as_u64(), key.1.as_u64(), key.2.as_str());
+        match fold {
+            TsPartitionFold::Now => {
+                let refreshed = self.continuous_agg_mgr.on_flush(
+                    database_id,
+                    tid,
+                    collection,
+                    partition,
+                    drain,
+                    now_ms,
+                );
+                if !refreshed.is_empty() {
+                    tracing::debug!(
+                        collection,
+                        aggregates = ?refreshed,
+                        "continuous aggregates refreshed on flush"
+                    );
+                }
+            }
+            TsPartitionFold::Backfill => {
+                self.continuous_agg_mgr
+                    .mark_backfill(database_id, tid, collection);
+            }
+        }
+    }
+}
+
+/// What a timeseries flush's partitions name.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::data::executor) enum TsFlushStamp {
+    /// Every record this core applied: an ordinary flush.
+    Applied,
+    /// A flush in the middle of a committed record: a batched install's
+    /// between two batches, or a truncate's that is an op of the record.
+    /// Every record this core applied, and the ops of that record the
+    /// `PartialRecord` names.
+    InstallPartial(crate::types::partial_record::PartialRecord),
+}
+
+impl TsFlushStamp {
+    /// How the flush folds its partitions. A partition flushed in the
+    /// middle of a record folds only once the install settled: the
+    /// maintenance tick and every aggregate read fold a partition an
+    /// aggregate lacks, and a rollback removes the partition before either
+    /// can.
+    pub(in crate::data::executor) fn fold(self) -> TsPartitionFold {
+        match self {
+            Self::Applied => TsPartitionFold::Now,
+            Self::InstallPartial(_) => TsPartitionFold::Backfill,
+        }
+    }
+}
+
+/// When a flushed partition folds into the continuous aggregates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::data::executor) enum TsPartitionFold {
+    /// At the flush.
+    Now,
+    /// Later: the root is marked for the maintenance tick's backfill.
+    Backfill,
+}
+
+impl CoreLoop {
     /// Charge the memtable's current resident footprint, replacing the
     /// prior charge so the budget tracks `memory_bytes()`, not the sum of
     /// every recharge.

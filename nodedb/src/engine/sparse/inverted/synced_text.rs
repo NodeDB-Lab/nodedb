@@ -71,13 +71,26 @@ impl SyncedTextHead {
 /// The stored frame versions of one document at one moment, as an undo
 /// puts them back: the newest version's ordinal and stored value, and the
 /// value at the ordinal a frame write names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct SyncedTextMark {
     newest: Option<(i64, Vec<u8>)>,
     /// The ordinal a re-issued frame version writes, and the value stored
     /// there before it. `None` for a live frame, which writes above
     /// `newest`.
     at: Option<(i64, Option<Vec<u8>>)>,
+}
+
+impl SyncedTextMark {
+    /// Heap bytes the stored frame values the mark holds.
+    pub fn heap_bytes(&self) -> usize {
+        let newest = self.newest.as_ref().map_or(0, |(_, value)| value.len());
+        let at = self
+            .at
+            .as_ref()
+            .and_then(|(_, value)| value.as_ref())
+            .map_or(0, Vec::len);
+        newest + at
+    }
 }
 
 impl InvertedIndex {

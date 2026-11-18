@@ -411,6 +411,149 @@ fn a_stopped_core_releases_no_ordinary_held_events_after_a_durable_store() {
     assert_eq!(events(), 0);
 }
 
+/// An event bus that keeps every event it received.
+fn event_log(core: &mut CoreLoop) -> impl FnMut() -> Vec<crate::event::WriteEvent> + use<> {
+    let (mut producers, mut consumers) = crate::event::bus::create_event_bus_with_capacity(1, 64);
+    core.set_event_producer(producers.pop().expect("producer"));
+    let mut consumer = consumers.pop().expect("consumer");
+    move || {
+        let mut received = Vec::new();
+        while let Some(event) = consumer.try_recv() {
+            received.push(event);
+        }
+        received
+    }
+}
+
+/// What one root redo install sent, its held events spilling past
+/// `threshold`, when its outer task answers `outer_ok`. Asserts the held
+/// set spilled exactly when `threshold` is 0, and left no directory.
+fn held_run(threshold: usize, outer_ok: bool) -> Vec<crate::event::WriteEvent> {
+    let directory = tempfile::tempdir().expect("directory");
+    let (mut core, _ends) = core_with_sum(directory.path());
+    core.ts_tuning.memtable_budget_bytes = 1;
+    core.query_tuning.max_txn_overlay_bytes = threshold;
+    let mut events = event_log(&mut core);
+    let task = task(false, false);
+    let permit = core
+        .begin_task_journal(&task, group())
+        .expect("root permit");
+    let mut response = core.execute_with_journal(&task, Some(permit));
+    assert_eq!(response.status, Status::Ok, "{response:?}");
+    assert!(events().is_empty(), "events wait for outer success");
+    let held = core
+        .write_set_journal
+        .held_events
+        .as_ref()
+        .expect("held events");
+    let spill_dir = held.dir().map(std::path::Path::to_path_buf);
+    if threshold == 0 {
+        assert!(held.spilled_len() > 0, "the held events spilled");
+        assert!(spill_dir.as_ref().is_some_and(|dir| dir.is_dir()));
+    } else {
+        assert!(spill_dir.is_none(), "an unspilled set names no directory");
+    }
+    if !outer_ok {
+        response.status = Status::Error;
+    }
+    core.finish_journalled_task(&task, &mut response)
+        .expect("finish journal");
+    assert!(core.write_set_journal.held_events.is_none());
+    if let Some(dir) = spill_dir {
+        assert!(!dir.exists(), "the spill directory is gone");
+    }
+    events()
+}
+
+/// Held events that spilled leave on outer success in the order, and with
+/// the sequence numbers, of held events that stayed in RAM. On outer
+/// failure they leave nothing behind: no event and no spill file.
+#[test]
+fn spilled_held_events_leave_only_on_outer_success() {
+    let in_ram = held_run(usize::MAX, true);
+    let spilled = held_run(0, true);
+    assert_eq!(spilled.len(), 2);
+    // Images compare as decoded documents: a document image writes its
+    // keys in hash order.
+    assert_eq!(
+        crate::data::executor::core_loop::held_events::read_as::as_read_all(&spilled),
+        crate::data::executor::core_loop::held_events::read_as::as_read_all(&in_ram)
+    );
+    assert!(
+        spilled
+            .windows(2)
+            .all(|pair| pair[1].sequence == pair[0].sequence + 1),
+        "the events take consecutive sequence numbers"
+    );
+    assert!(held_run(0, false).is_empty());
+}
+
+/// A held-event spill that fails answers the journalled write with an
+/// error: no write set is stored, and no event is sent.
+#[test]
+fn a_failed_held_event_spill_answers_the_write_with_an_error() {
+    let directory = tempfile::tempdir().expect("directory");
+    let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
+    core.query_tuning.max_txn_overlay_bytes = 0;
+    // A file where the held set's spill directory goes.
+    let blocked = crate::data::executor::handlers::spill::cleanup::SpillKind::Txn
+        .core_dir(directory.path(), core.core_id)
+        .join("held-events-0");
+    std::fs::create_dir_all(blocked.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&blocked, b"in the way").expect("block the directory");
+    let mut events = event_bus(&mut core);
+    let task = ordinary_task(1);
+    assert!(core.begin_task_journal(&task, ordinary_group(1)).is_none());
+    let mut response = core.execute(&task);
+    assert!(
+        core.write_set_journal
+            .held_events
+            .as_ref()
+            .is_some_and(|held| held.failure().is_some()),
+        "the held set failed"
+    );
+    assert!(
+        core.finish_journalled_task(&task, &mut response).is_err(),
+        "the journal answers an error"
+    );
+    assert!(captures(&core).is_empty(), "no write set is stored");
+    assert_eq!(events(), 0, "no event is sent");
+    assert!(core.is_fail_stopped());
+}
+
+/// A spilled held event that does not read back at the journal's end
+/// fail-stops the core.
+#[test]
+fn a_held_event_that_does_not_read_back_fail_stops_the_core() {
+    let directory = tempfile::tempdir().expect("directory");
+    let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
+    core.query_tuning.max_txn_overlay_bytes = 0;
+    let mut events = event_bus(&mut core);
+    let task = ordinary_task(1);
+    assert!(core.begin_task_journal(&task, ordinary_group(1)).is_none());
+    let mut response = core.execute(&task);
+    assert_eq!(response.status, Status::Ok, "{response:?}");
+    let dir = core
+        .write_set_journal
+        .held_events
+        .as_ref()
+        .and_then(|held| held.dir())
+        .map(std::path::Path::to_path_buf)
+        .expect("the held events spilled");
+    for file in std::fs::read_dir(&dir).expect("spill dir") {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.expect("entry").path())
+            .and_then(|file| file.set_len(2))
+            .expect("cut the spill file");
+    }
+    core.finish_journalled_task(&task, &mut response)
+        .expect("the write set is stored");
+    assert_eq!(captures(&core).len(), 1);
+    assert_eq!(events(), 0, "the cut event never leaves");
+    assert!(core.is_fail_stopped(), "the core stops on the lost event");
+}
+
 pub(super) fn reject_captures(core: &CoreLoop) {
     let txn = core.sparse.begin_write().expect("transaction");
     txn.delete_table(redb::TableDefinition::<u64, &[u8]>::new(

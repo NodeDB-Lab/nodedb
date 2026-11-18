@@ -107,11 +107,42 @@ impl CoreLoop {
     pub(in crate::data::executor) fn claim_for_validation(&mut self) -> bool {
         match self.redo_apply.scope.as_mut() {
             Some(scope) if scope.pass == RedoApplyPass::Validate => {
-                scope.claimed += 1;
+                scope.claim_sub_record();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Whether an arm of a committed-redo apply recorded an error. Restart
+    /// replay holds no scope, so it never stops here.
+    pub(crate) fn committed_redo_failed(&self) -> bool {
+        self.redo_apply
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.error.is_some())
+    }
+
+    /// Whether a batched install drives the arms. Its driver runs every
+    /// timeseries and array flush of the record, between batches and named
+    /// in part, so an arm runs none of its own.
+    pub(in crate::data::executor) fn installing_batched(&self) -> bool {
+        self.redo_apply
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_batched())
+    }
+
+    /// The index among its record's ops of the sub-record whose op index in
+    /// the slice an arm replays is `op`. A batched install hands the arms
+    /// one batch at a time, so its slice counts from the batch's first op.
+    pub(in crate::data::executor) fn record_op(&self, op: Option<u64>) -> Option<u64> {
+        let base = self
+            .redo_apply
+            .scope
+            .as_ref()
+            .map_or(0, |scope| scope.op_base);
+        op.map(|op| op.saturating_add(base))
     }
 
     /// Whether the arm must record undo entries for the writes it makes:
@@ -132,7 +163,7 @@ impl CoreLoop {
         if let Some(scope) = self.redo_apply.scope.as_mut()
             && scope.pass == RedoApplyPass::Install
         {
-            scope.undo.extend(entries);
+            scope.record_undo(entries);
         }
     }
 

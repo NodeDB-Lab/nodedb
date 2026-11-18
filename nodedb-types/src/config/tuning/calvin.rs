@@ -51,6 +51,10 @@ fn default_max_open_redo_bytes() -> u64 {
     512 * 1024 * 1024
 }
 
+fn default_redo_stream_batch_bytes() -> usize {
+    1024 * 1024
+}
+
 fn default_restage_attempts() -> u32 {
     5
 }
@@ -110,6 +114,13 @@ pub struct CalvinTuning {
     #[serde(default = "default_max_open_redo_bytes")]
     pub max_open_redo_bytes: u64,
 
+    /// Bytes of whole framed records one batch of a chunked redo's install
+    /// holds. The install validates and applies the stream one batch at a
+    /// time and makes each batch durable, so this bounds the install's
+    /// memory per batch. A record larger than it forms a batch alone.
+    #[serde(default = "default_redo_stream_batch_bytes")]
+    pub redo_stream_batch_bytes: usize,
+
     /// Most times a leader stages a committed transaction again after its
     /// own stage failed. An earlier leader's COMMIT vote decided the
     /// transaction, so it cannot drop. The scheduler halts once the stages
@@ -135,6 +146,7 @@ impl Default for CalvinTuning {
             catch_up_window: default_catch_up_window(),
             max_redo_entry_bytes: default_max_redo_entry_bytes(),
             max_open_redo_bytes: default_max_open_redo_bytes(),
+            redo_stream_batch_bytes: default_redo_stream_batch_bytes(),
             restage_attempts: default_restage_attempts(),
             restage_backoff_ms: default_restage_backoff_ms(),
         }
@@ -156,6 +168,7 @@ mod tests {
         assert_eq!(t.catch_up_window, 512);
         assert_eq!(t.max_redo_entry_bytes, 8 * 1024 * 1024);
         assert_eq!(t.max_open_redo_bytes, 512 * 1024 * 1024);
+        assert_eq!(t.redo_stream_batch_bytes, 1024 * 1024);
         assert_eq!(t.restage_attempts, 5);
         assert_eq!(t.restage_backoff_ms, 100);
     }

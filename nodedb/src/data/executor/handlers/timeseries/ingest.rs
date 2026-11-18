@@ -71,15 +71,7 @@ impl CoreLoop {
             });
         }
 
-        let governor_pressure = self
-            .governor
-            .try_reserve(
-                task.request.database_id,
-                tid,
-                nodedb_mem::EngineId::Timeseries,
-                0,
-            )
-            .is_err();
+        let governor_pressure = self.ts_engine_pressed();
         let resident = match live_resident {
             Some(live) => live.saturating_add(
                 simulation
@@ -267,7 +259,9 @@ impl CoreLoop {
         // resolves every possible mid-record stop before the first row lands.
         // A replayed or installed sub-record never flushes here: the replay
         // arm flushed before the record's first sub-record (`group_flush`),
-        // and a flush between two sub-records would split the record.
+        // and a flush between two sub-records would split the record with
+        // no stamp naming the part. A batched install's driver flushes
+        // between batches with a stamp that names it (`install_flush`).
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
         if mode == TimeseriesApplyMode::Immediate
             && self.ts_ingest_needs_flush(&key, &lines)

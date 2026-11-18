@@ -20,6 +20,7 @@ use crate::util::fnv1a_hash;
 use super::{UndoEntry, UndoError};
 
 /// The pre-image of one spatial row.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct SpatialRowUndo {
     pub key: SpatialIndexKey,
     /// The geometry row and its newest version before the write.

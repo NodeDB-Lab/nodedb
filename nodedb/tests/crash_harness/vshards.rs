@@ -25,6 +25,21 @@ pub fn names_on_distinct_vshards<const N: usize>(prefixes: [&str; N]) -> [String
     })
 }
 
+/// The vShard `name` homes on.
+pub fn vshard_of(name: &str) -> u32 {
+    nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, name)
+        .vshard()
+        .as_u32()
+}
+
+/// The first name `<prefix>_<n>` that homes on `vshard`.
+pub fn name_on_vshard(prefix: &str, vshard: u32) -> String {
+    (0..1u32 << 16)
+        .map(|i| format!("{prefix}_{i}"))
+        .find(|name| vshard_of(name) == vshard)
+        .unwrap_or_else(|| panic!("no {prefix} name on vShard {vshard} in 65536 tries"))
+}
+
 /// Data Raft groups a single-node server runs. The server maps vShard `v` to
 /// group `1 + v % SINGLE_NODE_DATA_GROUPS`.
 pub const SINGLE_NODE_DATA_GROUPS: u32 = 4;

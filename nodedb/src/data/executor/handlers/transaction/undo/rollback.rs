@@ -43,7 +43,7 @@ impl CoreLoop {
 
     /// Apply a single undo entry. An error is fatal: the shard's in-memory
     /// state is partially rolled back and must not serve writes.
-    fn apply_undo_entry(
+    pub(in crate::data::executor) fn apply_undo_entry(
         &mut self,
         did: u64,
         tid: u64,
@@ -105,6 +105,15 @@ impl CoreLoop {
             }
             UndoEntry::TimeseriesEndedInstall(undo) => {
                 self.apply_undo_ts_ended_install(entry_index, undo)
+            }
+            UndoEntry::TimeseriesTruncateFlush(undo) => {
+                self.apply_undo_ts_flush(entry_index, *undo)
+            }
+            UndoEntry::TimeseriesInstallFlush(undo) => {
+                self.apply_undo_ts_install_flush(entry_index, *undo)
+            }
+            UndoEntry::ArrayInstallFlush(undo) => {
+                self.apply_undo_array_install_flush(entry_index, *undo)
             }
             UndoEntry::StatsRestore { .. } => self.apply_undo_stats(entry_index, entry),
             UndoEntry::MarkNodeDeleted { .. } => self.apply_undo_mark_node(entry_index, entry),

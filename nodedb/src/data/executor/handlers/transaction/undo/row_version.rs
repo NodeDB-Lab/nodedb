@@ -18,6 +18,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use super::UndoError;
 
 /// One row a write names: where it is stored, and its version floor.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct RowVersionFloor {
     pub key: StorageKey,
     /// The system time of the row's newest stored version before the

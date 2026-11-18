@@ -9,12 +9,16 @@
 //!   Calvin stage runs the same checks on its staged images.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
-//! - [`streamed`]: the content of a stream marker, read back from the WAL.
+//! - [`streamed`]: reads of a stream marker's content back from the WAL.
+//! - [`batched`]: the install of a stream marker's content, batch by
+//!   batch.
 //! - [`stream_validate`]: the validate of a stream marker's content, run
 //!   batch by batch over the stream.
 //! - [`document`]: document rows written while the apply scope is open, or
 //!   while restart replay folds a record whose install never became durable.
 //! - [`replay_fold`]: restart replay's fold of such a record.
+//! - [`fold_ledger`]: the ops and target rows a batched install folded
+//!   durably.
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
@@ -30,6 +34,7 @@
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
 //! - [`retention_instant_tests`]: retention judged at the entry's instant.
 
+mod batched;
 #[cfg(test)]
 pub(in crate::data::executor) mod calvin_fold_tests;
 mod calvin_install;
@@ -41,6 +46,7 @@ mod cross_shard_fold_tests;
 mod document;
 mod entry;
 mod events;
+mod fold_ledger;
 mod folded_store;
 #[cfg(test)]
 mod install_refusal_tests;

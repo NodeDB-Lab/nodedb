@@ -25,6 +25,7 @@ use super::row_version::{RowVersionFloor, WrittenRows};
 use super::{UndoEntry, UndoError};
 
 /// The pre-image of one vector write.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct VectorWriteUndo {
     pub index_key: VectorIndexKey,
     pub tid: u64,

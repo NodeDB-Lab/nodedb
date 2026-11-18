@@ -13,8 +13,8 @@ mod verdict;
 mod walk;
 
 #[cfg(test)]
-mod tests;
+pub(in crate::data::executor::handlers::transaction::redo_apply) mod tests;
 
 pub(in crate::data::executor::handlers::transaction::redo_apply) use walk::{
-    StreamLimits, StreamValidateInput,
+    StreamHeader, StreamLimits, StreamValidateInput, StreamValidated,
 };

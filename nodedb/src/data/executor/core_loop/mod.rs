@@ -28,6 +28,7 @@ pub(in crate::data::executor) mod graph_metrics;
 mod graph_partition;
 mod graph_view;
 pub(in crate::data::executor) mod hash_chain_state;
+pub(in crate::data::executor) mod held_events;
 pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
 #[cfg(test)]

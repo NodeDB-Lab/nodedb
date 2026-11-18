@@ -35,6 +35,30 @@ impl PartitionRegistry {
         self.partitions.remove(key)
     }
 
+    /// The state the AUTO interval adapts by: the current interval and the
+    /// ingest rate estimate. A flush moves it.
+    pub fn adaptive_state(&self) -> AdaptiveState {
+        AdaptiveState {
+            interval: self.current_interval.clone(),
+            rate: self.rate_estimator.clone(),
+        }
+    }
+
+    /// Put back the adaptive state `state` held, for the undo of a flush.
+    pub fn restore_adaptive_state(&mut self, state: AdaptiveState) {
+        self.current_interval = state.interval;
+        self.rate_estimator = state.rate;
+    }
+}
+
+/// The AUTO interval's adaptive state of one registry.
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+pub struct AdaptiveState {
+    interval: nodedb_types::timeseries::PartitionInterval,
+    rate: super::rate::RateEstimator,
+}
+
+impl PartitionRegistry {
     /// Remove deleted partitions from the registry (after physical cleanup).
     pub fn purge_deleted(&mut self) -> Vec<String> {
         let deleted: Vec<PartitionKey> = self

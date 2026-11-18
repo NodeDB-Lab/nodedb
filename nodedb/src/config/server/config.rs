@@ -591,6 +591,32 @@ mod tests {
         assert_eq!(cfg.tuning.calvin.max_open_redo_bytes, 1_048_576);
     }
 
+    #[test]
+    fn from_file_rejects_a_redo_stream_batch_below_its_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-batch-small.toml",
+            "[tuning.calvin]\nredo_stream_batch_bytes = 1024\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tuning.calvin.redo_stream_batch_bytes"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn from_file_reads_the_redo_stream_batch() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-batch-ok.toml",
+            "[tuning.calvin]\nredo_stream_batch_bytes = 16384\n",
+        );
+        let cfg = ServerConfig::from_file(&path).expect("valid redo stream batch");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cfg.tuning.calvin.redo_stream_batch_bytes, 16_384);
+    }
+
     /// Every shipped default satisfies every bound the gate enforces.
     #[test]
     fn the_compiled_defaults_are_in_domain() {

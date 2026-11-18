@@ -18,14 +18,14 @@ use crate::data::executor::handlers::vector_direct_row::VectorIndexKey;
 
 /// One payload bitmap row: a live node and the lower-cased sidecar fields
 /// its entries index.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct PayloadRow {
     pub node_id: u32,
     pub fields: HashMap<String, Value>,
 }
 
 /// The payload bitmap change of one restored row.
-#[derive(Debug)]
+#[derive(Debug, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct VectorPayloadRowsUndo {
     pub index_key: VectorIndexKey,
     /// The row the install took out.

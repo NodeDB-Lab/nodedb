@@ -28,6 +28,9 @@ pub struct CoreCompactionConfig {
     /// refused on every replica, so a replica's purge below the cleanup
     /// horizon never changes a commit verdict.
     pub commit_snapshot_window: std::time::Duration,
+    /// Bytes of whole framed records one batch of a chunked redo's install
+    /// holds (`CalvinTuning::redo_stream_batch_bytes`).
+    pub redo_stream_batch_bytes: usize,
 }
 
 impl Default for CoreCompactionConfig {
@@ -42,6 +45,8 @@ impl Default for CoreCompactionConfig {
             checkpoint_interval: std::time::Duration::from_secs(300),
             commit_snapshot_window: nodedb_types::config::tuning::NetworkTuning::default()
                 .snapshot_max_hold(),
+            redo_stream_batch_bytes: nodedb_types::config::tuning::CalvinTuning::default()
+                .redo_stream_batch_bytes,
         }
     }
 }

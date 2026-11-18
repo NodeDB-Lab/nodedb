@@ -14,6 +14,7 @@ use crate::types::{DatabaseId, TenantId};
 use super::{UndoEntry, UndoError};
 
 /// The Loro state of one CRDT collection before a write.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(in crate::data::executor) struct CrdtCollectionUndo {
     pub database_id: DatabaseId,
     pub tenant_id: TenantId,

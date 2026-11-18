@@ -16,8 +16,9 @@
 //! and `replay_all_wal` returns the halt to its caller as an error. Boot then
 //! refuses to start, exactly as it does for a redo group replay cannot
 //! reconstitute and for a partially-recovered sync HWM idempotency gate. The
-//! forensic report is filed here rather than at each call site, so one WAL
-//! tail that fails identically on every core files one growing report.
+//! fail-stop files the one report of the halt, with the engine, the step and
+//! the record in its detail. Its grouping key is the cause, so one WAL tail
+//! that fails identically on every core files one growing report.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::fail_stop::FailStopCause;
@@ -39,7 +40,6 @@ impl CoreLoop {
         if self.is_fail_stopped() {
             return;
         }
-        crate::diag::replay_record_unapplied(engine, stage, self.core_id, record_lsn, detail);
         tracing::error!(
             core_id = self.core_id,
             engine,

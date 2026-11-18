@@ -94,7 +94,7 @@ pub(in crate::diag) use raft_apply::{
     CalvinBarrierLogStoreFailed, CalvinLeftStateNotForgotten, RaftEntryReapplied,
 };
 pub(in crate::diag) use read_cut::OrdinalReservationLeaked;
-pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
+pub(in crate::diag) use recovery::WalArchivalFailedTruncationHeld;
 pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoChangesUnstaged, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };

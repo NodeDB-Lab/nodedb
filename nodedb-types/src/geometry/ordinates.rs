@@ -139,6 +139,15 @@ impl Ordinates {
         Self::default()
     }
 
+    /// Heap bytes the Z and M arrays hold.
+    pub fn heap_bytes(&self) -> usize {
+        [&self.z, &self.m]
+            .into_iter()
+            .flatten()
+            .map(|values| std::mem::size_of_val(&**values))
+            .sum()
+    }
+
     /// Z and M arrays as given. [`super::SridGeometry::with_ordinates`]
     /// checks them against the shape.
     pub fn new(z: Option<Vec<f64>>, m: Option<Vec<f64>>) -> Self {

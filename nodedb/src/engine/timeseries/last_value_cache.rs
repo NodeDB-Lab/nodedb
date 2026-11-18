@@ -82,6 +82,21 @@ impl LastValueCache {
         self.pruned_below = self.pruned_below.max(at);
     }
 
+    /// Heap bytes the cache's entries and their replaced versions hold.
+    pub fn heap_bytes(&self) -> usize {
+        let slot = std::mem::size_of::<SeriesId>() + std::mem::size_of::<LastValueEntry>();
+        let history = self
+            .history
+            .values()
+            .map(|versions| {
+                std::mem::size_of::<SeriesId>()
+                    + std::mem::size_of::<Vec<LastValueEntry>>()
+                    + versions.capacity() * std::mem::size_of::<LastValueEntry>()
+            })
+            .sum::<usize>();
+        self.entries.capacity() * slot + history
+    }
+
     /// Set the cleanup horizon. Updates drop the versions no read at or
     /// above it reaches.
     pub fn set_horizon(&mut self, horizon: i64) {

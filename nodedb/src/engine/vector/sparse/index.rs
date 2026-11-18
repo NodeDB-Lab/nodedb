@@ -19,11 +19,18 @@ use super::history::SparseHistory;
 /// One document of a [`SparseInvertedIndex`]: its internal id, its
 /// `(dimension, weight)` entries, and the ordinal its live version started
 /// at (`i64::MIN` when no retained cut reads below it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct SparseDocImage {
     pub(super) internal_id: u32,
     pub(super) entries: Vec<(u32, f32)>,
     pub(super) sys_from: i64,
+}
+
+impl SparseDocImage {
+    /// Heap bytes the document's entries hold.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.len() * std::mem::size_of::<(u32, f32)>()
+    }
 }
 
 /// Inverted index for sparse vectors.

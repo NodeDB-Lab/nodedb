@@ -21,6 +21,7 @@
 
 mod array;
 mod array_restore;
+mod array_stamp;
 mod crdt;
 mod crdt_admission;
 mod crdt_doc;

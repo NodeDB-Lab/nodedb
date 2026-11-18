@@ -52,7 +52,10 @@ impl CoreLoop {
         // Node labels are tenant-wide: every historical CSR of the tenant
         // drops.
         self.historical_csr.invalidate_tenant(db, tenant);
-        let due = self.edge_store.label_version_due(lsn);
+        // A record whose batched install ended part way versioned only its
+        // durable batches: boot replay versions all of it again.
+        let due = self.edge_store.label_version_due(lsn)
+            || lsn.is_some_and(|lsn| self.redo_apply.install_cursors.contains(lsn));
         let exact = op.exact && kind == LabelOpKind::Set;
         let ordinal = (due || exact).then(|| self.label_op_ordinal(op.system_from));
         let undo = match kind {
