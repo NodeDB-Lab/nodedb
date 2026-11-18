@@ -40,7 +40,7 @@ impl CoreLoop {
     ///
     /// The batched install cursors are read before the passes and dropped
     /// after them, an empty WAL included: replay completes each cursor's
-    /// record (see `redo_apply::batched::boot`).
+    /// record (see `redo_apply::batched::durable::boot`).
     pub fn replay_all_wal(
         &mut self,
         records: &[WalRecord],

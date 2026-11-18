@@ -454,7 +454,7 @@ fn a_pressed_collection_the_install_has_not_ingested_into_keeps_its_rows_on_roll
     use std::collections::HashSet;
 
     use super::super::state::{RedoApplyPass, RedoApplyScope};
-    use super::undo::SpillableUndo;
+    use super::rollback::undo::SpillableUndo;
     use crate::data::executor::handlers::timeseries::{TsStreamAt, TsStreamLoads};
     use crate::types::partial_record::PartialRecord;
 
@@ -508,7 +508,7 @@ fn a_pressed_collection_the_install_has_not_ingested_into_keeps_its_rows_on_roll
         .expect("the install scope");
     let undo = scope.spillable.expect("the batched log");
     let core = &mut node.core;
-    let drained = undo.drain_newest_first(|index, _, entry| {
+    let drained = super::rollback::undo::tests::drain_newest_first(undo, |index, _, entry| {
         core.apply_undo_entry(0, TID, index, entry, TimerRestore::KeepNewer)
     });
     assert!(drained.is_ok(), "every entry reversed");

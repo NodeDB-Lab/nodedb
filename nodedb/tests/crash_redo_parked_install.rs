@@ -8,7 +8,10 @@
 //!
 //! - at the park after the third batch;
 //! - at a later park, after a write of another database ran and answered
-//!   while the install was held parked.
+//!   while the install was held parked;
+//! - at a park of the rollback of an install whose document pass failed,
+//!   after a write of another database ran and answered while the
+//!   rollback was held parked.
 //!
 //! Boot completes the record forward. Every source row reads back once,
 //! the sum holds one fold of every row, and the other write stays.
@@ -40,36 +43,87 @@ async fn abort_while_parked_folds_once() {
 /// write and one fold of every row.
 #[tokio::test(flavor = "multi_thread")]
 async fn abort_while_parked_with_a_concurrent_write_keeps_both() {
-    const HOLD_AT: &str = "redo_apply::batched::hold_parked::Document::1";
-    const ABORT_AT: &str = "redo_apply::batched::parked::Document::3";
-    const OTHER_DB: &str = "bi_parked_db";
-    let names = names("bi_parked_write");
-    let notes = name_off_vshard("bi_parked_notes", vshard_of(&names.source));
+    abort_after_a_held_write(
+        "bi_parked",
+        Held {
+            at: "redo_apply::batched::hold_parked::Document::1",
+            message: "batched install parked",
+            batch: 1,
+        },
+        "redo_apply::batched::parked::Document::3",
+        None,
+    )
+    .await;
+}
+
+/// The install's document pass fails once it wrote every batch, and its
+/// rollback parks after each batch it reverses. The rollback is held
+/// parked at the checkpoint that keeps batch 2 while a write of another
+/// database runs and answers. It then resumes, and the process aborts at
+/// its next park. A restart completes the record forward, holds one fold
+/// of every row, and keeps the write.
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_while_the_rollback_is_parked_with_a_concurrent_write_keeps_both() {
+    abort_after_a_held_write(
+        "bi_rollback",
+        Held {
+            at: "redo_apply::batched::hold_rollback_parked::Document::2",
+            message: "batched rollback parked",
+            batch: 2,
+        },
+        "redo_apply::batched::rollback_parked::Document::1",
+        Some("redo_apply::batched::install_batch_fails::Document"),
+    )
+    .await;
+}
+
+/// Where a test holds the install parked while the other write runs.
+struct Held {
+    /// The fail point that holds it until the gate file exists.
+    at: &'static str,
+    /// The log line its park writes.
+    message: &'static str,
+    /// The `batch` field of that line.
+    batch: u64,
+}
+
+/// Commit the large transaction with the install held parked at `held`
+/// while a write of another database, on another vShard, runs and
+/// answers. `fail_at`, when named, fails the install besides. The install
+/// then resumes, and the process aborts at `abort_at`. A restart holds the
+/// write and one fold of every row. `prefix` names the test's collections.
+async fn abort_after_a_held_write(prefix: &str, held: Held, abort_at: &str, fail_at: Option<&str>) {
+    let other_db = format!("{prefix}_db");
+    let names = names(&format!("{prefix}_write"));
+    let notes = name_off_vshard(&format!("{prefix}_notes"), vshard_of(&names.source));
     // One core, so the write runs on the core the install is parked on.
     let mut h = harness_with("[server]\ndata_plane_cores = 1\n");
     h.spawn();
     h.wait_ready();
     create(&h, &names).await;
-    h.exec(&format!("CREATE DATABASE {OTHER_DB}")).await;
+    h.exec(&format!("CREATE DATABASE {other_db}")).await;
     let ddl = format!(
         "CREATE COLLECTION {notes} (id TEXT PRIMARY KEY, body TEXT) WITH (engine='document_strict')"
     );
-    h.exec_in(OTHER_DB, &ddl).await;
+    h.exec_in(&other_db, &ddl).await;
     h.kill_9();
     let gate = h.data_dir().join("parked_gate");
-    let spec = format!("{HOLD_AT}=wait_file({}),{ABORT_AT}=abort", gate.display());
+    let mut spec = format!("{}=wait_file({}),{abort_at}=abort", held.at, gate.display());
+    if let Some(fail_at) = fail_at {
+        spec.push_str(&format!(",{fail_at}=fail(a late batch fails)"));
+    }
     h.set_env("NODEDB_FAILPOINTS", &spec);
     h.reopen();
 
-    // The install holds at its park after batch 1 until the gate opens.
+    // The install holds at its park until the gate opens.
     let write = async {
         let parked = async {
-            while !log_field(&h.server_log(), "batched install parked", "batch").contains(&1) {
+            while !log_field(&h.server_log(), held.message, "batch").contains(&held.batch) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         };
-        let held = tokio::time::timeout(CRASH_TIMEOUT, parked).await;
-        let conn = h.pgwire_conn_str_for(OTHER_DB);
+        let was_held = tokio::time::timeout(CRASH_TIMEOUT, parked).await;
+        let conn = h.pgwire_conn_str_for(&other_db);
         let (client, connection) = tokio_postgres::connect(&conn, tokio_postgres::NoTls)
             .await
             .expect("connect to the other database");
@@ -79,11 +133,11 @@ async fn abort_while_parked_with_a_concurrent_write_keeps_both() {
         let insert = format!("INSERT INTO {notes} (id, body) VALUES ('n1', 'kept')");
         let inserted = tokio::time::timeout(CRASH_TIMEOUT, client.simple_query(&insert)).await;
         std::fs::write(&gate, b"").expect("open the gate");
-        (held.is_ok(), inserted.map(|result| result.map(|_| ())))
+        (was_held.is_ok(), inserted.map(|result| result.map(|_| ())))
     };
-    let (committed, (held, inserted)) =
+    let (committed, (was_held, inserted)) =
         tokio::join!(commit_large_transaction(&h, &names.source), write);
-    assert!(held, "the install never parked after batch 1");
+    assert!(was_held, "the install never parked at `{}`", held.at);
     assert!(
         matches!(inserted, Ok(Ok(()))),
         "the write did not answer while the install was parked: {inserted:?}"
@@ -92,13 +146,13 @@ async fn abort_while_parked_with_a_concurrent_write_keeps_both() {
         !committed,
         "COMMIT answered success, but the server was armed to abort"
     );
-    await_abort_at(&mut h, ABORT_AT);
+    await_abort_at(&mut h, abort_at);
 
     h.clear_env("NODEDB_FAILPOINTS");
     h.reopen();
     assert_installed_once(&h, &names, "after the restart").await;
     let read = format!("SELECT body FROM {notes} WHERE id = 'n1'");
-    let kept = h.query_col_idx_in(OTHER_DB, &read, 0);
+    let kept = h.query_col_idx_in(&other_db, &read, 0);
     assert_eq!(
         kept.await,
         vec!["kept".to_string()],

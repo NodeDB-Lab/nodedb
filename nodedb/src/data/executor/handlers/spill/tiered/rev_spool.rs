@@ -125,6 +125,7 @@ where
     pub(in crate::data::executor) fn into_newest_first(self) -> NewestFirst<E> {
         NewestFirst {
             tail: self.tail,
+            tail_bytes: self.tail_bytes,
             back: self.file.map(|file| BackReader {
                 run: RunFile::new(file.path.clone()),
                 reader: BlockReader::default(),
@@ -224,21 +225,30 @@ impl BackReader {
 /// was handed back.
 pub(in crate::data::executor) struct NewestFirst<E> {
     tail: Vec<E>,
+    tail_bytes: usize,
     back: Option<BackReader>,
 }
 
 impl<E> NewestFirst<E>
 where
-    E: for<'de> zerompk::FromMessagePack<'de>,
+    E: SpillWeight + for<'de> zerompk::FromMessagePack<'de>,
 {
     /// Entries not yet handed back.
     pub(in crate::data::executor) fn remaining(&self) -> u64 {
         self.tail.len() as u64 + self.back.as_ref().map_or(0, |back| back.file.entries)
     }
 
+    /// RAM the cursor holds: the tail entries not yet handed back, and the
+    /// file bytes read and not yet handed back.
+    pub(in crate::data::executor) fn held_bytes(&self) -> usize {
+        self.tail_bytes
+            .saturating_add(self.back.as_ref().map_or(0, |back| back.buf.len()))
+    }
+
     /// The newest entry not yet handed back, `None` past the oldest.
     pub(in crate::data::executor) fn next_newest(&mut self) -> crate::Result<Option<E>> {
         if let Some(entry) = self.tail.pop() {
+            self.tail_bytes = self.tail_bytes.saturating_sub(entry.spill_weight());
             return Ok(Some(entry));
         }
         let Some(back) = self.back.as_mut() else {

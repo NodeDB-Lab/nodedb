@@ -32,6 +32,7 @@ use super::super::stream_validate::tests::{StreamWal, framed, record};
 use super::super::stream_validate::{StreamLimits, StreamValidateInput};
 use super::super::test_commit::doc_put_sub_record;
 use super::StreamInstallInput;
+use super::install::job::StreamInstallJob;
 
 /// A batch bound that puts a few source rows in each batch.
 const BATCH_BYTES: usize = 256;
@@ -116,6 +117,18 @@ fn install(live: &mut Live, plan: PhysicalPlan, lsn: Lsn) -> Response {
 
 /// [`install`] up to the install's answer, before the journal ends.
 fn install_unfinished(live: &mut Live, plan: PhysicalPlan, lsn: Lsn) -> (ExecutionTask, Response) {
+    let (task, job) = open_install(live, plan, lsn);
+    let response = job.run_to_end(&mut live.core, &task, &mut Vec::new());
+    (task, response)
+}
+
+/// Validate the marker `plan` names at `lsn` under a root journal, and open
+/// its install as a job that runs no slice yet.
+fn open_install(
+    live: &mut Live,
+    plan: PhysicalPlan,
+    lsn: Lsn,
+) -> (ExecutionTask, StreamInstallJob) {
     let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { redo, .. }) = &plan else {
         panic!("a redo install");
     };
@@ -155,7 +168,8 @@ fn install_unfinished(live: &mut Live, plan: PhysicalPlan, lsn: Lsn) -> (Executi
         })
         .unwrap_or_else(|code| panic!("validate: {code:?}"));
     let collections = [SOURCE.to_string()];
-    let response = core.install_redo_stream(
+    let job = StreamInstallJob::open(
+        core,
         StreamInstallInput {
             task: &task,
             tid: TID,
@@ -168,9 +182,9 @@ fn install_unfinished(live: &mut Live, plan: PhysicalPlan, lsn: Lsn) -> (Executi
             collections: &collections,
         },
         validated,
-        &mut Vec::new(),
-    );
-    (task, response)
+    )
+    .unwrap_or_else(|code| panic!("open the install: {code:?}"));
+    (task, job)
 }
 
 /// The install cursors the stores at `stores` hold.
@@ -251,10 +265,15 @@ mod cut {
     }
 
     /// The live node cut at `point`, a fail point the install reaches while
-    /// it is parked. The install runs through the core's request ring and
-    /// `tick()`, with `foreign` queued behind it. The panic there stops the
-    /// core, and the stores hold what a crash at the point leaves.
-    fn cut_parked_at(point: &str, foreign: Option<crate::bridge::envelope::Request>) -> Cut {
+    /// it is parked, with `failing` armed to fail besides. The install runs
+    /// through the core's request ring and `tick()`, with `foreign` queued
+    /// behind it. The panic there stops the core, and the stores hold what
+    /// a crash at the point leaves.
+    fn cut_parked_at(
+        point: &str,
+        foreign: Option<crate::bridge::envelope::Request>,
+        failing: Option<&str>,
+    ) -> Cut {
         use crate::bridge::dispatch::{BridgeRequest, BridgeResponse, WriteSetJournal};
         use nodedb_bridge::buffer::{Consumer, Producer};
 
@@ -292,6 +311,7 @@ mod cut {
                 .expect("queue foreign write");
         }
         let stores = {
+            let _failing = failing.map(|name| FailGuard::fail(name, "a late batch fails"));
             let _cut = FailGuard::install(point, FailAction::Panic);
             for _ in 0..1_000 {
                 if live.core.is_fail_stopped() {
@@ -403,7 +423,7 @@ mod cut {
     /// once.
     #[test]
     fn a_crash_while_parked_completes_forward_once() {
-        let cut = cut_parked_at("redo_apply::batched::parked::Document::1", None);
+        let cut = cut_parked_at("redo_apply::batched::parked::Document::1", None, None);
         let left = cursors(cut.stores.path());
         assert!(
             matches!(left.as_slice(), [cursor] if matches!(cursor.state, CursorState::Installing { batch: 1, .. })),
@@ -429,6 +449,7 @@ mod cut {
         let cut = cut_parked_at(
             "redo_apply::batched::parked::Document::1",
             Some(foreign_put()),
+            None,
         );
         assert!(
             holds_foreign(cut.stores.path()),
@@ -440,6 +461,151 @@ mod cut {
             holds_foreign(cut.stores.path()),
             "boot keeps the foreign write"
         );
+    }
+
+    /// The last batch fails, and the rollback parks after each durable
+    /// checkpoint with its state out of the core. The cut at the park after
+    /// the checkpoint that keeps batch 1 leaves the forward install through
+    /// it. Boot completes the record forward and folds each source once.
+    #[test]
+    fn a_crash_while_the_rollback_is_parked_completes_forward_once() {
+        let cut = cut_parked_at(
+            "redo_apply::batched::rollback_parked::Document::1",
+            None,
+            Some("redo_apply::batched::install_batch_fails::Document"),
+        );
+        let left = cursors(cut.stores.path());
+        assert!(
+            matches!(left.as_slice(), [cursor] if matches!(cursor.state, CursorState::RollingBack { batch: 1, .. })),
+            "the cut leaves the checkpoint of the parked rollback: {left:?}"
+        );
+        let (balance, captures) = restart(&cut);
+        assert_eq!(
+            balance.as_deref(),
+            Some(SINGLE_FOLD),
+            "one fold of every row"
+        );
+        assert_eq!(captures.len(), 1);
+        assert!(
+            cursors(cut.stores.path()).is_empty(),
+            "boot drops the cursor"
+        );
+    }
+
+    /// A vector-primary write before the source rows: a vector arm runs
+    /// before the document arm, so the rollback's last checkpoint keeps a
+    /// batch of that arm. The install runs as a job, slice by slice, and the
+    /// document pass fails once it wrote every batch. The cut right after
+    /// that checkpoint leaves no fold: it rewound the fold ledger to none.
+    /// Boot completes the record forward and folds each source once.
+    #[test]
+    fn a_rollback_cut_at_an_arm_before_the_document_arm_folds_once() {
+        use super::super::install::job_stage::{ParkPoint, StepOutcome};
+        use crate::wal::redo::replay_arm::RedoArm;
+
+        let mut ops = super::super::equivalence_tests::resolved(
+            &[super::super::super::install_refusal_tests::vector_direct_insert()],
+            |_| {},
+        )
+        .ops;
+        ops.extend(charges());
+        let mut live = live();
+        let (plan, lsn) = append_marker(&mut live, &record(ops));
+        let (task, mut job) = open_install(&mut live, plan, lsn);
+        let failing = FailGuard::fail(
+            "redo_apply::batched::install_batch_fails::Document",
+            "a late batch fails",
+        );
+        let kept = loop {
+            match job.step(&mut live.core, &task) {
+                Ok(StepOutcome::Ran) => {}
+                Ok(StepOutcome::Done(response)) => panic!(
+                    "the rollback never kept a batch of an arm before the document arm: \
+                     {response:?}"
+                ),
+                Err(code) => panic!("step: {code:?}"),
+            }
+            if let ParkPoint::RollingBack(kept) = job.park_point()
+                && kept.arm < RedoArm::Document
+            {
+                break kept;
+            }
+        };
+        let stores = crash_image(live.dir.path());
+        drop(job);
+        drop(failing);
+        let cut = Cut {
+            live,
+            stores,
+            lsn: lsn.as_u64(),
+        };
+        let left = cursors(cut.stores.path());
+        assert!(
+            matches!(left.as_slice(), [cursor] if cursor.state
+                == CursorState::RollingBack { arm: kept.arm, batch: kept.batch }),
+            "the cut keeps {kept:?}: {left:?}"
+        );
+        assert_eq!(
+            install_rows(cut.stores.path(), cut.lsn),
+            (Vec::new(), 0),
+            "the checkpoint rewound every fold of the record"
+        );
+        let (balance, captures) = restart(&cut);
+        assert_eq!(
+            balance.as_deref(),
+            Some(SINGLE_FOLD),
+            "one fold of every row"
+        );
+        assert_eq!(captures.len(), 1);
+        assert!(cursors(cut.stores.path()).is_empty());
+    }
+
+    /// Every batch is durable when the capture cannot be prepared. The core
+    /// fail-stops at detection and rolls nothing back: the cursor of the
+    /// last batch stays. Boot completes the record forward and folds each
+    /// source once.
+    #[test]
+    fn a_failed_capture_prepare_fail_stops_and_completes_forward_once() {
+        use crate::data::executor::core_loop::fail_stop::FailStopCause;
+
+        let mut live = live();
+        let (plan, lsn) = append_marker(&mut live, &record(charges()));
+        let (_task, response) = {
+            let _failing =
+                FailGuard::fail("redo_apply::capture_prepare_fails", "the prepare fails");
+            install_unfinished(&mut live, plan, lsn)
+        };
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(crate::bridge::envelope::ErrorCode::Internal { detail })
+                    if detail.contains("next boot")
+            ),
+            "{response:?}"
+        );
+        assert!(matches!(
+            live.core.fail_stop.cause(),
+            Some((FailStopCause::WriteSetUnpersisted, _))
+        ));
+        let stores = crash_image(live.dir.path());
+        let left = cursors(stores.path());
+        assert!(
+            matches!(left.as_slice(), [cursor] if matches!(cursor.state, CursorState::Installing { .. })),
+            "nothing rolled back: {left:?}"
+        );
+        let cut = Cut {
+            live,
+            stores,
+            lsn: lsn.as_u64(),
+        };
+        let (balance, captures) = restart(&cut);
+        assert_eq!(
+            balance.as_deref(),
+            Some(SINGLE_FOLD),
+            "one fold of every row"
+        );
+        assert_eq!(captures.len(), 1);
+        assert!(cursors(cut.stores.path()).is_empty());
     }
 
     /// Every batch is durable and the write set is not stored: boot folds

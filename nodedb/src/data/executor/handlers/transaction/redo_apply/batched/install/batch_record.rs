@@ -14,8 +14,8 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 use crate::wal::{CalvinStamp, CrossShardAppliedKey, RedoRecord, RedoSubRecord};
 
-use super::super::passes::{final_refusal, redo_wal_record};
-use super::super::stream_validate::StreamHeader;
+use super::super::super::passes::{final_refusal, redo_wal_record};
+use super::super::super::stream_validate::StreamHeader;
 
 /// The marker fields every batch record carries.
 pub(in crate::data::executor::handlers::transaction::redo_apply) struct BatchStamps {

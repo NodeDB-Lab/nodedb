@@ -3,7 +3,7 @@
 //! The arms' validate pass over a stream, one batch at a time.
 //!
 //! Each batch's ops form a record that holds only them (see
-//! `batched::batch_record`). The pass runs over it through
+//! `batched::install::batch_record`). The pass runs over it through
 //! `ValidateBatches`, which keeps one scope across the batches and ranks
 //! their errors as a whole-record pass does.
 

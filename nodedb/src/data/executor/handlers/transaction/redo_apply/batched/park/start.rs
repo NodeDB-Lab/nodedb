@@ -34,10 +34,11 @@ use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, Lsn};
 
-use super::super::state::TsInstalled;
-use super::super::stream_validate::{StreamValidateInput, StreamValidated};
-use super::driver::StreamInstallInput;
-use super::job::{StepOutcome, StreamInstallJob};
+use super::super::super::state::TsInstalled;
+use super::super::super::stream_validate::{StreamValidateInput, StreamValidated};
+use super::super::install::driver::StreamInstallInput;
+use super::super::install::job::StreamInstallJob;
+use super::super::install::job_stage::{ParkPoint, StepOutcome};
 use super::parked::{InstallTail, PendingPark};
 
 /// The site a fence key's name failed at, for its report.
@@ -226,24 +227,27 @@ impl CoreLoop {
 
     /// Log where `job`, the install at `lsn`, parked. A crash test kills
     /// the process here: the install's state is out of the core, and its
-    /// last batch is durable.
+    /// last batch, or its rollback's last checkpoint, is durable.
     pub(super) fn note_parked(&self, job: &StreamInstallJob, lsn: Lsn) {
         let point = job.park_point();
-        if let Some((arm, batch)) = point {
-            tracing::debug!(
+        match point {
+            ParkPoint::Batch { arm, batch } => tracing::debug!(
                 core = self.core_id,
                 lsn = lsn.as_u64(),
                 arm = ?arm,
                 batch,
                 "batched install parked"
-            );
+            ),
+            ParkPoint::RollingBack(kept) => tracing::debug!(
+                core = self.core_id,
+                lsn = lsn.as_u64(),
+                arm = ?kept.arm,
+                batch = kept.batch,
+                "batched rollback parked"
+            ),
+            ParkPoint::Finish => {}
         }
-        #[cfg(feature = "failpoints")]
-        let at = park_point_name(point);
-        crate::fail_point!(
-            self.fail_scope,
-            &format!("redo_apply::batched::parked::{at}")
-        );
+        crate::fail_point!(self.fail_scope, &park_fail_point(point, ParkSite::Parked));
     }
 
     /// Stop the core: a part of the install at `lsn` outside its arms
@@ -272,15 +276,46 @@ impl CoreLoop {
     }
 }
 
-/// The name a park point takes in a failpoint: `{arm:?}::{batch}`, or
-/// `finish` once the arms ended.
+/// A fail point a parked install passes.
 #[cfg(feature = "failpoints")]
-pub(super) fn park_point_name(
-    point: Option<(crate::wal::redo::replay_arm::RedoArm, u64)>,
-) -> String {
-    match point {
-        Some((arm, batch)) => format!("{arm:?}::{batch}"),
-        None => "finish".to_owned(),
+#[derive(Clone, Copy)]
+pub(super) enum ParkSite {
+    /// The install parked.
+    Parked,
+    /// The install's next slice may run.
+    Held,
+}
+
+/// The fail point `site` names at `point`:
+/// `redo_apply::batched::{site}::{arm:?}::{batch}` while the arms run,
+/// `redo_apply::batched::{site}::finish` once they ended, and
+/// `redo_apply::batched::{rollback site}::{arm:?}::{batch}` at the batch a
+/// rollback's checkpoint kept. The sites are `parked` and `hold_parked`,
+/// and `rollback_parked` and `hold_rollback_parked`.
+#[cfg(feature = "failpoints")]
+pub(super) fn park_fail_point(point: ParkPoint, site: ParkSite) -> String {
+    let (site, at) = match (point, site) {
+        (ParkPoint::Batch { arm, batch }, site) => (site.forward(), format!("{arm:?}::{batch}")),
+        (ParkPoint::Finish, site) => (site.forward(), "finish".to_owned()),
+        (ParkPoint::RollingBack(kept), ParkSite::Parked) => {
+            ("rollback_parked", format!("{:?}::{}", kept.arm, kept.batch))
+        }
+        (ParkPoint::RollingBack(kept), ParkSite::Held) => (
+            "hold_rollback_parked",
+            format!("{:?}::{}", kept.arm, kept.batch),
+        ),
+    };
+    format!("redo_apply::batched::{site}::{at}")
+}
+
+#[cfg(feature = "failpoints")]
+impl ParkSite {
+    /// The site's name while the install runs forward.
+    fn forward(self) -> &'static str {
+        match self {
+            Self::Parked => "parked",
+            Self::Held => "hold_parked",
+        }
     }
 }
 

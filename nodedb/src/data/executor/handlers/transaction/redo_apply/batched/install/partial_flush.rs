@@ -23,8 +23,8 @@ use crate::data::executor::handlers::timeseries::InstallFlushError;
 use crate::types::partial_record::PartialRecord;
 use crate::wal::redo::replay_arm::RedoArm;
 
+use super::super::state::BatchedInstall;
 use super::arm_pass::ArmStop;
-use super::state::BatchedInstall;
 
 impl CoreLoop {
     /// The flushes before `arm`'s first batch. `false` when the install

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! A stream install that `run_task` runs gives the core back between its
-//! batches.
+//! batches, and its rollback between the batches it reverses.
 //!
 //! Each case queues requests on a core's request ring and drives `tick()`.
 //! The core cuts a stream into batches of [`YIELD_BATCH_BYTES`], and each
@@ -22,6 +22,8 @@ use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::core_loop::tests::make_default_task;
 use crate::engine::sparse::btree::SparseEngine;
 use crate::types::{DatabaseId, Lsn, RequestId, TenantId, VShardId};
+#[cfg(feature = "failpoints")]
+use crate::wal::redo::install_cursor::{CursorState, InstallCursor};
 use crate::wal::{RedoRecord, RedoSubRecord, WriteSetCapture};
 
 use super::super::calvin_fold_tests::{ACCOUNT, SOURCE, balance, core_with_sum, sum_targets};
@@ -753,4 +755,205 @@ fn a_checkpoint_while_parked_holds_no_later_write() {
     assert_ok(ring.tick_until_answered(INSTALL));
     // The checkpoint answers once the release puts it back in the queue.
     ring.tick_until_answered(CHECKPOINT);
+}
+
+/// The fail point that fails the document arm's pass once it wrote every
+/// batch: the install rolls back.
+#[cfg(feature = "failpoints")]
+const ARM_FAILS: &str = "redo_apply::batched::install_batch_fails::Document";
+
+/// The state of the install cursor `core` holds, `None` when it holds none.
+#[cfg(feature = "failpoints")]
+fn cursor_state(core: &CoreLoop) -> Option<CursorState> {
+    core.sparse
+        .load_install_cursors()
+        .expect("load cursors")
+        .into_iter()
+        .next()
+        .map(|(lsn, bytes)| {
+            InstallCursor::from_bytes(lsn, &bytes)
+                .expect("decode cursor")
+                .state
+        })
+}
+
+/// Whether `core` holds the rollback of its install parked.
+#[cfg(feature = "failpoints")]
+fn rollback_parked(core: &CoreLoop) -> bool {
+    core.has_parked_install() && matches!(cursor_state(core), Some(CursorState::RollingBack { .. }))
+}
+
+/// Whether `response` reports an install that rolled back.
+#[cfg(feature = "failpoints")]
+fn rolled_back(response: &Response) -> bool {
+    matches!(
+        response.error_code.as_deref(),
+        Some(ErrorCode::RetryableRefusal { .. })
+    )
+}
+
+/// The install fails once it wrote every batch, and its rollback parks
+/// after each batch it reverses. A read of the installing collection waits
+/// through every slice, forward and back, and answers what it answered
+/// before the install. The state ends as it stood before the install.
+#[cfg(feature = "failpoints")]
+#[test]
+fn a_rollback_yields_and_a_fenced_read_sees_none_of_the_install() {
+    use nodedb_types::fail_point::FailGuard;
+
+    let mut ring = Ring::open(plain_core);
+    let before = digest(&ring.core);
+    let _failing = FailGuard::fail(ARM_FAILS, "a late batch fails");
+    // The read before the install answers what the collection held.
+    ring.push(request(READ_B, scan(FILL)), None);
+    ring.push_fill_install();
+    ring.push(request(READ_A, scan(FILL)), None);
+
+    let mut rollback_parks = 0_usize;
+    for _ in 0..MAX_TICKS {
+        ring.tick();
+        if ring.answer(INSTALL).is_some() {
+            break;
+        }
+        assert!(
+            ring.answer(READ_A).is_none(),
+            "the fenced read waits while the install runs or rolls back"
+        );
+        if rollback_parked(&ring.core) {
+            rollback_parks += 1;
+        }
+    }
+    assert!(
+        rollback_parks > 1,
+        "the rollback gave the core back between its batches: {rollback_parks} parks"
+    );
+    let answer = ring.answer(INSTALL).expect("the install answered");
+    assert!(rolled_back(answer), "{:?}", answer.error_code);
+    let baseline = ring
+        .answer(READ_B)
+        .expect("the read before answered")
+        .clone();
+    let read = ring.tick_until_answered(READ_A).clone();
+    assert_eq!(read.status, baseline.status, "{:?}", read.error_code);
+    assert_eq!(
+        read.payload.to_vec(),
+        baseline.payload.to_vec(),
+        "the read sees none of the install"
+    );
+    assert_eq!(installed_rows(&ring.core), 0);
+    assert_eq!(
+        digest(&ring.core),
+        before,
+        "the state is the pre-install state"
+    );
+    assert!(
+        cursor_state(&ring.core).is_none(),
+        "the rollback end removed the cursor"
+    );
+    assert!(!ring.core.has_install_fence());
+    assert!(!ring.core.is_fail_stopped());
+}
+
+/// A write of another database queued while the rollback is parked runs
+/// before the rollback's next slice, and the rollback then ends.
+#[cfg(feature = "failpoints")]
+#[test]
+fn an_unfenced_task_runs_between_rollback_slices() {
+    use nodedb_types::fail_point::FailGuard;
+
+    let mut ring = Ring::open(plain_core);
+    let _failing = FailGuard::fail(ARM_FAILS, "a late batch fails");
+    ring.push_fill_install();
+    for _ in 0..MAX_TICKS {
+        if rollback_parked(&ring.core) {
+            break;
+        }
+        assert!(ring.answer(INSTALL).is_none(), "the install rolls back");
+        ring.tick();
+    }
+    let Some(CursorState::RollingBack { batch: kept, .. }) = cursor_state(&ring.core) else {
+        panic!("the rollback never parked");
+    };
+    assert!(kept > 0, "batches before batch {kept} are left to reverse");
+
+    ring.push(foreign_put(FOREIGN), None);
+    ring.tick();
+    assert_ok(
+        ring.answer(FOREIGN)
+            .expect("the foreign write ran between rollback slices"),
+    );
+    assert!(
+        rollback_parked(&ring.core),
+        "the rollback is still parked: the write ran between its slices"
+    );
+    assert!(ring.answer(INSTALL).is_none());
+
+    let answer = ring.tick_until_answered(INSTALL).clone();
+    assert!(rolled_back(&answer), "{:?}", answer.error_code);
+    assert!(holds_foreign(&ring.core.sparse), "the foreign write stays");
+    assert_eq!(installed_rows(&ring.core), 0);
+    assert!(cursor_state(&ring.core).is_none());
+}
+
+/// At a spill threshold of 0 the undo log spills after every batch, so the
+/// rollback reads its spill lane back from disk across its parked slices.
+/// A read of the installing collection waits through every slice, and the
+/// state ends as it stood before the install.
+#[cfg(feature = "failpoints")]
+#[test]
+fn a_parked_rollback_reads_its_spilled_undo_log_across_slices() {
+    use nodedb_types::fail_point::FailGuard;
+
+    let mut ring = Ring::open(plain_core);
+    ring.core.query_tuning.max_txn_overlay_bytes = 0;
+    let before = digest(&ring.core);
+    let _failing = FailGuard::fail(ARM_FAILS, "a late batch fails");
+    // The read before the install answers what the collection held.
+    ring.push(request(READ_B, scan(FILL)), None);
+    ring.push_fill_install();
+    ring.push(request(READ_A, scan(FILL)), None);
+
+    let mut rollback_parks = 0_usize;
+    for _ in 0..MAX_TICKS {
+        ring.tick();
+        if ring.answer(INSTALL).is_some() {
+            break;
+        }
+        assert!(
+            ring.answer(READ_A).is_none(),
+            "the fenced read waits while the install runs or rolls back"
+        );
+        if rollback_parked(&ring.core) {
+            rollback_parks += 1;
+        }
+    }
+    assert!(
+        rollback_parks > 1,
+        "the rollback gave the core back between its batches: {rollback_parks} parks"
+    );
+    let report = ring.core.redo_apply.last_rollback;
+    assert!(
+        report.spill_lane > 0 && report.spill_lane_hot_bytes == 0,
+        "the rollback began with its spill lane on disk: {report:?}"
+    );
+    let answer = ring.answer(INSTALL).expect("the install answered");
+    assert!(rolled_back(answer), "{:?}", answer.error_code);
+    assert_eq!(installed_rows(&ring.core), 0);
+    assert_eq!(
+        digest(&ring.core),
+        before,
+        "the state is the pre-install state"
+    );
+    assert!(cursor_state(&ring.core).is_none());
+    let baseline = ring
+        .answer(READ_B)
+        .expect("the read before answered")
+        .clone();
+    let read = ring.tick_until_answered(READ_A).clone();
+    assert_eq!(read.status, baseline.status, "{:?}", read.error_code);
+    assert_eq!(
+        read.payload.to_vec(),
+        baseline.payload.to_vec(),
+        "the read sees none of the install"
+    );
 }

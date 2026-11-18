@@ -15,6 +15,7 @@ use crate::wal::redo::replay_arm::RedoArm;
 use crate::wal::{RedoRecord, RedoSubRecord};
 
 use super::super::entry::CommittedRedo;
+use super::super::passes::PassRefusal;
 use super::super::stream_validate::tests::{
     Hold, LSN, TID, default_task, framed, hold, plain_core, record,
 };
@@ -25,9 +26,26 @@ use super::equivalence_tests::{
     BATCH_BYTES, FILL, FILL_EACH, FILL_FROM, METRICS, digest, fill, install_batched_at,
     install_whole, ts_layout, ts_line,
 };
+use super::rollback::run::{BatchedRollback, RollbackSlice};
 
 /// A threshold every batch passes: the undo log spills after each batch.
 const SPILL_EVERY_BATCH: usize = 1;
+
+/// Reverse every write of a batched install that failed with `cause`, in
+/// one call.
+pub(super) fn roll_back_batched(
+    core: &mut CoreLoop,
+    rollback: BatchedRollback,
+    cause: ErrorCode,
+) -> PassRefusal {
+    let mut run = core.begin_batched_rollback(rollback, cause);
+    loop {
+        match core.step_batched_rollback(run) {
+            RollbackSlice::Checkpointed { run: next, .. } => run = next,
+            RollbackSlice::Ended(refusal) => return refusal,
+        }
+    }
+}
 
 /// Validate `redo` as a stream in the held core's WAL, then install it
 /// batch by batch, spilling past `spill_threshold`. `arm` receives the last

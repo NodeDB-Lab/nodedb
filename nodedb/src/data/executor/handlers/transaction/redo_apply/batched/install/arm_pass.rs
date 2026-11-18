@@ -21,12 +21,12 @@ use crate::wal::redo::install_cursor::CursorState;
 use crate::wal::redo::replay_arm::RedoArm;
 use crate::wal::{RedoStreamReader, RedoSubRecord};
 
-use super::super::fold_ledger::FoldLedger;
-use super::super::passes::arm_panic;
-use super::super::streamed::unreadable;
+use super::super::super::fold_ledger::FoldLedger;
+use super::super::super::passes::arm_panic;
+use super::super::super::streamed::unreadable;
+use super::super::rollback::undo::{BatchAt, SpillableUndo};
+use super::super::state::BatchedInstall;
 use super::batch_record::batch_wal_record;
-use super::state::BatchedInstall;
-use super::undo::{BatchAt, SpillableUndo};
 
 /// Why an arm's pass over the stream stopped.
 pub(super) enum ArmStop {
@@ -195,7 +195,7 @@ impl CoreLoop {
         state: CursorState,
     ) -> Result<(), ArmStop> {
         #[cfg(feature = "failpoints")]
-        let at = super::cursor::batch_point(state);
+        let at = super::super::durable::cursor::batch_point(state);
         crate::fail_point!(
             self.fail_scope,
             &format!("redo_apply::batched::before_batch_durable::{at}")

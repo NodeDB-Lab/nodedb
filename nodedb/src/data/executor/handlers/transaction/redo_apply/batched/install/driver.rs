@@ -17,13 +17,14 @@
 //! whole record, beside what the validate kept for the events. After each
 //! batch the spools and the undo log spill into the install's space once
 //! they pass the threshold. The first error stops the install, and the
-//! undo log rolls every batch back (`roll_back_batched`).
+//! undo log rolls every batch back, one batch per slice of the job's
+//! rolling-back stage.
 //!
 //! The install is a job (see `job`) that runs one slice per step: one
 //! batch of an arm's pass, the end of the arms, or the finish. A task that
 //! `run_task` runs gives the core back between slices: the job parks under
 //! the install fence (see `park`), and each tick runs one slice (see
-//! `drive`). Every other caller runs the steps back to back.
+//! `park::drive`). Every other caller runs the steps back to back.
 //!
 //! Under a root journal the scope also holds the fold ledger of the batch
 //! that runs: each source row's transaction records how many of the
@@ -31,7 +32,7 @@
 //! and writes no ledger row, as a whole-record install writes none.
 //!
 //! After each batch the install makes everything through the batch durable
-//! with its cursor (see `cursor`). Restart replay completes a record whose
+//! with its cursor (see `durable::cursor`). Restart replay completes a record whose
 //! install ended part way: its durable stores re-apply each op at its
 //! exact key, its memory engines re-apply from op 0, and its folds skip
 //! the ops the fold ledger names.
@@ -50,10 +51,10 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoStreamRef};
 
-use super::super::state::TsInstalled;
-use super::super::stream_validate::{StreamLimits, StreamValidated};
+use super::super::super::state::TsInstalled;
+use super::super::super::stream_validate::{StreamLimits, StreamValidated};
+use super::super::state::BatchedInstall;
 use super::job::StreamInstallJob;
-use super::state::BatchedInstall;
 
 /// One validated stream marker's install.
 pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamInstallInput<'a> {

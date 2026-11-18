@@ -16,9 +16,9 @@ use crate::wal::redo::replay_arm::RedoArm;
 
 use super::super::state::CollectionKey;
 use super::super::stream_validate::{StreamHeader, StreamLimits};
-use super::batch_record::BatchStamps;
+use super::install::batch_record::BatchStamps;
+use super::rollback::undo::BatchAt;
 use super::space::InstallSpace;
-use super::undo::BatchAt;
 
 /// The ops each replay arm claims in one stream, counted by the validate.
 /// An arm that claims no op gets no pass over the stream.

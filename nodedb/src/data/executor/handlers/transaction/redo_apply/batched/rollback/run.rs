@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The rollback of a batched install that failed: every batch it wrote,
-//! newest first.
+//! newest first, one batch per slice.
 //!
 //! The entries come off both lanes of the install's undo log in the
 //! reverse of the order they were recorded in, and each applies through
@@ -9,12 +9,27 @@
 //! not reverse stops the rollback, and the `RollbackFailed` answer
 //! fail-stops the core as it leaves.
 //!
-//! Once every entry of a batch reversed, the rollback makes the reversal
-//! durable with a `RollingBack` cursor (see `cursor`). The state is then the
-//! forward install through the batches before it, so a crash leaves a
-//! forward prefix, and restart replay completes the record forward. The
-//! rollback ends with a durable commit that removes the cursor, the fold
+//! A slice reverses every entry of one batch, then makes the reversal
+//! durable with a `RollingBack` cursor (see `durable::cursor`) that keeps the batch
+//! the next entry reverses. The state is then the forward install through
+//! the kept batch, so a crash leaves a forward prefix, and restart replay
+//! completes the record forward. A checkpoint that cannot be stored stops
+//! the core and seals the stores, as a forward batch's failed commit does.
+//! A parked install gives the core back after each such slice. The slice that reverses the oldest batch ends
+//! the rollback with a durable commit that removes the cursor, the fold
 //! ledger and the fold target rows, before the refusal leaves the core.
+//!
+//! Between slices the install fence holds every collection the undo
+//! entries touch. What other tasks can change meanwhile is core-wide, and
+//! each undo leaves it as such a task left it:
+//!
+//! - the timeseries ingest timer restores with `TimerRestore::KeepNewer`;
+//! - a sync high-water mark lowers only while it holds the install's value;
+//! - each slice forgets the cached newest ordinals before it lowers
+//!   versions;
+//! - the node-label LSN mark lowers once, at the end. A mark another
+//!   database's record raised meanwhile lowers with it, and restart replay
+//!   versions that record's labels again, idempotently.
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -22,9 +37,10 @@ use crate::data::executor::handlers::transaction::undo::{TimerRestore, UndoError
 use crate::wal::RedoStreamId;
 use crate::wal::redo::install_cursor::CursorState;
 
-use super::super::passes::{PassRefusal, rollback_end_failed};
-use super::state::FoldedThrough;
+use super::super::super::passes::{PassRefusal, rollback_end_failed};
+use super::super::state::FoldedThrough;
 use super::undo::{BatchAt, DrainStop, SpillableUndo};
+use super::undo_drain::{BatchDrained, UndoDrain};
 
 /// What a batched rollback reverses.
 pub(in crate::data::executor::handlers::transaction::redo_apply) struct BatchedRollback {
@@ -41,13 +57,49 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct BatchedR
     pub folded: FoldedThrough,
 }
 
+/// A batched rollback between its slices.
+pub(in crate::data::executor::handlers::transaction::redo_apply) struct RollbackRun {
+    database_id: u64,
+    tid: u64,
+    lsn: u64,
+    stream: RedoStreamId,
+    label_mark_before: Option<u64>,
+    folded: FoldedThrough,
+    /// The entries left to reverse.
+    drain: UndoDrain,
+    /// Whether the log held an entry when the rollback began.
+    lowers: bool,
+    /// The error the install failed with.
+    cause: ErrorCode,
+}
+
+impl RollbackRun {
+    /// The RAM the rollback holds between slices.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn held_bytes(&self) -> usize {
+        self.drain.held_bytes()
+    }
+}
+
+/// How one slice of a rollback ended.
+pub(in crate::data::executor::handlers::transaction::redo_apply) enum RollbackSlice {
+    /// One batch reversed, and the checkpoint that keeps `kept` is
+    /// durable. More is left.
+    Checkpointed {
+        run: Box<RollbackRun>,
+        kept: BatchAt,
+    },
+    /// The rollback ended with this refusal.
+    Ended(PassRefusal),
+}
+
 impl CoreLoop {
-    /// Reverse every write of a batched install that failed with `cause`.
-    pub(in crate::data::executor::handlers::transaction::redo_apply) fn roll_back_batched(
+    /// Start the rollback of a batched install that failed with `cause`.
+    /// Nothing is reversed yet.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn begin_batched_rollback(
         &mut self,
         rollback: BatchedRollback,
         cause: ErrorCode,
-    ) -> PassRefusal {
+    ) -> Box<RollbackRun> {
         let BatchedRollback {
             database_id,
             tid,
@@ -57,39 +109,42 @@ impl CoreLoop {
             label_mark_before,
             folded,
         } = rollback;
-        // A rollback lowers stored versions in a way no write note
-        // describes: the newest-ordinal cache forgets every value.
-        if !undo.is_empty() {
-            self.forget_newest_ordinals();
-        }
         #[cfg(test)]
         {
-            self.redo_apply.last_rollback = super::super::state::UndoReport {
+            self.redo_apply.last_rollback = super::super::super::state::UndoReport {
                 spill_lane: undo.spill_lane_len(),
                 spill_lane_hot_bytes: undo.hot_bytes(),
                 ram_lane: undo.ram_lane_len(),
             };
         }
-        // Each entry names the batch whose write it reverses, and one
-        // batch's entries come together.
-        let mut reversing: Option<BatchAt> = None;
-        let drained = undo.drain_newest_first(|entry_index, at, entry| {
-            if let Some(reversed) = reversing
-                && reversed != at
-            {
-                self.checkpoint_rollback(lsn, stream, at, &folded)
-                    .map_err(|error| {
-                        UndoError::failed(
-                            entry_index,
-                            format!(
-                                "storing the rollback checkpoint after reversing batch {} of {:?}",
-                                reversed.batch, reversed.arm
-                            ),
-                            error,
-                        )
-                    })?;
-            }
-            reversing = Some(at);
+        Box::new(RollbackRun {
+            database_id,
+            tid,
+            lsn,
+            stream,
+            label_mark_before,
+            folded,
+            lowers: !undo.is_empty(),
+            drain: undo.into_drain(),
+            cause,
+        })
+    }
+
+    /// Run one slice of `run`: reverse every entry of the newest batch
+    /// left, then store the checkpoint that keeps the batch before it, or
+    /// end the rollback once no entry is left.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn step_batched_rollback(
+        &mut self,
+        mut run: Box<RollbackRun>,
+    ) -> RollbackSlice {
+        // A rollback lowers stored versions in a way no write note
+        // describes: the newest-ordinal cache forgets every value. A task
+        // between slices can fill it again, so each slice forgets.
+        if run.lowers {
+            self.forget_newest_ordinals();
+        }
+        let (database_id, tid) = (run.database_id, run.tid);
+        let drained = run.drain.drain_batch(|entry_index, _, entry| {
             self.apply_undo_entry(
                 database_id,
                 tid,
@@ -99,22 +154,41 @@ impl CoreLoop {
             )
         });
         match drained {
-            Ok(()) => self.end_batched_rollback(cause, lsn, label_mark_before),
-            Err(DrainStop::Undo(mut undo_error)) => {
-                undo_error.action = format!(
-                    "rolling back a committed redo install that failed with {cause:?}: {}",
-                    undo_error.action
-                );
-                PassRefusal::RollbackFailed(ErrorCode::from(undo_error))
+            Ok(BatchDrained::Boundary { kept }) => {
+                if let Err(error) = self.checkpoint_rollback(run.lsn, run.stream, kept, &run.folded)
+                {
+                    // The stores hold a reversal past the last durable
+                    // cursor. The core stops and seals them, as after a
+                    // forward batch's failed commit, and the next boot
+                    // completes the record forward from that cursor.
+                    self.fail_install_progress(run.lsn, &error);
+                    return RollbackSlice::Ended(PassRefusal::Unpersisted(ErrorCode::from(error)));
+                }
+                RollbackSlice::Checkpointed { run, kept }
             }
-            Err(DrainStop::Read(error)) => PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
-                entry_index: 0,
-                detail: format!(
-                    "rolling back a committed redo install that failed with {cause:?}: its \
-                     spilled undo entries could not be read back: {error}"
-                ),
-                cause: None,
-            }),
+            Ok(BatchDrained::Empty) => {
+                let RollbackRun {
+                    cause,
+                    lsn,
+                    label_mark_before,
+                    ..
+                } = *run;
+                RollbackSlice::Ended(self.end_batched_rollback(cause, lsn, label_mark_before))
+            }
+            Err(DrainStop::Undo(undo_error)) => {
+                RollbackSlice::Ended(undo_failed(&run.cause, undo_error))
+            }
+            Err(DrainStop::Read { entry_index, error }) => {
+                RollbackSlice::Ended(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+                    entry_index,
+                    detail: format!(
+                        "rolling back a committed redo install that failed with {:?}: its \
+                         spilled undo entries could not be read back: {error}",
+                        run.cause
+                    ),
+                    cause: None,
+                }))
+            }
         }
     }
 
@@ -166,10 +240,21 @@ impl CoreLoop {
     }
 }
 
+/// The refusal of a rollback that stopped at `undo_error`, of an install
+/// that failed with `cause`.
+fn undo_failed(cause: &ErrorCode, mut undo_error: UndoError) -> PassRefusal {
+    undo_error.action = format!(
+        "rolling back a committed redo install that failed with {cause:?}: {}",
+        undo_error.action
+    );
+    PassRefusal::RollbackFailed(ErrorCode::from(undo_error))
+}
+
 #[cfg(test)]
 mod tests {
     use nodedb_types::{DatabaseId, TenantId};
 
+    use super::super::super::rollback_tests::roll_back_batched;
     use super::*;
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::handlers::transaction::undo::{TimeseriesIngestUndo, UndoEntry};
@@ -204,7 +289,8 @@ mod tests {
 
         // The answer depends on the durable end of the rollback, which this
         // test does not set up. The timer restores before that end.
-        let _ = core.roll_back_batched(
+        let _ = roll_back_batched(
+            &mut core,
             BatchedRollback {
                 database_id: DatabaseId::DEFAULT.as_u64(),
                 tid: 1,

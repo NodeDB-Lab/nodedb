@@ -13,12 +13,24 @@
 //! durable cursor, or wrote nothing since the last one.
 //!
 //! The arms' apply scope sits in the core while the arms run, since the
-//! arms read it there. The slice that ends the last pass takes it back,
-//! closes the KV write scope, and rolls the install back on an error.
+//! arms read it there. The slice that ends the last pass takes it back and
+//! closes the KV write scope.
+//!
+//! Arms that fail roll back one batch per slice (see `rollback`): a
+//! refused batch, or a panic in an arm. The failing slice reverses the
+//! newest batch, and each later slice the batch before it. Every slice
+//! ends at the durable checkpoint that keeps the batch the next one
+//! reverses. The KV write scope stays open through the rollback, and the
+//! last slice answers.
+//!
+//! A finish that cannot prepare its capture rolls nothing back: every
+//! batch is durable under the install's cursor. The journal fails and the
+//! core fail-stops at once, and the next boot completes the record
+//! forward.
 //!
 //! A task that `run_task` runs parks its job between slices (see `park`):
 //! the job's ambient core state leaves the core, other tasks run under the
-//! install fence, and `tick()` drives the next slice (see `drive`). Any
+//! install fence, and `tick()` drives the next slice (see `park::drive`). Any
 //! other caller runs the job to its end in one call.
 
 use std::collections::BTreeSet;
@@ -31,47 +43,18 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::engine::KvWriteScopeGuard;
 use crate::wal::redo::replay_arm::RedoArm;
 
-use super::super::entry::unrecorded_fold;
-use super::super::passes::{PassRefusal, lost_scope};
-use super::super::state::{RedoApplyPass, RedoApplyScope, TsInstalled};
-use super::super::stream_validate::{StreamValidated, ValidateSpill};
+use super::super::super::entry::unrecorded_fold;
+use super::super::super::passes::{PassRefusal, lost_scope};
+use super::super::super::state::{RedoApplyPass, RedoApplyScope, TsInstalled};
+use super::super::super::stream_validate::{StreamValidated, ValidateSpill};
+use super::super::rollback::run::{BatchedRollback, RollbackRun, RollbackSlice};
+use super::super::rollback::undo::SpillableUndo;
+use super::super::state::{BatchedInstall, BatchedInstallOpen, FoldedThrough, InstallLoads};
 use super::arm_pass::{ArmPass, ArmStop, BatchStep};
 use super::batch_record::BatchStamps;
 use super::driver::StreamInstallInput;
 use super::finish::{BatchedFinish, InstallFinish};
-use super::rollback::BatchedRollback;
-use super::state::{BatchedInstall, BatchedInstallOpen, FoldedThrough, InstallLoads};
-use super::undo::SpillableUndo;
-
-/// Where a job stands.
-pub(super) enum JobStage {
-    /// The arms run. `next_arm` indexes the job's active arms. `pass` is
-    /// the open pass of that arm, `None` before its first batch.
-    Arms {
-        next_arm: usize,
-        pass: Option<Box<ArmPass>>,
-    },
-    /// Every arm wrote all of the record: the finish runs next.
-    Finish(Box<FinishInput>),
-    /// The job answered.
-    Done,
-}
-
-/// What the finish reads: the apply scope the arms filled, and the undo log
-/// out of it.
-pub(super) struct FinishInput {
-    scope: RedoApplyScope,
-    undo: SpillableUndo,
-}
-
-/// What one step did.
-#[derive(Debug)]
-pub(super) enum StepOutcome {
-    /// A slice ran, and the job has more to run.
-    Ran,
-    /// The job answered with this response.
-    Done(Response),
-}
+use super::job_stage::{ArmsFailed, FinishInput, JobStage, ParkPoint, StepOutcome};
 
 /// One stream marker's batched install, run slice by slice.
 pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamInstallJob {
@@ -89,7 +72,8 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamIn
     stamp: WriteStamp,
     /// The ordinal every KV write of the record stamps.
     apply_ordinal: Option<i64>,
-    /// The KV write scope the arms write in. `None` once the arms ran.
+    /// The KV write scope the arms and a rollback write in. `None` once
+    /// it closed.
     kv_scope: Option<KvWriteScopeGuard>,
     permit: Option<RootJournalPermit>,
     /// Every collection the record writes.
@@ -201,25 +185,37 @@ impl StreamInstallJob {
     }
 
     /// Hand over what each resolved timeseries batch the install stored.
-    pub(super) fn take_ts_installs(&mut self) -> Vec<TsInstalled> {
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn take_ts_installs(
+        &mut self,
+    ) -> Vec<TsInstalled> {
         std::mem::take(&mut self.ts_installs)
     }
 
-    /// Where the job stands between slices: the arm and the index of the
-    /// batch the last slice ran. `None` once the arms ended.
-    pub(super) fn park_point(&self) -> Option<(RedoArm, u64)> {
+    /// Where the job stands between slices.
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn park_point(
+        &self,
+    ) -> ParkPoint {
         match &self.stage {
             JobStage::Arms {
                 pass: Some(pass), ..
-            } => Some((pass.arm(), pass.last_batch())),
-            JobStage::Arms { pass: None, .. } | JobStage::Finish(_) | JobStage::Done => None,
+            } => ParkPoint::Batch {
+                arm: pass.arm(),
+                batch: pass.last_batch(),
+            },
+            JobStage::RollingBack { kept, .. } => ParkPoint::RollingBack(*kept),
+            JobStage::Arms { pass: None, .. } | JobStage::Finish(_) | JobStage::Done => {
+                ParkPoint::Finish
+            }
         }
     }
 
     /// The RAM the job holds between slices: its read buffer, and the hot
     /// parts of its spools, fold target entries and undo log. While the
     /// arms run, the apply scope is `core_scope`, the one in the core.
-    pub(super) fn resident_bytes(&self, core_scope: Option<&RedoApplyScope>) -> usize {
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn resident_bytes(
+        &self,
+        core_scope: Option<&RedoApplyScope>,
+    ) -> usize {
         let (scope, undo, read) = match &self.stage {
             JobStage::Arms { pass, .. } => (
                 core_scope,
@@ -227,6 +223,7 @@ impl StreamInstallJob {
                 pass.as_ref().map_or(0, |pass| pass.held_bytes()),
             ),
             JobStage::Finish(input) => (Some(&input.scope), Some(&input.undo), 0),
+            JobStage::RollingBack { run, .. } => (None, None, run.held_bytes()),
             JobStage::Done => (None, None, 0),
         };
         let held = scope.map_or(0, |scope| {
@@ -243,14 +240,15 @@ impl StreamInstallJob {
 
     /// Run one slice for `task`, the task that opened the job. `Err` when
     /// the job answered already.
-    pub(super) fn step(
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn step(
         &mut self,
         core: &mut CoreLoop,
         task: &ExecutionTask,
     ) -> Result<StepOutcome, ErrorCode> {
         match std::mem::replace(&mut self.stage, JobStage::Done) {
             JobStage::Arms { next_arm, pass } => Ok(self.step_arms(core, task, next_arm, pass)),
-            JobStage::Finish(tail) => Ok(StepOutcome::Done(self.finish(core, task, *tail))),
+            JobStage::Finish(tail) => Ok(self.finish(core, task, *tail)),
+            JobStage::RollingBack { run, .. } => Ok(self.step_rollback(core, task, run)),
             JobStage::Done => Err(ErrorCode::Internal {
                 detail: format!(
                     "the batched install at lsn {} ran a step after it answered",
@@ -308,29 +306,27 @@ impl StreamInstallJob {
         }
     }
 
-    /// End the arms, which stopped at `stop` or ran every pass. The KV write
-    /// scope closes, the validate's spill files go, and the record's stamp
-    /// is forgotten. On an error the job answers.
+    /// End the arms, which stopped at `stop` or ran every pass. On success
+    /// the KV write scope closes, the validate's spill files go, and the
+    /// record's stamp is forgotten. A failure rolls back first, and the
+    /// rollback's last slice closes them.
     fn end_arms(
         &mut self,
         core: &mut CoreLoop,
         task: &ExecutionTask,
         stop: Option<ArmStop>,
     ) -> StepOutcome {
-        let installed = self.take_scope(core, stop);
-        if let Some(kv_scope) = self.kv_scope.take() {
-            core.kv_engine.close_write_scope(kv_scope);
-        }
-        // The install ran over the validated content: its spill directory
-        // goes.
-        drop(self.spill.take());
-        core.record_stamps.remove(self.install.lsn);
-        let mut scope = match installed {
+        let mut scope = match self.take_scope(core, stop) {
             Ok(scope) => scope,
-            Err(refusal) => {
+            Err(ArmsFailed::RollBack(run)) => {
+                return self.step_rollback(core, task, run);
+            }
+            Err(ArmsFailed::Refused(refusal)) => {
+                self.close_arms(core);
                 return StepOutcome::Done(core.response_error(task, refusal.into_code()));
             }
         };
+        self.close_arms(core);
         let Some(undo) = scope.spillable.take() else {
             return StepOutcome::Done(core.response_error(task, lost_scope().into_code()));
         };
@@ -338,16 +334,26 @@ impl StreamInstallJob {
         StepOutcome::Ran
     }
 
+    /// Close what the arms held open: the KV write scope, the validate's
+    /// spill files, which the install ran over, and the record's stamp.
+    fn close_arms(&mut self, core: &mut CoreLoop) {
+        if let Some(kv_scope) = self.kv_scope.take() {
+            core.kv_engine.close_write_scope(kv_scope);
+        }
+        drop(self.spill.take());
+        core.record_stamps.remove(self.install.lsn);
+    }
+
     /// Take the apply scope out of the core once the arms stopped at
     /// `stop`. On success the scope carries what the arms wrote. On a
-    /// failure every write is rolled back first, with the fold ledger rows
-    /// of the record, and the rollback ends durable. A batch whose durable
-    /// commit failed stopped the core instead, and nothing rolls back.
+    /// failure every write rolls back, with the fold ledger rows of the
+    /// record, and the rollback ends durable. A batch whose durable commit
+    /// failed stopped the core instead, and nothing rolls back.
     fn take_scope(
         &mut self,
         core: &mut CoreLoop,
         stop: Option<ArmStop>,
-    ) -> Result<RedoApplyScope, PassRefusal> {
+    ) -> Result<RedoApplyScope, ArmsFailed> {
         let stopped = match stop {
             None => None,
             Some(ArmStop::Refused(cause)) => Some(cause),
@@ -355,11 +361,11 @@ impl StreamInstallJob {
                 // The stores hold effects past the last cursor: a rollback
                 // would leave them with no cursor.
                 core.redo_apply.scope = None;
-                return Err(PassRefusal::Unpersisted(code));
+                return Err(ArmsFailed::Refused(PassRefusal::Unpersisted(code)));
             }
         };
         let Some(mut scope) = core.redo_apply.scope.take() else {
-            return Err(lost_scope());
+            return Err(ArmsFailed::Refused(lost_scope()));
         };
         // A pass that could not go on outranks an arm's error, as a
         // reconstitution error or a panic does in a whole-record pass.
@@ -367,46 +373,94 @@ impl StreamInstallJob {
             return Ok(scope);
         };
         let Some(undo) = scope.spillable.take() else {
-            return Err(lost_scope());
+            return Err(ArmsFailed::Refused(lost_scope()));
         };
+        let label_mark_before = scope.label_mark_before;
+        Err(ArmsFailed::RollBack(self.begin_rollback(
+            core,
+            undo,
+            label_mark_before,
+            cause,
+        )))
+    }
+
+    /// Start the rollback of the install's `undo`, after it failed with
+    /// `cause`. `label_mark_before` is the node-label LSN mark the install's
+    /// first version commit found.
+    fn begin_rollback(
+        &mut self,
+        core: &mut CoreLoop,
+        undo: SpillableUndo,
+        label_mark_before: Option<u64>,
+        cause: ErrorCode,
+    ) -> Box<RollbackRun> {
         let install = &mut self.install;
-        Err(core.roll_back_batched(
+        core.begin_batched_rollback(
             BatchedRollback {
                 database_id: install.database_id,
                 tid: install.tid,
                 undo,
                 lsn: install.lsn.as_u64(),
                 stream: install.reference.stream,
-                label_mark_before: scope.label_mark_before,
+                label_mark_before,
                 folded: std::mem::take(&mut install.folded),
             },
             cause,
-        ))
+        )
     }
 
-    /// Settle the record the arms wrote, as a whole record settles.
-    fn finish(&mut self, core: &mut CoreLoop, task: &ExecutionTask, tail: FinishInput) -> Response {
-        let FinishInput { scope, undo } = tail;
-        core.finish_redo_install(
-            InstallFinish {
-                task,
-                tid: self.install.tid,
-                lsn: self.install.lsn,
-                stamp: self.stamp,
-                apply_ordinal: self.apply_ordinal,
-                permit: self.permit.take(),
-                collections: &self.collections,
-                keyed: &self.keyed,
-                reader: self.install.space.reader(),
-                batched: Some(BatchedFinish {
-                    undo,
-                    stream: self.install.reference.stream,
-                    folded: std::mem::take(&mut self.install.folded),
-                }),
-            },
-            scope,
-            &mut self.ts_installs,
-        )
+    /// Run one slice of the rollback `run`. The slice that ends it closes
+    /// what the arms held open, and the job answers with its refusal.
+    fn step_rollback(
+        &mut self,
+        core: &mut CoreLoop,
+        task: &ExecutionTask,
+        run: Box<RollbackRun>,
+    ) -> StepOutcome {
+        match core.step_batched_rollback(run) {
+            RollbackSlice::Checkpointed { run, kept } => {
+                self.stage = JobStage::RollingBack { run, kept };
+                StepOutcome::Ran
+            }
+            RollbackSlice::Ended(refusal) => {
+                self.close_arms(core);
+                StepOutcome::Done(core.response_error(task, refusal.into_code()))
+            }
+        }
+    }
+
+    /// Settle the record the arms wrote, as a whole record settles. A
+    /// capture that cannot be prepared rolls nothing back: see the module
+    /// doc.
+    fn finish(
+        &mut self,
+        core: &mut CoreLoop,
+        task: &ExecutionTask,
+        tail: FinishInput,
+    ) -> StepOutcome {
+        let FinishInput { mut scope, undo } = tail;
+        let finish = InstallFinish {
+            task,
+            tid: self.install.tid,
+            lsn: self.install.lsn,
+            stamp: self.stamp,
+            apply_ordinal: self.apply_ordinal,
+            collections: &self.collections,
+            keyed: &self.keyed,
+            reader: self.install.space.reader(),
+        };
+        let response =
+            match core.prepare_install_capture(&finish, true, self.permit.take(), &mut scope) {
+                Ok(capture) => core.finish_redo_install(
+                    finish,
+                    capture,
+                    Some(BatchedFinish { undo }),
+                    scope,
+                    &mut self.ts_installs,
+                ),
+                Err(error) => core.refuse_batched_capture(task, self.install.lsn, &error),
+            };
+        StepOutcome::Done(response)
     }
 }
 
@@ -414,12 +468,12 @@ impl StreamInstallJob {
 mod tests {
     use nodedb_physical::physical_plan::RedoOrigin;
 
-    use super::super::super::install_refusal_tests as refusal;
-    use super::super::super::stream_validate::tests::{
+    use super::super::super::super::install_refusal_tests as refusal;
+    use super::super::super::super::stream_validate::tests::{
         LSN, TID, default_task, framed, hold, plain_core,
     };
-    use super::super::super::stream_validate::{StreamLimits, StreamValidateInput};
-    use super::super::equivalence_tests::{
+    use super::super::super::super::stream_validate::{StreamLimits, StreamValidateInput};
+    use super::super::super::equivalence_tests::{
         BATCH_BYTES, FILL, digest, install_batched_at, resolved, spread,
     };
     use super::*;

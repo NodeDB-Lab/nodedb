@@ -440,19 +440,18 @@ impl CoreLoop {
             scope.held.publishes.push(publish);
         }
         let reader = BlockReader::default();
-        self.finish_redo_install(
+        self.finish_whole_install(
             InstallFinish {
                 task,
                 tid,
                 lsn,
                 stamp,
                 apply_ordinal,
-                permit,
                 collections: committed.collections,
                 keyed: &keyed,
                 reader: &reader,
-                batched: None,
             },
+            permit,
             scope,
             ts_installs,
         )

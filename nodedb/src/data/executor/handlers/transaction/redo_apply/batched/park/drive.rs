@@ -24,9 +24,9 @@ use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 
-use super::job::StepOutcome;
-use super::park::unfinished;
+use super::super::install::job_stage::StepOutcome;
 use super::parked::{InstallTail, ParkedInstall, PendingPark};
+use super::start::unfinished;
 
 /// How one slice of a parked install ended.
 enum SliceEnd {
@@ -169,15 +169,18 @@ impl CoreLoop {
     }
 
     /// Whether a test holds `park` before its next slice: the failpoint
-    /// `redo_apply::batched::hold_parked::{point}` is armed to wait for a
-    /// file that does not exist yet. Other tasks run meanwhile.
+    /// `redo_apply::batched::hold_parked::{point}`, or
+    /// `redo_apply::batched::hold_rollback_parked::{point}` while it rolls
+    /// back, is armed to wait for a file that does not exist yet. Other
+    /// tasks run meanwhile.
     #[cfg(feature = "failpoints")]
     fn parked_slice_held(&self, park: &PendingPark) -> bool {
+        use super::start::{ParkSite, park_fail_point};
         use crate::fail_point::{FailAction, lookup};
 
-        let at = super::park::park_point_name(park.job.park_point());
+        let point = park_fail_point(park.job.park_point(), ParkSite::Held);
         matches!(
-            lookup(self.fail_scope, &format!("redo_apply::batched::hold_parked::{at}")),
+            lookup(self.fail_scope, &point),
             Some(FailAction::WaitForFile(path)) if !path.exists()
         )
     }

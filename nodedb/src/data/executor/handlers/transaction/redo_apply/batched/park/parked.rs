@@ -18,8 +18,8 @@ use crate::data::executor::core_loop::install_context::InstallContext;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 
-use super::super::calvin_install::CalvinTail;
-use super::job::StreamInstallJob;
+use super::super::super::calvin_install::CalvinTail;
+use super::super::install::job::StreamInstallJob;
 
 /// The detail of the placeholder response a parked install's task answers
 /// with inside its run.

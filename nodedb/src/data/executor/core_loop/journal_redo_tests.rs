@@ -400,6 +400,38 @@ fn a_capture_scope_error_rolls_back_before_any_timeseries_settlement() {
     assert!(core.write_set_journal.running.is_none());
 }
 
+/// A whole record whose capture cannot be prepared rolls back in its
+/// task. The journal then fails, and the core fail-stops once, for the
+/// unstored write set.
+#[cfg(feature = "failpoints")]
+#[test]
+fn a_failed_whole_record_capture_prepare_rolls_back_and_fail_stops_once() {
+    use nodedb_types::fail_point::FailGuard;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let (mut core, _ends) = core_with_sum(directory.path());
+    let root = task(false, false);
+    let permit = core.begin_task_journal(&root, group()).expect("permit");
+    let response = {
+        let _failing = FailGuard::fail("redo_apply::capture_prepare_fails", "the prepare fails");
+        core.execute_with_journal(&root, Some(permit))
+    };
+    assert!(
+        matches!(
+            response.error_code.as_deref(),
+            Some(crate::bridge::envelope::ErrorCode::RetryableRefusal { .. })
+        ),
+        "the record rolled back: {:?}",
+        response.error_code
+    );
+    assert_eq!(balance(&core).as_deref(), Some("100"), "no fold stays");
+    assert!(captures(&core).is_empty());
+    assert!(matches!(
+        core.fail_stop.cause(),
+        Some((FailStopCause::WriteSetUnpersisted, _))
+    ));
+}
+
 #[test]
 fn a_stopped_core_releases_no_ordinary_held_events_after_a_durable_store() {
     let directory = tempfile::tempdir().expect("directory");

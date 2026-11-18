@@ -26,7 +26,8 @@ use crate::data::executor::handlers::transaction::undo::{UndoEntry, UndoError};
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::redo::replay_arm::RedoArm;
 
-use super::super::state::CollectionKey;
+use super::super::super::state::CollectionKey;
+use super::undo_drain::UndoDrain;
 
 /// The arm and the batch whose write an undo entry reverses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -43,12 +44,12 @@ impl SpillWeight for BatchAt {
 }
 
 /// A snapshot entry of the RAM lane.
-struct RamUndo {
+pub(super) struct RamUndo {
     /// The spill-lane position the entry follows: every spill-lane entry
     /// below it was recorded before it, every one at or above it after.
-    follows: u64,
-    at: BatchAt,
-    entry: UndoEntry,
+    pub(super) follows: u64,
+    pub(super) at: BatchAt,
+    pub(super) entry: UndoEntry,
 }
 
 /// The keys whose pre-install state a kept snapshot holds.
@@ -131,8 +132,12 @@ impl SnapshotKeys {
 pub(in crate::data::executor::handlers::transaction::redo_apply) enum DrainStop {
     /// An entry did not reverse.
     Undo(UndoError),
-    /// A spilled entry could not be read back.
-    Read(crate::Error),
+    /// The spilled entry at forward position `entry_index` could not be
+    /// read back.
+    Read {
+        entry_index: usize,
+        error: crate::Error,
+    },
 }
 
 /// The undo log of one batched install. See the module doc.
@@ -163,7 +168,7 @@ impl Default for SpillableUndo {
 
 /// The forward position in the log of an entry recorded after
 /// `spill_before` spill-lane and `ram_before` RAM-lane entries.
-fn forward(spill_before: u64, ram_before: usize) -> usize {
+pub(super) fn forward(spill_before: u64, ram_before: usize) -> usize {
     usize::try_from(spill_before).map_or(usize::MAX, |spill| spill.saturating_add(ram_before))
 }
 
@@ -171,7 +176,7 @@ fn forward(spill_before: u64, ram_before: usize) -> usize {
 /// and the state the engine gave up for it hold. A detached vector index
 /// and the rows a columnar truncate moved out count by their headers: the
 /// engine held the same bytes before.
-fn ram_weight(entry: &UndoEntry) -> usize {
+pub(super) fn ram_weight(entry: &UndoEntry) -> usize {
     let held = match entry {
         UndoEntry::TimeseriesIngest(undo) => undo.held_bytes(),
         UndoEntry::TimeseriesTruncate(undo) => undo.held_bytes(),
@@ -270,35 +275,12 @@ impl SpillableUndo {
         self.ram.iter_mut().map(|ram| &mut ram.entry)
     }
 
-    /// Hand every entry to `undo`, newest first, with its forward position
-    /// in the log and the batch whose write it reverses. The entries of one
-    /// batch come together, the newest batch first. The first error stops
-    /// the drain.
-    pub(in crate::data::executor::handlers::transaction::redo_apply) fn drain_newest_first(
+    /// The log as a drain that hands the entries back newest first, one
+    /// batch at a time (see `undo_drain`).
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn into_drain(
         self,
-        mut undo: impl FnMut(usize, BatchAt, UndoEntry) -> Result<(), UndoError>,
-    ) -> Result<(), DrainStop> {
-        let Self {
-            spilled, mut ram, ..
-        } = self;
-        let mut spilled = spilled.into_newest_first();
-        loop {
-            // Every spill-lane entry at or above the newest RAM entry's
-            // position was recorded after it, so it goes first. Its forward
-            // position counts the RAM entries left: all came before it.
-            let follows = ram.last().map_or(0, |last| last.follows);
-            while spilled.remaining() > follows {
-                let position = forward(spilled.remaining() - 1, ram.len());
-                let Some((at, entry)) = spilled.next_newest().map_err(DrainStop::Read)? else {
-                    break;
-                };
-                undo(position, at, UndoEntry::from(entry)).map_err(DrainStop::Undo)?;
-            }
-            let Some(last) = ram.pop() else {
-                return Ok(());
-            };
-            undo(forward(last.follows, ram.len()), last.at, last.entry).map_err(DrainStop::Undo)?;
-        }
+    ) -> UndoDrain {
+        UndoDrain::new(self.spilled.into_newest_first(), self.ram)
     }
 
     /// Entries the spill lane took.
@@ -319,12 +301,30 @@ impl SpillableUndo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::data::executor::handlers::transaction::redo_apply::batched) mod tests {
+    use super::super::undo_drain::BatchDrained;
     use super::*;
     use crate::data::executor::handlers::transaction::undo::{
         TimeseriesIngestUndo, TimeseriesTruncateUndo,
     };
     use crate::engine::array::ArrayTileSnapshot;
+
+    /// Hand every entry of `log` to `undo`, newest first, with its forward
+    /// position in the log and the batch whose write it reverses. The
+    /// entries of one batch come together, the newest batch first. The
+    /// first error stops the drain.
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn drain_newest_first(
+        log: SpillableUndo,
+        mut undo: impl FnMut(usize, BatchAt, UndoEntry) -> Result<(), UndoError>,
+    ) -> Result<(), DrainStop> {
+        let mut drain = log.into_drain();
+        loop {
+            match drain.drain_batch(&mut undo)? {
+                BatchDrained::Boundary { .. } => {}
+                BatchDrained::Empty => return Ok(()),
+            }
+        }
+    }
 
     fn collection(name: &str) -> CollectionKey {
         (DatabaseId::DEFAULT, TenantId::new(1), name.to_string())
@@ -426,7 +426,7 @@ mod tests {
         assert!(undo.ram_lane_len() > 0 && undo.spill_lane_len() > 0);
 
         let mut drained = Vec::new();
-        undo.drain_newest_first(|index, batch, entry| {
+        drain_newest_first(undo, |index, batch, entry| {
             drained.push((index, batch, label(&entry)));
             Ok(())
         })
@@ -456,7 +456,7 @@ mod tests {
         undo.spill(&mut space).expect("spill");
         undo.record([stats("c"), ingest("d")]);
         let mut applied = Vec::new();
-        let drained = undo.drain_newest_first(|index, _, entry| {
+        let drained = drain_newest_first(undo, |index, _, entry| {
             let name = label(&entry);
             if name == "b" {
                 return Err(UndoError::mismatch(index, "b does not reverse"));

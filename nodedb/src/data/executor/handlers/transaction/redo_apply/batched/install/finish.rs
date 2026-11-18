@@ -5,6 +5,11 @@
 //! and the events. The whole-record install and the batched install end
 //! here alike, so both leave the same state after their arms.
 //!
+//! The capture is prepared first. A whole record whose capture cannot be
+//! prepared rolls back, then the journal fails. A batched install rolls
+//! nothing back: the journal fails at once, and the next boot completes
+//! the record forward from its durable batches.
+//!
 //! The notes, the settle and the collection notes run before the first
 //! event is sent. The events then stream from the spools. A spool that
 //! does not read back stops the stream there: the events before it reached
@@ -22,13 +27,11 @@ use crate::data::executor::handlers::spill::run::BlockReader;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::install_counts::TsInstallCounts;
 use crate::types::{Lsn, TenantId};
-use crate::wal::RedoStreamId;
 
-use super::super::events::{CommittedWrites, EventRows};
-use super::super::state::{RedoApplyScope, TsInstalled};
-use super::rollback::BatchedRollback;
-use super::state::FoldedThrough;
-use super::undo::SpillableUndo;
+use super::super::super::events::{CommittedWrites, EventRows};
+use super::super::super::passes::PassRefusal;
+use super::super::super::state::{RedoApplyScope, TsInstalled};
+use super::super::rollback::undo::SpillableUndo;
 
 /// The collections whose rows the arms noted by key. The whole-record
 /// install borrows their names from the record, the batched install holds
@@ -59,15 +62,12 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct InstallF
     /// The ordinal every KV write of the record stamped. A rollback stamps
     /// it too.
     pub apply_ordinal: Option<i64>,
-    pub permit: Option<RootJournalPermit>,
     /// Every collection the record writes.
     pub collections: &'a [String],
     /// The collections whose rows the arms noted by key.
     pub keyed: &'a dyn KeyedCollections,
     /// Reads what the scope's spools spilled.
     pub reader: &'a BlockReader,
-    /// What a batched install ends with. `None` for a whole-record install.
-    pub batched: Option<BatchedFinish>,
 }
 
 /// What the end of a batched install reads besides the scope.
@@ -75,49 +75,70 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct BatchedF
     /// The install's undo log. A whole-record install keeps its own in the
     /// scope.
     pub undo: SpillableUndo,
-    /// The stream the record's marker names.
-    pub stream: RedoStreamId,
-    /// The fold ledger each durable document batch left.
-    pub folded: FoldedThrough,
+}
+
+/// The write set an install stores, prepared before its settle.
+pub(in crate::data::executor::handlers::transaction::redo_apply) enum PreparedCapture {
+    /// Under a root journal: the capture, and the write set it holds.
+    Journalled {
+        capture: (u64, Vec<u8>),
+        write_set: Vec<WriteSetEntry>,
+    },
+    /// No root journal: the record stores no write set.
+    Unjournalled,
 }
 
 impl CoreLoop {
-    /// End the install of the record whose arms filled `scope`. When the
-    /// record stored resolved timeseries batches, the response payload
-    /// carries their [`TsInstallCounts`] and `ts_installs` receives what
-    /// each stored.
-    pub(in crate::data::executor::handlers::transaction::redo_apply) fn finish_redo_install(
+    /// End the whole-record install whose arms filled `scope`, under the
+    /// root journal `permit` names, if any. A capture that cannot be
+    /// prepared rolls the record back first.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn finish_whole_install(
         &mut self,
         finish: InstallFinish<'_>,
+        permit: Option<RootJournalPermit>,
         mut scope: RedoApplyScope,
         ts_installs: &mut Vec<TsInstalled>,
     ) -> Response {
-        let InstallFinish {
-            task,
-            tid,
-            lsn,
-            stamp,
-            apply_ordinal,
-            permit,
-            collections,
-            keyed,
-            reader,
-            mut batched,
-        } = finish;
+        let capture = match self.prepare_install_capture(&finish, false, permit, &mut scope) {
+            Ok(capture) => capture,
+            Err(error) => {
+                let detail = error.to_string();
+                let kv_scope = self.kv_engine.open_write_scope(finish.apply_ordinal);
+                let refusal = self.roll_back_redo(
+                    finish.task.request.database_id.as_u64(),
+                    finish.tid,
+                    std::mem::take(&mut scope.undo),
+                    ErrorCode::from(error),
+                    scope.label_mark_before,
+                );
+                self.kv_engine.close_write_scope(kv_scope);
+                return self.answer_capture_refusal(finish.task, refusal, detail);
+            }
+        };
+        self.finish_redo_install(finish, capture, None, scope, ts_installs)
+    }
+
+    /// Prepare the write set capture of the install `finish` names, under
+    /// the root journal `permit` names. `batched` names a batched install.
+    /// `Err` when the capture cannot be prepared.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn prepare_install_capture(
+        &self,
+        finish: &InstallFinish<'_>,
+        batched: bool,
+        permit: Option<RootJournalPermit>,
+        scope: &mut RedoApplyScope,
+    ) -> crate::Result<PreparedCapture> {
         // A batched install under a root journal wrote the fold ledger and
         // target rows of the record. Its write set is the target rows it
         // stored, and the commit that stores the write set removes them.
         let ledgered: Option<u64> = scope.ledger.take().map(|ledger| ledger.lsn);
-        // The commit that ends a batched install removes its cursor with
-        // its fold ledger and target rows.
-        let drop_installs: Vec<u64> = batched.as_ref().map(|_| lsn.as_u64()).into_iter().collect();
         // A crash test kills the process here: the install folded its sums
         // into deferred store commits, and its write set is not stored. Each
         // collection the record writes has its own point, taken in name
         // order.
         #[cfg(feature = "failpoints")]
         {
-            let mut names: Vec<&String> = collections.iter().collect();
+            let mut names: Vec<&String> = finish.collections.iter().collect();
             names.sort();
             for collection in names {
                 crate::fail_point!(
@@ -126,61 +147,99 @@ impl CoreLoop {
                 );
             }
         }
-        if batched.is_some() {
+        if batched {
             // A crash test kills the process here: every batch is durable,
             // and the write set is not stored.
             crate::fail_point!(self.fail_scope, "redo_apply::batched::before_final_capture");
         }
-        let write_set = match permit {
-            Some(permit) => {
-                let prepared = self
-                    .install_write_set(&mut scope, ledgered)
-                    .and_then(|write_set| {
-                        self.prepare_redo_capture(task, permit, &write_set)
-                            .map(|capture| (capture, write_set))
-                    });
-                let (capture, write_set) = match prepared {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
-                        let detail = error.to_string();
-                        let database_id = task.request.database_id.as_u64();
-                        let refusal = match batched.take() {
-                            Some(BatchedFinish {
-                                undo,
-                                stream,
-                                folded,
-                            }) => self.roll_back_batched(
-                                BatchedRollback {
-                                    database_id,
-                                    tid,
-                                    undo,
-                                    lsn: lsn.as_u64(),
-                                    stream,
-                                    label_mark_before: scope.label_mark_before,
-                                    folded,
-                                },
-                                ErrorCode::from(error),
-                            ),
-                            None => self.roll_back_redo(
-                                database_id,
-                                tid,
-                                std::mem::take(&mut scope.undo),
-                                ErrorCode::from(error),
-                                scope.label_mark_before,
-                            ),
-                        };
-                        self.kv_engine.close_write_scope(kv_scope);
-                        let error = crate::Error::Storage {
-                            engine: "journal".into(),
-                            detail,
-                        };
-                        let code = refusal.into_code();
-                        self.fail_stop_on_rollback_code(&code);
-                        self.fail_journalled(&error);
-                        return self.response_error(task, code);
-                    }
-                };
+        let Some(permit) = permit else {
+            return Ok(PreparedCapture::Unjournalled);
+        };
+        // A test fails the prepare here: the install's effects are in the
+        // stores, and no capture holds them.
+        crate::fail_point_err!(
+            self.fail_scope,
+            "redo_apply::capture_prepare_fails",
+            |detail: String| crate::Error::Storage {
+                engine: "journal".into(),
+                detail,
+            }
+        );
+        let write_set = self.install_write_set(scope, ledgered)?;
+        let capture = self.prepare_redo_capture(finish.task, permit, &write_set)?;
+        Ok(PreparedCapture::Journalled { capture, write_set })
+    }
+
+    /// Answer `task`, whose batched install at `lsn` could not prepare its
+    /// capture: `error`. Every batch is durable under the install's cursor,
+    /// so nothing rolls back. The journal fails, so no later commit of the
+    /// task persists, and the core fail-stops before any other task runs.
+    /// The next boot completes the record forward.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn refuse_batched_capture(
+        &mut self,
+        task: &ExecutionTask,
+        lsn: Lsn,
+        error: &crate::Error,
+    ) -> Response {
+        let detail = format!(
+            "the batched install of the committed redo at lsn {} could not prepare its write \
+             set capture: {error}; its durable batches complete at the next boot",
+            lsn.as_u64()
+        );
+        self.fail_journalled(&crate::Error::Storage {
+            engine: "journal".into(),
+            detail: detail.clone(),
+        });
+        self.response_error(task, ErrorCode::Internal { detail })
+    }
+
+    /// Answer `task`, whose whole-record install's capture failed to
+    /// prepare with `detail`, once `refusal` ended its rollback. The journal
+    /// fails, and the core fail-stops.
+    fn answer_capture_refusal(
+        &mut self,
+        task: &ExecutionTask,
+        refusal: PassRefusal,
+        detail: String,
+    ) -> Response {
+        let error = crate::Error::Storage {
+            engine: "journal".into(),
+            detail,
+        };
+        let code = refusal.into_code();
+        self.fail_stop_on_rollback_code(&code);
+        self.fail_journalled(&error);
+        self.response_error(task, code)
+    }
+
+    /// End the install of the record whose arms filled `scope`, with the
+    /// write set `capture` prepared. `batched` is what a batched install
+    /// ends with. When the record stored resolved timeseries batches, the
+    /// response payload carries their [`TsInstallCounts`] and `ts_installs`
+    /// receives what each stored.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn finish_redo_install(
+        &mut self,
+        finish: InstallFinish<'_>,
+        capture: PreparedCapture,
+        mut batched: Option<BatchedFinish>,
+        mut scope: RedoApplyScope,
+        ts_installs: &mut Vec<TsInstalled>,
+    ) -> Response {
+        let InstallFinish {
+            task,
+            tid,
+            lsn,
+            stamp,
+            apply_ordinal: _,
+            collections,
+            keyed,
+            reader,
+        } = finish;
+        // The commit that ends a batched install removes its cursor with
+        // its fold ledger and target rows.
+        let drop_installs: Vec<u64> = batched.as_ref().map(|_| lsn.as_u64()).into_iter().collect();
+        let write_set = match capture {
+            PreparedCapture::Journalled { capture, write_set } => {
                 if let Err(error) = self.persist_redo_capture(capture, &write_set, &drop_installs) {
                     let mut response = self.response_error(task, error);
                     response.write_set = write_set;
@@ -191,7 +250,7 @@ impl CoreLoop {
             // With no root journal the record stores no write set. A batched
             // install folds only under a root journal, so it wrote no fold
             // ledger row.
-            None => {
+            PreparedCapture::Unjournalled => {
                 let write_set = std::mem::take(&mut scope.target_set);
                 // Every commit of the install is durable already. The
                 // cursor goes before the record counts as applied.
@@ -227,7 +286,7 @@ impl CoreLoop {
         }
         #[cfg(test)]
         {
-            self.redo_apply.last_held = super::super::state::HeldReport {
+            self.redo_apply.last_held = super::super::super::state::HeldReport {
                 peak_hot_bytes: scope.held.peak_hot_bytes(),
                 spilled_entries: scope.held.spilled_entries(),
             };

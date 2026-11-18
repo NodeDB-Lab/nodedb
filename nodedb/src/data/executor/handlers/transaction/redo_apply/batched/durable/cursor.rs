@@ -33,7 +33,7 @@ impl CoreLoop {
     /// `state` names, with its cursor. `rewind` sets the fold ledger back to
     /// the ops the durable state folded, for a rollback that reversed folds
     /// above it.
-    pub(super) fn commit_batch_durable(
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn commit_batch_durable(
         &mut self,
         lsn: u64,
         stream: RedoStreamId,
@@ -72,7 +72,10 @@ impl CoreLoop {
     /// sparse commit. The edges go first: once the cursor is gone, boot no
     /// longer replays the record forward, so every edge and label version
     /// must already be durable.
-    pub(super) fn end_install_durable(&mut self, lsn: u64) -> crate::Result<()> {
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn end_install_durable(
+        &mut self,
+        lsn: u64,
+    ) -> crate::Result<()> {
         self.edge_store.persist()?;
         let txn = self.sparse.begin_durable_write()?;
         self.sparse.remove_redo_install_in_txn(&txn, &[lsn])?;
@@ -85,7 +88,11 @@ impl CoreLoop {
     /// Stop the core: the install at `lsn` could not store its progress.
     /// The stores hold effects past its last cursor, so no later commit of
     /// the task may persist.
-    pub(super) fn fail_install_progress(&mut self, lsn: u64, error: &crate::Error) {
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn fail_install_progress(
+        &mut self,
+        lsn: u64,
+        error: &crate::Error,
+    ) {
         self.seal_journalled();
         self.fail_stop_core(
             FailStopCause::InstallProgressUnpersisted,
@@ -99,7 +106,9 @@ impl CoreLoop {
 
 /// The `<arm>::<batch>` the fail points of the step `state` names.
 #[cfg(feature = "failpoints")]
-pub(super) fn batch_point(state: CursorState) -> String {
+pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn batch_point(
+    state: CursorState,
+) -> String {
     match state {
         CursorState::Installing { arm, batch, .. } | CursorState::RollingBack { arm, batch } => {
             format!("{arm:?}::{batch}")

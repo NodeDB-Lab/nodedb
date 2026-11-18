@@ -20,7 +20,7 @@
 //! - A batched install of a committed stream marker makes each batch
 //!   durable before that commit, with its install cursor. Its marker is
 //!   durable before the install starts. Boot completes the record forward
-//!   (see `handlers::transaction::redo_apply::batched::cursor`).
+//!   (see `handlers::transaction::redo_apply::batched::durable::cursor`).
 //!
 //! An install that gives the core back between its batches takes its
 //! window out of the core each time (see `super::journal_context`). A task
