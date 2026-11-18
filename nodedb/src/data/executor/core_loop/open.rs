@@ -195,6 +195,7 @@ impl CoreLoop {
                 crate::data::executor::handlers::transaction::redo_apply::RedoApplyState::new(),
             fail_stop: super::fail_stop::CoreFailStop::default(),
             write_set_journal: super::write_set_journal::WriteSetJournalState::default(),
+            install_fence: None,
         })
     }
 }

@@ -131,7 +131,7 @@ impl CoreLoop {
     }
 
     /// Forget the group of request `request_id`, which never runs.
-    pub(in crate::data::executor) fn drop_journal_group(&mut self, request_id: u64) {
+    pub(crate) fn drop_journal_group(&mut self, request_id: u64) {
         self.write_set_journal.groups.remove(&request_id);
     }
 

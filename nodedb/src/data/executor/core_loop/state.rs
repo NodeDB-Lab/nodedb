@@ -468,4 +468,7 @@ pub struct CoreLoop {
     pub(in crate::data::executor) fail_stop: super::fail_stop::CoreFailStop,
     /// Record groups of queued journalled writes, and their held events.
     pub(in crate::data::executor) write_set_journal: super::write_set_journal::WriteSetJournalState,
+    /// The keys an install holds and the tasks waiting for them. `None`
+    /// while no install holds any.
+    pub(in crate::data::executor) install_fence: Option<super::install_fence::InstallFence>,
 }

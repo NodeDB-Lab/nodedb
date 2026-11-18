@@ -16,8 +16,9 @@ impl CoreLoop {
         self.core_id
     }
 
+    /// Queued tasks and tasks waiting behind the install fence.
     pub fn pending_count(&self) -> usize {
-        self.task_queue.len()
+        self.task_queue.len() + self.fence_waiter_count()
     }
 
     /// Where this core reads WAL records back from.

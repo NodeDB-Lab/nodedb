@@ -58,9 +58,11 @@ impl CoreLoop {
         };
         self.io_metrics.record_wait(tier, wait_ns);
 
+        // A task that touches what an install holds waits for its release.
         // A plain REINDEX starts its rebuilds and waits for their cutovers.
         // A refresh wait waits for its cut to fold.
-        if let Some(task) = self.hold_plain_reindex(qt.task)
+        if let Some(task) = self.hold_fenced(qt.task)
+            && let Some(task) = self.hold_plain_reindex(task)
             && let Some(task) = self.hold_cagg_refresh_await(task)
             && let Some(task) = self.hold_cagg_read(task)
         {
@@ -195,7 +197,9 @@ impl CoreLoop {
         // Adjust SPSC read depth based on current memory pressure.
         self.apply_spsc_pressure();
         self.drain_requests();
-        let mut processed = 0;
+        // Waiters past their deadline answer, and a fail-stopped core
+        // refuses them.
+        let mut processed = self.sweep_fence_waiters();
         while !self.task_queue.is_empty() {
             // A fail-stopped core serves nothing, including the rest of the
             // queue behind the request that stopped it.

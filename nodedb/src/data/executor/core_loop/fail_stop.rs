@@ -26,6 +26,7 @@ use tracing::{error, warn};
 use crate::bridge::dispatch::BridgeResponse;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::control::metrics::CoreFailStopReport;
+use crate::data::executor::task::ExecutionTask;
 
 use super::CoreLoop;
 
@@ -161,8 +162,8 @@ impl CoreLoop {
         }
     }
 
-    /// Refuse every queued request of a fail-stopped core. Returns how many
-    /// were refused.
+    /// Refuse every queued request of a fail-stopped core, and every request
+    /// waiting behind its install fence. Returns how many were refused.
     pub(in crate::data::executor) fn refuse_queued_while_stopped(&mut self) -> usize {
         let Some((cause, _)) = self.fail_stop.cause() else {
             return 0;
@@ -172,25 +173,36 @@ impl CoreLoop {
             self.core_id,
             cause.label()
         );
-        let mut refused = 0;
+        // Waiters left the queue before every task still queued, so they
+        // are refused first.
+        let waiters = self.take_fence_waiters();
+        let mut refused = waiters.len();
+        for task in waiters {
+            self.refuse_stopped(&task, &detail);
+        }
         while let Some(task) = self.task_queue.pop_front() {
-            self.drop_journal_group(task.request_id().as_u64());
-            let response = self.response_error(
-                &task,
-                ErrorCode::CoreFailStopped {
-                    core_id: self.core_id,
-                    detail: detail.clone(),
-                },
-            );
-            if let Err(e) = self
-                .response_tx
-                .try_push(BridgeResponse { inner: response })
-            {
-                warn!(core = self.core_id, error = %e, "failed to send a fail-stop refusal");
-            }
+            self.refuse_stopped(&task, &detail);
             refused += 1;
         }
         refused
+    }
+
+    /// Answer `task` that this fail-stopped core never runs.
+    fn refuse_stopped(&mut self, task: &ExecutionTask, detail: &str) {
+        self.drop_journal_group(task.request_id().as_u64());
+        let response = self.response_error(
+            task,
+            ErrorCode::CoreFailStopped {
+                core_id: self.core_id,
+                detail: detail.to_owned(),
+            },
+        );
+        if let Err(e) = self
+            .response_tx
+            .try_push(BridgeResponse { inner: response })
+        {
+            warn!(core = self.core_id, error = %e, "failed to send a fail-stop refusal");
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::core_health::{CoreHealthWatchdog, MAX_CONSECUTIVE_PANICS, PANIC_WINDOW_SECS};
 use crate::data::eventfd::EventFd;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::task::ExecutionTask;
 
 /// Maximum idle poll timeout in milliseconds.
 ///
@@ -187,30 +188,41 @@ pub(super) fn run_event_loop(
 
 /// Drain all pending requests from a core's SPSC queue and send back
 /// `CoreDegraded` error responses. Used when the watchdog has flagged
-/// the core as unhealthy.
+/// the core as unhealthy. Waiters left the queue before every task still
+/// queued, so they are refused first.
 fn drain_and_reject(core: &mut CoreLoop, core_id: usize) {
     core.drain_requests();
+    for task in core.take_fence_waiters() {
+        reject_degraded(core, core_id, &task);
+    }
     while let Some(task) = core.task_queue.pop_front() {
-        let response = Response {
-            request_id: task.request_id(),
-            status: Status::Error,
-            attempt: 1,
-            partial: false,
-            payload: Payload::empty(),
-            watermark_lsn: core.watermark,
-            error_code: Some(Box::new(ErrorCode::Internal {
-                detail: format!("core-{core_id} is degraded after repeated panics"),
-            })),
-            stage_vote: None,
-            read_vshards: crate::types::ReadShards::new(),
-            write_set: Vec::new(),
-        };
-        if let Err(e) = core
-            .response_tx
-            .try_push(BridgeResponse { inner: response })
-        {
-            warn!(core_id, error = %e, "failed to send degraded-rejection response");
-        }
+        reject_degraded(core, core_id, &task);
+    }
+}
+
+/// Answer `task`, which the degraded core never runs.
+fn reject_degraded(core: &mut CoreLoop, core_id: usize, task: &ExecutionTask) {
+    // The task never runs, so its group gets no write set.
+    core.drop_journal_group(task.request_id().as_u64());
+    let response = Response {
+        request_id: task.request_id(),
+        status: Status::Error,
+        attempt: 1,
+        partial: false,
+        payload: Payload::empty(),
+        watermark_lsn: core.watermark,
+        error_code: Some(Box::new(ErrorCode::Internal {
+            detail: format!("core-{core_id} is degraded after repeated panics"),
+        })),
+        stage_vote: None,
+        read_vshards: crate::types::ReadShards::new(),
+        write_set: Vec::new(),
+    };
+    if let Err(e) = core
+        .response_tx
+        .try_push(BridgeResponse { inner: response })
+    {
+        warn!(core_id, error = %e, "failed to send degraded-rejection response");
     }
 }
 

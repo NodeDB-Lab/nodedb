@@ -62,6 +62,11 @@ impl CoreLoop {
     /// is not a batchable PointPut, in which case the caller should fall
     /// back to `poll_one`).
     pub fn poll_write_batch(&mut self) -> usize {
+        // While an install fence is armed, every task passes it in
+        // `poll_one` one at a time.
+        if self.install_fence.is_some() {
+            return 0;
+        }
         // Check if the front of the queue is a non-expired batchable PointPut.
         let front_is_put = self.task_queue.front().is_some_and(|t| {
             is_batchable_put(t) && !t.is_expired() && !self.requires_point_put_hooks(t)

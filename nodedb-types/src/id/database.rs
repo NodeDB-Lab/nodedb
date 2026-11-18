@@ -47,6 +47,8 @@ use serde::{Deserialize, Serialize};
     Copy,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     Serialize,
     Deserialize,

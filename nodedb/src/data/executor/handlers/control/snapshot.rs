@@ -45,8 +45,14 @@ impl CoreLoop {
             .task_queue
             .iter()
             .position(|t| t.request_id() == target_request_id);
-        if let Some(pos) = pos {
-            self.task_queue.remove(pos);
+        let removed = match pos {
+            Some(pos) => {
+                self.task_queue.remove(pos);
+                true
+            }
+            None => self.remove_fence_waiter(target_request_id),
+        };
+        if removed {
             // The cancelled task never runs, so its group gets no write set.
             self.drop_journal_group(target_request_id.as_u64());
         }
