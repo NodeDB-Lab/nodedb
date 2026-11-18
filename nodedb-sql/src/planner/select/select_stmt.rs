@@ -436,8 +436,13 @@ fn has_column_comparison(expr: &SqlExpr) -> bool {
     }
 }
 
-/// Check if a SELECT has aggregation (GROUP BY or aggregate functions in projection).
+/// Check if a SELECT has aggregation: GROUP BY, HAVING, or aggregate
+/// functions in the projection. HAVING filters groups, so a SELECT that
+/// carries one is always an aggregate query.
 pub(crate) fn has_aggregation(select: &Select, functions: &FunctionRegistry) -> bool {
+    if select.having.is_some() {
+        return true;
+    }
     let group_by_non_empty = match &select.group_by {
         ast::GroupByExpr::All(_) => true,
         ast::GroupByExpr::Expressions(exprs, _) => !exprs.is_empty(),

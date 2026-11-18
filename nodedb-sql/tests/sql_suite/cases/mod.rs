@@ -2,6 +2,7 @@
 
 mod aggregate_filter_planning;
 mod ddl_constraint_rejection;
+mod having_makes_aggregate;
 mod index_lookup_sorted;
 mod index_lookup_temporal;
 mod limit_offset_bounds;
