@@ -3,8 +3,10 @@
 //! Footprints of the core's own ops and of cluster event reads.
 //!
 //! A meta op checkpoints, snapshots, purges, installs or stages across
-//! collections, so each one is a core task. A cancel and a redo stream page
-//! read touch no state an install writes.
+//! collections, so each one is a core task. A sampler, a checkpoint or a
+//! version purge keeps no client order, so it waits for the install and
+//! holds no later task. A cancel and a redo stream page read touch no state
+//! an install writes.
 
 use nodedb_physical::physical_plan::{ClusterEventOp, MetaOp};
 
@@ -17,23 +19,17 @@ pub(super) fn meta_footprint(op: &MetaOp) -> Footprint {
         | MetaOp::TransactionBatch { .. }
         | MetaOp::CreateSnapshot
         | MetaOp::Compact
-        | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
         | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
-        | MetaOp::ListContinuousAggregates
-        | MetaOp::ContinuousAggregatesRegistered
         | MetaOp::AwaitContinuousAggregateRefresh { .. }
         | MetaOp::ConvertCollection { .. }
         | MetaOp::CreateTenantSnapshot { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
         | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeTenant { .. }
-        | MetaOp::ListTenantCollections { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
-        | MetaOp::QueryCollectionSize { .. }
-        | MetaOp::VerifyHashChain { .. }
         | MetaOp::EnforceTimeseriesRetention { .. }
         | MetaOp::TemporalPurgeEdgeStore { .. }
         | MetaOp::TemporalPurgeDocumentStrict { .. }
@@ -42,9 +38,6 @@ pub(super) fn meta_footprint(op: &MetaOp) -> Footprint {
         | MetaOp::TemporalPurgeArray { .. }
         | MetaOp::AlterArray { .. }
         | MetaOp::ApplyContinuousAggRetention { .. }
-        | MetaOp::QueryAggregateWatermark { .. }
-        | MetaOp::QueryLastValues { .. }
-        | MetaOp::QueryLastValue { .. }
         | MetaOp::CalvinExecuteStatic { .. }
         | MetaOp::CalvinExecutePassive { .. }
         | MetaOp::CalvinExecuteActive { .. }
@@ -61,10 +54,31 @@ pub(super) fn meta_footprint(op: &MetaOp) -> Footprint {
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_)
-        | MetaOp::PurgeVersionsBelow { .. }
-        | MetaOp::KvDueExpiries { .. }
+        // A client's read of catalog sizes, hash chains, aggregates or last
+        // values keeps its order against the client's later writes. The
+        // envelope names no connection, so each holds every later task.
+        | MetaOp::ListTenantCollections { .. }
+        | MetaOp::QueryCollectionSize { .. }
+        | MetaOp::VerifyHashChain { .. }
+        | MetaOp::QueryAggregateWatermark { .. }
+        | MetaOp::QueryLastValues { .. }
+        | MetaOp::QueryLastValue { .. }
+        | MetaOp::ListContinuousAggregates
+        | MetaOp::ContinuousAggregatesRegistered => Footprint::Core,
+        // Work with no client order to keep, each correct after any later
+        // write:
+        // - the storage, graph and expiry samplers, each sent only by its
+        //   Control-Plane pass, read gauges and due keys;
+        // - a checkpoint publishes at least the state its stamps name, and a
+        //   later write's effects are noted applied before any stamp names
+        //   them;
+        // - a purge below a horizon removes only versions ended below it,
+        //   and a later write ends a version at an ordinal above it.
+        MetaOp::KvDueExpiries { .. }
         | MetaOp::RefreshGraphCount { .. }
-        | MetaOp::QueryStorageBytes { .. } => Footprint::Core,
+        | MetaOp::QueryStorageBytes { .. }
+        | MetaOp::Checkpoint
+        | MetaOp::PurgeVersionsBelow { .. } => Footprint::Background,
     }
 }
 

@@ -67,6 +67,9 @@ pub(in crate::data::executor) enum FailStopCause {
     /// unpersisted or another window open. One task's durability or events
     /// would land in another's window.
     JournalWindowLeaked,
+    /// A slice of a parked batched install panicked outside its arms. What
+    /// the slice changed is unknown.
+    InstallPanicked,
 }
 
 impl FailStopCause {
@@ -83,6 +86,7 @@ impl FailStopCause {
             Self::InstallProgressUnpersisted => "install_progress_unpersisted",
             Self::InstallCursorOrphaned => "install_cursor_orphaned",
             Self::JournalWindowLeaked => "journal_window_leaked",
+            Self::InstallPanicked => "install_panicked",
         }
     }
 }

@@ -19,7 +19,7 @@ use super::journal_context::{JournalSuspendError, SuspendedJournal};
 use super::write_note::RecordStamps;
 
 /// An install's ambient core state, out of the core.
-pub struct InstallContext {
+pub(in crate::data::executor) struct InstallContext {
     /// The arms' apply scope. `None` once the arms ran.
     scope: Option<RedoApplyScope>,
     /// The record scope the task's apply set: its ordinals, its journaled
@@ -37,9 +37,9 @@ pub struct InstallContext {
 
 /// Why an install's ambient state cannot return to the core, with the state
 /// it holds. The core fail-stopped.
-pub struct InstallEnterRefused {
-    pub error: JournalSuspendError,
-    pub context: Box<InstallContext>,
+pub(in crate::data::executor) struct InstallEnterRefused {
+    pub(in crate::data::executor) error: JournalSuspendError,
+    pub(in crate::data::executor) context: Box<InstallContext>,
 }
 
 impl CoreLoop {
@@ -48,7 +48,9 @@ impl CoreLoop {
     /// stamp, and the task's journal window. The core then stands as it
     /// stands between tasks. `Err` when the journal window cannot leave:
     /// nothing moved, and the core fail-stopped.
-    pub fn leave_install(&mut self) -> Result<InstallContext, JournalSuspendError> {
+    pub(in crate::data::executor) fn leave_install(
+        &mut self,
+    ) -> Result<InstallContext, JournalSuspendError> {
         let journal = self.suspend_journal()?;
         Ok(InstallContext {
             scope: self.redo_apply.scope.take(),
@@ -63,7 +65,10 @@ impl CoreLoop {
     /// when the journal window cannot return: the core holds another
     /// window, or a commit since the leave is unpersisted. Nothing moved,
     /// the core fail-stopped, and the refusal carries `context` back.
-    pub fn enter_install(&mut self, context: InstallContext) -> Result<(), InstallEnterRefused> {
+    pub(in crate::data::executor) fn enter_install(
+        &mut self,
+        context: InstallContext,
+    ) -> Result<(), InstallEnterRefused> {
         if let Err(error) = self.check_journal_resume() {
             return Err(InstallEnterRefused {
                 error,

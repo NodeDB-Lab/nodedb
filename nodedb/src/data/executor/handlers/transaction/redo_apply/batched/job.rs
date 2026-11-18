@@ -15,6 +15,11 @@
 //! The arms' apply scope sits in the core while the arms run, since the
 //! arms read it there. The slice that ends the last pass takes it back,
 //! closes the KV write scope, and rolls the install back on an error.
+//!
+//! A task that `run_task` runs parks its job between slices (see `park`):
+//! the job's ambient core state leaves the core, other tasks run under the
+//! install fence, and `tick()` drives the next slice (see `drive`). Any
+//! other caller runs the job to its end in one call.
 
 use std::collections::BTreeSet;
 
@@ -47,14 +52,14 @@ pub(super) enum JobStage {
         pass: Option<Box<ArmPass>>,
     },
     /// Every arm wrote all of the record: the finish runs next.
-    Finish(Box<InstallTail>),
+    Finish(Box<FinishInput>),
     /// The job answered.
     Done,
 }
 
 /// What the finish reads: the apply scope the arms filled, and the undo log
 /// out of it.
-pub(super) struct InstallTail {
+pub(super) struct FinishInput {
     scope: RedoApplyScope,
     undo: SpillableUndo,
 }
@@ -195,6 +200,47 @@ impl StreamInstallJob {
         }
     }
 
+    /// Hand over what each resolved timeseries batch the install stored.
+    pub(super) fn take_ts_installs(&mut self) -> Vec<TsInstalled> {
+        std::mem::take(&mut self.ts_installs)
+    }
+
+    /// Where the job stands between slices: the arm and the index of the
+    /// batch the last slice ran. `None` once the arms ended.
+    pub(super) fn park_point(&self) -> Option<(RedoArm, u64)> {
+        match &self.stage {
+            JobStage::Arms {
+                pass: Some(pass), ..
+            } => Some((pass.arm(), pass.last_batch())),
+            JobStage::Arms { pass: None, .. } | JobStage::Finish(_) | JobStage::Done => None,
+        }
+    }
+
+    /// The RAM the job holds between slices: its read buffer, and the hot
+    /// parts of its spools, fold target entries and undo log. While the
+    /// arms run, the apply scope is `core_scope`, the one in the core.
+    pub(super) fn resident_bytes(&self, core_scope: Option<&RedoApplyScope>) -> usize {
+        let (scope, undo, read) = match &self.stage {
+            JobStage::Arms { pass, .. } => (
+                core_scope,
+                core_scope.and_then(|scope| scope.spillable.as_ref()),
+                pass.as_ref().map_or(0, |pass| pass.held_bytes()),
+            ),
+            JobStage::Finish(input) => (Some(&input.scope), Some(&input.undo), 0),
+            JobStage::Done => (None, None, 0),
+        };
+        let held = scope.map_or(0, |scope| {
+            scope
+                .held
+                .hot_bytes()
+                .saturating_add(scope.target_set_bytes)
+        });
+        let undo = undo.map_or(0, |undo| {
+            undo.hot_bytes().saturating_add(undo.pinned_bytes())
+        });
+        read.saturating_add(held).saturating_add(undo)
+    }
+
     /// Run one slice for `task`, the task that opened the job. `Err` when
     /// the job answered already.
     pub(super) fn step(
@@ -288,7 +334,7 @@ impl StreamInstallJob {
         let Some(undo) = scope.spillable.take() else {
             return StepOutcome::Done(core.response_error(task, lost_scope().into_code()));
         };
-        self.stage = JobStage::Finish(Box::new(InstallTail { scope, undo }));
+        self.stage = JobStage::Finish(Box::new(FinishInput { scope, undo }));
         StepOutcome::Ran
     }
 
@@ -339,8 +385,8 @@ impl StreamInstallJob {
     }
 
     /// Settle the record the arms wrote, as a whole record settles.
-    fn finish(&mut self, core: &mut CoreLoop, task: &ExecutionTask, tail: InstallTail) -> Response {
-        let InstallTail { scope, undo } = tail;
+    fn finish(&mut self, core: &mut CoreLoop, task: &ExecutionTask, tail: FinishInput) -> Response {
+        let FinishInput { scope, undo } = tail;
         core.finish_redo_install(
             InstallFinish {
                 task,

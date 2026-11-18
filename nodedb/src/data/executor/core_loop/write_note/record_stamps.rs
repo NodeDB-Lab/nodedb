@@ -57,7 +57,7 @@ impl RecordStamps {
 
     /// Register every record `other` holds: the stamps a suspended install
     /// took out of the core.
-    pub fn absorb(&mut self, other: RecordStamps) {
+    pub(in crate::data::executor) fn absorb(&mut self, other: RecordStamps) {
         self.by_lsn.extend(other.by_lsn);
     }
 

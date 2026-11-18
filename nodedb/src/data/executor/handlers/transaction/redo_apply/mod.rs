@@ -11,7 +11,7 @@
 //! - [`settle`]: the work an install defers until every sub-record landed.
 //! - [`streamed`]: reads of a stream marker's content back from the WAL.
 //! - [`batched`]: the install of a stream marker's content, batch by
-//!   batch.
+//!   batch, which a task `run_task` runs parks between its batches.
 //! - [`stream_validate`]: the validate of a stream marker's content, run
 //!   batch by batch over the stream.
 //! - [`document`]: document rows written while the apply scope is open, or
@@ -71,6 +71,7 @@ mod unique_handover_tests;
 mod validate;
 mod write_keys;
 
+pub(in crate::data::executor) use batched::is_park_placeholder;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
 pub(in crate::data::executor) use state::{

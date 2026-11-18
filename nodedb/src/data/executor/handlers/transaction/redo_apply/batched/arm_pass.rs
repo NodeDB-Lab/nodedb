@@ -92,6 +92,22 @@ impl ArmPass {
         })
     }
 
+    /// The arm the pass runs.
+    pub(super) fn arm(&self) -> RedoArm {
+        self.arm
+    }
+
+    /// The index of the last batch the pass ran, among every batch of the
+    /// stream.
+    pub(super) fn last_batch(&self) -> u64 {
+        self.index.saturating_sub(1)
+    }
+
+    /// The RAM the pass's read buffer holds.
+    pub(super) fn held_bytes(&self) -> usize {
+        self.batcher.held_bytes()
+    }
+
     /// Run the pass's next batch. A batch that ran ends durable with its
     /// cursor. `ledgered` writes the fold ledger. `Err` when the pass cannot
     /// go on.

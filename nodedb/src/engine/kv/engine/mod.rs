@@ -31,4 +31,5 @@ pub use newest::KvCollectionNewest;
 pub use reads::{KvEntryImage, KvKeyRef};
 pub use state::{KvEngine, ScanResult};
 pub use versioned_reads::{KvVersionRow, KvVersionedScan};
-pub use write_scope::{KvWriteScope, KvWriteScopeGuard, SuspendedKvScope};
+pub(crate) use write_scope::SuspendedKvScope;
+pub use write_scope::{KvWriteScope, KvWriteScopeGuard};

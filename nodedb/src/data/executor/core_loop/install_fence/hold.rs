@@ -22,7 +22,7 @@ impl CoreLoop {
     /// Hold back every task that touches `keys` until
     /// [`Self::release_install_fence`]. A fence already armed gains `keys`
     /// and keeps its waiters.
-    pub fn arm_install_fence(&mut self, keys: BTreeSet<FenceKey>) {
+    pub(in crate::data::executor) fn arm_install_fence(&mut self, keys: BTreeSet<FenceKey>) {
         match self.install_fence.as_mut() {
             Some(fence) => fence.keys.extend(keys),
             None => self.install_fence = Some(InstallFence::new(keys)),
@@ -32,7 +32,7 @@ impl CoreLoop {
     /// Disarm the fence. Maintenance that came due while it was armed runs
     /// first, so back-to-back installs never starve it. Its waiters then
     /// return to the front of the queue in arrival order.
-    pub fn release_install_fence(&mut self) {
+    pub(in crate::data::executor) fn release_install_fence(&mut self) {
         let Some(mut fence) = self.install_fence.take() else {
             return;
         };
@@ -55,7 +55,7 @@ impl CoreLoop {
     /// Note an install at `lsn` that holds events. Until the fence releases,
     /// a heartbeat publishes below the lowest such LSN, so no consumer sees
     /// a watermark past an event still to come. A no-op with no fence armed.
-    pub fn hold_event_floor(&mut self, lsn: u64) {
+    pub(in crate::data::executor) fn hold_event_floor(&mut self, lsn: u64) {
         if let Some(fence) = self.install_fence.as_mut() {
             fence.event_floor = Some(fence.event_floor.map_or(lsn, |floor| floor.min(lsn)));
         }
@@ -75,7 +75,7 @@ impl CoreLoop {
     }
 
     /// Whether an install fence is armed.
-    pub fn has_install_fence(&self) -> bool {
+    pub(crate) fn has_install_fence(&self) -> bool {
         self.install_fence.is_some()
     }
 
@@ -291,19 +291,42 @@ mod tests {
         assert_eq!(ids(&answered(&mut rx)), vec![4]);
     }
 
+    /// A client's core read keeps its order: a later task waits behind it.
     #[test]
-    fn a_waiting_checkpoint_holds_every_later_task() {
+    fn a_waiting_core_task_holds_every_later_task() {
         let (mut core, _tx, mut rx, _dir) = make_core();
         core.arm_install_fence(BTreeSet::new());
-        queue(&mut core, 1, PhysicalPlan::Meta(MetaOp::Checkpoint));
+        let size = MetaOp::QueryCollectionSize {
+            tenant_id: 1,
+            name: "a".into(),
+        };
+        queue(&mut core, 1, PhysicalPlan::Meta(size));
         queue(&mut core, 2, get("b"));
+        queue(&mut core, 3, put("c"));
         core.tick();
         assert!(answered(&mut rx).is_empty());
-        assert_eq!(core.fence_waiter_count(), 2);
+        assert_eq!(core.fence_waiter_count(), 3);
 
         core.release_install_fence();
         core.tick();
-        assert_eq!(ids(&answered(&mut rx)), vec![1, 2]);
+        assert_eq!(ids(&answered(&mut rx)), vec![1, 2, 3]);
+    }
+
+    /// A checkpoint keeps no client order: it waits for the release, and a
+    /// later write runs ahead of it.
+    #[test]
+    fn a_waiting_checkpoint_holds_no_later_task() {
+        let (mut core, _tx, mut rx, _dir) = make_core();
+        core.arm_install_fence(BTreeSet::new());
+        queue(&mut core, 1, PhysicalPlan::Meta(MetaOp::Checkpoint));
+        queue(&mut core, 2, put("c"));
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![2]);
+        assert_eq!(core.fence_waiter_count(), 1);
+
+        core.release_install_fence();
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![1]);
     }
 
     #[test]

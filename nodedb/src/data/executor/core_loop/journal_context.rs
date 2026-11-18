@@ -7,7 +7,8 @@
 //! part way takes its window with it: [`CoreLoop::suspend_journal`] lifts the
 //! deferral and empties the journal slots, so a task that runs meanwhile
 //! commits durably, sends its events directly, and opens its own journal.
-//! [`CoreLoop::resume_journal`] puts the window back as it stood.
+//! The window returns as it stood once `check_journal_resume` passes
+//! (`restore_journal`), as `CoreLoop::enter_install` returns it.
 //!
 //! A window leaves only with every commit of it persisted. A deferred commit
 //! left behind becomes durable with the next task's commit, or falls to a
@@ -21,7 +22,7 @@ use super::write_set_journal::RunningJournal;
 
 /// A journal window out of the core: the journal slots and which stores
 /// deferred.
-pub struct SuspendedJournal {
+pub(in crate::data::executor) struct SuspendedJournal {
     running: Option<RunningJournal>,
     held_events: Option<HeldEvents>,
     sparse_deferred: bool,
@@ -30,7 +31,7 @@ pub struct SuspendedJournal {
 
 /// Why a journal window cannot leave or return to the core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum JournalSuspendError {
+pub(crate) enum JournalSuspendError {
     /// A store holds a deferred commit no durable commit persisted.
     #[error("the {store} store holds a deferred commit that no durable commit persisted")]
     Unpersisted { store: &'static str },
@@ -42,7 +43,7 @@ pub enum JournalSuspendError {
 impl CoreLoop {
     /// Whether a journal window is open on the core: a journal slot holds a
     /// task's journal, or a store defers.
-    pub fn has_journal_window(&self) -> bool {
+    pub(in crate::data::executor) fn has_journal_window(&self) -> bool {
         self.write_set_journal.running.is_some()
             || self.write_set_journal.held_events.is_some()
             || self.sparse.db().is_deferred()
@@ -50,8 +51,10 @@ impl CoreLoop {
     }
 
     /// Take the journal window out of the core. The stores stop deferring,
-    /// and the journal slots are empty until [`Self::resume_journal`].
-    pub fn suspend_journal(&mut self) -> Result<SuspendedJournal, JournalSuspendError> {
+    /// and the journal slots are empty until the window returns.
+    pub(in crate::data::executor) fn suspend_journal(
+        &mut self,
+    ) -> Result<SuspendedJournal, JournalSuspendError> {
         if let Some(store) = self.unpersisted_store() {
             return Err(self.leak_journal_window(JournalSuspendError::Unpersisted { store }));
         }
@@ -75,17 +78,6 @@ impl CoreLoop {
             sparse_deferred,
             edge_deferred,
         })
-    }
-
-    /// Put `suspended` back. The core must hold no other journal window, and
-    /// every commit since the suspend must be persisted.
-    pub fn resume_journal(
-        &mut self,
-        suspended: SuspendedJournal,
-    ) -> Result<(), JournalSuspendError> {
-        self.check_journal_resume()?;
-        self.restore_journal(suspended);
-        Ok(())
     }
 
     /// Whether a journal window can return: the core holds no other window,
@@ -236,27 +228,29 @@ mod tests {
         txn.commit().expect("durable commit");
         assert!(!core.sparse.db().has_unpersisted());
 
-        let suspended = core.suspend_journal().expect("suspend");
+        let context = core.leave_install().expect("leave");
         assert!(!core.is_fail_stopped());
         assert!(!core.sparse.db().is_deferred());
-        core.resume_journal(suspended).expect("resume");
+        assert!(core.enter_install(context).is_ok(), "enter");
         assert!(core.sparse.db().is_deferred());
     }
 
     #[test]
-    fn resume_refuses_an_unpersisted_commit_since_the_suspend() {
+    fn enter_refuses_an_unpersisted_commit_since_the_leave() {
         let directory = tempfile::tempdir().expect("directory");
         let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
         let first = ordinary_task(1);
         assert!(core.begin_task_journal(&first, ordinary_group(1)).is_none());
-        let suspended = core.suspend_journal().expect("suspend");
+        let context = core.leave_install().expect("leave");
         core.sparse.db().defer();
         assert_eq!(core.execute(&ordinary_task(2)).status, Status::Ok);
         core.sparse.db().resume();
         assert!(core.sparse.db().has_unpersisted());
 
         assert_eq!(
-            core.resume_journal(suspended).err(),
+            core.enter_install(context)
+                .err()
+                .map(|refused| refused.error),
             Some(JournalSuspendError::Unpersisted { store: "sparse" })
         );
         assert_eq!(
@@ -268,13 +262,13 @@ mod tests {
     }
 
     #[test]
-    fn a_task_between_suspend_and_resume_commits_durably_and_sends_its_events() {
+    fn a_task_between_leave_and_enter_commits_durably_and_sends_its_events() {
         let directory = tempfile::tempdir().expect("directory");
         let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
         let mut events = event_bus(&mut core);
         let first = ordinary_task(1);
         assert!(core.begin_task_journal(&first, ordinary_group(1)).is_none());
-        let suspended = core.suspend_journal().expect("suspend");
+        let context = core.leave_install().expect("leave");
         assert!(!core.sparse.db().is_deferred());
         assert!(!core.edge_store.db().is_deferred());
 
@@ -298,7 +292,7 @@ mod tests {
         );
         drop(reopened);
 
-        core.resume_journal(suspended).expect("resume");
+        assert!(core.enter_install(context).is_ok(), "enter");
         assert!(core.sparse.db().is_deferred());
         assert!(core.edge_store.db().is_deferred());
         let mut response = core.execute(&first);
@@ -318,7 +312,7 @@ mod tests {
         let mut events = event_bus(&mut core);
         let first = ordinary_task(1);
         assert!(core.begin_task_journal(&first, ordinary_group(1)).is_none());
-        let suspended = core.suspend_journal().expect("suspend");
+        let context = core.leave_install().expect("leave");
 
         let between = ordinary_task(2);
         assert!(
@@ -333,7 +327,7 @@ mod tests {
         assert_eq!(captures(&core).len(), 1);
         assert_eq!(events(), 1);
 
-        core.resume_journal(suspended).expect("resume");
+        assert!(core.enter_install(context).is_ok(), "enter");
         assert!(matches!(
             core.write_set_journal.running,
             Some(RunningJournal::Pending { request_id: 1, .. })
@@ -350,12 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn resume_refuses_an_occupied_slot() {
+    fn enter_refuses_an_occupied_slot() {
         let directory = tempfile::tempdir().expect("directory");
         let (mut core, _requests, _responses) = make_core_with_dir(directory.path());
         let first = ordinary_task(1);
         assert!(core.begin_task_journal(&first, ordinary_group(1)).is_none());
-        let suspended = core.suspend_journal().expect("suspend");
+        let context = core.leave_install().expect("leave");
         let between = ordinary_task(2);
         assert!(
             core.begin_task_journal(&between, ordinary_group(2))
@@ -363,7 +357,9 @@ mod tests {
         );
 
         assert_eq!(
-            core.resume_journal(suspended).err(),
+            core.enter_install(context)
+                .err()
+                .map(|refused| refused.error),
             Some(JournalSuspendError::Occupied)
         );
         assert!(core.is_fail_stopped());

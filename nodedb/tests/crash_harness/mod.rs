@@ -32,6 +32,8 @@ mod pgwire;
 pub use pgwire::{RetryableSchemaChange, Session};
 #[path = "../support/mod.rs"]
 pub mod support;
+// The chunked commit the batched-install crash tests abort inside.
+pub mod redo_batched;
 pub mod vshards;
 
 /// Re-exported so a crash test can state its own filesystem precondition

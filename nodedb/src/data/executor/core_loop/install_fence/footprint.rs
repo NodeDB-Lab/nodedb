@@ -5,7 +5,8 @@
 //! Only a read of named collections gets `Keys`: a write gets the database
 //! it writes, and so does every op this module cannot bound to named
 //! collections. A misfiled write breaks the fence, so every match here is
-//! exhaustive.
+//! exhaustive. A task of a database also names the vShard its events
+//! carry, the task's own: its events advance that vShard's partition.
 
 use nodedb_array::types::ArrayId;
 use nodedb_physical::physical_plan::{
@@ -15,7 +16,7 @@ use nodedb_physical::physical_plan::{
 use nodedb_types::QualifiedCollection;
 
 use crate::data::executor::task::ExecutionTask;
-use crate::types::DatabaseId;
+use crate::types::{DatabaseId, VShardId};
 
 use super::footprint_meta::{cluster_event_footprint, meta_footprint};
 use super::state::FenceKey;
@@ -27,8 +28,14 @@ pub(in crate::data::executor) enum Footprint {
     Keys(Vec<FenceKey>),
     /// Any state of this database.
     Database(DatabaseId),
+    /// Any state of database `db`, by a task whose events carry `vshard`.
+    Write { db: DatabaseId, vshard: VShardId },
     /// Any state of the core.
     Core,
+    /// Core work with no client order to keep, such as a sampler or a
+    /// checkpoint. It waits while a fence is armed, so it never sees an
+    /// install part way, and holds no later task.
+    Background,
 }
 
 impl Footprint {
@@ -42,7 +49,12 @@ impl Footprint {
             (Footprint::Keys(_), Footprint::Database(db))
             | (Footprint::Database(db), Footprint::Keys(_)) => Footprint::Database(db),
             (Footprint::Database(a), Footprint::Database(b)) if a == b => Footprint::Database(a),
+            // A plan's parts never name a vShard: only `footprint` adds it.
             (Footprint::Database(_), Footprint::Database(_))
+            | (Footprint::Write { .. }, _)
+            | (_, Footprint::Write { .. })
+            | (Footprint::Background, _)
+            | (_, Footprint::Background)
             | (Footprint::Core, _)
             | (_, Footprint::Core) => Footprint::Core,
         }
@@ -51,7 +63,16 @@ impl Footprint {
 
 /// The footprint of `task`.
 pub(in crate::data::executor) fn footprint(task: &ExecutionTask) -> Footprint {
-    plan_footprint(task.plan(), task.request.database_id)
+    match plan_footprint(task.plan(), task.request.database_id) {
+        Footprint::Database(db) => Footprint::Write {
+            db,
+            vshard: task.request.vshard_id,
+        },
+        footprint @ (Footprint::Keys(_)
+        | Footprint::Write { .. }
+        | Footprint::Core
+        | Footprint::Background) => footprint,
+    }
 }
 
 /// The footprint of `plan`, run for database `db`.
@@ -75,11 +96,19 @@ pub(super) fn plan_footprint(plan: &PhysicalPlan, db: DatabaseId) -> Footprint {
 }
 
 /// A read of `collection` alone, keyed by the database its stored name
-/// names. A name that names no database is a task of `db`.
+/// names. A name that names no database is a task of `db`, and files a
+/// report.
 fn read_of(collection: &QualifiedCollection, db: DatabaseId) -> Footprint {
     match FenceKey::of_stored_collection(collection.as_str()) {
         Ok(key) => Footprint::Keys(vec![key]),
-        Err(_) => Footprint::Database(db),
+        Err(error) => {
+            crate::diag::stored_collection_name_malformed(
+                "fence_footprint: the read waits as a task of its database",
+                collection.as_str(),
+                &error,
+            );
+            Footprint::Database(db)
+        }
     }
 }
 
@@ -533,10 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn meta_ops_are_core_except_cancel_and_stream_pages() {
+    fn meta_ops_are_core_except_cancel_stream_pages_and_background_passes() {
+        assert_eq!(class(PhysicalPlan::Meta(MetaOp::Compact)), Footprint::Core);
         assert_eq!(
             class(PhysicalPlan::Meta(MetaOp::Checkpoint)),
-            Footprint::Core
+            Footprint::Background
         );
         let cancel = PhysicalPlan::Meta(MetaOp::Cancel {
             target_request_id: RequestId::new(1),

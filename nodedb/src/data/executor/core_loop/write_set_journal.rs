@@ -22,6 +22,11 @@
 //!   durable before the install starts. Boot completes the record forward
 //!   (see `handlers::transaction::redo_apply::batched::cursor`).
 //!
+//! An install that gives the core back between its batches takes its
+//! window out of the core each time (see `super::journal_context`). A task
+//! that runs between the batches commits durably, sends its events, and
+//! journals into its own window.
+//!
 //! Boot does both in `crate::bootstrap::write_group_settle`.
 
 use std::collections::HashMap;

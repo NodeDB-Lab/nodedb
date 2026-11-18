@@ -31,11 +31,11 @@ pub(in crate::data::executor) mod hash_chain_state;
 pub(in crate::data::executor) mod held_events;
 pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
-pub mod install_context;
-pub mod install_fence;
+pub(in crate::data::executor) mod install_context;
+pub(in crate::data::executor) mod install_fence;
 #[cfg(test)]
 mod installed_event_tests;
-pub mod journal_context;
+pub(crate) mod journal_context;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
 #[cfg(test)]
@@ -57,6 +57,7 @@ mod row_image_limit_tests;
 mod segment_keks;
 mod state;
 pub(in crate::data::executor) mod state_types;
+mod task_completion;
 mod test_governor;
 mod tick;
 mod ts_declared_schema;

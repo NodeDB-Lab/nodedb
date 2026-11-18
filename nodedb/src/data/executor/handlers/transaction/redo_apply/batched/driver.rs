@@ -20,8 +20,10 @@
 //! undo log rolls every batch back (`roll_back_batched`).
 //!
 //! The install is a job (see `job`) that runs one slice per step: one
-//! batch of an arm's pass, the end of the arms, or the finish. The task
-//! that validated the stream runs every step, with no yield between them.
+//! batch of an arm's pass, the end of the arms, or the finish. A task that
+//! `run_task` runs gives the core back between slices: the job parks under
+//! the install fence (see `park`), and each tick runs one slice (see
+//! `drive`). Every other caller runs the steps back to back.
 //!
 //! Under a root journal the scope also holds the fold ledger of the batch
 //! that runs: each source row's transaction records how many of the

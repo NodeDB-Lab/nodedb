@@ -22,6 +22,7 @@ mod event_image;
 mod held_entry;
 mod index_rebuild;
 mod ingest;
+mod install_fence;
 mod kv_expiry;
 mod lease;
 mod mirror;
@@ -78,6 +79,7 @@ pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, Re
 pub(in crate::diag) use index_rebuild::{IndexRebuildNotInstalled, TextIndexStepOwed};
 pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
+pub(in crate::diag) use install_fence::StoredCollectionNameMalformed;
 pub(in crate::diag) use kv_expiry::KvReapEntryUnusable;
 pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,

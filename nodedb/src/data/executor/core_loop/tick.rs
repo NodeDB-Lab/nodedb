@@ -73,6 +73,7 @@ impl CoreLoop {
 
     /// Execute `task` and send its response: an idempotent replay answers
     /// from the cache, and an expired task answers that it never started.
+    /// A stream install that parks answers in the tick that ends it.
     pub(in crate::data::executor) fn run_task(&mut self, mut task: ExecutionTask) {
         let journal = self.take_journal_group(&task);
         if let Some(key) = task.request.idempotency_key
@@ -92,9 +93,9 @@ impl CoreLoop {
             return;
         }
 
-        let response = if task.is_expired() {
+        if task.is_expired() {
             task.state = TaskState::Failed;
-            Response {
+            let response = Response {
                 request_id: task.request_id(),
                 status: Status::Error,
                 attempt: 1,
@@ -106,81 +107,19 @@ impl CoreLoop {
                 stage_vote: None,
                 read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
-            }
-        } else {
-            task.state = TaskState::Running;
-            let journalled = journal.is_some();
-            let permit = journal.and_then(|group| self.begin_task_journal(&task, group));
-            let mut resp = self.execute_with_journal(&task, permit);
-            // Every engine's next checkpoint, flush or manifest stamps what
-            // this core applied, so a record applied here is noted whichever
-            // engine applied it. A refused record carries a durable abort
-            // marker instead, and a stamp never names it.
-            if resp.status == Status::Ok
-                && let Some(lsn) = task.wal_lsn()
-            {
-                self.floors.applied_prefix.note_applied(lsn);
-            }
-            // A crash test kills the process here: one collection's logged
-            // write applied, and its response never leaves the core. A
-            // committed redo matches each collection it writes. A task with
-            // no WAL record never matches. A journalled write's sparse and
-            // edge store effects are not durable yet here.
-            #[cfg(feature = "failpoints")]
-            if task.wal_lsn().is_some() {
-                for collection in task.plan().named_collections() {
-                    crate::fail_point!(
-                        self.fail_scope,
-                        &format!("core::after_apply::{collection}")
-                    );
-                }
-            }
-            if journalled {
-                if let Err(error) = self.finish_journalled_task(&task, &mut resp) {
-                    resp.status = Status::Error;
-                    resp.error_code = Some(Box::new(ErrorCode::from(error)));
-                }
-                // A crash test kills the process here: the write's write set
-                // is stored and its parts are not journalled yet.
-                #[cfg(feature = "failpoints")]
-                for collection in task.plan().named_collections() {
-                    crate::fail_point!(
-                        self.fail_scope,
-                        &format!("core::after_capture::{collection}")
-                    );
-                }
-            }
-            task.state = TaskState::Completed;
-            // A failed rollback leaves this core's state unknown.
-            self.fail_stop_on_rollback_failure(&resp);
-            resp
+            };
+            self.answer_task(&task, response);
+            return;
+        }
+
+        let start = self.begin_run(&mut task, journal);
+        let resp = self.execute_with_journal(&task, start.permit);
+        // A parked install's response is a placeholder that never leaves:
+        // the task answers when its install ends.
+        let Some(task) = self.park_yielded(task, start.journalled) else {
+            return;
         };
-
-        if let Some(key) = task.request.idempotency_key {
-            self.idempotency.record(key, response.status == Status::Ok);
-        }
-
-        // Bound the dangling-edge tracker across all tenants. Count
-        // all entries; when the aggregate exceeds the cap, drop the
-        // whole map — callers are tolerant of false negatives (an
-        // `EdgePut` to a recently-deleted node races the tracker, so
-        // the semantics are advisory regardless).
-        let total: usize = self
-            .deleted_nodes
-            .values()
-            .flat_map(|collections| collections.values())
-            .map(|nodes| nodes.len())
-            .sum();
-        if total > 100_000 {
-            self.deleted_nodes.clear();
-        }
-
-        if let Err(e) = self
-            .response_tx
-            .try_push(BridgeResponse { inner: response })
-        {
-            warn!(core = self.core_id, error = %e, "failed to send response — response queue full");
-        }
+        self.complete_run(task, start.journalled, resp);
     }
 
     /// Run one iteration of the event loop: drain requests, process tasks.
@@ -203,9 +142,11 @@ impl CoreLoop {
         // Adjust SPSC read depth based on current memory pressure.
         self.apply_spsc_pressure();
         self.drain_requests();
+        // A parked install runs one slice, ahead of the tasks it lets run.
+        let mut processed = self.drive_parked_install();
         // Waiters past their deadline answer, and a fail-stopped core
         // refuses them.
-        let mut processed = self.sweep_fence_waiters();
+        processed += self.sweep_fence_waiters();
         while !self.task_queue.is_empty() {
             // A fail-stopped core serves nothing, including the rest of the
             // queue behind the request that stopped it.

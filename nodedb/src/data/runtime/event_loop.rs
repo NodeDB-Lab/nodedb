@@ -62,8 +62,15 @@ pub(super) fn run_event_loop(
             beat.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Block until signaled or timeout.
-        efd.poll_wait(IDLE_POLL_TIMEOUT_MS);
+        // Block until signaled or timeout. A parked install runs its next
+        // slice without waiting. A degraded core leaves it parked until the
+        // cooldown ends, and waits.
+        let timeout = if core.has_parked_install() && !watchdog.is_degraded() {
+            0
+        } else {
+            IDLE_POLL_TIMEOUT_MS
+        };
+        efd.poll_wait(timeout);
 
         // Drain all accumulated signals.
         while efd.drain() > 0 {}
@@ -192,7 +199,8 @@ pub(super) fn run_event_loop(
 /// Drain all pending requests from a core's SPSC queue and send back
 /// `CoreDegraded` error responses. Used when the watchdog has flagged
 /// the core as unhealthy. Waiters left the queue before every task still
-/// queued, so they are refused first.
+/// queued, so they are refused first. A parked install stays parked, and
+/// its next slice runs once the cooldown ends.
 fn drain_and_reject(core: &mut CoreLoop, core_id: usize) {
     core.drain_requests();
     for task in core.take_fence_waiters() {

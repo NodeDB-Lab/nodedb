@@ -156,7 +156,7 @@ impl CheckpointCoordinator {
 
     /// Whether the tick interval has elapsed, so [`Self::tick`] plans a
     /// flush. Reads the clock and changes nothing.
-    pub fn tick_is_due(&self) -> bool {
+    pub(crate) fn tick_is_due(&self) -> bool {
         self.last_tick
             .is_none_or(|last| last.elapsed() >= self.config.tick_interval)
     }

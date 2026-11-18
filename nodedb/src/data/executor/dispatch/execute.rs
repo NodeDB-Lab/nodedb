@@ -24,7 +24,8 @@ impl CoreLoop {
     /// A fresh write that loads a vector or R-tree index under emergency
     /// pressure is refused before it changes anything. Every write recharges
     /// its tenant's index charges before it answers, so the governor holds
-    /// each index's exact bytes after every write.
+    /// each index's exact bytes after every write. A task whose install
+    /// parked recharges again when the install ends.
     #[cfg(test)]
     pub(in crate::data::executor) fn execute(&mut self, task: &ExecutionTask) -> Response {
         self.execute_with_journal(task, None)
@@ -51,10 +52,25 @@ impl CoreLoop {
         *self.apply_scope.storage_schemas.get_mut() = previous_schemas;
         self.apply_scope.journaled = previous_journaled;
         self.apply_scope.replicated_ordinal = previous;
+        self.recharge_written_tenant(task);
+        response
+    }
+
+    /// End the execution of `task`, whose install parked inside it and
+    /// answered in a later tick. The apply scope stands as it stands
+    /// between tasks, and the tenant's index charges follow every write
+    /// the install applied.
+    pub(in crate::data::executor) fn end_parked_execution(&mut self, task: &ExecutionTask) {
+        self.apply_scope = Default::default();
+        self.recharge_written_tenant(task);
+    }
+
+    /// Recharge the index charges of `task`'s tenant, unless the task is
+    /// exempt as a read.
+    fn recharge_written_tenant(&mut self, task: &ExecutionTask) {
         if !task.request.admission.is_exempt_as_read() {
             self.recharge_tenant_indexes(task.request.database_id, task.request.tenant_id);
         }
-        response
     }
 
     /// Execute an arbitrary physical plan (used for inline sub-plans in multi-way joins).

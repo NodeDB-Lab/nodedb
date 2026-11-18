@@ -90,6 +90,11 @@ impl<S: ChunkSource> FrameBatcher<S> {
         }
     }
 
+    /// The RAM the bytes read and not handed out hold.
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.held.capacity()
+    }
+
     /// Where the record the held bytes end inside starts, in the held bytes.
     fn last_record_start(&self) -> usize {
         let mut start = 0usize;

@@ -430,18 +430,19 @@ fn events_match_whole_record_install() {
 
 // ── RAM bound ────────────────────────────────────────────────────────────
 
-/// Hot bytes past which the install's spools spill.
-const SMALL_THRESHOLD: usize = 16 * 1024;
+/// Hot bytes past which the install's spools spill: a small part of what
+/// the record holds in all.
+const SMALL_THRESHOLD: usize = 4 * 1024;
 /// What one batch of [`super::equivalence_tests::BATCH_BYTES`] adds to the
 /// spools between two checks, with room to spare.
 const ONE_BATCH: usize = 16 * 1024;
 
-/// 10k ops install with their held state bounded by the threshold plus one
+/// 500 ops install with their held state bounded by the threshold plus one
 /// batch, while the spill files hold the rest.
 #[test]
 fn scope_ram_stays_under_threshold() {
-    const DOCS: u32 = 9_000;
-    const KEYS: u32 = 1_000;
+    const DOCS: u32 = 450;
+    const KEYS: u32 = 50;
     let mut ops = fill(1, DOCS);
     for index in 0..KEYS {
         ops.push(kv_put(

@@ -15,8 +15,11 @@
 //!
 //! The fold target rows stay in `Response::write_set`, so the funnel
 //! journals them with the record.
+//!
+//! An install that parks between its batches carries 2 and 3 in its
+//! [`CalvinTail`], and the tick that ends the install runs them.
 
-use nodedb_physical::physical_plan::{CalvinInstall, RedoOrigin};
+use nodedb_physical::physical_plan::{CalvinInstall, CalvinReplySpec, RedoOrigin};
 use tracing::info_span;
 
 use crate::bridge::envelope::{Payload, Response, Status};
@@ -24,8 +27,23 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::kv::engine::KvWriteScopeGuard;
 
+use super::batched::InstallTail;
 use super::entry::{CalvinBoundary, CommittedRedo};
+use super::state::TsInstalled;
+
+/// What a committed Calvin slice owes once its install answered.
+pub(super) struct CalvinTail {
+    epoch: u64,
+    position: u32,
+    vshard_id: u32,
+    /// The slice's position is a mirror source's.
+    mirror: bool,
+    reply: CalvinReplySpec,
+    /// The slice's fixed-ordinal KV write scope, open until the tail.
+    kv_scope: KvWriteScopeGuard,
+}
 
 impl CoreLoop {
     /// Install the committed Calvin slice `install` names from its redo
@@ -74,7 +92,7 @@ impl CoreLoop {
         // Every KV write of the slice stamps the transaction's ordinal, which
         // every replica derives alike.
         let kv_scope = self.kv_engine.open_write_scope(Some(txn_ordinal));
-        let mut response = self.install_committed_redo_into(
+        let response = self.install_committed_redo_into(
             task,
             tid,
             committed,
@@ -85,6 +103,41 @@ impl CoreLoop {
                 epoch_system_ms,
             },
         );
+        let tail = CalvinTail {
+            epoch,
+            position,
+            vshard_id,
+            mirror: *mirror,
+            reply: reply.clone(),
+            kv_scope,
+        };
+        // A parked install ends the slice in the tick that ends the
+        // install. Its response is a placeholder until then.
+        if let Some(park) = self.redo_apply.parking.as_mut() {
+            park.tail = InstallTail::Calvin(Box::new(tail));
+            return response;
+        }
+        self.calvin_install_tail(response, &ts_installs, tail)
+    }
+
+    /// End the Calvin slice `tail` names once its install answered
+    /// `response`, with what each resolved timeseries batch stored in
+    /// `ts_installs`. The slice's KV write scope closes. An installed slice
+    /// ends its staged state and answers its reply.
+    pub(super) fn calvin_install_tail(
+        &mut self,
+        mut response: Response,
+        ts_installs: &[TsInstalled],
+        tail: CalvinTail,
+    ) -> Response {
+        let CalvinTail {
+            epoch,
+            position,
+            vshard_id,
+            mirror,
+            reply,
+            kv_scope,
+        } = tail;
         self.kv_engine.close_write_scope(kv_scope);
         if response.status != Status::Ok {
             return response;
@@ -92,7 +145,7 @@ impl CoreLoop {
         // The record installed: a staged entry of the slice and its overlay
         // are spent. A mirror's position is its source's: a staged entry at
         // the same numbers belongs to another transaction of this cluster.
-        if !*mirror {
+        if !mirror {
             self.calvin
                 .commit_pending
                 .remove(&(epoch, position, vshard_id));
@@ -111,7 +164,7 @@ impl CoreLoop {
             }
         }
 
-        match self.calvin_reply_payload(CalvinReply::from(reply.clone()), &ts_installs) {
+        match self.calvin_reply_payload(CalvinReply::from(reply), ts_installs) {
             Ok(payload) => response.payload = Payload::from_vec(payload),
             Err(error) => response.error_code = Some(Box::new(error)),
         }

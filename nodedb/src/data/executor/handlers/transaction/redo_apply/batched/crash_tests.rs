@@ -222,6 +222,112 @@ mod cut {
         }
     }
 
+    /// A collection of a database the install's fence never holds.
+    const OTHER_DB: DatabaseId = DatabaseId::new(7);
+    const OTHER_SURROGATE: u32 = 77;
+
+    /// A put of one row into [`OTHER_DB`], with no journal.
+    fn foreign_put() -> crate::bridge::envelope::Request {
+        let mut request = make_default_task().request;
+        request.request_id = crate::types::RequestId::new(2);
+        request.tenant_id = TenantId::new(TID);
+        request.database_id = OTHER_DB;
+        // Its events carry another vShard than the install's, so the fence
+        // lets it run while the install is parked.
+        request.vshard_id = VShardId::new(1);
+        request.plan =
+            PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::PointPut {
+                collection: nodedb_types::QualifiedCollection::new(OTHER_DB, "other"),
+                document_id: "o1".into(),
+                value: doc_format::encode_to_msgpack(&serde_json::json!({"value": 1})),
+                surrogate: nodedb_types::Surrogate::new(OTHER_SURROGATE),
+                pk_bytes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            });
+        request
+    }
+
+    /// The live node cut at `point`, a fail point the install reaches while
+    /// it is parked. The install runs through the core's request ring and
+    /// `tick()`, with `foreign` queued behind it. The panic there stops the
+    /// core, and the stores hold what a crash at the point leaves.
+    fn cut_parked_at(point: &str, foreign: Option<crate::bridge::envelope::Request>) -> Cut {
+        use crate::bridge::dispatch::{BridgeRequest, BridgeResponse, WriteSetJournal};
+        use nodedb_bridge::buffer::{Consumer, Producer};
+
+        let mut live = live();
+        live.core.redo_apply.stream_batch_bytes = BATCH_BYTES;
+        let (plan, lsn) = append_marker(&mut live, &record(charges()));
+        let mut request = make_default_task().request;
+        request.tenant_id = TenantId::new(TID);
+        request.wal_lsn = Some(lsn);
+        request.plan = plan;
+        let group = JournalGroup {
+            origin: lsn,
+            collection: SOURCE.into(),
+            apply_key: NO_APPLY_KEY,
+            commit_hlc: None,
+            change_position: None,
+        };
+        let (requests, _responses) = live
+            ._ends
+            .downcast_mut::<(Producer<BridgeRequest>, Consumer<BridgeResponse>)>()
+            .expect("ring ends");
+        requests
+            .try_push(BridgeRequest {
+                inner: request,
+                outcome_floor: Lsn::ZERO,
+                journal: WriteSetJournal {
+                    group: Some(group),
+                    settled: Vec::new(),
+                },
+            })
+            .expect("queue install");
+        if let Some(foreign) = foreign {
+            requests
+                .try_push(BridgeRequest::unfloored(foreign))
+                .expect("queue foreign write");
+        }
+        let stores = {
+            let _cut = FailGuard::install(point, FailAction::Panic);
+            for _ in 0..1_000 {
+                if live.core.is_fail_stopped() {
+                    break;
+                }
+                live.core.tick();
+            }
+            assert!(
+                live.core.is_fail_stopped(),
+                "the parked install stops at {point}"
+            );
+            crash_image(live.dir.path())
+        };
+        Cut {
+            live,
+            stores,
+            lsn: lsn.as_u64(),
+        }
+    }
+
+    /// Whether the stores at `stores` hold the foreign row.
+    fn holds_foreign(stores: &Path) -> bool {
+        let sparse = SparseEngine::open(&stores.join("sparse/core-0.redb")).expect("open sparse");
+        sparse
+            .get(
+                OTHER_DB.as_u64(),
+                TID,
+                nodedb_types::QualifiedCollection::new(OTHER_DB, "other").as_str(),
+                &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(
+                    OTHER_SURROGATE,
+                )),
+            )
+            .expect("read foreign row")
+            .is_some()
+    }
+
     /// Settle and boot the cut stores. Returns the balance and the write
     /// sets replay stored.
     fn restart(cut: &Cut) -> (Option<String>, Vec<crate::wal::WriteSetCapture>) {
@@ -290,6 +396,50 @@ mod cut {
             "a second restart folds nothing again"
         );
         assert!(captures.is_empty());
+    }
+
+    /// The install parked after its second batch, with its state out of
+    /// the core. Boot completes the record forward and folds each source
+    /// once.
+    #[test]
+    fn a_crash_while_parked_completes_forward_once() {
+        let cut = cut_parked_at("redo_apply::batched::parked::Document::1", None);
+        let left = cursors(cut.stores.path());
+        assert!(
+            matches!(left.as_slice(), [cursor] if matches!(cursor.state, CursorState::Installing { batch: 1, .. })),
+            "the cut leaves the cursor of the parked batch: {left:?}"
+        );
+        let (balance, captures) = restart(&cut);
+        assert_eq!(
+            balance.as_deref(),
+            Some(SINGLE_FOLD),
+            "one fold of every row"
+        );
+        assert_eq!(captures.len(), 1);
+        assert!(
+            cursors(cut.stores.path()).is_empty(),
+            "boot drops the cursor"
+        );
+    }
+
+    /// A write of another database ran while the install was parked. The
+    /// crash keeps it, and boot completes the install forward beside it.
+    #[test]
+    fn a_crash_while_parked_after_a_foreign_write_keeps_the_write() {
+        let cut = cut_parked_at(
+            "redo_apply::batched::parked::Document::1",
+            Some(foreign_put()),
+        );
+        assert!(
+            holds_foreign(cut.stores.path()),
+            "the foreign write is durable at the cut"
+        );
+        let (balance, _) = restart(&cut);
+        assert_eq!(balance.as_deref(), Some(SINGLE_FOLD));
+        assert!(
+            holds_foreign(cut.stores.path()),
+            "boot keeps the foreign write"
+        );
     }
 
     /// Every batch is durable and the write set is not stored: boot folds

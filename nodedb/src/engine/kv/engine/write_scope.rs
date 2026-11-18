@@ -45,7 +45,7 @@ pub struct KvWriteScopeGuard {
 /// the scopes stay with whoever opened them.
 #[must_use = "pass the suspended scope back to resume_write_scope"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SuspendedKvScope {
+pub(crate) struct SuspendedKvScope {
     scope: KvWriteScope,
 }
 
@@ -60,7 +60,7 @@ impl KvEngine {
     /// one included. The engine stands with no scope open until
     /// [`KvEngine::resume_write_scope`], so a write meanwhile draws its own
     /// ordinal. No guard closes here: a guard has no drop logic.
-    pub fn suspend_write_scope(&mut self) -> SuspendedKvScope {
+    pub(crate) fn suspend_write_scope(&mut self) -> SuspendedKvScope {
         SuspendedKvScope {
             scope: std::mem::take(&mut self.write_scope),
         }
@@ -68,7 +68,7 @@ impl KvEngine {
 
     /// Put `suspended` back as it stood, its drawn ordinal included. The
     /// guards that opened it close it.
-    pub fn resume_write_scope(&mut self, suspended: SuspendedKvScope) {
+    pub(crate) fn resume_write_scope(&mut self, suspended: SuspendedKvScope) {
         self.write_scope = suspended.scope;
     }
 

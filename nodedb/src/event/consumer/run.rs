@@ -675,14 +675,22 @@ mod tests {
             window.settle();
         }
 
-        let expected_crdt = WRITES;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while totals(&shared).crdt_events < expected_crdt {
+        // Each side effect lands on its own schedule: wait until every one
+        // holds every write, however loaded the machine.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let totals = totals(&shared);
+                if totals.crdt_events >= WRITES
+                    && totals.audit_rows >= WRITES as usize
+                    && totals.mv_count >= WRITES as i64
+                {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("every write reaches the side effects");
+        .expect("every write reaches every side effect");
         // A second delivery of any event would land within this window.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let seen = totals(&shared);

@@ -12,9 +12,11 @@
 //! column keeps at most `max_tag_cardinality + 1` new values: past that the
 //! record cannot fit any generation, so more values change no verdict.
 //!
-//! The tag dictionaries are read as the validate runs. The validate and the
-//! install run in one task with no yield, and no arm before the timeseries
-//! arm writes a timeseries memtable, so the flush reads the same ones.
+//! The tag dictionaries are read as the validate runs. An install that
+//! gives the core back between its batches holds the install fence from
+//! before its validate, so no ingest into the record's collections and no
+//! idle flush runs until it ends. No arm before the timeseries arm writes a
+//! timeseries memtable, so the flush reads the same dictionaries.
 
 use std::collections::{HashMap, HashSet};
 

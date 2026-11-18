@@ -46,7 +46,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoStreamRef};
 
-use super::batched::{InstallFinish, StreamInstallInput};
+use super::batched::{InstallFinish, StreamInstallInput, YieldingStream};
 use super::clone_copy::clone_probe_unreadable;
 use super::passes::{RedoTarget, final_refusal, redo_wal_record};
 use super::state::TsInstalled;
@@ -77,6 +77,9 @@ struct RedoInstallBoundary<'a> {
     /// Unix epoch. A Calvin slice names its epoch instant, which its stage
     /// judged at. `None` judges at the request's system-time ordinal.
     judged_at_ms: Option<i64>,
+    /// A stream marker's install may park between its batches: the task
+    /// runs through `run_task`. Every other install runs to its end.
+    yielding: bool,
 }
 
 /// What a committed Calvin slice's install carries to its commit boundary.
@@ -168,6 +171,7 @@ impl CoreLoop {
     ) -> Response {
         // A Calvin slice's stage vote validated its snapshot, and its stage
         // judged its commit boundary at the epoch instant.
+        let yielding = self.take_yield_grant();
         self.install_redo_into(
             task,
             tid,
@@ -178,6 +182,7 @@ impl CoreLoop {
                 snapshot: None,
                 permit: calvin.permit,
                 judged_at_ms: Some(calvin.epoch_system_ms),
+                yielding,
             },
         )
     }
@@ -223,6 +228,7 @@ impl CoreLoop {
         snapshot: Option<RedoSnapshot<'_>>,
         permit: Option<RootJournalPermit>,
     ) -> Response {
+        let yielding = self.take_yield_grant();
         self.install_redo_into(
             task,
             tid,
@@ -233,6 +239,7 @@ impl CoreLoop {
                 snapshot,
                 permit,
                 judged_at_ms: None,
+                yielding,
             },
         )
     }
@@ -253,6 +260,7 @@ impl CoreLoop {
             snapshot,
             permit,
             judged_at_ms,
+            yielding,
         } = boundary;
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
@@ -282,9 +290,12 @@ impl CoreLoop {
         );
         // A stream marker's content is validated as the stream pages in,
         // with every check the whole-record path runs below, and the same
-        // first error. The validate and the install run in this one
-        // synchronous task on this core, with no yield between them, so no
-        // write lands between the verdict and the install.
+        // first error. A yielding install arms the install fence before the
+        // validate: every task that touches what the record writes waits
+        // until the install ends, so no write lands between the verdict and
+        // the install, and the install gives the core back between its
+        // batches. Any other install runs the validate and every batch in
+        // this one call.
         if let Some(reference) = &reference {
             let limits = StreamLimits {
                 batch_bytes: self.redo_apply.stream_batch_bytes,
@@ -301,25 +312,32 @@ impl CoreLoop {
                 lsn,
                 limits,
             };
+            let install = StreamInstallInput {
+                task,
+                tid,
+                marker: &redo,
+                reference,
+                origin,
+                lsn,
+                limits,
+                permit,
+                collections: committed.collections,
+            };
+            if yielding {
+                return self.install_redo_stream_yielding(
+                    YieldingStream {
+                        validate: input,
+                        install,
+                        sum_targets: committed.sum_targets,
+                    },
+                    ts_installs,
+                );
+            }
             let validated = match self.validate_redo_stream(&input) {
                 Ok(validated) => validated,
                 Err(code) => return self.response_error(task, code),
             };
-            return self.install_redo_stream(
-                StreamInstallInput {
-                    task,
-                    tid,
-                    marker: &redo,
-                    reference,
-                    origin,
-                    lsn,
-                    limits,
-                    permit,
-                    collections: committed.collections,
-                },
-                validated,
-                ts_installs,
-            );
+            return self.install_redo_stream(install, validated, ts_installs);
         }
         // A whole record's folds persist with its write set under a root
         // journal, or wait in an open journal's deferred commits.

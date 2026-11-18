@@ -66,7 +66,6 @@ impl CoreLoop {
 mod tests {
     use nodedb_types::sync::wire::SyncProvenance;
 
-    use super::*;
     use crate::data::executor::core_loop::tests::make_core_with_dir;
 
     const KEY: (u64, u64) = (9, 4);

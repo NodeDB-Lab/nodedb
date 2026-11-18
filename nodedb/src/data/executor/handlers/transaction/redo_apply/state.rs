@@ -47,6 +47,15 @@ pub(in crate::data::executor) struct RedoApplyState {
     /// replay completes each one's record, then boot drops them. Empty
     /// outside boot replay.
     pub(in crate::data::executor) install_cursors: crate::wal::redo::install_cursor::InstallCursors,
+    /// The stream install that gave the core back between its slices, with
+    /// its task. `tick()` runs one slice of it per tick.
+    pub(in crate::data::executor) parked: Option<Box<super::batched::ParkedInstall>>,
+    /// The install that parked in the task running now. `run_task` takes
+    /// it once the task ran.
+    pub(in crate::data::executor) parking: Option<Box<super::batched::PendingPark>>,
+    /// The task running now may park its stream install: `run_task` runs
+    /// it, and no other install is parked.
+    pub(in crate::data::executor) yield_grant: bool,
     /// What the last finished install held, for the tests that bound it.
     #[cfg(test)]
     pub(in crate::data::executor) last_held: HeldReport,
@@ -89,6 +98,9 @@ impl RedoApplyState {
             scope: None,
             replay_folds: Default::default(),
             install_cursors: Default::default(),
+            parked: None,
+            parking: None,
+            yield_grant: false,
             #[cfg(test)]
             last_held: HeldReport::default(),
             #[cfg(test)]

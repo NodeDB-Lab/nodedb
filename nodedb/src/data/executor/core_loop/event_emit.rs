@@ -279,6 +279,11 @@ impl CoreLoop {
     /// the current watermark LSN so the Event Plane can advance its partition
     /// watermark without waiting for user writes.
     pub fn emit_heartbeat(&mut self) {
+        // A fail-stopped core publishes no watermark: an install it stopped
+        // part way holds events below its watermark that never leave.
+        if self.fail_stop.is_stopped() {
+            return;
+        }
         let heartbeat_lsn = self.heartbeat_lsn();
         let producer = match self.events.producer.as_mut() {
             Some(p) => p,
