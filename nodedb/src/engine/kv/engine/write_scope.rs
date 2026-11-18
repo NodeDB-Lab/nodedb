@@ -40,7 +40,38 @@ pub struct KvWriteScopeGuard {
     restore: Option<KvWriteScope>,
 }
 
+/// The apply scope a suspended apply left open, its drawn ordinal
+/// included. Returned by [`KvEngine::suspend_write_scope`]. The guards of
+/// the scopes stay with whoever opened them.
+#[must_use = "pass the suspended scope back to resume_write_scope"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuspendedKvScope {
+    scope: KvWriteScope,
+}
+
 impl KvEngine {
+    /// The apply scope the next write belongs to.
+    #[cfg(test)]
+    pub(crate) fn current_write_scope(&self) -> KvWriteScope {
+        self.write_scope
+    }
+
+    /// Take whatever apply scope is open out of the engine, an enclosing
+    /// one included. The engine stands with no scope open until
+    /// [`KvEngine::resume_write_scope`], so a write meanwhile draws its own
+    /// ordinal. No guard closes here: a guard has no drop logic.
+    pub fn suspend_write_scope(&mut self) -> SuspendedKvScope {
+        SuspendedKvScope {
+            scope: std::mem::take(&mut self.write_scope),
+        }
+    }
+
+    /// Put `suspended` back as it stood, its drawn ordinal included. The
+    /// guards that opened it close it.
+    pub fn resume_write_scope(&mut self, suspended: SuspendedKvScope) {
+        self.write_scope = suspended.scope;
+    }
+
     /// Share the Data Plane core's system-time clock. Every ordinal a write
     /// draws comes from it, and every restored or fixed ordinal folds into it.
     pub fn attach_clock(&mut self, clock: Arc<OrdinalClock>) {
@@ -142,6 +173,45 @@ mod tests {
         assert_eq!(e.write_ordinal(), 7);
         e.close_write_scope(inner);
         e.close_write_scope(outer);
+    }
+
+    #[test]
+    fn kv_scope_suspend_keeps_the_drawn_ordinal() {
+        let mut e = engine();
+        let fixed = e.open_write_scope(Some(7));
+        let suspended = e.suspend_write_scope();
+        assert_eq!(suspended.scope, KvWriteScope::Fixed(7));
+        assert_eq!(e.write_scope, KvWriteScope::Closed);
+        e.resume_write_scope(suspended);
+        assert_eq!(e.write_ordinal(), 7);
+        e.close_write_scope(fixed);
+        assert_eq!(e.write_scope, KvWriteScope::Closed);
+
+        let drawn = e.open_write_scope(None);
+        let first = e.write_ordinal();
+        let suspended = e.suspend_write_scope();
+        assert_eq!(suspended.scope, KvWriteScope::Drawn(Some(first)));
+        let between = e.write_ordinal();
+        assert!(between > first, "a write between draws its own ordinal");
+        e.resume_write_scope(suspended);
+        assert_eq!(e.write_ordinal(), first);
+        e.close_write_scope(drawn);
+        assert_eq!(e.write_scope, KvWriteScope::Closed);
+
+        let undrawn = e.open_write_scope(None);
+        let suspended = e.suspend_write_scope();
+        assert_eq!(suspended.scope, KvWriteScope::Drawn(None));
+        let between = e.write_ordinal();
+        e.resume_write_scope(suspended);
+        assert_eq!(e.write_scope, KvWriteScope::Drawn(None));
+        let drawn_after = e.write_ordinal();
+        assert!(
+            drawn_after > between,
+            "the resumed scope draws at its first write"
+        );
+        assert_eq!(e.write_ordinal(), drawn_after);
+        e.close_write_scope(undrawn);
+        assert_eq!(e.write_scope, KvWriteScope::Closed);
     }
 
     #[test]

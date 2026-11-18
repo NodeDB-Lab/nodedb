@@ -16,5 +16,5 @@ mod walk;
 pub(in crate::data::executor::handlers::transaction::redo_apply) mod tests;
 
 pub(in crate::data::executor::handlers::transaction::redo_apply) use walk::{
-    StreamHeader, StreamLimits, StreamValidateInput, StreamValidated,
+    StreamHeader, StreamLimits, StreamValidateInput, StreamValidated, ValidateSpill,
 };

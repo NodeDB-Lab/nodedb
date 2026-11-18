@@ -6,9 +6,9 @@
 //! - [`state`]: the state one install keeps across its passes and batches.
 //! - [`batch_record`]: the record one batch runs as, in the validate and
 //!   the install alike.
-//! - [`driver`]: the arm-major passes over the stream, and
-//!   [`partial_flush`], the timeseries and array flushes around their
-//!   batches.
+//! - [`driver`]: the arm-major install, run as a [`job`] one slice at a
+//!   time: one batch of an [`arm_pass`], or the finish. [`partial_flush`]
+//!   runs the timeseries and array flushes around their batches.
 //! - [`finish`]: the end every install shares once its arms ran.
 //! - [`spools`]: what an install holds for after its arms, spilled past a
 //!   threshold, in [`space`].
@@ -17,6 +17,7 @@
 //! - [`cursor`]: the durable commit after each batch, and [`boot`], which
 //!   settles the cursors a crash left.
 
+mod arm_pass;
 mod batch_record;
 mod boot;
 #[cfg(test)]
@@ -28,6 +29,7 @@ mod driver;
 #[cfg(test)]
 mod equivalence_tests;
 mod finish;
+mod job;
 mod notes;
 mod partial_flush;
 #[cfg(test)]

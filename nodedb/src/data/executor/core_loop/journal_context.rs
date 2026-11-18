@@ -40,6 +40,15 @@ pub enum JournalSuspendError {
 }
 
 impl CoreLoop {
+    /// Whether a journal window is open on the core: a journal slot holds a
+    /// task's journal, or a store defers.
+    pub fn has_journal_window(&self) -> bool {
+        self.write_set_journal.running.is_some()
+            || self.write_set_journal.held_events.is_some()
+            || self.sparse.db().is_deferred()
+            || self.edge_store.db().is_deferred()
+    }
+
     /// Take the journal window out of the core. The stores stop deferring,
     /// and the journal slots are empty until [`Self::resume_journal`].
     pub fn suspend_journal(&mut self) -> Result<SuspendedJournal, JournalSuspendError> {
@@ -74,16 +83,26 @@ impl CoreLoop {
         &mut self,
         suspended: SuspendedJournal,
     ) -> Result<(), JournalSuspendError> {
-        let occupied = self.write_set_journal.running.is_some()
-            || self.write_set_journal.held_events.is_some()
-            || self.sparse.db().is_deferred()
-            || self.edge_store.db().is_deferred();
-        if occupied {
+        self.check_journal_resume()?;
+        self.restore_journal(suspended);
+        Ok(())
+    }
+
+    /// Whether a journal window can return: the core holds no other window,
+    /// and every commit since the suspend is persisted. A refusal seals both
+    /// stores and fail-stops the core.
+    pub(super) fn check_journal_resume(&mut self) -> Result<(), JournalSuspendError> {
+        if self.has_journal_window() {
             return Err(self.leak_journal_window(JournalSuspendError::Occupied));
         }
         if let Some(store) = self.unpersisted_store() {
             return Err(self.leak_journal_window(JournalSuspendError::Unpersisted { store }));
         }
+        Ok(())
+    }
+
+    /// Put `suspended` back. [`Self::check_journal_resume`] passed.
+    pub(super) fn restore_journal(&mut self, suspended: SuspendedJournal) {
         if suspended.sparse_deferred {
             self.sparse.db().defer();
         }
@@ -92,7 +111,6 @@ impl CoreLoop {
         }
         self.write_set_journal.running = suspended.running;
         self.write_set_journal.held_events = suspended.held_events;
-        Ok(())
     }
 
     /// The first store that holds an unpersisted deferred commit.

@@ -55,6 +55,12 @@ impl RecordStamps {
         self.by_lsn.remove(&lsn.as_u64());
     }
 
+    /// Register every record `other` holds: the stamps a suspended install
+    /// took out of the core.
+    pub fn absorb(&mut self, other: RecordStamps) {
+        self.by_lsn.extend(other.by_lsn);
+    }
+
     /// Forget every record: restart replay finished.
     pub fn clear(&mut self) {
         self.by_lsn.clear();

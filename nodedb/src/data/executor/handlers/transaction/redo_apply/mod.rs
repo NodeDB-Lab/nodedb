@@ -73,6 +73,8 @@ mod write_keys;
 
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
-pub(in crate::data::executor) use state::{RedoApplyPass, RedoApplyState, TsInstalled};
+pub(in crate::data::executor) use state::{
+    RedoApplyPass, RedoApplyScope, RedoApplyState, TsInstalled,
+};
 pub(in crate::data::executor) use sub_ops::{RedoDocOp, RedoKvOp, document_ops, kv_ops};
 pub(in crate::data::executor) use validate::CommitBoundary;

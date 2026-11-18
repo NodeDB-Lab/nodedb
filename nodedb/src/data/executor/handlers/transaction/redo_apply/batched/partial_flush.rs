@@ -23,7 +23,7 @@ use crate::data::executor::handlers::timeseries::InstallFlushError;
 use crate::types::partial_record::PartialRecord;
 use crate::wal::redo::replay_arm::RedoArm;
 
-use super::driver::ArmStop;
+use super::arm_pass::ArmStop;
 use super::state::BatchedInstall;
 
 impl CoreLoop {

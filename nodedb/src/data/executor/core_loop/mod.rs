@@ -31,6 +31,7 @@ pub(in crate::data::executor) mod hash_chain_state;
 pub(in crate::data::executor) mod held_events;
 pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
+pub mod install_context;
 pub mod install_fence;
 #[cfg(test)]
 mod installed_event_tests;
