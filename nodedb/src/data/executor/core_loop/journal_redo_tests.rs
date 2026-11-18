@@ -57,7 +57,7 @@ pub(super) fn task(calvin: bool, refused: bool) -> ExecutionTask {
     ExecutionTask::new(request)
 }
 
-pub(super) fn group() -> JournalGroup {
+pub(in crate::data::executor::core_loop) fn group() -> JournalGroup {
     JournalGroup {
         origin: Lsn::new(ORIGIN),
         collection: SOURCE.into(),
@@ -67,7 +67,7 @@ pub(super) fn group() -> JournalGroup {
     }
 }
 
-pub(super) fn captures(core: &CoreLoop) -> Vec<WriteSetCapture> {
+pub(in crate::data::executor::core_loop) fn captures(core: &CoreLoop) -> Vec<WriteSetCapture> {
     core.sparse
         .load_write_set_captures()
         .expect("load captures")
@@ -76,7 +76,10 @@ pub(super) fn captures(core: &CoreLoop) -> Vec<WriteSetCapture> {
         .collect()
 }
 
-fn crash_sparse(core_dir: &std::path::Path, image: &std::path::Path) {
+pub(in crate::data::executor::core_loop) fn crash_sparse(
+    core_dir: &std::path::Path,
+    image: &std::path::Path,
+) {
     std::fs::create_dir_all(image.join("sparse")).expect("mkdir");
     std::fs::copy(
         core_dir.join("sparse/core-0.redb"),
@@ -85,7 +88,9 @@ fn crash_sparse(core_dir: &std::path::Path, image: &std::path::Path) {
     .expect("copy sparse crash image");
 }
 
-pub(super) fn event_bus(core: &mut CoreLoop) -> impl FnMut() -> usize + use<> {
+pub(in crate::data::executor::core_loop) fn event_bus(
+    core: &mut CoreLoop,
+) -> impl FnMut() -> usize + use<> {
     let (mut producers, mut consumers) = crate::event::bus::create_event_bus_with_capacity(1, 64);
     core.set_event_producer(producers.pop().expect("producer"));
     let mut consumer = consumers.pop().expect("consumer");
@@ -293,7 +298,7 @@ fn an_early_validation_return_leaves_the_root_group_for_outer_completion() {
     assert!(!core.sparse.db().is_deferred());
 }
 
-pub(super) fn ordinary_task(id: u64) -> ExecutionTask {
+pub(in crate::data::executor::core_loop) fn ordinary_task(id: u64) -> ExecutionTask {
     let mut request = make_default_task().request;
     request.request_id = crate::types::RequestId::new(id);
     request.wal_lsn = Some(Lsn::new(id));
@@ -313,7 +318,7 @@ pub(super) fn ordinary_task(id: u64) -> ExecutionTask {
     ExecutionTask::new(request)
 }
 
-pub(super) fn ordinary_group(id: u64) -> JournalGroup {
+pub(in crate::data::executor::core_loop) fn ordinary_group(id: u64) -> JournalGroup {
     JournalGroup {
         origin: Lsn::new(id),
         collection: "ordinary_rows".into(),

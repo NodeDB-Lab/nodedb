@@ -24,7 +24,8 @@ pub struct GatedDatabase {
     fence: WriteFence,
     unresolved: AtomicBool,
     deferred: AtomicBool,
-    /// Whether a transaction began deferred since the last [`Self::persist`].
+    /// Whether a transaction began deferred since the last [`Self::persist`]
+    /// or successful [`DurableWrite::commit`].
     pending: AtomicBool,
 }
 
@@ -63,11 +64,20 @@ impl GatedDatabase {
 
     /// Begin a write transaction that persists its commit and every deferred
     /// commit before it, whatever the gate says.
-    pub fn begin_durable_write(&self) -> Result<WriteTransaction, redb::Error> {
+    pub fn begin_durable_write(&self) -> Result<DurableWrite<'_>, redb::Error> {
         self.fence.check()?;
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate)?;
-        Ok(txn)
+        Ok(DurableWrite {
+            txn,
+            pending: &self.pending,
+        })
+    }
+
+    /// Whether a commit began deferred and no durable commit persisted it
+    /// yet.
+    pub fn has_unpersisted(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
     }
 
     /// Defer the durability of every write transaction begun from now on.
@@ -110,6 +120,30 @@ impl GatedDatabase {
             self.pending.store(true, Ordering::Release);
         }
         persisted
+    }
+}
+
+/// A write transaction whose commit persists every commit before it. redb
+/// has one writer, so its successful commit leaves nothing deferred.
+pub struct DurableWrite<'a> {
+    txn: WriteTransaction,
+    pending: &'a AtomicBool,
+}
+
+impl DurableWrite<'_> {
+    /// Commit and persist. On success no deferred commit stays unpersisted.
+    pub fn commit(self) -> Result<(), redb::CommitError> {
+        self.txn.commit()?;
+        self.pending.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Deref for DurableWrite<'_> {
+    type Target = WriteTransaction;
+
+    fn deref(&self) -> &WriteTransaction {
+        &self.txn
     }
 }
 
@@ -195,6 +229,33 @@ mod tests {
             keys_after_crash(&path, &dir.path().join("crash-2.redb")),
             [1, 2]
         );
+    }
+
+    /// A durable commit persists the deferred commits before it, so the
+    /// database holds nothing unpersisted after it.
+    #[test]
+    fn a_durable_commit_clears_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gated.redb");
+        let db = GatedDatabase::create(&path).unwrap();
+        assert!(!db.has_unpersisted());
+        db.defer();
+        put(&db, 1);
+        assert!(db.has_unpersisted());
+
+        let txn = db.begin_durable_write().unwrap();
+        txn.open_table(T).unwrap().insert(2, 2).unwrap();
+        txn.commit().unwrap();
+        assert!(!db.has_unpersisted());
+        assert_eq!(
+            keys_after_crash(&path, &dir.path().join("crash.redb")),
+            [1, 2]
+        );
+
+        put(&db, 3);
+        assert!(db.has_unpersisted(), "a later deferred commit is pending");
+        db.resume();
+        db.resolve_journal();
     }
 }
 

@@ -16,6 +16,7 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
 use super::engine::SparseEngine;
 use super::tables::redb_err;
+use crate::engine::durability_gate::DurableWrite;
 
 /// Key: the group origin LSN. Value: the encoded write set.
 pub(super) const WRITE_SET_CAPTURES: TableDefinition<u64, &[u8]> =
@@ -24,7 +25,7 @@ pub(super) const WRITE_SET_CAPTURES: TableDefinition<u64, &[u8]> =
 impl SparseEngine {
     /// Begin a write transaction that persists its commit and every deferred
     /// commit before it.
-    pub fn begin_durable_write(&self) -> crate::Result<WriteTransaction> {
+    pub fn begin_durable_write(&self) -> crate::Result<DurableWrite<'_>> {
         self.db
             .begin_durable_write()
             .map_err(|e| redb_err("begin durable write txn", e))

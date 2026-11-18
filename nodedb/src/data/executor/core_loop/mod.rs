@@ -33,6 +33,7 @@ pub(in crate::data::executor) mod idempotency;
 pub(in crate::data::executor) mod index_charge;
 #[cfg(test)]
 mod installed_event_tests;
+pub mod journal_context;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
 #[cfg(test)]

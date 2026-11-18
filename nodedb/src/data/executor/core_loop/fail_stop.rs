@@ -62,6 +62,10 @@ pub(in crate::data::executor) enum FailStopCause {
     /// A batched install's cursor names no record the WAL holds. Its durable
     /// effects have no record to complete them.
     InstallCursorOrphaned,
+    /// A task's journal window left or returned to the core with a commit
+    /// unpersisted or another window open. One task's durability or events
+    /// would land in another's window.
+    JournalWindowLeaked,
 }
 
 impl FailStopCause {
@@ -77,6 +81,7 @@ impl FailStopCause {
             Self::HeldEventsUnkept => "held_events_unkept",
             Self::InstallProgressUnpersisted => "install_progress_unpersisted",
             Self::InstallCursorOrphaned => "install_cursor_orphaned",
+            Self::JournalWindowLeaked => "journal_window_leaked",
         }
     }
 }

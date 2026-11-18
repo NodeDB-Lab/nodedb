@@ -44,7 +44,9 @@ pub(in crate::data::executor) struct WriteSetJournalState {
     /// Origins whose parts are durable. The next store drops their write
     /// sets.
     settled: Vec<u64>,
-    running: Option<RunningJournal>,
+    /// The journal of the running root task. `None` outside a journalled
+    /// task.
+    pub(in crate::data::executor::core_loop) running: Option<RunningJournal>,
     /// The events of the running journalled tasks, sent once their write
     /// sets are stored. `None` outside a journalled task.
     pub(in crate::data::executor) held_events: Option<HeldEvents>,
@@ -72,7 +74,8 @@ pub(in crate::data::executor) struct RootJournalPermit {
     vshard_id: u32,
 }
 
-enum RunningJournal {
+/// Where the running root task's journal stands.
+pub(in crate::data::executor::core_loop) enum RunningJournal {
     Pending {
         request_id: u64,
         group: JournalGroup,
@@ -432,7 +435,7 @@ impl CoreLoop {
 
 #[cfg(test)]
 #[path = "journal_redo_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "journal_close_tests.rs"]

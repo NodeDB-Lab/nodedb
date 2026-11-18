@@ -182,3 +182,13 @@ impl From<crate::data::executor::handlers::transaction::overlay::ArrayOverlayMer
         }
     }
 }
+
+/// A journal window that cannot leave or return to its core. The core
+/// fail-stopped at the refusal, so the task answers an internal error.
+impl From<crate::data::executor::core_loop::journal_context::JournalSuspendError> for Error {
+    fn from(e: crate::data::executor::core_loop::journal_context::JournalSuspendError) -> Self {
+        Error::Internal {
+            detail: format!("journal window: {e}"),
+        }
+    }
+}
