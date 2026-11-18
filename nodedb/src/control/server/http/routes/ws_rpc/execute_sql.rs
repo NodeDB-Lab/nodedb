@@ -24,6 +24,7 @@ use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
 
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::graph_statement::try_graph_rows;
 
 /// Execute SQL and return result as JSON.
 ///
@@ -61,6 +62,9 @@ pub async fn execute_sql(
     // Admission gate runs before planning/dispatch. WebSocket has no headers for
     // `X-RateLimit-*`, so the outcome is discarded on success; a denial still fails closed.
     crate::control::server::session_auth::check_request_admission(shared, &request, "sql")?;
+    if let Some(done) = try_graph_rows(shared, identity, sql, database_id).await {
+        return done.map(rows_result);
+    }
 
     let (clean_sql, scope) = crate::control::server::session_auth::apply_per_query_on_deny(
         sql,
