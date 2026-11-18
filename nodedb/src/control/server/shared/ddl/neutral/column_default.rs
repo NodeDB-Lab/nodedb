@@ -143,9 +143,9 @@ pub(super) fn validate_clause_expr(
 fn clause_error(clause: &str, owner: &str, error: &SqlError) -> DdlError {
     let sqlstate = match error {
         SqlError::UndefinedFunction { .. } => sqlstate::UNDEFINED_FUNCTION,
-        SqlError::TypeMismatch { .. } | SqlError::VectorElementNotNumeric { .. } => {
-            sqlstate::DATATYPE_MISMATCH
-        }
+        SqlError::TypeMismatch { .. }
+        | SqlError::VectorElementNotNumeric { .. }
+        | SqlError::DatatypeMismatch { .. } => sqlstate::DATATYPE_MISMATCH,
         SqlError::IntegerOutOfRange { .. }
         | SqlError::FloatOutOfRange { .. }
         | SqlError::DecimalOutOfRange { .. }

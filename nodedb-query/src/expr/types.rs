@@ -24,7 +24,7 @@ pub enum SqlExpr {
         op: BinaryOp,
         right: Box<SqlExpr>,
     },
-    /// Unary negation: -expr or NOT expr.
+    /// Unary negation: `-expr`. `NOT expr` is [`SqlExpr::logical_not`].
     Negate(Box<SqlExpr>),
     /// Scalar function call.
     Function { name: String, args: Vec<SqlExpr> },

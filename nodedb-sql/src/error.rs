@@ -108,6 +108,11 @@ pub enum SqlError {
         element: String,
     },
 
+    /// An operand has a type its operator refuses, such as a number under
+    /// `NOT`. Rendered as SQLSTATE `42804` (datatype_mismatch).
+    #[error("{detail}")]
+    DatatypeMismatch { detail: String },
+
     /// A statement lists a different number of targets than expressions, such
     /// as an `INSERT` whose target column list does not match its `SELECT`
     /// list.

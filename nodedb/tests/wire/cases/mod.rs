@@ -209,6 +209,7 @@ mod move_tenant_idempotent;
 mod move_tenant_round_trip;
 mod native_cluster_array;
 mod native_index_ddl_restart;
+mod not_operator_boolean_only;
 mod object_literal_array_insert;
 mod object_literal_dml_row_level_security;
 mod object_literal_trailing_clause;

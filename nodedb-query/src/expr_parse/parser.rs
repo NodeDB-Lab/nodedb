@@ -112,7 +112,7 @@ fn parse_not(
     if peek_keyword(tokens, *pos, "NOT") {
         *pos += 1;
         let inner = parse_not(tokens, pos, depth)?;
-        return Ok(SqlExpr::Negate(Box::new(inner)));
+        return Ok(SqlExpr::logical_not(inner));
     }
     parse_comparison(tokens, pos, depth)
 }
@@ -206,7 +206,7 @@ fn parse_unary(
     if peek_keyword(tokens, *pos, "NOT") {
         *pos += 1;
         let expr = parse_primary(tokens, pos, depth)?;
-        return Ok(SqlExpr::Negate(Box::new(expr)));
+        return Ok(SqlExpr::logical_not(expr));
     }
     parse_primary(tokens, pos, depth)
 }
