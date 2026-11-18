@@ -12,7 +12,9 @@ use crate::planner::select::cte_catalog::CteCatalog;
 use crate::planner::select::rekey_join_output;
 use crate::planner::select::relation_leaf::refuse_leaf_over_statement_relation;
 use crate::reserved::check_ast_identifier;
-use crate::resolver::derived::{infer_subquery_relation, rename_output_columns};
+use crate::resolver::derived::{
+    infer_subquery_relation, open_subquery_relation, rename_output_columns,
+};
 use crate::temporal::TemporalScope;
 use crate::types::{CtePlan, SqlCatalog, SqlPlan};
 
@@ -42,6 +44,22 @@ pub fn plan_query(
     plan_query_at(query, catalog, functions, temporal, false)
 }
 
+/// `query` with its WITH clause removed: the outer query of a CTE.
+fn without_with(query: &Query) -> Query {
+    Query {
+        with: None,
+        body: query.body.clone(),
+        order_by: query.order_by.clone(),
+        limit_clause: query.limit_clause.clone(),
+        fetch: query.fetch.clone(),
+        locks: query.locks.clone(),
+        for_clause: query.for_clause.clone(),
+        settings: query.settings.clone(),
+        format_clause: query.format_clause.clone(),
+        pipe_operators: query.pipe_operators.clone(),
+    }
+}
+
 /// Plan a SELECT query. `statement_output` says whether its rows are the
 /// statement's result; a WITH clause passes it to the outer query only.
 fn plan_query_at(
@@ -55,26 +73,39 @@ fn plan_query_at(
     if let Some(with) = &query.with
         && with.recursive
     {
-        let plan = crate::planner::cte::plan_recursive_cte(query, catalog, functions, temporal)?;
-        refuse_leaf_over_statement_relation(&plan, catalog)?;
-        return Ok(plan);
+        let recursive =
+            crate::planner::cte::plan_recursive_cte(query, catalog, functions, temporal)?;
+        refuse_leaf_over_statement_relation(&recursive, catalog)?;
+        let Some(cte) = with.cte_tables.first() else {
+            return Ok(recursive);
+        };
+        // The recursive plan answers the CTE itself. The outer query reads it
+        // by name, as it reads a plain `WITH` definition, so its SELECT list,
+        // WHERE, ORDER BY and LIMIT apply to the recursion's rows. The
+        // recursion's output shape is not known to the planner here, so any
+        // column name resolves against it.
+        let name = check_ast_identifier(&cte.alias.name)?;
+        let cte_catalog = CteCatalog {
+            inner: catalog,
+            relations: vec![(name.clone(), open_subquery_relation(&name))],
+        };
+        let outer = plan_query_at(
+            &without_with(query),
+            &cte_catalog,
+            functions,
+            temporal,
+            statement_output,
+        )?;
+        return Ok(SqlPlan::Cte(CtePlan {
+            definitions: vec![(name, rekey_join_output(recursive))],
+            outer: Box::new(outer),
+        }));
     }
     // Non-recursive CTEs: plan each CTE subquery and the outer query.
     if let Some(with) = &query.with
         && !with.cte_tables.is_empty()
     {
-        let inner_query = Query {
-            with: None,
-            body: query.body.clone(),
-            order_by: query.order_by.clone(),
-            limit_clause: query.limit_clause.clone(),
-            fetch: query.fetch.clone(),
-            locks: query.locks.clone(),
-            for_clause: query.for_clause.clone(),
-            settings: query.settings.clone(),
-            format_clause: query.format_clause.clone(),
-            pipe_operators: query.pipe_operators.clone(),
-        };
+        let inner_query = without_with(query);
 
         // Plan each CTE subquery and infer the relation it exposes. A
         // definition reads the definitions before it, as in PostgreSQL:
