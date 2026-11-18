@@ -322,7 +322,11 @@ impl SqlExpr {
                 for (when_expr, then_expr) in when_thens {
                     let when_val = when_expr.eval_scope(scope)?;
                     let matches = match &op_val {
-                        Some(ov) => coerced_eq(ov, &when_val),
+                        // `CASE x WHEN y` compares `x = y`. A NULL on either side
+                        // is unknown, so the branch does not match.
+                        Some(ov) => {
+                            !ov.is_null() && !when_val.is_null() && coerced_eq(ov, &when_val)
+                        }
                         None => is_truthy(&when_val),
                     };
                     if matches {
@@ -466,6 +470,46 @@ mod tests {
         assert_eq!(
             expr.eval(&doc(), &crs()).unwrap(),
             Value::String("adult".into())
+        );
+    }
+
+    fn case_on(operand: SqlExpr, when: SqlExpr) -> SqlExpr {
+        SqlExpr::Case {
+            operand: Some(Box::new(operand)),
+            when_thens: vec![(when, SqlExpr::Literal(Value::String("matched".into())))],
+            else_expr: Some(Box::new(SqlExpr::Literal(Value::String("else".into())))),
+        }
+    }
+
+    #[test]
+    fn a_case_operand_of_null_matches_no_when_value() {
+        let null_operand = case_on(
+            SqlExpr::Column("email".into()),
+            SqlExpr::Literal(Value::Null),
+        );
+        assert_eq!(
+            null_operand.eval(&doc(), &crs()).unwrap(),
+            Value::String("else".into())
+        );
+        let null_when = case_on(
+            SqlExpr::Column("name".into()),
+            SqlExpr::Literal(Value::Null),
+        );
+        assert_eq!(
+            null_when.eval(&doc(), &crs()).unwrap(),
+            Value::String("else".into())
+        );
+    }
+
+    #[test]
+    fn a_case_operand_equal_to_a_when_value_still_matches() {
+        let expr = case_on(
+            SqlExpr::Column("name".into()),
+            SqlExpr::Literal(Value::String("Alice".into())),
+        );
+        assert_eq!(
+            expr.eval(&doc(), &crs()).unwrap(),
+            Value::String("matched".into())
         );
     }
 
