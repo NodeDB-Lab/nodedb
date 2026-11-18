@@ -35,7 +35,8 @@
 //! `RETURNING *` announces `is_star` instead, and a star keeps the row-derived
 //! list. The concrete columns of a star are only knowable once the rows exist —
 //! a schemaless row carries fields no catalog column declares — which is the
-//! same answer `SELECT *` gives for the same row.
+//! same answer `SELECT *` gives for the same row. The star's declared columns
+//! order that list, so a strict collection answers in declared order.
 
 use nodedb_types::{NativeCell, NdbDateTime, NodeDbError, Value};
 
@@ -43,7 +44,7 @@ use crate::data::executor::response_codec::ReturningRowsReply;
 
 use crate::control::sequence::SequenceAccess;
 
-use super::compose::kernel::{project_row, redact_rows, stamp_computed_columns};
+use super::compose::kernel::{order_by_declared, project_row, redact_rows, stamp_computed_columns};
 use super::project::cell_keys;
 use super::redaction::RedactionCtx;
 use super::schema::OutputSchema;
@@ -115,6 +116,10 @@ pub fn shape_returning_rows(
     )?;
 
     let Some(schema) = announced else {
+        // A star keeps the payload's own columns, which the Data Plane lists
+        // in field-name order. The star's declared columns put them in the
+        // order the extended query protocol announces.
+        let columns = order_by_declared(columns, projection);
         let column_types = ShapedRows::text_types(columns.len());
         return Ok(ShapedRows::from_rows(columns, column_types, rows));
     };
@@ -651,5 +656,33 @@ mod tests {
         )
         .expect_err("a malformed payload is refused");
         assert!(err.to_string().contains("RowsPayload"), "got: {err}");
+    }
+
+    /// `RETURNING *` on a strict `(id, name, n)`: the Data Plane lists the
+    /// payload columns in name order. The shaper answers the declared order
+    /// and keeps each cell under its own column.
+    #[test]
+    fn a_star_returning_lists_declared_columns_in_declared_order() {
+        let star = OutputSchema {
+            is_star: true,
+            ..announced(&[
+                ("id", DdlColType::Text),
+                ("name", DdlColType::Text),
+                ("n", DdlColType::Text),
+            ])
+        };
+        let bytes = payload(&["id", "n", "name"], &[&[Some("1"), Some("10"), Some("a")]]);
+
+        let shaped = shape_returning_rows(
+            &bytes,
+            Some(&star),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape star returning");
+        assert_eq!(shaped.columns, vec!["id", "name", "n"]);
+        assert_eq!(shaped.rows[0]["name"], text("a"));
+        assert_eq!(shaped.rows[0]["n"], text("10"));
     }
 }
