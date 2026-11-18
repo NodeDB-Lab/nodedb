@@ -80,13 +80,17 @@ impl PostState {
         seq
     }
 
-    /// Spill every hot tier once their weight passed the threshold.
-    pub(super) fn spill_past_threshold(&mut self) -> crate::Result<()> {
-        let hot = self.balanced.hot_bytes()
+    /// The weight of every hot tier.
+    pub(super) fn hot_bytes(&self) -> usize {
+        self.balanced.hot_bytes()
             + self.claims.hot_bytes()
             + self.written.hot_bytes()
-            + self.folds.hot_bytes();
-        if hot <= self.space.threshold() {
+            + self.folds.hot_bytes()
+    }
+
+    /// Spill every hot tier once their weight passed the threshold.
+    pub(super) fn spill_past_threshold(&mut self) -> crate::Result<()> {
+        if self.hot_bytes() <= self.space.threshold() {
             return Ok(());
         }
         self.balanced.spill(&mut self.space, "balanced")?;

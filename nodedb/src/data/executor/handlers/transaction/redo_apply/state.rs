@@ -228,6 +228,12 @@ pub(in crate::data::executor) type CollectionKey =
     (crate::types::DatabaseId, crate::types::TenantId, String);
 
 impl RedoApplyScope {
+    /// The RAM the scope holds between batches: the hot part of its spools
+    /// and its fold targets' write set entries.
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.held.hot_bytes().saturating_add(self.target_set_bytes)
+    }
+
     pub(in crate::data::executor) fn new(
         pass: RedoApplyPass,
         sum_targets: Vec<RedoSumTargets>,

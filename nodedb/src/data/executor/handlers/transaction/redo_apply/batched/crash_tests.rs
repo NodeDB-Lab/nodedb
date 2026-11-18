@@ -442,6 +442,31 @@ mod cut {
         );
     }
 
+    /// The install parked in its validate after the validate's second
+    /// batch. The validate wrote nothing, so the cut holds no cursor and no
+    /// fold. Boot replays the record from op 0 and folds each source once.
+    #[test]
+    fn a_crash_while_validating_replays_the_record_once() {
+        let cut = cut_parked_at("redo_apply::batched::validate_parked::1", None, None);
+        assert!(
+            cursors(cut.stores.path()).is_empty(),
+            "a validate writes no cursor"
+        );
+        assert_eq!(
+            install_rows(cut.stores.path(), cut.lsn),
+            (Vec::new(), 0),
+            "a validate writes no fold"
+        );
+        let (balance, captures) = restart(&cut);
+        assert_eq!(
+            balance.as_deref(),
+            Some(SINGLE_FOLD),
+            "one fold of every row"
+        );
+        assert_eq!(captures.len(), 1, "replay stores the record's write set");
+        assert!(cursors(cut.stores.path()).is_empty());
+    }
+
     /// A write of another database ran while the install was parked. The
     /// crash keeps it, and boot completes the install forward beside it.
     #[test]

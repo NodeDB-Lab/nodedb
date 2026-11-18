@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A stream install that `run_task` runs gives the core back between its
-//! batches, and its rollback between the batches it reverses.
+//! A stream install that `run_task` runs gives the core back between the
+//! batches its validate walks, between the batches it installs, and
+//! between the batches its rollback reverses.
 //!
 //! Each case queues requests on a core's request ring and drives `tick()`.
 //! The core cuts a stream into batches of [`YIELD_BATCH_BYTES`], and each
@@ -26,17 +27,22 @@ use crate::types::{DatabaseId, Lsn, RequestId, TenantId, VShardId};
 use crate::wal::redo::install_cursor::{CursorState, InstallCursor};
 use crate::wal::{RedoRecord, RedoSubRecord, WriteSetCapture};
 
-use super::super::calvin_fold_tests::{ACCOUNT, SOURCE, balance, core_with_sum, sum_targets};
+use super::super::calvin_fold_tests::{
+    ACCOUNT, SOURCE, TARGET, balance, core_with_sum, sum_targets,
+};
 use super::super::install_refusal_tests as refusal;
 use super::super::replay_fold::tests::crash_image;
 use super::super::stream_validate::tests::{LSN, StreamWal, TID, framed, plain_core, record};
 use super::super::test_commit::doc_put_sub_record;
 use super::equivalence_tests::{FILL, FILL_EACH, FILL_FROM, digest, fill, install_whole, spread};
+use super::install::job_stage::ParkPoint;
 
 /// The bytes of one batch the core cuts a stream into.
 const YIELD_BATCH_BYTES: usize = 4096;
 /// Filler rows a record writes: several batches of them.
 const ROWS: u32 = 300;
+/// Filler rows a record writes when a case needs many validate slices.
+const MANY_ROWS: u32 = 1200;
 /// The database of the foreign writes, which the fence never holds.
 const OTHER_DB: DatabaseId = DatabaseId::new(7);
 const OTHER: &str = "other";
@@ -48,6 +54,7 @@ const INSTALL: u64 = 1;
 const READ_B: u64 = 2;
 const READ_A: u64 = 3;
 const FOREIGN: u64 = 4;
+const FENCED_WRITE: u64 = 7;
 
 /// How long a test request may wait behind the install's fence.
 const WAITER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
@@ -148,16 +155,71 @@ impl Ring {
         })
     }
 
+    /// The install of `redo` as a stream marker whose plan and content name
+    /// what `spec` names.
+    fn marker_plan_of(
+        &mut self,
+        redo: &RedoRecord,
+        collections: Vec<String>,
+        spec: MarkerSpec,
+    ) -> PhysicalPlan {
+        let reference = self
+            .wal
+            .write(&framed(redo, &spec.header_targets, &spec.reads));
+        let marker = reference.marker(None, None, Vec::new()).expect("marker");
+        PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo: marker.to_bytes().expect("encode marker"),
+            collections,
+            sum_targets: spec.plan_targets,
+            origin: RedoOrigin::Commit,
+            calvin: None,
+            reads: Vec::new(),
+            snapshot_ordinal: spec.snapshot,
+        })
+    }
+
     /// Queue the install of `ROWS` filler rows as request [`INSTALL`].
     fn push_fill_install(&mut self) {
-        let plan = self.marker_plan(
-            &record(fill(FILL_FROM, ROWS)),
-            vec![FILL.to_string()],
-            Vec::new(),
-            None,
-        );
+        self.push_install_of(fill(FILL_FROM, ROWS));
+    }
+
+    /// Queue the install of `ops`, which write [`FILL`], as request
+    /// [`INSTALL`].
+    fn push_install_of(&mut self, ops: Vec<RedoSubRecord>) {
+        let plan = self.marker_plan(&record(ops), vec![FILL.to_string()], Vec::new(), None);
         self.push(install_request(INSTALL, plan, LSN), None);
     }
+
+    /// Whether the parked install is in its validate.
+    fn validating(&self) -> bool {
+        matches!(self.core.parked_point(), Some(ParkPoint::Validating { .. }))
+    }
+
+    /// Tick until the parked install's validate ended. Returns how many
+    /// ticks it stayed in its validate.
+    fn tick_past_validate(&mut self) -> usize {
+        for ticks in 0..MAX_TICKS {
+            if !self.validating() {
+                return ticks;
+            }
+            self.tick();
+        }
+        panic!("the validate never ended");
+    }
+}
+
+/// What a marker's plan and content name beside its ops.
+#[derive(Default)]
+struct MarkerSpec {
+    /// The sum targets the plan names, which the fence keys before the
+    /// validate.
+    plan_targets: Vec<RedoSumTargets>,
+    /// The sum targets the content header names.
+    header_targets: Vec<RedoSumTargets>,
+    /// The read set the content holds.
+    reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
+    /// The snapshot the read set validates at.
+    snapshot: Option<i64>,
 }
 
 /// A request of `plan`. A waiter behind the fence answers that it expired
@@ -231,6 +293,33 @@ fn foreign_put(id: u64) -> Request {
     request.vshard_id = OTHER_VSHARD;
     request
 }
+
+/// A put of one row into [`FILL`], which the install fences. Its events
+/// carry another vShard than the install's, so only the collection's fence
+/// holds it.
+fn fenced_put(id: u64) -> Request {
+    let mut request = request(
+        id,
+        PhysicalPlan::Document(DocumentOp::PointPut {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, FILL),
+            document_id: "w1".into(),
+            value: crate::data::executor::doc_format::encode_to_msgpack(
+                &serde_json::json!({"n": id}),
+            ),
+            surrogate: Surrogate::new(FENCED_SURROGATE),
+            pk_bytes: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+        }),
+    );
+    request.vshard_id = OTHER_VSHARD;
+    request
+}
+
+/// The surrogate of the row [`fenced_put`] writes: no filler row's.
+const FENCED_SURROGATE: u32 = FILL_FROM + MANY_ROWS + 1;
 
 /// The stored name of the foreign collection.
 fn other_stored() -> String {
@@ -324,6 +413,9 @@ fn another_task_runs_between_batches_and_sees_no_partial_state() {
     assert!(ring.answer(READ_B).is_some(), "the untouched read answered");
     assert!(ring.answer(READ_A).is_none(), "the fenced read waits");
     assert_ok(ring.answer(FOREIGN).expect("the foreign write answered"));
+    ring.tick_past_validate();
+    assert!(ring.core.has_parked_install(), "the install parked");
+    assert!(ring.answer(READ_A).is_none(), "the fenced read waits");
     let installed = installed_rows(&ring.core);
     assert!(
         installed > 0 && installed < ROWS as usize,
@@ -449,13 +541,7 @@ fn a_parked_calvin_install_answers_its_reply() {
 /// install leaves.
 #[test]
 fn a_parked_install_matches_an_unyielded_one() {
-    let plans = [refusal::kv_predicate_delete()];
-    let mut redo = super::equivalence_tests::resolved(&plans, refusal::seed_kv);
-    let mut ops = spread(std::mem::take(&mut redo.ops));
-    ops.extend(fill(FILL_FROM + 2 * FILL_EACH, ROWS));
-    redo.ops = ops;
-    let mut collections = nodedb_physical::physical_plan::written_collections(&plans);
-    collections.push(FILL.to_string());
+    let (redo, collections) = kv_and_fill_record();
 
     let mut whole = super::super::stream_validate::tests::hold(plain_core);
     refusal::seed_kv(&mut whole.core);
@@ -533,10 +619,25 @@ fn a_panic_in_the_first_slice_validate_stops_and_answers() {
     assert_a_panic_at_stops_and_answers("redo_apply::batched::before_validate");
 }
 
-/// The first park, inside the task's run.
+/// The first park, inside the task's run, after the validate's first
+/// batch.
 #[cfg(feature = "failpoints")]
 #[test]
 fn a_panic_at_the_first_park_stops_and_answers() {
+    assert_a_panic_at_stops_and_answers("redo_apply::batched::validate_parked::0");
+}
+
+/// The park after a driven validate slice.
+#[cfg(feature = "failpoints")]
+#[test]
+fn a_panic_at_a_later_validate_park_stops_and_answers() {
+    assert_a_panic_at_stops_and_answers("redo_apply::batched::validate_parked::1");
+}
+
+/// The first park of the arms, after the slice that ended the validate.
+#[cfg(feature = "failpoints")]
+#[test]
+fn a_panic_at_the_first_arm_park_stops_and_answers() {
     assert_a_panic_at_stops_and_answers("redo_apply::batched::parked::Document::0");
 }
 
@@ -580,6 +681,7 @@ fn a_fail_stop_while_parked_answers_and_keeps_the_cursor() {
     ring.push_fill_install();
     ring.push(request(READ_A, scan(FILL)), None);
     ring.tick();
+    ring.tick_past_validate();
     assert!(ring.core.has_parked_install());
     assert!(ring.answer(READ_A).is_none(), "the read waits");
 
@@ -675,6 +777,7 @@ fn the_governor_holds_a_parked_jobs_ram() {
     let before = query(&ring.core);
     ring.push_fill_install();
     ring.tick();
+    ring.tick_past_validate();
     assert!(ring.core.has_parked_install());
     assert!(query(&ring.core) > before, "the parked job is charged");
 
@@ -956,4 +1059,446 @@ fn a_parked_rollback_reads_its_spilled_undo_log_across_slices() {
         baseline.payload.to_vec(),
         "the read sees none of the install"
     );
+}
+
+/// The record of [`refusal::kv_predicate_delete`] between filler rows, with
+/// `ROWS` filler rows after it, and every collection it writes.
+fn kv_and_fill_record() -> (RedoRecord, Vec<String>) {
+    let plans = [refusal::kv_predicate_delete()];
+    let mut redo = super::equivalence_tests::resolved(&plans, refusal::seed_kv);
+    let mut ops = spread(std::mem::take(&mut redo.ops));
+    ops.extend(fill(FILL_FROM + 2 * FILL_EACH, ROWS));
+    redo.ops = ops;
+    let mut collections = nodedb_physical::physical_plan::written_collections(&plans);
+    collections.push(FILL.to_string());
+    (redo, collections)
+}
+
+/// The validate walks its batches across ticks, at a spill threshold of 0
+/// and of `usize::MAX`. What it hands the install is what the one-call
+/// validate hands it: the install leaves the state the one-call validate
+/// and install leave.
+#[test]
+fn a_validate_across_ticks_matches_the_one_call_validate() {
+    for spill in [0, usize::MAX] {
+        let (redo, collections) = kv_and_fill_record();
+        let mut whole = super::super::stream_validate::tests::hold(plain_core);
+        refusal::seed_kv(&mut whole.core);
+        assert_ok(&super::equivalence_tests::install_batched_at(
+            &mut whole,
+            &redo,
+            &[],
+            &collections,
+            spill,
+        ));
+
+        let mut ring = Ring::open(plain_core);
+        ring.core.query_tuning.max_txn_overlay_bytes = spill;
+        refusal::seed_kv(&mut ring.core);
+        let plan = ring.marker_plan(&redo, collections, Vec::new(), None);
+        ring.push(install_request(INSTALL, plan, LSN), None);
+        ring.tick();
+        assert!(ring.validating(), "spill {spill}: the validate parked");
+        let ticks = ring.tick_past_validate();
+        assert!(
+            ticks > 1,
+            "spill {spill}: the validate spanned several ticks: {ticks}"
+        );
+        assert_ok(ring.tick_until_answered(INSTALL));
+        assert_eq!(digest(&ring.core), digest(&whole.core), "spill {spill}");
+        assert_eq!(
+            installed_rows(&ring.core),
+            installed_rows(&whole.core),
+            "spill {spill}"
+        );
+    }
+}
+
+/// A write to a collection the install writes waits through every validate
+/// slice, and runs once the install ends.
+#[test]
+fn a_write_to_a_fenced_collection_waits_during_the_validate() {
+    let mut ring = Ring::open(plain_core);
+    ring.push_install_of(fill(FILL_FROM, MANY_ROWS));
+    ring.push(fenced_put(FENCED_WRITE), None);
+    ring.tick();
+    let mut validate_ticks = 0_usize;
+    while ring.validating() {
+        assert!(
+            ring.answer(FENCED_WRITE).is_none(),
+            "the write waits while the validate runs"
+        );
+        validate_ticks += 1;
+        assert!(validate_ticks < MAX_TICKS, "the validate never ended");
+        ring.tick();
+    }
+    assert!(
+        validate_ticks > 1,
+        "the validate spanned several ticks: {validate_ticks}"
+    );
+    for _ in 0..MAX_TICKS {
+        if ring.answer(INSTALL).is_some() {
+            break;
+        }
+        assert!(
+            ring.answer(FENCED_WRITE).is_none(),
+            "the write waits while the install runs"
+        );
+        ring.tick();
+    }
+    assert_ok(ring.answer(INSTALL).expect("the install answered"));
+    assert_ok(ring.tick_until_answered(FENCED_WRITE));
+    assert!(
+        ring.core
+            .sparse
+            .get(
+                DatabaseId::DEFAULT.as_u64(),
+                TID,
+                QualifiedCollection::new(DatabaseId::DEFAULT, FILL).as_str(),
+                &StorageKey::for_surrogate(Surrogate::new(FENCED_SURROGATE)),
+            )
+            .expect("read the written row")
+            .is_some(),
+        "the write landed after the install"
+    );
+}
+
+/// A write of another database queued while the validate is parked runs
+/// before the validate's next slice.
+#[test]
+fn an_unfenced_task_runs_between_validate_slices() {
+    let mut ring = Ring::open(plain_core);
+    ring.push_install_of(fill(FILL_FROM, MANY_ROWS));
+    ring.tick();
+    assert!(ring.validating(), "the validate parked");
+
+    ring.push(foreign_put(FOREIGN), None);
+    ring.tick();
+    assert_ok(
+        ring.answer(FOREIGN)
+            .expect("the foreign write ran between validate slices"),
+    );
+    assert!(
+        ring.validating(),
+        "the validate is still parked: the write ran between its slices"
+    );
+    assert!(ring.answer(INSTALL).is_none());
+
+    assert_ok(ring.tick_until_answered(INSTALL));
+    assert!(holds_foreign(&ring.core.sparse), "the foreign write stays");
+}
+
+/// The refusal the one-call validate reaches on `redo` as a stream at
+/// [`YIELD_BATCH_BYTES`], on a fresh core.
+fn one_call_refusal(redo: &RedoRecord) -> ErrorCode {
+    use super::super::stream_validate::tests::default_task;
+    use super::super::stream_validate::{StreamLimits, StreamValidateInput};
+
+    let mut held = super::super::stream_validate::tests::hold(plain_core);
+    let reference = held.wal.write(&framed(redo, &[], &[]));
+    let marker = reference.marker(None, None, Vec::new()).expect("marker");
+    let task = default_task();
+    let verdict = held.core.validate_redo_stream(&StreamValidateInput {
+        task: &task,
+        tid: TID,
+        marker: &marker,
+        reference: &reference,
+        origin: RedoOrigin::Commit,
+        snapshot: None,
+        judged_at_ms: crate::data::executor::enforcement::retention::judged_instant_ms(
+            None,
+            task.request.system_ordinal,
+        ),
+        lsn: Lsn::new(LSN),
+        limits: StreamLimits {
+            batch_bytes: YIELD_BATCH_BYTES,
+            spill_threshold: usize::MAX,
+        },
+    });
+    match verdict {
+        Err(code) => code,
+        Ok(_) => panic!("the one-call validate refuses"),
+    }
+}
+
+/// Content that refuses at the end of its validate answers the refusal the
+/// one-call validate answers, once, after several parked validate slices. It
+/// writes no cursor and nothing else, and the fence releases.
+#[test]
+fn a_validate_refusal_after_parked_slices_answers_once_and_leaves_no_cursor() {
+    let mut ops = fill(FILL_FROM, MANY_ROWS);
+    ops.push(refusal::raw_crdt_delta_sub_record());
+    let expected = one_call_refusal(&record(ops.clone()));
+
+    let mut ring = Ring::open(plain_core);
+    let before = digest(&ring.core);
+    ring.push_install_of(ops);
+    ring.push(request(READ_A, scan(FILL)), None);
+    let mut parked_slices = 0_usize;
+    for _ in 0..MAX_TICKS {
+        ring.tick();
+        if ring.answer(INSTALL).is_some() {
+            break;
+        }
+        assert!(ring.validating(), "the install refuses in its validate");
+        assert!(ring.answer(READ_A).is_none(), "the fenced read waits");
+        parked_slices += 1;
+    }
+    assert!(
+        parked_slices > 1,
+        "the validate parked across several slices: {parked_slices}"
+    );
+    let answer = ring.answer(INSTALL).expect("the install answered").clone();
+    assert_eq!(answer.status, Status::Error);
+    assert_eq!(
+        answer.error_code.as_deref(),
+        Some(&expected),
+        "the refusal the one-call validate answers"
+    );
+    assert!(
+        ring.core
+            .sparse
+            .load_install_cursors()
+            .expect("load cursors")
+            .is_empty(),
+        "a refused validate writes no cursor"
+    );
+    assert!(!ring.core.has_parked_install());
+    assert!(!ring.core.has_install_fence());
+    assert!(!ring.core.is_fail_stopped());
+    assert_eq!(digest(&ring.core), before, "nothing was written");
+    assert_ok(ring.tick_until_answered(READ_A));
+    // A second answer to the install panics in `tick`.
+    for _ in 0..8 {
+        ring.tick();
+    }
+}
+
+/// Tick until request `id` answers, asserting each tick that every request
+/// of `waiting` stays unanswered until then.
+fn tick_until_answered_while_waiting(ring: &mut Ring, id: u64, waiting: &[u64]) {
+    for _ in 0..MAX_TICKS {
+        if ring.answer(id).is_some() {
+            return;
+        }
+        for waiter in waiting {
+            assert!(
+                ring.answer(*waiter).is_none(),
+                "request {waiter} answered before request {id}"
+            );
+        }
+        ring.tick();
+    }
+    panic!("request {id} never answered");
+}
+
+/// The content header alone names the sum targets: the plan names none. A
+/// read of the target collection waits from the slice that walks the
+/// header through every later validate slice, and the install folds once.
+#[test]
+fn a_read_of_a_header_sum_target_waits_during_the_validate() {
+    const SOURCES: u32 = 400;
+    let mut ring = Ring::open(core_with_sum);
+    let plan = ring.marker_plan_of(
+        &record(charges(SOURCES)),
+        vec![SOURCE.to_string()],
+        MarkerSpec {
+            header_targets: sum_targets(),
+            ..MarkerSpec::default()
+        },
+    );
+    ring.push(
+        install_request(INSTALL, plan, LSN),
+        Some(group(LSN, SOURCE)),
+    );
+    ring.push(request(READ_A, scan(TARGET)), None);
+    ring.tick();
+    assert!(ring.validating(), "the validate parked");
+    assert!(
+        ring.tick_past_validate() > 0,
+        "the validate spanned several ticks"
+    );
+    tick_until_answered_while_waiting(&mut ring, INSTALL, &[READ_A]);
+    assert_ok(ring.answer(INSTALL).expect("the install answered"));
+    assert_ok(ring.tick_until_answered(READ_A));
+    assert_eq!(
+        balance(&ring.core),
+        Some((100 + SOURCES).to_string()),
+        "one fold of every row"
+    );
+}
+
+/// A header sum target the fence cannot key: the job runs to its end in
+/// the task's one slice, as an install the fence cannot key does.
+#[test]
+fn a_header_target_that_cannot_be_keyed_runs_in_one_slice() {
+    let mut ring = Ring::open(plain_core);
+    let plan = ring.marker_plan_of(
+        &record(fill(FILL_FROM, MANY_ROWS)),
+        vec![FILL.to_string()],
+        MarkerSpec {
+            // A name of another database than the task's.
+            header_targets: vec![RedoSumTargets {
+                collection: "7/acct".to_string(),
+                resolved: Vec::new(),
+            }],
+            ..MarkerSpec::default()
+        },
+    );
+    ring.push(install_request(INSTALL, plan, LSN), Some(group(LSN, FILL)));
+    ring.tick();
+    assert!(
+        ring.answer(INSTALL).is_some(),
+        "the install answered in its task's slice"
+    );
+    assert!(!ring.core.has_parked_install(), "the install never parked");
+    assert!(!ring.core.has_install_fence(), "the fence released");
+}
+
+/// The snapshot every read of [`snapshot_spec`] validates at: above every
+/// version a fresh core holds.
+const SNAPSHOT: i64 = i64::MAX / 2;
+/// The read-only collection the read set names.
+const LEDGER: &str = "ledger";
+/// Reads of [`LEDGER`] in the read set: several validate batches of them.
+const LEDGER_READS: usize = 400;
+
+/// A read set that spans several validate slices: one read of the whole of
+/// the task's vShard, then reads of [`LEDGER`], all homed on that vShard.
+fn snapshot_spec() -> MarkerSpec {
+    use nodedb_types::calvin::{EngineTag, ReadKeyIdent, VersionedReadEntry};
+
+    let read = |collection: &str| VersionedReadEntry {
+        engine: EngineTag::Document,
+        collection: collection.to_string(),
+        key: ReadKeyIdent::Predicate,
+        home_vshard: Some(0),
+    };
+    let mut reads = vec![read("")];
+    reads.extend(std::iter::repeat_with(|| read(LEDGER)).take(LEDGER_READS));
+    MarkerSpec {
+        reads,
+        snapshot: Some(SNAPSHOT),
+        ..MarkerSpec::default()
+    }
+}
+
+/// Queue the snapshot install of `ROWS` filler rows with
+/// [`snapshot_spec`]'s read set as request [`INSTALL`].
+fn push_snapshot_install(ring: &mut Ring) {
+    let plan = ring.marker_plan_of(
+        &record(fill(FILL_FROM, ROWS)),
+        vec![FILL.to_string()],
+        snapshot_spec(),
+    );
+    ring.push(install_request(INSTALL, plan, LSN), None);
+}
+
+/// A write of another database whose events carry the install's vShard
+/// waits while the validate checks a read set that spans several slices:
+/// the whole-vShard read is checked once, so the write would go unseen.
+#[test]
+fn a_same_vshard_write_waits_while_a_read_set_spans_validate_slices() {
+    let mut ring = Ring::open(plain_core);
+    push_snapshot_install(&mut ring);
+    let mut same = foreign_put(FOREIGN);
+    same.vshard_id = VShardId::new(0);
+    ring.push(same, None);
+    ring.tick();
+    assert!(ring.validating(), "the validate parked");
+    assert!(
+        ring.tick_past_validate() > 0,
+        "the read set spans several validate slices"
+    );
+    tick_until_answered_while_waiting(&mut ring, INSTALL, &[FOREIGN]);
+    assert_ok(ring.answer(INSTALL).expect("the install answered"));
+    assert_ok(ring.tick_until_answered(FOREIGN));
+    assert!(holds_foreign(&ring.core.sparse));
+}
+
+/// The slice that checks a chunk of the read set fences the chunk's
+/// collection. A write to it and a read of it wait from then until the
+/// install ends.
+#[test]
+fn a_write_to_a_read_set_collection_waits_after_its_chunk_was_checked() {
+    use crate::data::executor::core_loop::install_fence::FenceKey;
+
+    let mut ring = Ring::open(plain_core);
+    push_snapshot_install(&mut ring);
+    ring.tick();
+    assert!(ring.validating(), "the validate parked");
+    let ledger = FenceKey::Collection {
+        db: DatabaseId::DEFAULT,
+        name: QualifiedCollection::new(DatabaseId::DEFAULT, LEDGER)
+            .as_str()
+            .to_owned(),
+    };
+    assert!(
+        ring.core
+            .install_fence
+            .as_ref()
+            .is_some_and(|fence| fence.keys.contains(&ledger)),
+        "the first slice fenced the collection of the reads it checked"
+    );
+    let mut write = foreign_put(FENCED_WRITE);
+    write.database_id = DatabaseId::DEFAULT;
+    write.plan = PhysicalPlan::Document(DocumentOp::PointPut {
+        collection: QualifiedCollection::new(DatabaseId::DEFAULT, LEDGER),
+        document_id: "l1".into(),
+        value: crate::data::executor::doc_format::encode_to_msgpack(&serde_json::json!({"n": 1})),
+        surrogate: Surrogate::new(FENCED_SURROGATE),
+        pk_bytes: Vec::new(),
+        returning: None,
+        rls_filters: Vec::new(),
+        resolved_sum_targets: Vec::new(),
+        rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+    });
+    ring.push(write, None);
+    ring.push(request(READ_A, scan(LEDGER)), None);
+    tick_until_answered_while_waiting(&mut ring, INSTALL, &[FENCED_WRITE, READ_A]);
+    assert_ok(ring.answer(INSTALL).expect("the install answered"));
+    assert_ok(ring.tick_until_answered(FENCED_WRITE));
+    assert_ok(ring.tick_until_answered(READ_A));
+}
+
+/// While the validate is parked, the governor holds exactly what the job
+/// measures: the reader's buffer, the post-state, the spools, the arms'
+/// validate scope and the rest of the walk. The charge follows the job past
+/// the verdict, and returns once the install ends.
+#[test]
+fn the_governor_charge_follows_the_validate() {
+    let mut ring = Ring::open(plain_core);
+    let query = |core: &CoreLoop| {
+        core.governor
+            .budget(nodedb_mem::EngineId::Query)
+            .allocated()
+    };
+    refusal::seed_kv(&mut ring.core);
+    let before = query(&ring.core);
+    let (redo, collections) = kv_and_fill_record();
+    let plan = ring.marker_plan(&redo, collections, Vec::new(), None);
+    ring.push(install_request(INSTALL, plan, LSN), None);
+    ring.tick();
+    let mut validate_parks = 0_usize;
+    while ring.validating() {
+        let resident = ring.core.parked_resident().expect("a parked job");
+        assert!(resident > 0, "the parked validate holds RAM");
+        assert_eq!(
+            query(&ring.core) - before,
+            resident,
+            "the charge is the validate's measure"
+        );
+        validate_parks += 1;
+        assert!(validate_parks < MAX_TICKS, "the validate never ended");
+        ring.tick();
+    }
+    assert!(validate_parks > 1, "the validate parked several times");
+    if ring.core.has_parked_install() {
+        assert!(
+            query(&ring.core) > before,
+            "the install past the verdict is charged"
+        );
+    }
+    assert_ok(ring.tick_until_answered(INSTALL));
+    assert_eq!(query(&ring.core), before, "the charge is released");
 }

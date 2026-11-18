@@ -19,7 +19,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 
 use super::super::super::calvin_install::CalvinTail;
-use super::super::install::job::StreamInstallJob;
+use super::stream_job::StreamJob;
 
 /// The detail of the placeholder response a parked install's task answers
 /// with inside its run.
@@ -36,7 +36,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) enum InstallTai
 
 /// An install that parked in the task running now.
 pub(in crate::data::executor) struct PendingPark {
-    pub(super) job: StreamInstallJob,
+    pub(super) job: StreamJob,
     /// The install's ambient core state, out of the core.
     pub(super) context: InstallContext,
     pub(in crate::data::executor::handlers::transaction::redo_apply) tail: InstallTail,
@@ -128,5 +128,29 @@ impl CoreLoop {
             EngineId::Query,
         )
         .charge(bytes)
+    }
+}
+
+#[cfg(test)]
+impl CoreLoop {
+    /// Where the parked install stands, `None` when none is parked.
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn parked_point(
+        &self,
+    ) -> Option<super::super::install::job_stage::ParkPoint> {
+        self.redo_apply
+            .parked
+            .as_ref()
+            .map(|parked| parked.park.job.park_point())
+    }
+
+    /// The RAM the parked job holds by its own measure, `None` when none is
+    /// parked. The arms' apply scope is out of the core while parked.
+    pub(in crate::data::executor::handlers::transaction::redo_apply::batched) fn parked_resident(
+        &self,
+    ) -> Option<usize> {
+        self.redo_apply
+            .parked
+            .as_ref()
+            .map(|parked| parked.park.job.resident_bytes(None))
     }
 }

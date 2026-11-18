@@ -8,14 +8,17 @@
 //! labels of the task's tenant, and the vShard the record's events carry.
 //! A stream marker names no op, so whether the content holds label ops is
 //! unknown before the validate, and the labels are always fenced. The
-//! validate's header names the content's sum targets, and they join the
-//! fence before the first batch.
+//! content header names the content's sum targets, and they join the fence
+//! in the slice that walks the header (see `stream_job`). So no write lands
+//! on what the record reads or writes between the validate's verdict and
+//! the install's first batch.
 //!
-//! The first slice runs inside the task. When the job has more to run, its
-//! ambient state leaves the core, the heartbeat stays below the marker's
-//! LSN, and the task answers with a placeholder that never leaves the core
-//! (see `parked`). A name that is no stored collection name fences nothing
-//! it names, so that install runs to its end in its task.
+//! The job opens validating, and its first slice runs inside the task.
+//! When the job has more to run, its ambient state leaves the core, the
+//! heartbeat stays below the marker's LSN, and the task answers with a
+//! placeholder that never leaves the core (see `parked`). A name that is no
+//! stored collection name fences nothing it names, so that install runs to
+//! its end in its task.
 //!
 //! Everything from the fence's arming through the park runs inside one
 //! unwind boundary. A panic there stops the core, drops the job, releases
@@ -35,11 +38,12 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, Lsn};
 
 use super::super::super::state::TsInstalled;
-use super::super::super::stream_validate::{StreamValidateInput, StreamValidated};
+use super::super::super::stream_validate::StreamValidateInput;
 use super::super::install::driver::StreamInstallInput;
-use super::super::install::job::StreamInstallJob;
 use super::super::install::job_stage::{ParkPoint, StepOutcome};
+use super::owned::OwnedStream;
 use super::parked::{InstallTail, PendingPark};
+use super::stream_job::StreamJob;
 
 /// The site a fence key's name failed at, for its report.
 const UNFENCED_SITE: &str = "install_fence: the stream install runs to its end in its task";
@@ -92,23 +96,24 @@ impl CoreLoop {
             sum_targets,
         } = stream;
         let task = install.task;
+        let lsn = install.lsn;
         let fenced = self.arm_stream_fence(task, install.collections, sum_targets);
         // A test panics here: the fence is armed, and nothing is validated.
         crate::fail_point!(self.fail_scope, "redo_apply::batched::before_validate");
-        let validated = match self.validate_redo_stream(&validate) {
-            Ok(validated) => validated,
+        if !fenced {
+            return match self.validate_redo_stream(&validate) {
+                Ok(validated) => self.install_redo_stream(install, validated, ts_installs),
+                Err(code) => self.response_error(task, code),
+            };
+        }
+        let job = match StreamJob::open(self, task, OwnedStream::of(&validate, install)) {
+            Ok(job) => job,
             Err(code) => {
-                if fenced {
-                    self.release_install_fence();
-                }
+                self.release_install_fence();
                 return self.response_error(task, code);
             }
         };
-        if fenced {
-            self.install_redo_stream_parking(install, validated, ts_installs)
-        } else {
-            self.install_redo_stream(install, validated, ts_installs)
-        }
+        self.run_first_slice(job, task, lsn, ts_installs)
     }
 
     /// Arm the install fence over what the record of `task` writes: the
@@ -149,39 +154,16 @@ impl CoreLoop {
         true
     }
 
-    /// Install the stream `input` names, which the validate passed as
-    /// `validated`, under the install fence its task armed. The first slice
-    /// runs now, and a job with more to run parks. The fence releases when
-    /// the job answers.
-    fn install_redo_stream_parking(
+    /// Run the first slice of `job`, the install of `task` at `lsn`, under
+    /// the install fence its task armed. A job with more to run parks. The
+    /// fence releases when the job answers.
+    fn run_first_slice(
         &mut self,
-        input: StreamInstallInput<'_>,
-        validated: StreamValidated,
+        mut job: StreamJob,
+        task: &ExecutionTask,
+        lsn: Lsn,
         ts_installs: &mut Vec<TsInstalled>,
     ) -> Response {
-        let task = input.task;
-        let lsn = input.lsn;
-        let mut targets = BTreeSet::new();
-        let parks = sum_target_keys(
-            task.request.database_id,
-            &validated.header.sum_targets,
-            &mut targets,
-        );
-        if parks {
-            self.arm_install_fence(targets);
-        }
-        let mut job = match StreamInstallJob::open(self, input, validated) {
-            Ok(job) => job,
-            Err(refusal) => {
-                self.release_install_fence();
-                return self.response_error(task, refusal);
-            }
-        };
-        if !parks {
-            let response = job.run_to_end(self, task, ts_installs);
-            self.release_install_fence();
-            return response;
-        }
         match job.step(self, task) {
             Ok(StepOutcome::Ran) => self.park_job(job, task, lsn),
             Ok(StepOutcome::Done(response)) => {
@@ -200,7 +182,7 @@ impl CoreLoop {
     /// more to run. Returns the placeholder the task answers with inside
     /// its run. A journal window that cannot leave fail-stopped the core:
     /// the task answers, and the job goes.
-    fn park_job(&mut self, job: StreamInstallJob, task: &ExecutionTask, lsn: Lsn) -> Response {
+    fn park_job(&mut self, job: StreamJob, task: &ExecutionTask, lsn: Lsn) -> Response {
         let resident = job.resident_bytes(self.redo_apply.scope.as_ref());
         let context = match self.leave_install() {
             Ok(context) => context,
@@ -227,10 +209,17 @@ impl CoreLoop {
 
     /// Log where `job`, the install at `lsn`, parked. A crash test kills
     /// the process here: the install's state is out of the core, and its
-    /// last batch, or its rollback's last checkpoint, is durable.
-    pub(super) fn note_parked(&self, job: &StreamInstallJob, lsn: Lsn) {
+    /// last batch, or its rollback's last checkpoint, is durable. A
+    /// validate that parked wrote nothing.
+    pub(super) fn note_parked(&self, job: &StreamJob, lsn: Lsn) {
         let point = job.park_point();
         match point {
+            ParkPoint::Validating { batch } => tracing::debug!(
+                core = self.core_id,
+                lsn = lsn.as_u64(),
+                batch,
+                "batched install parked in its validate"
+            ),
             ParkPoint::Batch { arm, batch } => tracing::debug!(
                 core = self.core_id,
                 lsn = lsn.as_u64(),
@@ -287,14 +276,22 @@ pub(super) enum ParkSite {
 }
 
 /// The fail point `site` names at `point`:
-/// `redo_apply::batched::{site}::{arm:?}::{batch}` while the arms run,
-/// `redo_apply::batched::{site}::finish` once they ended, and
-/// `redo_apply::batched::{rollback site}::{arm:?}::{batch}` at the batch a
-/// rollback's checkpoint kept. The sites are `parked` and `hold_parked`,
-/// and `rollback_parked` and `hold_rollback_parked`.
+/// `redo_apply::batched::{validate site}::{batch}` after the validate
+/// walked a batch, `redo_apply::batched::{site}::{arm:?}::{batch}` while
+/// the arms run, `redo_apply::batched::{site}::finish` once they ended,
+/// and `redo_apply::batched::{rollback site}::{arm:?}::{batch}` at the
+/// batch a rollback's checkpoint kept. The sites are `validate_parked` and
+/// `hold_validate_parked`, `parked` and `hold_parked`, and
+/// `rollback_parked` and `hold_rollback_parked`.
 #[cfg(feature = "failpoints")]
 pub(super) fn park_fail_point(point: ParkPoint, site: ParkSite) -> String {
     let (site, at) = match (point, site) {
+        (ParkPoint::Validating { batch }, ParkSite::Parked) => {
+            ("validate_parked", batch.to_string())
+        }
+        (ParkPoint::Validating { batch }, ParkSite::Held) => {
+            ("hold_validate_parked", batch.to_string())
+        }
         (ParkPoint::Batch { arm, batch }, site) => (site.forward(), format!("{arm:?}::{batch}")),
         (ParkPoint::Finish, site) => (site.forward(), "finish".to_owned()),
         (ParkPoint::RollingBack(kept), ParkSite::Parked) => {
@@ -321,13 +318,14 @@ impl ParkSite {
 
 /// The error a parked install's task answers with when the core stopped
 /// before the install ended: `detail` names why. Its durable batches and
-/// cursor stay, and boot completes the record forward, so the code claims
-/// nothing about what applied.
+/// cursor stay, and boot completes the record forward. A validate that
+/// stopped wrote nothing, and boot replays the record from op 0. So the
+/// code claims nothing about what applied.
 pub(super) fn unfinished(lsn: Lsn, detail: &str) -> ErrorCode {
     ErrorCode::Internal {
         detail: format!(
             "the batched install of the committed redo at lsn {} stopped part way: {detail}; \
-             its durable batches complete at the next boot",
+             the next boot completes the record",
             lsn.as_u64()
         ),
     }
@@ -336,7 +334,7 @@ pub(super) fn unfinished(lsn: Lsn, detail: &str) -> ErrorCode {
 /// Add the key of every source and target collection of `sum_targets`, in
 /// database `db`, to `keys`. `false` when a name is no collection name of
 /// `db`: its report is filed.
-fn sum_target_keys(
+pub(super) fn sum_target_keys(
     db: DatabaseId,
     sum_targets: &[RedoSumTargets],
     keys: &mut BTreeSet<FenceKey>,

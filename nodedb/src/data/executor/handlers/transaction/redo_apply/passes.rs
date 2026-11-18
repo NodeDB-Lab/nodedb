@@ -291,6 +291,13 @@ impl ValidateBatches {
         }
     }
 
+    /// The RAM the pass's scope holds between batches.
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.scope
+            .as_ref()
+            .map_or(0, RedoApplyScope::resident_bytes)
+    }
+
     /// Name the batch the next [`CoreLoop::validate_redo_batch`] runs
     /// over. Its errors rank by it.
     pub(super) fn enter_batch(&mut self, batch: u32) {

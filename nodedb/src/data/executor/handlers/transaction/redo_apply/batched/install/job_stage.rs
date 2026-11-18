@@ -34,6 +34,9 @@ pub(super) enum JobStage {
 /// Where a job stands between slices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor::handlers::transaction::redo_apply::batched) enum ParkPoint {
+    /// The validate walked batch `batch`, among every batch of the stream,
+    /// and wrote nothing.
+    Validating { batch: u64 },
     /// The last slice ran batch `batch`, among every batch of the stream,
     /// of `arm`'s pass.
     Batch { arm: RedoArm, batch: u64 },

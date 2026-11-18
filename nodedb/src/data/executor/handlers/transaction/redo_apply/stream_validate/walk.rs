@@ -8,6 +8,7 @@ use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets, ResolvedSumTarg
 use nodedb_types::calvin::VersionedReadEntry;
 
 use crate::data::executor::array_install_flush::ArrayStreamLoads;
+use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::handlers::timeseries::TsStreamLoads;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
@@ -121,8 +122,12 @@ pub(super) struct StreamWalk {
     pub(super) batch: u64,
     /// Op frames seen so far.
     pub(super) ops: u64,
-    /// Reads not checked yet.
+    /// Reads not checked yet. No read stays here past the slice that
+    /// walked it.
     pub(super) reads: Vec<VersionedReadEntry>,
+    /// The collections of the reads checked so far. A yielding install
+    /// fences each before its slice ends.
+    pub(super) read_keys: BTreeSet<FenceKey>,
     /// The instant the KV key images read at, in ms since the Unix epoch.
     pub(super) kv_now_ms: u64,
     pub(super) keyed: BTreeSet<String>,
@@ -146,6 +151,7 @@ impl StreamWalk {
             batch: 0,
             ops: 0,
             reads: Vec::new(),
+            read_keys: BTreeSet::new(),
             kv_now_ms,
             keyed: BTreeSet::new(),
             held: InstallSpools::default(),

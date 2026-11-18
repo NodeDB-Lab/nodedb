@@ -43,6 +43,14 @@ impl ArrayStreamLoads {
     pub(in crate::data::executor) fn arrays(&self) -> impl Iterator<Item = (&ArrayId, usize)> {
         self.cells.iter().map(|(id, cells)| (id, *cells))
     }
+
+    /// An estimate of the RAM the loads hold: each entry and its array name.
+    pub(in crate::data::executor) fn held_bytes(&self) -> usize {
+        self.cells
+            .keys()
+            .map(|id| std::mem::size_of::<(ArrayId, usize)>() + id.name.len())
+            .sum()
+    }
 }
 
 fn flush_error(id: &ArrayId, action: &str, e: impl std::fmt::Display) -> crate::Error {

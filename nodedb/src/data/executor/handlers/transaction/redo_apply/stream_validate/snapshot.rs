@@ -11,8 +11,18 @@
 //! op's writes in the lane the whole-record check lists them in. Each
 //! result is offered under its rank, so the verdict names the row the
 //! whole-record check names.
+//!
+//! Each read is checked once. A row that moves after its chunk passed is
+//! not seen again, so a yielding install fences the collection of every
+//! read it checked before the slice ends (`StreamWalk::read_keys`). A read
+//! that names no collection reads its whole vShard: it checks only on the
+//! task's own vShard, whose writes the fence holds from before the
+//! validate.
+
+use nodedb_types::QualifiedCollection;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::core_loop::txn_validate::TxnWrite;
 use crate::wal::RedoSubRecord;
 
@@ -63,7 +73,8 @@ impl CoreLoop {
     }
 
     /// Check the held reads. A read that moved, or a store that did not
-    /// read, refuses the record at the reads' rank.
+    /// read, refuses the record at the reads' rank. The collection of each
+    /// read checked joins the walk's read keys.
     pub(super) fn flush_stream_reads(
         &mut self,
         walk: &mut StreamWalk,
@@ -75,6 +86,17 @@ impl CoreLoop {
         };
         if reads.is_empty() || !walk.verdict.admits(&Rank::SnapshotReads) {
             return;
+        }
+        let db = input.task.request.database_id;
+        for read in reads.iter().filter(|read| !read.collection.is_empty()) {
+            // A name that is no collection name of `db` names no collection
+            // any write stores to.
+            if let Ok(qualified) = QualifiedCollection::from_request(db, &read.collection) {
+                walk.read_keys.insert(FenceKey::Collection {
+                    db,
+                    name: qualified.as_str().to_owned(),
+                });
+            }
         }
         let vshard = input.task.request.vshard_id.as_u32();
         match self.txn_reads_unchanged(input.task, input.tid, &reads, snapshot) {

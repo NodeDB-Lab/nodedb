@@ -19,11 +19,18 @@
 //! never stops at a check's error: it reads to the end, and stops early only
 //! at a decode or read error. Work whose rank cannot replace the kept error
 //! is skipped. The verdict is the error the whole-record path refuses with.
+//!
+//! The walk runs one batch per step ([`StreamValidation`]). A yielding
+//! install takes one step per slice and gives the core back between them.
+//! Every other caller runs every step in one call.
+
+use std::collections::BTreeSet;
 
 use nodedb_types::calvin::VersionedReadEntry;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::handlers::spill::cleanup::SpillKind;
 use crate::data::io::uring_wal_cursor::UringWalCursor;
 use crate::wal::redo::frame::{
@@ -46,18 +53,68 @@ fn undecodable(error: crate::Error) -> ErrorCode {
     final_refusal(error.into())
 }
 
+/// A streamed validate between its batches: the reader's place in the
+/// stream, and what the walk keeps. It writes nothing durable, so a crash
+/// between its batches leaves the record as it stood before the install.
+pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamValidation {
+    pub(super) batcher: FrameBatcher<RedoStreamReader<UringWalCursor>>,
+    pub(super) walk: StreamWalk,
+}
+
+/// What one slice of a streamed validate did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::data::executor::handlers::transaction::redo_apply) enum ValidateSlice {
+    /// It walked one batch. The stream can hold more.
+    Ran,
+    /// The stream ended: no batch is left to walk.
+    Ended,
+}
+
+impl StreamValidation {
+    /// The index, among the stream's batches, of the batch the last slice
+    /// walked.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn last_batch(&self) -> u64 {
+        self.walk.batch.saturating_sub(1)
+    }
+
+    /// The content header, once a batch held it.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn header(
+        &self,
+    ) -> Option<&StreamHeader> {
+        self.walk.header.as_ref()
+    }
+
+    /// The collections of the reads checked since the last take.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn take_read_keys(
+        &mut self,
+    ) -> BTreeSet<FenceKey> {
+        std::mem::take(&mut self.walk.read_keys)
+    }
+}
+
 impl CoreLoop {
     /// Validate the content of the stream `input` names, before its
-    /// install. `Ok` holds what the install reads, and the post-state until
-    /// the install ran. Nothing is written to any engine.
+    /// install, in one call. `Ok` holds what the install reads, and the
+    /// post-state until the install ran. Nothing is written to any engine.
     pub(in crate::data::executor::handlers::transaction::redo_apply) fn validate_redo_stream(
         &mut self,
         input: &StreamValidateInput<'_>,
     ) -> Result<StreamValidated, ErrorCode> {
+        let mut validation = self.open_stream_validate(input)?;
+        while self.step_stream_validate(&mut validation, input)? == ValidateSlice::Ran {}
+        self.finish_stream_validate(validation, input)
+    }
+
+    /// Open the validate of the stream `input` names, before its first
+    /// batch.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn open_stream_validate(
+        &self,
+        input: &StreamValidateInput<'_>,
+    ) -> Result<StreamValidation, ErrorCode> {
         let reference = input.reference;
         let reader = RedoStreamReader::<UringWalCursor>::open(&self.wal_source, reference.clone())
             .map_err(|error| unreadable(reference, error))?;
-        let mut batcher = FrameBatcher::new(reader, input.limits.batch_bytes);
+        let batcher = FrameBatcher::new(reader, input.limits.batch_bytes);
         let dir = SpillKind::Txn
             .core_dir(&self.data_dir, self.core_id)
             .join(format!("redo-validate-{}", input.lsn.as_u64()));
@@ -67,25 +124,52 @@ impl CoreLoop {
             input.lsn,
             input.limits.spill_threshold,
         );
-        let mut walk = StreamWalk::new(
+        let walk = StreamWalk::new(
             PostState::new(dir, input.limits.spill_threshold),
             space,
             self.kv_read_now_ms(),
         );
-        loop {
-            let batch = match batcher.next_batch() {
-                Ok(Some(batch)) => batch,
-                Ok(None) => break,
-                Err(error) => return Err(unreadable(reference, error)),
-            };
-            self.validate_stream_batch(&mut walk, input, &batch)?;
-            self.validate_stream_arms(&mut walk, input);
-            if walk.verdict.admits(&Rank::Local)
-                && let Err(error) = walk.held.spill_past_threshold(walk.space.space_mut(), 0)
-            {
-                walk.verdict.offer(Rank::Local, post_state_failed(error));
-            }
+        Ok(StreamValidation { batcher, walk })
+    }
+
+    /// Walk the next batch of `validation`. `Err` is the verdict: content
+    /// that does not decode or read refuses at once.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn step_stream_validate(
+        &mut self,
+        validation: &mut StreamValidation,
+        input: &StreamValidateInput<'_>,
+    ) -> Result<ValidateSlice, ErrorCode> {
+        let batch = match validation.batcher.next_batch() {
+            Ok(Some(batch)) => batch,
+            Ok(None) => return Ok(ValidateSlice::Ended),
+            Err(error) => return Err(unreadable(input.reference, error)),
+        };
+        let walk = &mut validation.walk;
+        self.validate_stream_batch(walk, input, &batch)?;
+        self.validate_stream_arms(walk, input);
+        if walk.verdict.admits(&Rank::Local)
+            && let Err(error) = walk.held.spill_past_threshold(walk.space.space_mut(), 0)
+        {
+            walk.verdict.offer(Rank::Local, post_state_failed(error));
         }
+        // No read waits past its slice: the parked validate holds none, and
+        // the slice's caller fences every read it checked. The reads check
+        // in record order and the first failure ranks at
+        // `Rank::SnapshotReads` with a refusal that names no row, so where a
+        // chunk ends changes no verdict.
+        self.flush_stream_reads(walk, input);
+        Ok(ValidateSlice::Ran)
+    }
+
+    /// End `validation` once its stream ended: the checks over the whole
+    /// record run, and the verdict is the error the whole-record path
+    /// refuses with.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn finish_stream_validate(
+        &mut self,
+        validation: StreamValidation,
+        input: &StreamValidateInput<'_>,
+    ) -> Result<StreamValidated, ErrorCode> {
+        let StreamValidation { mut walk, .. } = validation;
         walk.order.finish().map_err(undecodable)?;
         self.flush_stream_reads(&mut walk, input);
         self.finish_stream_collections(&mut walk, input);

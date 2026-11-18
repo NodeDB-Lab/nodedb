@@ -78,6 +78,29 @@ impl TsStreamLoads {
     pub(in crate::data::executor) fn keys(&self) -> impl Iterator<Item = &TsKey> {
         self.loads.keys()
     }
+
+    /// An estimate of the RAM the loads hold: each entry, its collection
+    /// name, and the fresh tag values of each symbol column.
+    pub(in crate::data::executor) fn held_bytes(&self) -> usize {
+        self.loads
+            .iter()
+            .map(|((_, _, collection), load)| {
+                let fresh: usize = load
+                    .fresh
+                    .iter()
+                    .map(|(column, values)| {
+                        std::mem::size_of::<String>()
+                            + column.len()
+                            + values
+                                .iter()
+                                .map(|value| std::mem::size_of::<String>() + value.len())
+                                .sum::<usize>()
+                    })
+                    .sum();
+                std::mem::size_of::<(TsKey, TsStreamLoad)>() + collection.len() + fresh
+            })
+            .sum()
+    }
 }
 
 impl CoreLoop {

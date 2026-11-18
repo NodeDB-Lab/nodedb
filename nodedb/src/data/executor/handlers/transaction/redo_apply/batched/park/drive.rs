@@ -14,7 +14,8 @@
 //! job, and the task answers that its install stopped part way. A core
 //! that stops while the install is parked answers the same way. The
 //! durable batches and the install cursor stay, and the next boot completes
-//! the record forward.
+//! the record forward. A job that stopped in its validate wrote nothing,
+//! and the next boot replays the record from op 0.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

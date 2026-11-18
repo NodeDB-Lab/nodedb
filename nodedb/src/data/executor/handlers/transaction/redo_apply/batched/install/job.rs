@@ -226,12 +226,7 @@ impl StreamInstallJob {
             JobStage::RollingBack { run, .. } => (None, None, run.held_bytes()),
             JobStage::Done => (None, None, 0),
         };
-        let held = scope.map_or(0, |scope| {
-            scope
-                .held
-                .hot_bytes()
-                .saturating_add(scope.target_set_bytes)
-        });
+        let held = scope.map_or(0, RedoApplyScope::resident_bytes);
         let undo = undo.map_or(0, |undo| {
             undo.hot_bytes().saturating_add(undo.pinned_bytes())
         });
