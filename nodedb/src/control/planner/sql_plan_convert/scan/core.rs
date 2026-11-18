@@ -18,6 +18,7 @@ use super::super::scan_params::ScanParams;
 use super::super::value::{
     sql_value_to_bytes, sql_value_to_index_text, sql_value_to_nodedb_value, sql_value_to_string,
 };
+use super::windowed::{convert_windowed_scan, scan_op_evaluates_windows};
 use crate::control::planner::sql_plan_convert::valid_time_point;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -78,6 +79,23 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             post_set_op: PostSetOp::None,
             txn_id: None,
         }]);
+    }
+
+    if !window_functions.is_empty() && !scan_op_evaluates_windows(engine) {
+        return convert_windowed_scan(ScanParams {
+            collection,
+            engine,
+            filters,
+            projection,
+            sort_keys,
+            limit,
+            offset,
+            distinct,
+            window_functions,
+            tenant_id,
+            temporal,
+            database_id,
+        });
     }
 
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
