@@ -359,7 +359,21 @@ impl CoreLoop {
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> crate::Result<()> {
-        self.replay_reconstituted(records, num_cores, tombstones, |core, input| {
+        self.replay_engines_within(records, records, num_cores, tombstones)
+    }
+
+    /// [`Self::replay_engines_in_lsn_order`] over `records`, a part of the
+    /// replayed stream `stream`. A stream marker of `records` reads its
+    /// chunk records from `stream`: they sit below the marker, and can lie
+    /// outside the part.
+    pub(crate) fn replay_engines_within(
+        &mut self,
+        records: &[WalRecord],
+        stream: &[WalRecord],
+        num_cores: usize,
+        tombstones: &nodedb_wal::TombstoneSet,
+    ) -> crate::Result<()> {
+        self.replay_reconstituted(records, stream, num_cores, tombstones, |core, input| {
             for arm in RedoArm::DISPATCH {
                 core.replay_one_arm(arm, input);
                 // A committed-redo apply stops at the first arm error: the
@@ -404,25 +418,27 @@ impl CoreLoop {
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> crate::Result<()> {
-        self.replay_reconstituted(records, num_cores, tombstones, |core, input| {
+        self.replay_reconstituted(records, records, num_cores, tombstones, |core, input| {
             core.replay_one_arm(arm, input);
         })
     }
 
     /// Reconstitute and merge `records`, then hand the arms' input to `run`.
+    /// A stream marker's chunks come from `stream`, which holds `records`.
     fn replay_reconstituted(
         &mut self,
         records: &[WalRecord],
+        stream: &[WalRecord],
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
         run: impl FnOnce(&mut Self, &ArmReplayInput<'_>),
     ) -> crate::Result<()> {
-        // A stream marker's chunks the slice lacks are read back through this
-        // core's io_uring cursor.
+        // A stream marker's chunks the stream lacks are read back through
+        // this core's io_uring cursor.
         let source = self.wal_source().clone();
         let mut fetch =
             |reference: &RedoStreamRef| read_stream_content::<UringWalCursor>(&source, reference);
-        let mut contents = StreamContents::new(records, &mut fetch);
+        let mut contents = StreamContents::new(stream, &mut fetch);
         // An open committed-redo scope tags each error it records with the
         // step that ran (`RedoArm`).
         self.enter_redo_arm(RedoArm::Reconstitute);

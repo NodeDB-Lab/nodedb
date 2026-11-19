@@ -305,12 +305,12 @@ pub async fn await_cluster_ready(
 /// tail, so a fixed bound refuses every boot of a node whose tail outgrew it.
 ///
 /// Returns the write sets every core's replay stored for the never-durable
-/// records it folded.
+/// records it folded, and the verdict on every record it judged.
 async fn await_data_plane_replay(
     replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<crate::wal::ReplayedCaptures>>>,
     gate: &ReadyGate,
 ) -> anyhow::Result<crate::wal::ReplayedCaptures> {
-    let mut captures = Vec::new();
+    let mut captures = crate::wal::ReplayedCaptures::default();
     for rx in replay_done {
         let replayed = match rx.await {
             Ok(replayed) => replayed,
@@ -321,7 +321,10 @@ async fn await_data_plane_replay(
             }
         };
         match replayed {
-            Ok(stored) => captures.extend(stored),
+            Ok(stored) => {
+                captures.captures.extend(stored.captures);
+                captures.verdicts.extend(stored.verdicts);
+            }
             Err(error) => {
                 gate.fail(format!("data plane WAL replay failed: {error}"));
                 return Err(anyhow::anyhow!(
@@ -334,20 +337,28 @@ async fn await_data_plane_replay(
     Ok(captures)
 }
 
-/// Journal the fold rows replay stored for each never-durable record as the
-/// parts of its group, durably, then tell each record's core its write set
-/// is settled. Runs before the node serves, so no point-in-time restore of
-/// the archived WAL sees such a group open. The WAL appends and the sync run
-/// on a blocking thread.
+/// Cancel each record replay refused and close the group of each record it
+/// passed, then journal the fold rows replay stored for each never-durable
+/// record as the parts of its group, durably, then tell each record's core
+/// its write set is settled. Runs before the node serves, so no
+/// point-in-time restore of the archived WAL sees such a group open. The
+/// WAL appends and the syncs run on a blocking thread.
 async fn close_replayed_groups(
     shared: &Arc<SharedState>,
-    captures: crate::wal::ReplayedCaptures,
+    replayed: crate::wal::ReplayedCaptures,
 ) -> crate::Result<()> {
-    if captures.is_empty() {
+    let crate::wal::ReplayedCaptures { captures, verdicts } = replayed;
+    if captures.is_empty() && verdicts.is_empty() {
         return Ok(());
     }
+    let refused = verdicts
+        .iter()
+        .filter(|verdict| verdict.outcome != crate::wal::BootVerdictOutcome::Passed)
+        .count();
+    let judged = verdicts.len();
     let wal = Arc::clone(&shared.wal);
     let captures = tokio::task::spawn_blocking(move || {
+        crate::bootstrap::write_group_settle::close_judged_redos(&wal, &verdicts, &captures)?;
         crate::bootstrap::write_group_settle::close_replayed_groups(&wal, &captures)
             .map(|_| captures)
     })
@@ -367,7 +378,9 @@ async fn close_replayed_groups(
     }
     info!(
         records = captures.len(),
-        "journalled the fold rows of the records WAL replay folded"
+        judged,
+        refused,
+        "journalled the fold rows of the records WAL replay folded, and settled the records it judged"
     );
     Ok(())
 }

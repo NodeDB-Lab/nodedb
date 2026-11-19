@@ -193,20 +193,45 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
             super::spatial::wal_append_spatial_op(wal, tenant_id, vshard_id, database_id, op)?
         }
         // A committed transaction's redo record: one `TransactionRedo` WAL
-        // record per apply, on every replica, in apply order.
+        // record per apply, on every replica, in apply order. Its commit
+        // boundary lands right below it, so boot can validate a record whose
+        // install has no outcome. A Calvin slice's stage vote validated it,
+        // so it carries none. The instant retention is judged at is fixed
+        // here once: the boundary and the dispatched install both carry it.
         PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo {
             redo,
             sum_targets,
+            origin,
+            calvin,
+            reads,
+            snapshot_ordinal,
             ..
         }) => {
             let payload = super::redo_marker::redo_wal_payload(redo, sum_targets)?;
             stream_marker = payload.stream_marker;
-            Some(wal.append_transaction_redo_bytes(
-                tenant_id,
-                vshard_id,
-                database_id,
-                &payload.bytes,
-            )?)
+            if calvin.is_some() {
+                Some(wal.append_transaction_redo_bytes(
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                    &payload.bytes,
+                )?)
+            } else {
+                let judged_at_ms = redo_judged_instant_ms(wal.system_ordinal());
+                resolved_now_ms = u64::try_from(judged_at_ms).ok();
+                Some(wal.append_bounded_transaction_redo_bytes(
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                    &payload.bytes,
+                    crate::wal::CommitBoundary {
+                        origin: *origin,
+                        snapshot_ordinal: *snapshot_ordinal,
+                        reads: reads.clone(),
+                        judged_at_ms,
+                    },
+                )?)
+            }
         }
         // NotAWrite — reads / query ops / control commands. `Meta` durable
         // writes (WAL append, transaction batch, Calvin apply) are logged on
@@ -225,6 +250,22 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
         resolved_now_ms,
         stream_marker,
     })
+}
+
+/// The instant a committed redo's install judges retention at, in ms since
+/// the Unix epoch: the millisecond of the system-time ordinal its records
+/// carry, else the wall clock now.
+fn redo_judged_instant_ms(system_ordinal: Option<i64>) -> i64 {
+    system_ordinal.map_or_else(
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                })
+        },
+        nodedb_types::ordinal_to_ms,
+    )
 }
 
 #[cfg(test)]

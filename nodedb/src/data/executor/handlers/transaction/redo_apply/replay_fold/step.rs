@@ -28,7 +28,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::core_loop::write_set_journal::InstallRows;
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
-use crate::wal::{NeverDurableRedos, ReplayedCaptures};
+use crate::wal::{NeverDurableRedos, WriteSetCapture};
 
 use super::capture::fold_capture;
 use super::state::OpenFold;
@@ -61,7 +61,7 @@ impl CoreLoop {
 
     /// The write sets replay stored for the records it folded. Replay
     /// ended, so the core forgets every fold.
-    pub(crate) fn take_replay_captures(&mut self) -> ReplayedCaptures {
+    pub(crate) fn take_replay_captures(&mut self) -> Vec<WriteSetCapture> {
         self.redo_apply.replay_folds.finish()
     }
 

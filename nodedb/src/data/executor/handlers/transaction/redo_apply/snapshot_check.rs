@@ -7,11 +7,10 @@
 //! write, against the versions this replica stored at the record's log
 //! position. Every replica stored the same versions there, so every one
 //! reaches one verdict, and nothing commits between the check and the
-//! install. Restart replay reinstalls the record through the replay arms
-//! straight from the WAL and never reaches the check: a refused record left
-//! no WAL record behind, since the funnel cancels the record of an apply
-//! that answers with an error, and the durable Raft applied floor names
-//! only records whose WAL record is synced.
+//! install. A refused record leaves no WAL record behind: the funnel
+//! cancels the record of an apply that answers with a refusal. Restart
+//! replay runs the check on a record whose install has no outcome, at the
+//! record's place in the stream, against the commit boundary its WAL holds.
 
 use nodedb_types::calvin::VersionedReadEntry;
 

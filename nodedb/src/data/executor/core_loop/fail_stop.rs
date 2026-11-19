@@ -70,6 +70,10 @@ pub(in crate::data::executor) enum FailStopCause {
     /// A slice of a parked batched install panicked outside its arms. What
     /// the slice changed is unknown.
     InstallPanicked,
+    /// Boot could not judge a committed record with no outcome: its validate
+    /// failed for a reason of this node, not of the record. Applying or
+    /// cancelling the record would decide it without a verdict.
+    BootJudgeUnreadable,
 }
 
 impl FailStopCause {
@@ -87,6 +91,7 @@ impl FailStopCause {
             Self::InstallCursorOrphaned => "install_cursor_orphaned",
             Self::JournalWindowLeaked => "journal_window_leaked",
             Self::InstallPanicked => "install_panicked",
+            Self::BootJudgeUnreadable => "boot_judge_unreadable",
         }
     }
 }

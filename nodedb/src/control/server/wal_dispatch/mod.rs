@@ -32,6 +32,7 @@ pub use system_stamp::stamp_system_ordinals;
 pub use write_set_redo::{
     GroupOrigin, GroupOriginAppend, GroupParts, WriteSetTarget, append_group_origin,
     append_group_parts, append_planned_parts, plan_group_parts, plan_post_apply_redo,
+    plan_record_group,
 };
 
 // Payload encoders shared by the autocommit WAL path and transaction resolve, so

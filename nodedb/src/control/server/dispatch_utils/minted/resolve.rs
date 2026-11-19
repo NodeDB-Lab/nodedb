@@ -40,13 +40,17 @@ pub(crate) async fn resolve_on_response(
             };
             // A refused sync frame advanced its stream's high-water mark. The
             // frame's record is cancelled, so the mark gets a record of its
-            // own, durable with the markers.
+            // own, durable with the markers. The core moved the mark at the
+            // frame's record, so the mark names it.
             if let ErrorCode::SyncRejected { provenance, .. } = code
-                && let Err(error) = wal.appender(marker_key).append_sync_seq_advance(
-                    provenance.producer_id,
-                    provenance.epoch,
-                    provenance.stream_id,
-                    provenance.seq,
+                && let Err(error) = wal.appender(marker_key).append_sync_mark(
+                    nodedb_wal::record::SyncSeqAdvancePayload::new(
+                        provenance.producer_id,
+                        provenance.epoch,
+                        provenance.stream_id,
+                        provenance.seq,
+                    )
+                    .at_frame(minted.first_lsn().map_or(0, |lsn| lsn.as_u64())),
                 )
             {
                 minted.hold();

@@ -12,6 +12,7 @@ use tracing::info;
 
 use super::chain_head::CHAIN_HEADS;
 use super::crdt_dead_letter::CRDT_DEAD_LETTERS;
+use super::redo_boot_verdict::REDO_BOOT_VERDICTS;
 use super::redo_install::{REDO_FOLD_LEDGER, REDO_INSTALL_CURSORS, REDO_INSTALL_TARGETS};
 use super::storage_bytes::SPARSE_COUNTER;
 use super::storage_conversion::STORAGE_CONVERSIONS;
@@ -68,6 +69,9 @@ impl SparseEngine {
             let _ = write_txn
                 .open_table(REDO_INSTALL_CURSORS)
                 .map_err(|e| redb_err("open redo install cursors table", e))?;
+            let _ = write_txn
+                .open_table(REDO_BOOT_VERDICTS)
+                .map_err(|e| redb_err("open redo boot verdicts table", e))?;
         }
         // Read transactions open the stored-bytes counter before any write.
         ensure_storage_bytes_table(&write_txn, SPARSE_COUNTER)?;

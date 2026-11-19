@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod array_restore;
+pub mod boundary;
 pub mod capture;
 pub mod chunk;
 pub mod columnar_restore;
@@ -10,6 +11,7 @@ pub mod frame;
 pub mod group;
 pub(crate) mod install_cursor;
 pub mod installed_document;
+pub mod judge_error;
 pub mod kv_restore;
 pub mod never_durable;
 pub mod node_label;
@@ -22,6 +24,7 @@ pub(crate) mod replay_origin;
 pub mod row_changes;
 pub mod row_sources;
 pub mod stamp_floor;
+pub mod stored_verdict;
 pub mod stream_expand;
 pub mod stream_page;
 pub mod stream_read;
@@ -32,6 +35,9 @@ pub mod timeseries_series_catalog;
 pub mod vector_restore;
 
 pub use array_restore::{ARRAY_RESTORE, ArrayRestoreRedo};
+pub use boundary::{
+    CommitBoundary, RedoBoundary, RedoBoundaryPiece, StoredBoundary, boundaries_in, boundary_of,
+};
 pub use capture::{CapturedEffect, CapturedEntry, OriginAppend, WriteSetCapture};
 pub use chunk::{
     CalvinPositionId, CarriedRedoStream, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord,
@@ -41,8 +47,11 @@ pub use columnar_restore::{COLUMNAR_RESTORE, ColumnarRestoreRedo, ColumnarRestor
 pub use continuation::{ContinuedRedo, SplitRedo, split_redo};
 pub use document::{DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp};
 pub use group::{GroupMembership, WriteGroup, WriteGroupRecord};
+pub use judge_error::RedoJudgeError;
 pub use kv_restore::{KV_RESTORE, KvRestoreLive, KvRestoreRedo, KvRestoreVersion};
-pub use never_durable::{NeverDurableRedos, ReplayedCaptures};
+pub use never_durable::{
+    BootVerdict, BootVerdictOutcome, JudgedRedo, NeverDurableRedos, ReplayedCaptures,
+};
 pub use node_label::NodeLabelRedo;
 pub use record::{
     CalvinStamp, CrossShardAppliedKey, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, PublishPosition,
@@ -50,6 +59,7 @@ pub use record::{
 };
 pub use row_changes::{EVERY_ROW, RedoRowChange, RedoRowKind};
 pub use row_sources::{RedoRowSource, RowSourceIndex};
+pub use stored_verdict::{StoredVerdict, decode_stored_verdicts};
 pub use stream_expand::{ChunkFetch, StreamContents, markers_in};
 pub use stream_page::read_stream_page;
 pub use stream_read::{RedoStreamReader, WalReadSource, WalRecordCursor, read_stream_content};

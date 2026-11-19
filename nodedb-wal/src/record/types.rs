@@ -423,6 +423,17 @@ pub enum RecordType {
     ///
     /// Required: skipping it drops every row the redo writes.
     RedoStreamRef = 70 | 0x8000,
+
+    /// The commit boundary of one committed `TransactionRedo` record: who
+    /// committed it, its snapshot ordinal, its read set and the instant
+    /// retention is judged at. Payload: one `RedoBoundaryPiece` of the
+    /// encoded boundary, which names the redo record's LSN. A boundary
+    /// spreads over as many pieces as its size needs, right below its redo
+    /// record under one WAL lock. Boot validates a record whose install has
+    /// no outcome against it. No engine replays it.
+    ///
+    /// Required: skipping it applies a record boot can not validate.
+    RedoBoundary = 71 | 0x8000,
 }
 
 impl RecordType {
@@ -484,6 +495,7 @@ impl RecordType {
             x if x == 68 | 0x8000 => Some(Self::GraphEdgeCut),
             x if x == 69 | 0x8000 => Some(Self::RedoChunk),
             x if x == 70 | 0x8000 => Some(Self::RedoStreamRef),
+            x if x == 71 | 0x8000 => Some(Self::RedoBoundary),
             _ => None,
         }
     }
@@ -523,6 +535,7 @@ mod tests {
         assert!(RecordType::is_required(RecordType::WriteAborted as u32));
         assert!(RecordType::is_required(RecordType::RedoChunk as u32));
         assert!(RecordType::is_required(RecordType::RedoStreamRef as u32));
+        assert!(RecordType::is_required(RecordType::RedoBoundary as u32));
     }
 
     #[test]
@@ -578,6 +591,7 @@ mod tests {
             RecordType::GraphEdgeCut,
             RecordType::RedoChunk,
             RecordType::RedoStreamRef,
+            RecordType::RedoBoundary,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

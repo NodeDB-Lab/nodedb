@@ -66,6 +66,28 @@ pub fn plan_post_apply_redo(plan: &PhysicalPlan) -> Option<String> {
     }
 }
 
+/// Return `Some(collection)` when the funnel opens a record group for
+/// `plan`: every plan [`plan_post_apply_redo`] names, and a committed
+/// transaction record that names no collection, such as one that only
+/// publishes. Its finished install then leaves a part or a write set, so
+/// boot never judges an installed record again. Such a record writes no
+/// row, so it takes no write-order fence and no other row-write rule: only
+/// its group opens. A Calvin slice that names no collection opens none.
+pub fn plan_record_group(plan: &PhysicalPlan) -> Option<String> {
+    if let Some(collection) = plan_post_apply_redo(plan) {
+        return Some(collection);
+    }
+    let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+        collections,
+        calvin: None,
+        ..
+    }) = plan
+    else {
+        return None;
+    };
+    collections.is_empty().then(String::new)
+}
+
 /// [`plan_post_apply_redo`] for a document op.
 fn document_post_apply_collection(op: &DocumentOp) -> Option<String> {
     match op {
@@ -983,5 +1005,34 @@ mod tests {
             }
         }
         assert_eq!(rows, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    /// A committed record that names no collection, such as one that only
+    /// publishes, opens a group, so its finished install leaves a part. It
+    /// is no row write. A Calvin slice that names none opens none.
+    #[test]
+    fn a_redo_with_no_collection_opens_a_group_and_writes_no_row() {
+        let plan = |calvin: Option<nodedb_physical::physical_plan::CalvinInstall>| {
+            PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+                redo: Vec::new(),
+                collections: Vec::new(),
+                sum_targets: Vec::new(),
+                origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+                calvin,
+                reads: Vec::new(),
+                snapshot_ordinal: None,
+            })
+        };
+        assert_eq!(plan_record_group(&plan(None)), Some(String::new()));
+        assert_eq!(plan_post_apply_redo(&plan(None)), None, "no row write");
+        let calvin = nodedb_physical::physical_plan::CalvinInstall {
+            epoch: 1,
+            position: 0,
+            epoch_system_ms: 1,
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Frozen,
+            user_write: false,
+            mirror: false,
+        };
+        assert_eq!(plan_record_group(&plan(Some(calvin))), None);
     }
 }

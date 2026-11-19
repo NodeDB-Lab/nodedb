@@ -22,19 +22,20 @@ pub(crate) use crdt_payload::{
 };
 pub use manager::WalManager;
 pub use redo::{
-    ARRAY_RESTORE, ArrayRestoreRedo, COLUMNAR_RESTORE, CalvinPositionId, CalvinStamp,
-    CapturedEntry, CarriedRedoStream, ColumnarRestoreRedo, ColumnarRestoreVersion, ContinuedRedo,
-    CrossShardAppliedKey, DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp, EVERY_ROW,
-    EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership, KV_RESTORE, KvRestoreLive,
-    KvRestoreRedo, KvRestoreVersion, NeverDurableRedos, NodeLabelRedo, OriginAppend,
-    PublishPosition, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord, RedoChunkRef, RedoPublish,
-    RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource, RedoStreamId, RedoStreamReader,
-    RedoStreamRef, RedoSubRecord, ReplayedCaptures, RowSourceIndex, SplitRedo,
-    TIMESERIES_ENDED_PARTITION, TIMESERIES_RESTORE, TIMESERIES_SERIES_CATALOG,
-    TimeseriesEndedPartitionRedo, TimeseriesRestoreRedo, TimeseriesSeriesCatalogRedo,
-    VECTOR_RESTORE, VectorRestoreIndex, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo,
-    VectorSidecarVersion, WalReadSource, WriteGroup, WriteGroupRecord, WriteSetCapture, chunk_crc,
-    split_redo,
+    ARRAY_RESTORE, ArrayRestoreRedo, BootVerdict, BootVerdictOutcome, COLUMNAR_RESTORE,
+    CalvinPositionId, CalvinStamp, CapturedEntry, CarriedRedoStream, ColumnarRestoreRedo,
+    ColumnarRestoreVersion, CommitBoundary, ContinuedRedo, CrossShardAppliedKey,
+    DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp, EVERY_ROW, EdgeCutRedo, EdgeDeleteRedo,
+    EdgePutRedo, GroupMembership, JudgedRedo, KV_RESTORE, KvRestoreLive, KvRestoreRedo,
+    KvRestoreVersion, NeverDurableRedos, NodeLabelRedo, OriginAppend, PublishPosition,
+    RedoBoundary, RedoBoundaryPiece, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord,
+    RedoChunkRef, RedoJudgeError, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind,
+    RedoRowSource, RedoStreamId, RedoStreamReader, RedoStreamRef, RedoSubRecord, ReplayedCaptures,
+    RowSourceIndex, SplitRedo, StoredBoundary, TIMESERIES_ENDED_PARTITION, TIMESERIES_RESTORE,
+    TIMESERIES_SERIES_CATALOG, TimeseriesEndedPartitionRedo, TimeseriesRestoreRedo,
+    TimeseriesSeriesCatalogRedo, VECTOR_RESTORE, VectorRestoreIndex, VectorRestoreLive,
+    VectorRestoreNode, VectorRestoreRedo, VectorSidecarVersion, WalReadSource, WriteGroup,
+    WriteGroupRecord, WriteSetCapture, boundaries_in, boundary_of, chunk_crc, split_redo,
 };
 pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;

@@ -8,6 +8,7 @@
 
 mod array_sync;
 mod audit;
+mod boot_judge;
 mod calvin_frozen;
 mod catalog;
 mod change_feed;
@@ -46,6 +47,7 @@ pub(in crate::diag) use audit::{
     AuditFlushNotPersisted, AuditPruneNotApplied, AuditWalAppendFailed, AuditWalNotTruncated,
     SecurityBusLagged, SecurityBusRowsNotRecorded,
 };
+pub(in crate::diag) use boot_judge::{RedoBoundaryMissing, RedoEventSourceUnknown};
 pub(in crate::diag) use calvin_frozen::CalvinFrozenReplyStoreFailed;
 pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, ConsumerGroupOffsetsRetained, MetadataApplyWedged,

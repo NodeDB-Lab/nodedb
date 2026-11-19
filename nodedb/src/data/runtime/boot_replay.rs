@@ -44,7 +44,10 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // must still be skipped. Every per-engine replay method
     // consults the merged set.
     core.replay_all_wal(wal_records, num_cores, tombstones)?;
-    let captures = core.take_replay_captures();
+    let captures = crate::wal::ReplayedCaptures {
+        captures: core.take_replay_captures(),
+        verdicts: core.take_boot_verdicts(),
+    };
 
     // The document history the store kept across the restart, plus every
     // version replay wrote, is charged to the document budget before the

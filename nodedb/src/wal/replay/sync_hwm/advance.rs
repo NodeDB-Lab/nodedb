@@ -137,7 +137,8 @@ pub fn replay_sync_hwm_records(
             | RecordType::SnapshotInstalled
             | RecordType::WriteGroup
             | RecordType::RedoChunk
-            | RecordType::RedoStreamRef => {}
+            | RecordType::RedoStreamRef
+            | RecordType::RedoBoundary => {}
         }
     }
 

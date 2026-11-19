@@ -10,6 +10,7 @@
 
 mod array_sync;
 mod audit;
+mod boot_judge;
 mod calvin_frozen;
 mod catalog;
 mod change_feed;
@@ -47,6 +48,7 @@ pub use audit::{
     audit_flush_not_persisted, audit_prune_not_applied, audit_wal_append_failed,
     audit_wal_not_truncated, security_bus_lagged, security_bus_rows_not_recorded,
 };
+pub use boot_judge::{redo_boundary_missing, redo_event_source_unknown};
 pub use calvin_frozen::calvin_frozen_reply_store_failed;
 pub use catalog::{
     catalog_apply_orphan_row, consumer_group_offsets_retained, metadata_apply_wedged,

@@ -128,7 +128,9 @@ pub fn replay_surrogate_records(
             // the carried identities did not bind first.
             | RecordType::RedoChunk
             // A stream reference names chunks and binds nothing.
-            | RecordType::RedoStreamRef => {}
+            | RecordType::RedoStreamRef
+            // A commit boundary names a redo's reads and binds nothing.
+            | RecordType::RedoBoundary => {}
         }
     }
     Ok(stats)

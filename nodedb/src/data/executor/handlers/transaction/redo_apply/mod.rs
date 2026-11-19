@@ -8,6 +8,10 @@
 //! - [`validate`]: commit-boundary checks that run before any write. The
 //!   Calvin stage runs the same checks on its staged images.
 //! - [`passes`]: the validate and install passes over the replay arms.
+//! - [`whole_validate`]: every check a whole record's install runs before
+//!   its first write.
+//! - [`boot_judge`]: restart replay judges a committed record whose install
+//!   has no outcome, at its place in the stream.
 //! - [`settle`]: the work an install defers until every sub-record landed.
 //! - [`streamed`]: reads of a stream marker's content back from the WAL.
 //! - [`batched`]: the install of a stream marker's content, batch by
@@ -35,6 +39,7 @@
 //! - [`retention_instant_tests`]: retention judged at the entry's instant.
 
 mod batched;
+mod boot_judge;
 #[cfg(test)]
 pub(in crate::data::executor) mod calvin_fold_tests;
 mod calvin_install;
@@ -69,6 +74,7 @@ pub(in crate::data::executor) mod test_commit;
 #[cfg(test)]
 mod unique_handover_tests;
 mod validate;
+mod whole_validate;
 mod write_keys;
 
 pub(in crate::data::executor) use batched::is_park_placeholder;

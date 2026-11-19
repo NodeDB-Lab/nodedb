@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
-use crate::wal::{NeverDurableRedos, ReplayedCaptures};
+use crate::wal::{NeverDurableRedos, WriteSetCapture};
 
 /// The replay folds of one core.
 #[derive(Default)]
@@ -23,7 +23,7 @@ pub(in crate::data::executor) struct ReplayFolds {
     /// The record whose document writes replay folds now.
     pub(super) open: Option<OpenFold>,
     /// The write sets stored for the records replay folded.
-    pub(super) captures: ReplayedCaptures,
+    pub(super) captures: Vec<WriteSetCapture>,
 }
 
 /// The never-durable record the document arm folds now. Its store commits
@@ -120,8 +120,14 @@ impl ReplayFolds {
         targets
     }
 
+    /// The committed records boot settle judged never durable, and the
+    /// records replay judges.
+    pub(in crate::data::executor) fn never_durable(&self) -> &NeverDurableRedos {
+        &self.never_durable
+    }
+
     /// Hand back the stored write sets and forget every fold: replay ended.
-    pub(super) fn finish(&mut self) -> ReplayedCaptures {
+    pub(super) fn finish(&mut self) -> Vec<WriteSetCapture> {
         let captures = std::mem::take(&mut self.captures);
         *self = Self::default();
         captures

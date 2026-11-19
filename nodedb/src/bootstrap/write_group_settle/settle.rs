@@ -23,6 +23,11 @@
 //!   open through replay. Replay folds the record and stores the fold rows
 //!   as a write set. [`close_replayed_groups`] then journals them as the
 //!   group's parts before the node serves.
+//! - A committed record with no stored write set and no part whose commit
+//!   boundary the WAL holds has no outcome. Replay judges it, and its group
+//!   stays open through replay. [`super::judged::close_judged_redos`] then
+//!   cancels a refused record, or closes a passed record's group with one
+//!   part with no rows.
 //!
 //! Restart replay, a point-in-time restore of the archived WAL, and the event
 //! stream rebuilt from it then agree with the stores. Boot makes the appended
@@ -65,7 +70,8 @@ pub fn settle_write_groups(
     records: &[WalRecord],
 ) -> crate::Result<SettleOutcome> {
     let stored = StoredWriteSets::read(data_dir)?;
-    let outcome = settle_against(wal, records, &stored.captures)?;
+    let mut outcome = settle_against(wal, records, &stored.captures)?;
+    stored.settle_verdicts(&mut outcome.never_durable)?;
     if outcome.appended {
         wal.sync()?;
     }
@@ -93,7 +99,13 @@ pub(crate) fn settle_against(
     }
     let never_durable = never_durable_redos(records, &scanned, &captured)?;
     for (&origin, scan) in &scanned.groups {
-        if scan.is_whole() || captured.contains(&origin) || never_durable.contains(origin) {
+        // A judged record's group closes, or its records are cancelled,
+        // once replay reached its verdict.
+        if scan.is_whole()
+            || captured.contains(&origin)
+            || never_durable.contains(origin)
+            || never_durable.judged(origin).is_some()
+        {
             continue;
         }
         if scanned.committed.contains(&origin) {

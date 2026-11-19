@@ -47,12 +47,11 @@ use crate::types::Lsn;
 use crate::wal::{RedoRecord, RedoStreamRef};
 
 use super::batched::{InstallFinish, StreamInstallInput, YieldingStream};
-use super::clone_copy::clone_probe_unreadable;
-use super::passes::{RedoTarget, final_refusal, redo_wal_record};
+use super::passes::{RedoTarget, final_refusal};
 use super::state::TsInstalled;
 use super::stream_validate::{StreamLimits, StreamValidateInput};
-use super::sub_ops::{document_ops, kv_ops, label_ops};
-use super::validate::CommitBoundary;
+use super::sub_ops::{kv_ops, label_ops};
+use super::whole_validate::{WholeValidateInput, WholeValidated};
 
 /// The `MetaOp::ApplyTransactionRedo` fields the handler reads.
 pub(in crate::data::executor) struct CommittedRedo<'a> {
@@ -281,11 +280,14 @@ impl CoreLoop {
             Err(error) => return self.response_error(task, final_refusal(error.into())),
         };
         // Retention is judged at an instant the entry carries: a Calvin
-        // slice's epoch instant, else the system-time ordinal the entry's
-        // leader assigned. So every replica reaches the same verdict. Only a
-        // write with neither reads the wall clock.
+        // slice's epoch instant, else the instant the funnel fixed when it
+        // appended the record, which the record's commit boundary holds too,
+        // else the system-time ordinal the entry's leader assigned. So every
+        // replica, and a boot that judges the record, reaches the same
+        // verdict. Only a write with none reads the wall clock.
+        let funnel_instant = task.resolved_now_ms().and_then(|ms| i64::try_from(ms).ok());
         let judged_at_ms = crate::data::executor::enforcement::retention::judged_instant_ms(
-            judged_at_ms,
+            judged_at_ms.or(funnel_instant),
             task.request.system_ordinal,
         );
         // A stream marker's content is validated as the stream pages in,
@@ -347,36 +349,25 @@ impl CoreLoop {
         }
         let database_id = task.request.database_id.as_u64();
 
-        // A clone copy over a row the target holds writes nothing, so no
-        // check judges it.
-        let doc_ops =
-            match self.without_skipped_clone_copies(database_id, tid, document_ops(&redo.ops)) {
-                Ok(ops) => ops,
-                Err(error) => return self.response_error(task, clone_probe_unreadable(error)),
-            };
-        // Nothing is written when a check refuses the record, so the refusal
-        // is final on every replica. A role-guarded transition is judged
-        // against the roles the record carries.
-        let kv_writes = kv_ops(&redo.ops);
-        if let Err(error) = self.check_commit_boundary(&CommitBoundary {
-            database_id,
+        // Every check runs before the first write, and a refusal writes
+        // nothing.
+        let validated = self.validate_whole_redo(&WholeValidateInput {
+            task,
             tid,
-            documents: &doc_ops,
-            kv: &kv_writes,
+            lsn,
+            redo: &redo,
+            redo_bytes: committed.redo,
             sum_targets: committed.sum_targets,
             origin,
-            user_roles: &redo.user_roles,
+            snapshot,
             judged_at_ms,
-        }) {
-            return self.response_error(task, error);
-        }
-        let kv_images = self.kv_prior_images(database_id, tid, kv_writes);
-        let labels = label_ops(&redo.ops);
-
-        let record = match redo_wal_record(task, lsn, committed.redo.to_vec()) {
-            Ok(record) => record,
+        });
+        let WholeValidated { doc_ops, record } = match validated {
+            Ok(validated) => validated,
             Err(code) => return self.response_error(task, code),
         };
+        let kv_images = self.kv_prior_images(database_id, tid, kv_ops(&redo.ops));
+        let labels = label_ops(&redo.ops);
         let target = RedoTarget {
             record: &record,
             sub_records: redo.ops.len(),
@@ -384,17 +375,6 @@ impl CoreLoop {
             tid,
             origin,
         };
-        if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
-            return self.response_error(task, refusal.into_code());
-        }
-        // A snapshot transaction commits only while nothing it read or
-        // replaces moved past its snapshot. Nothing is written yet.
-        if let Some(snapshot) = snapshot
-            && let Err(refusal) =
-                self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
-        {
-            return self.response_error(task, refusal);
-        }
         // The replay arms install the record. Each write they apply takes the
         // record's stamp: its vShard and its LSN.
         let stamp = self.task_write_stamp_at(task, lsn);

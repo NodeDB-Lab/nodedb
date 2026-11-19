@@ -155,7 +155,9 @@ fn crash_after_installing(plan: PhysicalPlan, live_balance: &str) -> Crashed {
     }
 }
 
-/// The stores under `dir` as a power loss at this instant leaves them.
+/// The stores under `dir` as a power loss at this instant leaves them, with
+/// the core's WAL directory: a booted core reads stream chunks from it, as
+/// a node reads its own WAL.
 pub(in crate::data::executor::handlers::transaction::redo_apply) fn crash_image(
     dir: &Path,
 ) -> tempfile::TempDir {
@@ -164,6 +166,18 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn crash_image(
         let to = image.path().join(store);
         std::fs::create_dir_all(to.parent().expect("parent")).expect("mkdir");
         std::fs::copy(dir.join(store), &to).expect("copy store");
+    }
+    let wal = dir.join("wal");
+    if wal.is_dir() {
+        let to = image.path().join("wal");
+        std::fs::create_dir_all(&to).expect("mkdir wal");
+        for entry in std::fs::read_dir(&wal).expect("read wal dir") {
+            let path = entry.expect("wal entry").path();
+            if path.is_file() {
+                let name = path.file_name().expect("file name");
+                std::fs::copy(&path, to.join(name)).expect("copy wal file");
+            }
+        }
     }
     image
 }
@@ -177,7 +191,10 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn settle(
     let records = wal.replay().expect("replay");
     let outcome = {
         let stored = StoredWriteSets::read(stores).expect("read write sets");
-        let outcome = settle_against(wal, &records, &stored.captures).expect("settle");
+        let mut outcome = settle_against(wal, &records, &stored.captures).expect("settle");
+        stored
+            .settle_verdicts(&mut outcome.never_durable)
+            .expect("settle verdicts");
         stored.clear().expect("clear");
         outcome
     };

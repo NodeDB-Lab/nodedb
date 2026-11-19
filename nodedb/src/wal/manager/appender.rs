@@ -218,6 +218,81 @@ impl WalAppender<'_> {
         self.append_target(target, tenant_id, vshard_id, database_id, payload)
     }
 
+    /// Append the records `build` returns one after another under one WAL
+    /// lock, so no other record lands between them. `build` receives the
+    /// LSN the first record takes. Each item names its record type, whether
+    /// it is a row-write record, and its payload. Only a row-write record
+    /// carries this appender's apply key: the rest of a run marks no
+    /// proposal applied. `run_bytes` bounds the run's size on disk: a run
+    /// that does not fit the active segment starts a new one. Returns each
+    /// record's LSN.
+    pub(super) fn append_contiguous(
+        &self,
+        tenant_id: TenantId,
+        vshard_id: VShardId,
+        database_id: DatabaseId,
+        run_bytes: u64,
+        build: impl FnOnce(u64) -> crate::Result<Vec<(RecordType, bool, Vec<u8>)>>,
+    ) -> crate::Result<Vec<Lsn>> {
+        let mut wal = self.wal.wal.lock().unwrap_or_else(|p| p.into_inner());
+        // A roll inside the run would put the roll's time anchor between its
+        // records. It runs first, so the run's LSNs follow `next_lsn`.
+        wal.roll_for_run(run_bytes).map_err(crate::Error::Wal)?;
+        let items = build(wal.next_lsn())?;
+        // A refused item refuses the whole run before any record lands.
+        if let Some((record_type, _, _)) = items
+            .iter()
+            .find(|(_, row, _)| *row && self.event_source == nodedb_wal::NO_EVENT_SOURCE)
+        {
+            return Err(crate::Error::Internal {
+                detail: format!(
+                    "WAL append: a {record_type:?} row-write record needs the event source \
+                     of its write; the appender names none"
+                ),
+            });
+        }
+        let mut lsns = Vec::with_capacity(items.len());
+        for (record_type, row, payload) in items {
+            let target = RecordTarget {
+                record_type: record_type as u32,
+                tenant_id: tenant_id.as_u64(),
+                vshard_id: vshard_id.as_u32(),
+                database_id: database_id.as_u64(),
+                event_source: if row {
+                    self.event_source
+                } else {
+                    nodedb_wal::NO_EVENT_SOURCE
+                },
+                commit_hlc: self.record_hlc(),
+                system_ordinal: self.system_ordinal,
+            };
+            let lsn = Lsn::new(
+                wal.append_keyed_in_run(
+                    target,
+                    &payload,
+                    if row { self.apply_key } else { NO_APPLY_KEY },
+                )
+                .map_err(crate::Error::Wal)?,
+            );
+            if let Some(sink) = self.sink {
+                sink.record(RecordedAppend {
+                    lsn,
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                });
+            }
+            lsns.push(lsn);
+        }
+        Ok(lsns)
+    }
+
+    /// The system-time ordinal every record this appender writes carries.
+    /// `None` when it names none.
+    pub fn system_ordinal(&self) -> Option<i64> {
+        (self.system_ordinal != nodedb_wal::NO_SYSTEM_ORDINAL).then_some(self.system_ordinal)
+    }
+
     fn append_target(
         &self,
         target: RecordTarget,

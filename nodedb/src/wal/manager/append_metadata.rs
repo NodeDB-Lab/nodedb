@@ -164,9 +164,21 @@ impl WalAppender<'_> {
         stream_id: u64,
         seq: u64,
     ) -> crate::Result<Lsn> {
-        let payload =
-            nodedb_wal::record::SyncSeqAdvancePayload::new(producer_id, epoch, stream_id, seq)
-                .to_bytes();
+        self.append_sync_mark(nodedb_wal::record::SyncSeqAdvancePayload::new(
+            producer_id,
+            epoch,
+            stream_id,
+            seq,
+        ))
+    }
+
+    /// Append the `SyncSeqAdvance` record `mark`. A mark that names its
+    /// frame's record takes effect at that record in replay.
+    pub fn append_sync_mark(
+        &self,
+        mark: nodedb_wal::record::SyncSeqAdvancePayload,
+    ) -> crate::Result<Lsn> {
+        let payload = mark.to_bytes();
         self.append_record(
             RecordType::SyncSeqAdvance,
             TenantId::new(0),

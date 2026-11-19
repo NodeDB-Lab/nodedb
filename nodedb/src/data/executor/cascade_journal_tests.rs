@@ -232,6 +232,8 @@ fn a_crdt_document_delete_leaves_its_nodes_edges() {
 
 /// A committed transaction record whose install never became durable keeps
 /// applying: boot closes its group with an empty part and never cancels it.
+/// A Calvin slice's record carries no commit boundary, so boot closes its
+/// broken group before replay and replays it with no validate.
 #[test]
 fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -243,7 +245,12 @@ fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
     let redo = RedoRecord {
         version: 1,
         ops: Vec::new(),
-        calvin_stamp: None,
+        calvin_stamp: Some(crate::wal::CalvinStamp {
+            epoch: 1,
+            position: 0,
+            vshard_id: 0,
+            mirror_database: None,
+        }),
         cross_shard_applied: None,
         row_sources: Vec::new(),
         publishes: Vec::new(),

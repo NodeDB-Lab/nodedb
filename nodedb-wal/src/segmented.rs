@@ -227,6 +227,38 @@ impl SegmentedWal {
         self.writer.append_keyed(target, payload, apply_key)
     }
 
+    /// Roll to a new segment before a run of `run_bytes` when the active one
+    /// reached its target, or holds a record and has no room left for the
+    /// run.
+    ///
+    /// A caller that appends a run of records with
+    /// [`Self::append_keyed_in_run`] calls it first. A roll syncs the old
+    /// segment, and the sync appends a time anchor, which takes an LSN. Done
+    /// before the run, no record of the WAL's own lands inside it, so the
+    /// run's LSNs follow [`Self::next_lsn`] one by one. A segment overshoots
+    /// its target only by a run larger than a whole segment, and only by
+    /// that run.
+    pub fn roll_for_run(&mut self, run_bytes: u64) -> Result<()> {
+        let offset = self.writer.file_offset();
+        let holds_record = self.writer.next_lsn() > self.active_first_lsn;
+        let no_room = holds_record && offset.saturating_add(run_bytes) > self.segment_target_size;
+        if offset >= self.segment_target_size || no_room {
+            self.roll_segment()?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::append_keyed`] with no segment roll: one record of a run
+    /// that stays in the active segment, past its target when it must.
+    pub fn append_keyed_in_run(
+        &mut self,
+        target: RecordTarget,
+        payload: &[u8],
+        apply_key: u64,
+    ) -> Result<u64> {
+        self.writer.append_keyed(target, payload, apply_key)
+    }
+
     /// Flush all buffered records and fsync the active segment.
     pub fn sync(&mut self) -> Result<()> {
         self.writer.sync()

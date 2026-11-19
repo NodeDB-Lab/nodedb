@@ -84,7 +84,9 @@ impl CoreLoop {
         // Fatal on error: a redo group that cannot be reconstituted is a
         // committed transaction that cannot be applied, and continuing would
         // open the database with a hole in the replayed suffix.
-        let replayed = self.replay_engines_in_lsn_order(records, num_cores, tombstones);
+        // A committed record whose install has no outcome is judged at its
+        // place in the stream, as its live install would have judged it.
+        let replayed = self.replay_engines_judging(records, num_cores, tombstones);
         self.apply_scope.journaled = previous_journaled;
         // Replay is over: no arm applies a registered record again.
         self.record_stamps.clear();

@@ -143,6 +143,13 @@ impl MintedRecords {
         self.sent.store(true, Ordering::Release);
     }
 
+    /// The LSN of the write's first record: the record this set resends,
+    /// or the first one it appended.
+    pub(crate) fn first_lsn(&self) -> Option<Lsn> {
+        self.resent
+            .or_else(|| self.recorded().first().map(|record| record.lsn))
+    }
+
     /// Every appended LSN, in append order.
     #[cfg(test)]
     pub(crate) fn lsns(&self) -> Vec<Lsn> {

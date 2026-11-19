@@ -115,7 +115,10 @@ pub(crate) async fn enqueue_write(
     // its apply decides journals them AFTER apply, from the surrogate +
     // post-image the Data Plane returns in `Response::write_set`.
     // `Some(collection)` for such a write, else `None`.
-    let post_apply = wal_dispatch::plan_post_apply_redo(&plan);
+    // A committed record that writes no row still opens its group. Only a
+    // write that stores rows holds its guards across the response.
+    let post_apply = wal_dispatch::plan_record_group(&plan);
+    let stores_rows = wal_dispatch::plan_post_apply_redo(&plan).is_some();
     let appends_here = matches!(&durability, WalDurability::AppendHere { .. });
     // A write that appends its own records journals the rows its apply
     // decides as its record group. A write whose records live elsewhere,
@@ -395,7 +398,7 @@ pub(crate) async fn enqueue_write(
             _unscheduled: unscheduled,
             _write_order: write_order,
         },
-        post_apply.is_some(),
+        stores_rows,
         waits_for_capacity,
     )
     .await;

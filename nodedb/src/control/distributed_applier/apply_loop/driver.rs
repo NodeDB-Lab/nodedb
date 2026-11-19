@@ -29,11 +29,46 @@ pub async fn run_apply_loop(
     state: Arc<SharedState>,
     tracker: Arc<ProposeTracker>,
 ) {
-    // Proposals this node already applied, recovered from its WAL before any
-    // entry is delivered: every record an entry's apply appended carries the
-    // entry's idempotency key in its header.
-    let records = match state.wal.replay() {
-        Ok(records) => records,
+    let Some(ledger) = recover_ledger(&state.startup, &state.wal).await else {
+        return;
+    };
+    // Change events of this node's writes take Raft log positions from here on.
+    state.cdc_router.positions().mark_replicated();
+
+    let ctx = ApplyContext {
+        state: &state,
+        tracker: &tracker,
+    };
+    let mut pipeline = Pipeline::new(ctx, ledger);
+    drive(&mut pipeline, &mut apply_rx, &state).await;
+}
+
+/// The proposals this node already applied, recovered from its WAL before
+/// any entry is delivered: every record an entry's apply appended carries
+/// the entry's idempotency key in its header. Boot cancels each committed
+/// record its replay refused before the data plane replay phase ends, so
+/// the WAL is read after that phase: a cancelled record never counts as
+/// applied. `None` refuses to apply anything, and the loop stops.
+async fn recover_ledger(
+    startup: &crate::control::startup::StartupGate,
+    wal: &crate::wal::WalManager,
+) -> Option<ProposalLedger> {
+    if let Err(error) = startup
+        .await_phase(crate::control::startup::StartupPhase::DataPlaneReplay)
+        .await
+    {
+        tracing::error!(
+            %error,
+            "data-group apply loop: boot stopped before the data plane replay settled its \
+             records; refusing to apply committed entries"
+        );
+        return None;
+    }
+    match wal.replay() {
+        Ok(records) => Some(ProposalLedger::from_records(
+            &records,
+            PROPOSAL_LEDGER_CAPACITY,
+        )),
         Err(error) => {
             // Without the keys an entry re-delivered above the durable floor,
             // or a second committed copy of a proposal, applies a second
@@ -44,20 +79,9 @@ pub async fn run_apply_loop(
                 "data-group apply loop cannot read its WAL to recover applied proposals; \
                  refusing to apply committed entries"
             );
-            return;
+            None
         }
-    };
-    let ledger = ProposalLedger::from_records(&records, PROPOSAL_LEDGER_CAPACITY);
-    drop(records);
-    // Change events of this node's writes take Raft log positions from here on.
-    state.cdc_router.positions().mark_replicated();
-
-    let ctx = ApplyContext {
-        state: &state,
-        tracker: &tracker,
-    };
-    let mut pipeline = Pipeline::new(ctx, ledger);
-    drive(&mut pipeline, &mut apply_rx, &state).await;
+    }
 }
 
 /// Feed `pipeline` from `apply_rx` and its wakes until the channel closes and
@@ -126,5 +150,58 @@ async fn wait_install_released(released: &mut Option<watch::Receiver<u64>>) {
             }
         }
         None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use crate::control::startup::{StartupPhase, StartupSequencer};
+    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::wal::WalManager;
+    use crate::wal::manager::NO_APPLY_KEY;
+
+    /// The ledger is read only once the data plane replay phase is reached.
+    /// A record boot cancels before then never counts as applied, so its
+    /// entry applies again when it is delivered.
+    #[tokio::test]
+    async fn the_ledger_waits_for_the_boot_cancels() {
+        const KEY: u64 = 0xCA9C;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("w.wal")).expect("wal"));
+        let (t, v, d) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
+        let lsn = wal
+            .appender(KEY)
+            .with_event_source(crate::event::EventSource::User)
+            .append_put(t, v, d, b"row")
+            .expect("append");
+        wal.sync().expect("sync");
+
+        let (sequencer, startup) = StartupSequencer::new();
+        let replay = sequencer.register_gate(StartupPhase::DataPlaneReplay, "data-plane-replay");
+        let _hold = sequencer.register_gate(StartupPhase::RaftMetadataReplay, "hold");
+        let reader = {
+            let (startup, wal) = (Arc::clone(&startup), Arc::clone(&wal));
+            tokio::spawn(async move { recover_ledger(&startup, &wal).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !reader.is_finished(),
+            "the ledger waits for the replay phase"
+        );
+
+        // Boot cancels the record its replay refused, with no proposal key,
+        // then ends the replay phase.
+        wal.appender(NO_APPLY_KEY)
+            .append_write_aborted(t, v, d, Lsn::new(lsn.as_u64()))
+            .expect("cancel");
+        wal.sync().expect("sync");
+        replay.fire();
+
+        let ledger = reader.await.expect("reader").expect("ledger");
+        assert!(
+            ledger.prior(KEY).is_none(),
+            "a cancelled record is not applied"
+        );
     }
 }

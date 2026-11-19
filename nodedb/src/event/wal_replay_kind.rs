@@ -136,6 +136,9 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         | RecordType::RedoChunk
         // A stream reference is a sub-record that names those chunks. Every
         // reader of the whole WAL rebuilds the rows it names.
-        | RecordType::RedoStreamRef => None,
+        | RecordType::RedoStreamRef
+        // A commit boundary names what a redo's install validates. It
+        // writes no row.
+        | RecordType::RedoBoundary => None,
     }
 }

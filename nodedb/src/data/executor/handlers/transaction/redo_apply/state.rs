@@ -47,6 +47,13 @@ pub(in crate::data::executor) struct RedoApplyState {
     /// replay completes each one's record, then boot drops them. Empty
     /// outside boot replay.
     pub(in crate::data::executor) install_cursors: crate::wal::redo::install_cursor::InstallCursors,
+    /// The verdicts restart replay reached on the records it judged, until
+    /// boot takes them. Empty outside boot replay.
+    pub(in crate::data::executor) boot_verdicts: Vec<crate::wal::BootVerdict>,
+    /// The durable commits that stored boot verdicts, for the tests that
+    /// bound them.
+    #[cfg(test)]
+    pub(in crate::data::executor) boot_verdict_commits: u64,
     /// The stream install that gave the core back between its slices, with
     /// its task. `tick()` runs one slice of it per tick.
     pub(in crate::data::executor) parked: Option<Box<super::batched::ParkedInstall>>,
@@ -98,6 +105,9 @@ impl RedoApplyState {
             scope: None,
             replay_folds: Default::default(),
             install_cursors: Default::default(),
+            boot_verdicts: Vec::new(),
+            #[cfg(test)]
+            boot_verdict_commits: 0,
             parked: None,
             parking: None,
             yield_grant: false,

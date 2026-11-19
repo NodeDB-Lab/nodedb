@@ -573,13 +573,8 @@ fn rollback_removes_install_partitions() {
             .exists(),
         "every revert finished"
     );
-    assert!(node.core.ts_replay.stamps.get(&metrics_key()).is_none());
-    assert!(
-        node.core
-            .columnar_memtable_mem
-            .get(&metrics_key())
-            .is_none()
-    );
+    assert!(!node.core.ts_replay.stamps.contains_key(&metrics_key()));
+    assert!(!node.core.columnar_memtable_mem.contains_key(&metrics_key()));
 }
 
 #[cfg(feature = "failpoints")]
