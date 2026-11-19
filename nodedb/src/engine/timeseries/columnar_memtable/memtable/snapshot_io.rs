@@ -223,8 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_roundtrip_dict_encoded_column_rebuilds_reverse() {
-        // Construct a DictEncoded snapshot directly (bypass ingest path).
+    fn a_dictionary_encoded_column_for_a_symbol_schema_type_is_refused() {
+        // The schema type `Symbol` builds a `Symbol` column. A dictionary-encoded
+        // column would stop the partition writer and the grouped filter.
         let snap = MemtableSnapshot {
             schema_columns: vec![
                 ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
@@ -246,24 +247,37 @@ mod tests {
             max_ts: 3000,
         };
 
+        let result = ColumnarMemtable::from_snapshot(snap, default_config());
+        assert!(
+            matches!(result, Err(crate::Error::BadRequest { .. })),
+            "expected BadRequest for a column with the wrong encoding"
+        );
+    }
+
+    #[test]
+    fn a_column_whose_encoding_matches_its_schema_type_is_accepted() {
+        let snap = MemtableSnapshot {
+            schema_columns: vec![
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                ("tag".into(), ColumnType::Symbol),
+                ("value".into(), ColumnType::Float64),
+            ],
+            timestamp_idx: 0,
+            columns: vec![
+                ColumnSnapshot::Timestamp(vec![1000, 2000]),
+                ColumnSnapshot::Symbol(vec![0, 1]),
+                ColumnSnapshot::Float64(vec![1.0, 2.0]),
+            ],
+            symbol_dicts: vec![],
+            series_row_counts: vec![],
+            row_count: 2,
+            min_ts: 1000,
+            max_ts: 2000,
+        };
+
         let mt = ColumnarMemtable::from_snapshot(snap, default_config()).expect("from_snapshot");
-        assert_eq!(mt.row_count(), 3);
-        // Verify the DictEncoded column has correct data.
-        match mt.column(1) {
-            ColumnData::DictEncoded {
-                ids,
-                dictionary,
-                reverse,
-                valid,
-            } => {
-                assert_eq!(ids, &[0u32, 1, 0]);
-                assert_eq!(dictionary, &["alpha", "beta"]);
-                assert_eq!(reverse.get("alpha"), Some(&0u32));
-                assert_eq!(reverse.get("beta"), Some(&1u32));
-                assert_eq!(valid, &[true, true, true]);
-            }
-            other => panic!("expected DictEncoded, got {:?}", other),
-        }
+        assert_eq!(mt.row_count(), 2);
+        assert!(matches!(mt.column(1), ColumnData::Symbol(_)));
     }
 
     #[test]
