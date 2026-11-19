@@ -169,3 +169,17 @@ fn a_window_function_still_plans_a_scan() {
         "the index lookup evaluates no window function"
     );
 }
+
+#[test]
+fn an_equality_with_a_null_literal_plans_a_scan_not_an_index_lookup() {
+    for sql in [
+        "SELECT id FROM turns WHERE session_id = NULL",
+        "SELECT id FROM turns WHERE NULL = session_id",
+        "SELECT id FROM turns WHERE agent_id = 'a1' AND session_id = NULL",
+    ] {
+        assert!(
+            lookup_of(plan_one(sql)).is_none(),
+            "a NULL equality matches no row and must not probe the index: {sql}"
+        );
+    }
+}

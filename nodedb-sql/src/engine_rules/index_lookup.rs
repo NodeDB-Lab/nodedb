@@ -192,7 +192,8 @@ pub(crate) fn find_indexed_equality<'a>(
 }
 
 /// Every `(column_name, equality_value, residual_expr)` a filter offers as an
-/// index lookup: one per column-equals-literal conjunct. The residual is the
+/// index lookup: one per column-equals-literal conjunct. A NULL literal offers
+/// none: `col = NULL` matches no row, and the index holds no NULL key. The residual is the
 /// rest of the conjunction with that equality removed, in the original order
 /// — `None` when the filter was a bare equality. Empty when the filter holds
 /// no usable equality.
@@ -202,7 +203,7 @@ fn equality_candidates(expr: &FilterExpr) -> Vec<(String, SqlValue, Option<SqlEx
             field,
             op: CompareOp::Eq,
             value,
-        } => vec![(field.clone(), value.clone(), None)],
+        } if !matches!(value, SqlValue::Null) => vec![(field.clone(), value.clone(), None)],
         FilterExpr::Expr(sql_expr) => equalities_from_expr(sql_expr),
         _ => Vec::new(),
     }
@@ -310,8 +311,8 @@ fn is_column_eq_literal(expr: &SqlExpr) -> bool {
         SqlExpr::BinaryOp { left, op: BinaryOp::Eq, right }
             if matches!(
                 (left.as_ref(), right.as_ref()),
-                (SqlExpr::Column { .. }, SqlExpr::Literal(_))
-                | (SqlExpr::Literal(_), SqlExpr::Column { .. }),
+                (SqlExpr::Column { .. }, SqlExpr::Literal(v))
+                | (SqlExpr::Literal(v), SqlExpr::Column { .. }) if !matches!(v, SqlValue::Null),
             )
     )
 }
