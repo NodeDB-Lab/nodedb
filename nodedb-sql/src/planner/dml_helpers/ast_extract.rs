@@ -151,4 +151,36 @@ mod tests {
         assert!(keys_for("id = 'a'"));
         assert!(keys_for("id IN ('a', 'b')"));
     }
+
+    fn bound_selection_yields_key(sql: &str, params: &[crate::params::ParamValue]) -> bool {
+        let mut stmt = crate::parser::statement::parse_sql(sql)
+            .expect("parse")
+            .remove(0);
+        crate::params::bind_params(&mut stmt, params);
+        let selection = match &stmt {
+            ast::Statement::Delete(d) => d.selection.clone(),
+            ast::Statement::Update(u) => u.selection.clone(),
+            other => panic!("not a DML statement: {other}"),
+        };
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut keys = Vec::new();
+        collect_pk_equalities(&selection.expect("WHERE"), "id", &mut keys, &crs)
+    }
+
+    #[test]
+    fn bound_null_param_is_not_a_point_key() {
+        use crate::params::ParamValue;
+        assert!(!bound_selection_yields_key(
+            "DELETE FROM t WHERE id = $1",
+            &[ParamValue::Null]
+        ));
+        assert!(!bound_selection_yields_key(
+            "UPDATE t SET v = 1 WHERE id = $1",
+            &[ParamValue::Null]
+        ));
+        assert!(bound_selection_yields_key(
+            "DELETE FROM t WHERE id = $1",
+            &[ParamValue::Text("a".into())]
+        ));
+    }
 }
