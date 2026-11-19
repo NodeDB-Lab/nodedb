@@ -202,7 +202,7 @@ pub(crate) fn eval_filters_bitmask(
                         let a = (rt.gte_i64)(slice, fv);
                         let b = (rt.lte_i64)(slice, fv);
                         let eq = simd_filter::bitmask_and(&a, &b);
-                        simd_filter::bitmask_not(&eq, row_count)
+                        simd_filter::bitmask_not(&eq, slice.len())
                     }
                     _ => return None,
                 }
@@ -227,7 +227,7 @@ pub(crate) fn eval_filters_bitmask(
                         let a = (rt.gte_i64)(slice, fv);
                         let b = (rt.lte_i64)(slice, fv);
                         let eq = simd_filter::bitmask_and(&a, &b);
-                        simd_filter::bitmask_not(&eq, row_count)
+                        simd_filter::bitmask_not(&eq, slice.len())
                     }
                     _ => return None,
                 }
