@@ -69,7 +69,10 @@ impl AggAccum {
                     .collect();
                 Value::Array(arr)
             }
+            // No input row is NULL, as in SQL.
+            AggAccum::ArrayAgg { values } if values.is_empty() => Value::Null,
             AggAccum::ArrayAgg { values } => Value::Array(values),
+            AggAccum::ArrayAggDistinct { values, .. } if values.is_empty() => Value::Null,
             AggAccum::ArrayAggDistinct { values, .. } => {
                 Value::Array(values.into_iter().map(|(_, value)| value).collect())
             }
