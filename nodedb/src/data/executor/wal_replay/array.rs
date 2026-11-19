@@ -88,6 +88,19 @@ impl CoreLoop {
         Ok(ArrayOpen::Ready)
     }
 
+    /// Whether a sub-record of an array with no catalog entry is a skip.
+    /// A committed-redo apply holds one: the array was dropped after the
+    /// commit, on every replica. The validate pass claims the sub-record and
+    /// no error is recorded. Outside a committed-redo apply the caller
+    /// reports the missing entry itself.
+    pub(in crate::data::executor) fn skip_dropped_array_in_redo(&mut self) -> bool {
+        if !self.applying_committed_redo() {
+            return false;
+        }
+        self.claim_for_validation();
+        true
+    }
+
     /// In the install pass of a committed-redo apply, record the memtable
     /// tiles a cell write touches and the sync high-water mark it advances.
     /// Returns `false` when the tiles cannot be read; the error is kept on
@@ -221,15 +234,17 @@ impl CoreLoop {
                 match self.ensure_array_open_for_replay(&payload.array_id) {
                     Ok(ArrayOpen::Ready) => {}
                     Ok(ArrayOpen::NoCatalogEntry) => {
-                        self.replay_record_rejected(
-                            "array",
-                            record_lsn,
-                            None,
-                            &format!(
-                                "array '{}' has no catalog entry; its retained cells are skipped",
-                                payload.array_id.name
-                            ),
-                        );
+                        if !self.skip_dropped_array_in_redo() {
+                            self.replay_record_rejected(
+                                "array",
+                                record_lsn,
+                                None,
+                                &format!(
+                                    "array '{}' has no catalog entry; its retained cells are skipped",
+                                    payload.array_id.name
+                                ),
+                            );
+                        }
                         skipped += 1;
                         continue;
                     }
@@ -342,15 +357,17 @@ impl CoreLoop {
             match self.ensure_array_open_for_replay(&payload.array_id) {
                 Ok(ArrayOpen::Ready) => {}
                 Ok(ArrayOpen::NoCatalogEntry) => {
-                    self.replay_record_rejected(
-                        "array",
-                        record_lsn,
-                        None,
-                        &format!(
-                            "array '{}' has no catalog entry; its retained tombstones are skipped",
-                            payload.array_id.name
-                        ),
-                    );
+                    if !self.skip_dropped_array_in_redo() {
+                        self.replay_record_rejected(
+                            "array",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "array '{}' has no catalog entry; its retained tombstones are skipped",
+                                payload.array_id.name
+                            ),
+                        );
+                    }
                     skipped += 1;
                     continue;
                 }

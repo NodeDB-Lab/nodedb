@@ -27,7 +27,8 @@ pub(super) enum RestoreReplay {
     Applied { cells: usize, in_flight: bool },
     /// The record installed nothing.
     Skipped,
-    /// A validate pass claimed the record: nothing is written.
+    /// A validate pass claimed the record, or a committed redo names a dropped
+    /// array: nothing is written.
     Claimed,
 }
 
@@ -58,6 +59,9 @@ impl CoreLoop {
         match self.ensure_array_open_for_replay(&array_id) {
             Ok(ArrayOpen::Ready) => {}
             Ok(ArrayOpen::NoCatalogEntry) => {
+                if self.skip_dropped_array_in_redo() {
+                    return RestoreReplay::Claimed;
+                }
                 self.replay_record_rejected(
                     "array",
                     record_lsn,

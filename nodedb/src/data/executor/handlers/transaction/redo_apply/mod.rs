@@ -49,6 +49,8 @@ mod clone_copy;
 #[cfg(test)]
 mod cross_shard_fold_tests;
 mod document;
+#[cfg(test)]
+mod dropped_array_tests;
 mod entry;
 mod events;
 mod fold_ledger;
