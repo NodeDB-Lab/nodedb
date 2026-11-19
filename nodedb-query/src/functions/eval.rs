@@ -265,6 +265,20 @@ mod tests {
     }
 
     #[test]
+    fn substr_and_replace_with_a_null_argument_are_null() {
+        let t = |s: &str| Value::String(s.into());
+        let cases = [
+            ("substr", vec![t("hello"), Value::Null]),
+            ("substr", vec![t("hello"), Value::Integer(2), Value::Null]),
+            ("replace", vec![t("abc"), Value::Null, t("x")]),
+            ("replace", vec![t("abc"), t("b"), Value::Null]),
+        ];
+        for (name, args) in cases {
+            assert_eq!(eval_fn(name, args.clone()), Value::Null, "{name} {args:?}");
+        }
+    }
+
+    #[test]
     fn round_with_decimals() {
         assert_eq!(
             eval_fn("round", vec![Value::Float(3.15159), Value::Integer(2)]),
