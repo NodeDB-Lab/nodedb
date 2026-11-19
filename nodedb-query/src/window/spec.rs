@@ -47,6 +47,9 @@ pub struct WindowFuncSpec {
     pub partition_by: Vec<SqlExpr>,
     /// ORDER BY within each partition: [(expr, ascending)].
     pub order_by: Vec<(SqlExpr, bool)>,
+    /// NULLS FIRST (`true`) or NULLS LAST (`false`) per `order_by` key. A key
+    /// with no entry places NULLs by direction: last for ASC, first for DESC.
+    pub order_nulls_first: Vec<bool>,
     /// Window frame specification.
     pub frame: WindowFrame,
 }

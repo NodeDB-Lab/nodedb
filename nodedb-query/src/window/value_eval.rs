@@ -478,6 +478,7 @@ mod tests {
             args,
             partition_by,
             order_by,
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         }
     }

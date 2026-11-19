@@ -240,6 +240,7 @@ pub(in crate::control::planner::sql_plan_convert) fn serialize_window_functions(
                 .iter()
                 .map(|k| (convert(&k.expr), k.ascending))
                 .collect(),
+            order_nulls_first: s.order_by.iter().map(|k| k.nulls_first).collect(),
             frame: s.frame.clone(),
         })
         .collect();

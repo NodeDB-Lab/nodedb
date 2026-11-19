@@ -26,6 +26,7 @@ pub(super) fn build_partitions(
     rows: &[(String, Value)],
     partition_by: &[SqlExpr],
     order_by: &[(SqlExpr, bool)],
+    order_nulls_first: &[bool],
     crs: &CrsContext<'_>,
 ) -> Result<Vec<Vec<usize>>, crate::expr::EvalError> {
     let mut partitions = if partition_by.is_empty() {
@@ -62,7 +63,9 @@ pub(super) fn build_partitions(
         }
 
         for partition in &mut partitions {
-            partition.sort_by(|&a, &b| compare_order_keys(&keys[a], &keys[b], order_by));
+            partition.sort_by(|&a, &b| {
+                compare_order_keys(&keys[a], &keys[b], order_by, order_nulls_first)
+            });
         }
     }
 
@@ -79,13 +82,21 @@ fn partition_key_part(v: &Value) -> String {
 /// evaluator's `compare_order_keys` and the MATCH ORDER BY.
 ///
 /// NULL placement follows PostgreSQL's default: ASC places NULLs last, DESC
-/// places NULLs first. Neither caller carries an explicit NULLS FIRST/LAST
-/// override, so this default is fixed by direction alone. Returns `None`
+/// places NULLs first. This function applies that default by direction alone;
+/// `null_order_with` takes an explicit NULLS FIRST/LAST. Returns `None`
 /// when neither value is NULL, leaving the non-null comparison to the
 /// caller.
 pub fn null_order(a_null: bool, b_null: bool, ascending: bool) -> Option<std::cmp::Ordering> {
+    null_order_with(a_null, b_null, !ascending)
+}
+
+/// NULL placement for one ORDER BY column with an explicit `nulls_first`.
+pub fn null_order_with(
+    a_null: bool,
+    b_null: bool,
+    nulls_first: bool,
+) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
-    let nulls_first = !ascending;
     match (a_null, b_null) {
         (true, true) => Some(Ordering::Equal),
         (true, false) => Some(if nulls_first {
@@ -107,13 +118,15 @@ fn compare_order_keys(
     a: &[Value],
     b: &[Value],
     order_by: &[(SqlExpr, bool)],
+    order_nulls_first: &[bool],
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     for (idx, (_, ascending)) in order_by.iter().enumerate() {
         let (Some(va), Some(vb)) = (a.get(idx), b.get(idx)) else {
             continue;
         };
-        let ord = null_order(va.is_null(), vb.is_null(), *ascending).unwrap_or_else(|| {
+        let nulls_first = order_nulls_first.get(idx).copied().unwrap_or(!*ascending);
+        let ord = null_order_with(va.is_null(), vb.is_null(), nulls_first).unwrap_or_else(|| {
             let c = compare_sort_values(va, vb);
             if *ascending { c } else { c.reverse() }
         });
