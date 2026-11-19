@@ -329,17 +329,23 @@ pub(crate) fn parse_optional_ttl(args: &[String]) -> Result<u64, DdlError> {
         let upper = arg.trim().to_uppercase();
         if upper.starts_with("TTL") {
             // Formats: "TTL => 86400" or split across args: "TTL", "=>", "86400"
-            if let Some(val_str) = upper
-                .strip_prefix("TTL")
-                .map(|r| r.trim_start_matches("=>").trim_start_matches('=').trim())
-                && !val_str.is_empty()
+            if let Some(val_str) = upper.strip_prefix("TTL").map(|r| {
+                r.trim()
+                    .trim_start_matches("=>")
+                    .trim_start_matches('=')
+                    .trim()
+            }) && !val_str.is_empty()
             {
                 return parse_ttl_seconds(val_str);
             }
             // Look at next arg(s) for the value.
             let remaining: Vec<&str> = args[i + 1..].iter().map(|s| s.trim()).collect();
             for r in &remaining {
-                let cleaned = r.trim_start_matches("=>").trim_start_matches('=').trim();
+                let cleaned = r
+                    .trim()
+                    .trim_start_matches("=>")
+                    .trim_start_matches('=')
+                    .trim();
                 if !cleaned.is_empty() {
                     return parse_ttl_seconds(cleaned);
                 }
@@ -372,6 +378,17 @@ mod tests {
 
     /// A string literal names the object verbatim. A bare name lowercases
     /// and a double-quoted name keeps its case.
+    #[test]
+    fn ttl_arrow_with_spaces_parses_as_seconds() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(
+            parse_optional_ttl(&a(&["TTL => 86400"])).unwrap(),
+            86_400_000
+        );
+        assert_eq!(parse_optional_ttl(&a(&["TTL=>5"])).unwrap(), 5_000);
+        assert_eq!(parse_optional_ttl(&a(&["TTL", "=>", "7"])).unwrap(), 7_000);
+    }
+
     #[test]
     fn name_arg_reads_literals_verbatim_and_names_by_the_identifier_rule() {
         assert_eq!(name_arg(" 'Counters' ").unwrap(), "Counters");
