@@ -313,6 +313,9 @@ pub enum DocumentOp {
         /// of the dropped one. `Hlc::ZERO` when the catalog holds none.
         #[serde(default)]
         incarnation: nodedb_types::Hlc,
+        /// Content digest of the validate-relevant config this Register
+        /// installs. The core stores it on the collection's config.
+        digest: u64,
     },
 
     /// Lookup documents by secondary index value.

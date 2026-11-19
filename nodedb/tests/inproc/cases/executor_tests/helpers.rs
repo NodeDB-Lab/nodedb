@@ -278,6 +278,7 @@ pub fn register_text_fields(
             declared_key: None,
             text_fields: nodedb_physical::physical_plan::TextFieldSet::all_readable(fields),
             incarnation: nodedb_types::Hlc::ZERO,
+            digest: 0,
         }),
     );
 }

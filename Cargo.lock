@@ -4173,6 +4173,7 @@ dependencies = [
  "uuid",
  "wasmtime",
  "x509-parser",
+ "xxhash-rust",
  "zeroize",
  "zerompk",
  "zstd",

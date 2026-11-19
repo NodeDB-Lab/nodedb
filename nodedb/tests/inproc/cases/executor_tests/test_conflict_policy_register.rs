@@ -56,6 +56,7 @@ fn register(ctx: &mut TestCtx, collection: &str, conflict_policy: Option<String>
             declared_key: None,
             text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
             incarnation: nodedb_types::Hlc::ZERO,
+            digest: 0,
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register document collection");

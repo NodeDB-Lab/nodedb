@@ -66,6 +66,10 @@ pub struct CollectionConfig {
     /// The collection's catalog incarnation. Its CRDT document derives its
     /// Loro peer id from it. `Hlc::ZERO` when the catalog holds none.
     pub incarnation: nodedb_types::Hlc,
+    /// Content digest of the validate-relevant fields, as the Register
+    /// carried it. `0` for a config built outside a Register or the boot
+    /// seed.
+    pub digest: u64,
 }
 
 impl CollectionConfig {
@@ -86,6 +90,7 @@ impl CollectionConfig {
             text_fields: nodedb_physical::physical_plan::TextFieldSet::default(),
             type_guards: Vec::new(),
             incarnation: nodedb_types::Hlc::ZERO,
+            digest: 0,
         }
     }
 

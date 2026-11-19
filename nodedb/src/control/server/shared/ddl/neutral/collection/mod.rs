@@ -12,6 +12,8 @@ pub mod create;
 pub mod describe;
 mod describe_array;
 pub mod dml;
+pub mod doc_config_canon;
+pub mod doc_config_wire;
 pub mod drop;
 pub mod enforcement;
 pub(crate) mod helpers;
@@ -32,6 +34,7 @@ pub use copy_to::{CopyToOptions, copy_to_file};
 pub use create::{CreateCollectionRequest, create_collection, create_table};
 pub use describe::{describe_collection, show_collections};
 pub use dml::{insert_document, upsert_document};
+pub use doc_config_wire::{DocConfigWire, DocConfigWireError};
 pub use drop::{DropCollectionRequest, drop_collection};
 pub use index::{CreateIndexRequest, DropIndexRequest, create_index, drop_index};
 pub use register::{

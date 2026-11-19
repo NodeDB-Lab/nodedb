@@ -33,6 +33,7 @@ impl CoreLoop {
             declared_key,
             text_fields,
             incarnation,
+            digest,
         } = op
         else {
             return self.response_error(
@@ -71,6 +72,7 @@ impl CoreLoop {
                 declared_key: declared_key.as_deref(),
                 text_fields,
                 incarnation: *incarnation,
+                digest: *digest,
             },
         )
     }

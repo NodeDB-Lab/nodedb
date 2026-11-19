@@ -47,6 +47,8 @@ pub(in crate::data::executor) struct RegisterDocumentCollectionParams<'a> {
     /// The collection's catalog incarnation, which its CRDT document's Loro
     /// peer id derives from.
     pub incarnation: nodedb_types::Hlc,
+    /// Content digest of the config, computed on the Control Plane.
+    pub digest: u64,
 }
 
 impl CoreLoop {
@@ -76,6 +78,7 @@ impl CoreLoop {
             declared_key,
             text_fields,
             incarnation,
+            digest,
         } = params;
         let mode_label = match storage_mode {
             nodedb_physical::physical_plan::StorageMode::Schemaless => "document_schemaless",
@@ -130,6 +133,7 @@ impl CoreLoop {
                     &enforcement.type_guards,
                 ),
             incarnation,
+            digest,
         };
 
         // The analyzer and fuzzy default the collection's full-text records
@@ -303,6 +307,7 @@ mod tests {
                 declared_key: None,
                 text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
                 incarnation: nodedb_types::Hlc::new(hlc, 0),
+                digest: 0,
             },
         )
         .status

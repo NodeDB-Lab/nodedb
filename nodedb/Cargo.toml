@@ -71,6 +71,7 @@ sonic-rs = { workspace = true }
 chrono = { workspace = true }
 redb = { workspace = true }
 crc32c = { workspace = true }
+xxhash-rust = { workspace = true }
 zerompk = { workspace = true }
 rmpv = { workspace = true }
 rkyv = { workspace = true }

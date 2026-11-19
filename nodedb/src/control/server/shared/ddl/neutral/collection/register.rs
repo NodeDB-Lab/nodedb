@@ -401,6 +401,22 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         &coll.name,
         &enforcement.type_guards,
     );
+    let wire = super::DocConfigWire {
+        bitemporal: coll.bitemporal,
+        enforcement,
+        storage_mode,
+        index_paths: indexes.to_vec(),
+        declared_key: crate::control::planner::catalog_adapter::document_declared_key(coll),
+        vector_primary: coll.vector_primary.clone(),
+    };
+    let digest = wire.digest()?;
+    let super::DocConfigWire {
+        enforcement,
+        storage_mode,
+        declared_key,
+        vector_primary,
+        ..
+    } = wire;
     Ok(crate::engine::document::store::CollectionConfig {
         name,
         type_guards,
@@ -414,12 +430,13 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         bitemporal: coll.bitemporal,
         conflict_policy: coll.conflict_policy.clone(),
         timeseries: build_timeseries_schema(coll),
-        vector_primary: coll.vector_primary.clone().map(Box::new),
+        vector_primary: vector_primary.map(Box::new),
         vector_fields: declared_vector_fields(coll),
         declared_columns: declared_columns(coll),
-        declared_key: crate::control::planner::catalog_adapter::document_declared_key(coll),
+        declared_key,
         text_fields,
         incarnation: coll.incarnation,
+        digest,
     })
 }
 
@@ -452,6 +469,7 @@ async fn dispatch_register_from_stored_inner(
             declared_key: config.declared_key.clone(),
             text_fields: config.text_fields.clone(),
             incarnation: config.incarnation,
+            digest: config.digest,
         },
     );
 
@@ -585,5 +603,101 @@ mod tests {
         )
         .expect("build doc config");
         assert_eq!(config.declared_key, None);
+    }
+
+    /// A catalog that holds a fixed set of collections for one tenant.
+    struct FixedCatalog(Vec<StoredCollection>);
+
+    impl CollectionSource for FixedCatalog {
+        fn list_database_ids(&self) -> crate::Result<Vec<DatabaseId>> {
+            Ok(Vec::new())
+        }
+        fn collections_in(&self, _database_id: DatabaseId) -> crate::Result<Vec<StoredCollection>> {
+            Ok(self.0.clone())
+        }
+        fn collections_for_tenant(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+        ) -> crate::Result<Vec<StoredCollection>> {
+            Ok(self.0.clone())
+        }
+        fn index_records_for_tenant(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+            Ok(Vec::new())
+        }
+        fn index_records_for_collection(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+            _collection: &str,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredIndexRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn built_config<S: CollectionSource + ?Sized>(
+        catalog: &S,
+        coll: &StoredCollection,
+    ) -> crate::engine::document::store::CollectionConfig {
+        let mut indexes = derive_auto_indexes(coll.fields.iter().map(|(n, _)| n.as_str()));
+        extend_with_catalog_indexes(&mut indexes, coll);
+        build_doc_config_from_stored(
+            catalog,
+            crate::types::TenantId::new(coll.tenant_id),
+            coll,
+            &indexes,
+            TextFieldSet::default(),
+        )
+        .expect("build doc config")
+    }
+
+    /// The live Register and the boot seed both call the one builder, so
+    /// one collection gives one digest, and it is the wire form's digest.
+    #[test]
+    fn the_builder_gives_one_digest_for_one_collection() {
+        let coll = vector_primary_collection();
+        let first = built_config(&EmptyCatalog, &coll);
+        let second = built_config(&EmptyCatalog, &coll);
+        assert_eq!(first.digest, second.digest);
+        let wire = super::super::DocConfigWire {
+            bitemporal: first.bitemporal,
+            enforcement: first.enforcement.clone(),
+            storage_mode: first.storage_mode.clone(),
+            index_paths: Vec::new(),
+            declared_key: first.declared_key.clone(),
+            vector_primary: first.vector_primary.as_deref().cloned(),
+        };
+        assert_eq!(first.digest, wire.digest().expect("digest"));
+    }
+
+    /// A sum binding lives on the target. It changes the source's
+    /// `materialized_sum_sources`, so the source's digest changes.
+    #[test]
+    fn a_sum_binding_on_another_collection_changes_the_source_digest() {
+        let source = StoredCollection::new(1, "entries", "owner");
+        let mut target = StoredCollection::new(1, "accounts", "owner");
+        let before = built_config(&FixedCatalog(vec![source.clone(), target.clone()]), &source);
+
+        target
+            .materialized_sums
+            .push(crate::control::security::catalog::MaterializedSumDef {
+                target_collection: target.name.clone(),
+                target_column: "balance".into(),
+                source_collection: crate::control::planner::sql_plan_convert::convert::db_qualified(
+                    source.database_id,
+                    &source.name,
+                ),
+                join_column: "account_id".into(),
+                value_expr: nodedb_query::expr::SqlExpr::Column("amount".into()),
+            });
+        let after = built_config(&FixedCatalog(vec![source.clone(), target]), &source);
+
+        assert!(before.enforcement.materialized_sum_sources.is_empty());
+        assert_eq!(after.enforcement.materialized_sum_sources.len(), 1);
+        assert_ne!(before.digest, after.digest);
     }
 }
