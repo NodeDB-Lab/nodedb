@@ -96,6 +96,11 @@ fn extract_pk_equality(filter: &Filter, pk: Option<&str>) -> Option<(String, Sql
         },
         _ => return None,
     };
+    // `pk = NULL` is unknown and matches no row. A point lookup on the NULL
+    // key would read the real key `''`.
+    if matches!(value, SqlValue::Null) {
+        return None;
+    }
     key_column_named(column, pk).map(|key| (key, value.clone()))
 }
 

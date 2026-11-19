@@ -72,13 +72,7 @@ fn collect_pk_equalities(
             } else {
                 return false;
             };
-            match expr_to_sql_value(value, crs) {
-                Ok(v) => {
-                    keys.push(v);
-                    true
-                }
-                Err(_) => false,
-            }
+            push_key(value, keys, crs)
         }
         ast::Expr::BinaryOp {
             left,
@@ -92,14 +86,22 @@ fn collect_pk_equalities(
             expr: inner,
             list,
             negated: false,
-        } if is_column(inner, pk) => list.iter().all(|item| match expr_to_sql_value(item, crs) {
-            Ok(v) => {
-                keys.push(v);
-                true
-            }
-            Err(_) => false,
-        }),
+        } if is_column(inner, pk) => list.iter().all(|item| push_key(item, keys, crs)),
         _ => false,
+    }
+}
+
+/// Push the literal `expr` as a key. Returns `false` for a non-literal and for
+/// NULL: `pk = NULL` is unknown and matches no row, and the key `''` is a real
+/// key, so a NULL must never be turned into a point key. The statement then
+/// takes the predicate path, which judges the comparison as unknown.
+fn push_key(expr: &ast::Expr, keys: &mut Vec<SqlValue>, crs: &nodedb_crs::CrsContext<'_>) -> bool {
+    match expr_to_sql_value(expr, crs) {
+        Ok(SqlValue::Null) | Err(_) => false,
+        Ok(v) => {
+            keys.push(v);
+            true
+        }
     }
 }
 
@@ -112,5 +114,41 @@ fn is_column(expr: &ast::Expr, name: &str) -> bool {
             normalize_ident(&parts[1]) == name
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    fn keys_for(where_sql: &str) -> bool {
+        let expr = Parser::new(&GenericDialect {})
+            .try_with_sql(where_sql)
+            .expect("tokenize")
+            .parse_expr()
+            .expect("parse");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut keys = Vec::new();
+        collect_pk_equalities(&expr, "id", &mut keys, &crs)
+    }
+
+    #[test]
+    fn pk_equal_null_is_not_a_point_key() {
+        assert!(!keys_for("id = NULL"));
+        assert!(!keys_for("NULL = id"));
+    }
+
+    #[test]
+    fn pk_in_list_with_null_is_not_a_point_key() {
+        assert!(!keys_for("id IN (NULL)"));
+        assert!(!keys_for("id IN ('a', NULL)"));
+    }
+
+    #[test]
+    fn pk_equal_literal_stays_a_point_key() {
+        assert!(keys_for("id = 'a'"));
+        assert!(keys_for("id IN ('a', 'b')"));
     }
 }
