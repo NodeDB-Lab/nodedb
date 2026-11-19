@@ -13,6 +13,7 @@ pub mod describe;
 mod describe_array;
 pub mod dml;
 pub mod doc_config_canon;
+pub mod doc_config_stored;
 pub mod doc_config_wire;
 pub mod drop;
 pub mod enforcement;

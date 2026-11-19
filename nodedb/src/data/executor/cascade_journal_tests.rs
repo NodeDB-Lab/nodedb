@@ -257,6 +257,7 @@ fn a_committed_record_without_a_stored_write_set_is_closed_not_cancelled() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let origin = appender
         .append_transaction_redo(t, v, d, &redo)

@@ -149,6 +149,7 @@ pub(super) fn stamped_install(
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     })
 }
 

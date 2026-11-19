@@ -380,6 +380,7 @@ impl SharedState {
                 crate::control::server::admission::AdmissionRegistry::new(),
             ),
             audit_dml_cache: Arc::new(super::audit_dml_cache::AuditDmlCache::new()),
+            config_pins: Arc::new(super::config_pin_cache::ConfigPinCache::new()),
             idle_timeout_cache: Arc::new(super::idle_timeout_cache::IdleTimeoutCache::new()),
             collection_to_database: Arc::new(
                 super::collection_to_database::CollectionToDatabase::new(),

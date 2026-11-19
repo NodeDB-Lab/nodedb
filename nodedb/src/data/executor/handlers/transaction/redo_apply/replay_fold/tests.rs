@@ -62,6 +62,7 @@ fn commit_plan_of(rows: &[(&str, i64, u32)]) -> PhysicalPlan {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     }
     .to_bytes()
     .expect("encode redo");
@@ -73,6 +74,7 @@ fn commit_plan_of(rows: &[(&str, i64, u32)]) -> PhysicalPlan {
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     })
 }
 

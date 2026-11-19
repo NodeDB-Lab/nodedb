@@ -43,6 +43,7 @@ pub(super) fn fold_capture(
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     });
     let plan = zerompk::to_msgpack_vec(&plan).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),

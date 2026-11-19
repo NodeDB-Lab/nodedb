@@ -56,6 +56,7 @@ fn content_of(payload: &TransactionRedoPayload) -> RedoContent {
         sum_targets: payload.sum_targets.clone(),
         identities: payload.identities.iter().map(replicated_identity).collect(),
         reads: payload.reads.clone(),
+        pins: payload.pins.clone(),
     }
 }
 
@@ -77,6 +78,7 @@ fn view_of(
         sum_targets: &payload.sum_targets,
         identities: payload.identities.iter().map(replicated_identity),
         reads: &payload.reads,
+        pins: &payload.pins,
     }
 }
 
@@ -408,6 +410,7 @@ mod tests {
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
                 sum_targets: Vec::new(),
+                pins: Default::default(),
             },
             collections: vec!["orders".into()],
             incarnation_names: vec![(
@@ -422,7 +425,85 @@ mod tests {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
+            pins: Default::default(),
         }
+    }
+
+    /// Pins of one collection whose wire form holds `wire_bytes` bytes.
+    fn pins(wire_bytes: usize) -> nodedb_physical::physical_plan::RedoPins {
+        use std::sync::Arc;
+
+        use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+        RedoPins {
+            configs: vec![Arc::new(ConfigPin {
+                key: ConfigPinKey {
+                    database_id: DatabaseId::DEFAULT,
+                    tenant_id: TenantId::new(1),
+                    collection: "orders".into(),
+                },
+                digest: 21,
+                wire: vec![0x5a; wire_bytes].into(),
+            })],
+            crs: Some(Arc::new(CrsPin {
+                digest: 22,
+                bytes: vec![0x90].into(),
+            })),
+        }
+    }
+
+    /// The pins travel in the inline entry and in a chunk stream's content,
+    /// and decode unchanged from both.
+    #[test]
+    fn pins_travel_inline_and_chunked() {
+        let mut small = payload(100);
+        small.pins = pins(64);
+        let RedoProposal::Inline(entry) =
+            session_redo_proposal(target(), &small, 64 * 1024).expect("build")
+        else {
+            panic!("a small redo travels inline");
+        };
+        let ReplicatedWrite::TransactionRedo {
+            body: RedoBody::Inline(content),
+            ..
+        } = entry.write
+        else {
+            panic!("an inline body");
+        };
+        assert_eq!(content.pins, small.pins);
+
+        let mut large = payload(300_000);
+        large.pins = pins(64);
+        let RedoProposal::Chunked { chunks, .. } =
+            session_redo_proposal(target(), &large, 64 * 1024).expect("build")
+        else {
+            panic!("a 300 KB redo travels chunked");
+        };
+        let joined: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| match &chunk.write {
+                ReplicatedWrite::RedoChunk { bytes, .. } => bytes.clone(),
+                other => panic!("expected a chunk, got {other:?}"),
+            })
+            .collect();
+        let content = RedoContent::from_framed(&joined).expect("content");
+        assert_eq!(content.pins, large.pins);
+    }
+
+    /// Pin bytes count in the entry budget: a redo that fits alone
+    /// travels chunked once its pins pass the limit.
+    #[test]
+    fn pin_bytes_count_in_the_entry_budget() {
+        let limit = 64 * 1024;
+        let mut redo = payload(100);
+        assert!(matches!(
+            session_redo_proposal(target(), &redo, limit).expect("build"),
+            RedoProposal::Inline(_)
+        ));
+        redo.pins = pins(limit);
+        assert!(matches!(
+            session_redo_proposal(target(), &redo, limit).expect("build"),
+            RedoProposal::Chunked { .. }
+        ));
     }
 
     fn target() -> RedoEntryTarget {

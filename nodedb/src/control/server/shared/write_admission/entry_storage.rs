@@ -121,10 +121,12 @@ mod tests {
                     row_changes: Vec::new(),
                     user_roles: Vec::new(),
                     sum_targets: Vec::new(),
+                    pins: Default::default(),
                 },
                 sum_targets: Vec::new(),
                 identities: Vec::new(),
                 reads: Vec::new(),
+                pins: Default::default(),
             },
         ))
     }

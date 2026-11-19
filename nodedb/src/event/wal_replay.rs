@@ -613,6 +613,7 @@ mod tests {
             ],
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -684,6 +685,7 @@ mod tests {
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
                 sum_targets: Vec::new(),
+                pins: Default::default(),
             };
             let record = make_record(
                 RecordType::TransactionRedo,
@@ -725,6 +727,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -788,6 +791,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,
@@ -833,6 +837,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1086,6 +1091,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1263,6 +1269,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_record(
             RecordType::TransactionRedo,
@@ -1385,6 +1392,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = redo.to_bytes().unwrap();
         for (source, document, other) in [
@@ -1441,6 +1449,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let record = make_sourced_record(
             RecordType::TransactionRedo,

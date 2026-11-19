@@ -177,6 +177,7 @@ mod tests {
             cross_shard_applied: None,
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let mut out = Vec::new();
         push_frame(&mut out, RedoFrameTag::Header, &header).expect("header");

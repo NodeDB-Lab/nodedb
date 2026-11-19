@@ -64,6 +64,7 @@ impl CoreLoop {
             // record it resolves here.
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         match record.to_bytes() {
             Ok(bytes) => self.response_with_payload(task, bytes),

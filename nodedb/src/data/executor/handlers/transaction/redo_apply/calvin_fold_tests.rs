@@ -106,6 +106,7 @@ pub(in crate::data::executor) fn calvin_redo() -> Vec<u8> {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     }
     .to_bytes()
     .expect("encode redo")

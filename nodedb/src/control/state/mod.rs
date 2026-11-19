@@ -30,6 +30,7 @@ pub(crate) mod test_core;
 
 pub mod audit_dml_cache;
 pub mod collection_to_database;
+pub mod config_pin_cache;
 pub mod idle_timeout_cache;
 
 pub use self::calvin_ack_result::{

@@ -55,6 +55,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn batch_wal_re
         row_changes: Vec::new(),
         user_roles: header.user_roles.clone(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let payload = redo
         .to_bytes()

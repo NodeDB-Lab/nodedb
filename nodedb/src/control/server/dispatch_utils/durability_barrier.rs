@@ -175,6 +175,7 @@ mod tests {
             reads: Vec::new(),
             snapshot_ordinal: None,
             calvin: None,
+            pins: Default::default(),
         });
         assert_eq!(funnel_minted_redo_engine(&plan), Some("transaction"));
     }

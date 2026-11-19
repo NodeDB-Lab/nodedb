@@ -3,18 +3,11 @@
 //! Dispatch `DocumentOp::Register` to this node's Data Plane
 //! after a collection has been committed.
 //!
-//! Two entry points:
-//! - [`dispatch_register_if_needed`] — leader-side, called from
-//!   the handler path. Parses the FIELDS clause from
-//!   `parts` to derive index paths.
-//! - [`dispatch_register_from_stored`] — applier-side, called
-//!   from the metadata applier's post-apply hook after a
-//!   `CatalogEntry::PutCollection` commits. Derives index paths
-//!   from `coll.fields`.
-//!
-//! Both funnel into [`dispatch_register_from_stored_inner`]
-//! which builds the storage-mode + enforcement-options
-//! `EnforcementOptions` value and dispatches to the Data Plane.
+//! [`dispatch_register_from_stored`] runs from the metadata applier's
+//! post-apply hook after a `CatalogEntry::PutCollection` commits. It
+//! derives index paths from `coll.fields`, then
+//! [`dispatch_register_from_stored_inner`] builds the config and
+//! dispatches it to the Data Plane.
 //!
 //! The neutral `continuous_agg` / `materialized_view` families, the
 //! `catalog_entry::post_apply` hook, and the pgwire `alter` handlers all
@@ -22,53 +15,8 @@
 
 use crate::bootstrap::constraint_reconcile::CollectionSource;
 use crate::control::security::catalog::StoredCollection;
-use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
-use nodedb_types::DatabaseId;
-
-use super::enforcement::{build_generated_column_specs, find_materialized_sum_bindings};
-
-/// Dispatch a `DocumentOp::Register` to the Data Plane after
-/// collection creation (leader-side handler path). Looks up the
-/// created collection from catalog and parses the FIELDS
-/// clause from `parts` for index paths.
-///
-/// Returns an error if any Data Plane core fails to acknowledge the
-/// registration — the caller must not return DDL success to the client
-/// until every core has applied the new schema.
-pub async fn dispatch_register_if_needed(
-    state: &SharedState,
-    identity: &AuthenticatedIdentity,
-    parts: &[&str],
-    sql: &str,
-    database_id: DatabaseId,
-) -> crate::Result<()> {
-    let name = parts
-        .get(2)
-        .map(|token| nodedb_sql::reserved::check_identifier(token))
-        .transpose()
-        .map_err(|error| crate::Error::BadRequest {
-            detail: error.to_string(),
-        })?
-        .unwrap_or_default();
-    let tenant_id = identity.tenant_id;
-
-    let catalog = state.credentials.catalog();
-    let Ok(Some(coll)) = catalog.get_collection(database_id, tenant_id.as_u64(), &name) else {
-        return Ok(());
-    };
-    let (fields, _serial_fields) =
-        crate::control::server::shared::ddl::schema_validation::parse_fields_clause(&name, parts);
-    let mut indexes = derive_auto_indexes(fields.iter().map(|(n, _)| n.as_str()));
-    extend_with_catalog_indexes(&mut indexes, &coll);
-    // `sql` is unused on this leader-side path: index derivation reads
-    // `parts`/the catalog row directly, and the `crdt` flag already
-    // travels on `StoredCollection` (set at CREATE time from `WITH
-    // (crdt=...)`), so no SQL re-parsing is needed here.
-    let _ = sql;
-    dispatch_register_from_stored_inner(state, tenant_id, &coll, indexes).await
-}
 
 /// Applier-side entry point: dispatch `DocumentOp::Register` using
 /// a fully-populated [`StoredCollection`]. Called from the
@@ -117,7 +65,7 @@ pub async fn register_proposed_collection(
 ///
 /// A binding is stored on the TARGET collection, but the Data-Plane config that
 /// decides whether a write folds it is derived for the SOURCE:
-/// [`find_materialized_sum_bindings`] scans every collection for bindings that
+/// [`super::enforcement::find_materialized_sum_bindings`] scans every collection for bindings that
 /// name the collection BEING REGISTERED as their source. Registering the target
 /// alone therefore propagates nothing — a target carries no binding it is the
 /// target OF — and a source registered before the binding existed keeps a config
@@ -326,69 +274,10 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         &coll.name,
     );
 
-    // Determine storage mode from collection type — exhaustive
-    // match ensures new CollectionType variants get a compile
-    // error here.
-    let storage_mode = match &coll.collection_type {
-        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Strict(schema)) => {
-            nodedb_physical::physical_plan::StorageMode::Strict {
-                schema: schema.clone(),
-            }
-        }
-        nodedb_types::CollectionType::KeyValue(config) => {
-            nodedb_physical::physical_plan::StorageMode::Strict {
-                schema: config.schema.clone(),
-            }
-        }
-        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Schemaless)
-        | nodedb_types::CollectionType::Columnar(_) => {
-            nodedb_physical::physical_plan::StorageMode::Schemaless
-        }
-    };
-
-    let enforcement = nodedb_physical::physical_plan::EnforcementOptions {
-        append_only: coll.append_only,
-        hash_chain: coll.hash_chain,
-        balanced: coll
-            .balanced
-            .as_ref()
-            .map(|b| nodedb_physical::physical_plan::BalancedDef {
-                group_key_column: b.group_key_column.clone(),
-                entry_type_column: b.entry_type_column.clone(),
-                debit_value: b.debit_value.clone(),
-                credit_value: b.credit_value.clone(),
-                amount_column: b.amount_column.clone(),
-            }),
-        period_lock: coll.period_lock.as_ref().map(|pl| {
-            nodedb_physical::physical_plan::PeriodLockConfig {
-                period_column: pl.period_column.clone(),
-                ref_table: pl.ref_table.clone(),
-                ref_pk: pl.ref_pk.clone(),
-                status_column: pl.status_column.clone(),
-                allowed_statuses: pl.allowed_statuses.clone(),
-            }
-        }),
-        retention: coll.retention_period.as_ref().and_then(|s| {
-            crate::data::executor::enforcement::retention::parse_retention_period(s).ok()
-        }),
-        has_legal_hold: !coll.legal_holds.is_empty(),
-        state_constraints: coll.state_constraints.clone(),
-        transition_checks: coll.transition_checks.clone(),
-        materialized_sum_sources: find_materialized_sum_bindings(
-            catalog,
-            tenant_id.as_u64(),
-            &name,
-            coll.database_id,
-        ),
-        generated_columns: build_generated_column_specs(coll),
-        // Typeguards exist on schemaless collections only.
-        type_guards: if coll.collection_type.is_schemaless() {
-            coll.type_guards.clone()
-        } else {
-            Vec::new()
-        },
-        storage_conversion: coll.storage_conversion.clone(),
-    };
+    // The wire form holds the storage mode, the enforcement options, the
+    // indexes, the declared key and the vector-primary config. Its digest
+    // is the one a config pin of this collection carries.
+    let wire = super::DocConfigWire::from_stored(catalog, tenant_id, coll, indexes);
 
     // Written as a struct literal with every field named — and deliberately
     // NOT `..Default::default()`. A field added to `CollectionConfig` that is
@@ -399,16 +288,8 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
     // A violation names the collection the user wrote, never the qualified key.
     let type_guards = crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
         &coll.name,
-        &enforcement.type_guards,
+        &wire.enforcement.type_guards,
     );
-    let wire = super::DocConfigWire {
-        bitemporal: coll.bitemporal,
-        enforcement,
-        storage_mode,
-        index_paths: indexes.to_vec(),
-        declared_key: crate::control::planner::catalog_adapter::document_declared_key(coll),
-        vector_primary: coll.vector_primary.clone(),
-    };
     let digest = wire.digest()?;
     let super::DocConfigWire {
         enforcement,
@@ -487,6 +368,7 @@ async fn dispatch_register_from_stored_inner(
 mod tests {
     use super::*;
     use nodedb_physical::physical_plan::TextFieldSet;
+    use nodedb_types::DatabaseId;
     use nodedb_types::{PrimaryEngine, VectorPrimaryConfig};
 
     /// A catalog with no other collections — enough for the builder, which

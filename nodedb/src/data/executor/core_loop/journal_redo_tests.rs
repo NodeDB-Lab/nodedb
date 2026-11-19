@@ -52,6 +52,7 @@ pub(super) fn task(calvin: bool, refused: bool) -> ExecutionTask {
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     });
     request.wal_lsn = Some(Lsn::new(ORIGIN));
     ExecutionTask::new(request)

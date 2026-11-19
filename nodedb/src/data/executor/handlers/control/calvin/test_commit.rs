@@ -111,6 +111,7 @@ impl CoreLoop {
             }),
             reads: Vec::new(),
             snapshot_ordinal: None,
+            pins: Default::default(),
         });
         let folds = !redo_sum_targets(plans).is_empty();
         let mut request = task.request.clone();

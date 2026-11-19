@@ -183,6 +183,7 @@ fn install(
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     }));
     request.wal_lsn = Some(Lsn::new(lsn));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();

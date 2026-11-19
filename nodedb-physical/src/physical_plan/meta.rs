@@ -712,6 +712,9 @@ pub enum MetaOp {
     /// replica when a read entry homed on this vShard, or a row the record
     /// replaces or deletes, holds a committed version above the snapshot.
     /// A Calvin slice carries neither: its stage vote validated it.
+    ///
+    /// `pins` is the config content the proposer pinned for the validate.
+    /// A stream marker carries none: its content header carries them.
     ApplyTransactionRedo {
         redo: Vec<u8>,
         collections: Vec<String>,
@@ -722,6 +725,8 @@ pub enum MetaOp {
         reads: Vec<VersionedReadEntry>,
         #[serde(default)]
         snapshot_ordinal: Option<i64>,
+        #[serde(default)]
+        pins: super::RedoPins,
     },
 
     /// Install one batch of a RESTORE as part of a Calvin transaction, on

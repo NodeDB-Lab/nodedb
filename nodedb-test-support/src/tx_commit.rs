@@ -30,6 +30,7 @@ fn redo_of_parts(framed: &[u8]) -> Vec<u8> {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     for frame in RedoFrames::new(framed) {
         let (tag, body) = frame.expect("resolve frame");
@@ -135,6 +136,7 @@ pub fn commit_plans(
                 calvin: None,
                 reads: Vec::new(),
                 snapshot_ordinal: None,
+                pins: nodedb_physical::physical_plan::RedoPins::default(),
             }));
             install.wal_lsn = Some(Lsn::new(lsn));
             send_request(core, tx, rx, install)

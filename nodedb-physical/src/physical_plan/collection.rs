@@ -201,6 +201,7 @@ mod tests {
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            pins: crate::physical_plan::RedoPins::default(),
         });
         assert_eq!(redo.collection(), None);
         assert_eq!(redo.named_collections(), vec!["a", "b"]);

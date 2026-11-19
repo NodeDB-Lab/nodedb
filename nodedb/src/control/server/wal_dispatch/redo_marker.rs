@@ -7,18 +7,20 @@
 //! install reads. The fold rows become durable only with the install's
 //! stored write set, and a crash can cut that write set after this record is
 //! durable. Boot then folds the record from the targets its WAL copy holds,
-//! the same targets on every replica and at every restart.
+//! the same targets on every replica and at every restart. It carries the
+//! plan's `pins` the same way, so boot judges the record under the config
+//! content the proposer pinned.
 //!
 //! A stream marker's plan carries the row changes the Control-Plane change
 //! stream publishes. The chunk records hold the same changes, and every
 //! whole-WAL reader rebuilds the marker from them. So the marker's WAL record
 //! holds its reference alone, and stays one small record however many rows
-//! the stream changes. Its sum targets ride the stream content's header,
-//! which the install reads them from.
+//! the stream changes. Its sum targets and pins ride the stream content's
+//! header, which the install reads them from.
 
 use std::borrow::Cow;
 
-use nodedb_physical::physical_plan::RedoSumTargets;
+use nodedb_physical::physical_plan::{RedoPins, RedoSumTargets};
 
 use crate::wal::{RedoRecord, RedoStreamRef};
 
@@ -30,10 +32,12 @@ pub(super) struct RedoWalPayload<'a> {
 }
 
 /// The bytes the WAL record of the redo `redo` holds. `sum_targets` is the
-/// resolution the install of `redo` folds with.
+/// resolution the install of `redo` folds with. `pins` is the config
+/// content its validate is judged under.
 pub(super) fn redo_wal_payload<'a>(
     redo: &'a [u8],
     sum_targets: &[RedoSumTargets],
+    pins: &RedoPins,
 ) -> crate::Result<RedoWalPayload<'a>> {
     let mut record = RedoRecord::from_bytes(redo)?;
     if RedoStreamRef::of_marker(&record)?.is_some() {
@@ -48,10 +52,11 @@ pub(super) fn redo_wal_payload<'a>(
             stream_marker: true,
         });
     }
-    let bytes = if record.sum_targets.as_slice() == sum_targets {
+    let bytes = if record.sum_targets.as_slice() == sum_targets && record.pins == *pins {
         Cow::Borrowed(redo)
     } else {
         record.sum_targets = sum_targets.to_vec();
+        record.pins = pins.clone();
         Cow::Owned(record.to_bytes()?)
     };
     Ok(RedoWalPayload {
@@ -95,6 +100,7 @@ mod tests {
             }],
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
     }
 
@@ -121,13 +127,17 @@ mod tests {
             .expect("marker")
             .to_bytes()
             .expect("encode");
-        let payload = redo_wal_payload(&marker, &targets()).expect("payload");
+        let payload = redo_wal_payload(&marker, &targets(), &pins()).expect("payload");
         assert!(payload.stream_marker);
         let stored = RedoRecord::from_bytes(&payload.bytes).expect("decode");
         assert!(stored.row_changes.is_empty());
         assert!(
             stored.sum_targets.is_empty(),
             "a marker's targets ride its content header"
+        );
+        assert!(
+            stored.pins.is_empty(),
+            "a marker's pins ride its content header"
         );
         assert_eq!(
             RedoStreamRef::of_marker(&stored).expect("ref"),
@@ -138,21 +148,47 @@ mod tests {
     #[test]
     fn an_inline_redo_with_no_targets_is_stored_verbatim() {
         let inline = inline().to_bytes().expect("encode");
-        let payload = redo_wal_payload(&inline, &[]).expect("payload");
+        let payload = redo_wal_payload(&inline, &[], &RedoPins::default()).expect("payload");
         assert!(!payload.stream_marker);
         assert!(matches!(payload.bytes, Cow::Borrowed(_)));
     }
 
-    /// A whole record's WAL copy carries the targets its install folds with,
-    /// and decodes to them.
+    fn pins() -> RedoPins {
+        RedoPins {
+            configs: vec![std::sync::Arc::new(
+                nodedb_physical::physical_plan::ConfigPin {
+                    key: nodedb_physical::physical_plan::ConfigPinKey {
+                        database_id: nodedb_types::DatabaseId::DEFAULT,
+                        tenant_id: nodedb_types::TenantId::new(1),
+                        collection: "orders".into(),
+                    },
+                    digest: 31,
+                    wire: vec![0x91, 0x01].into(),
+                },
+            )],
+            crs: Some(std::sync::Arc::new(
+                nodedb_physical::physical_plan::CrsPin {
+                    digest: 32,
+                    bytes: vec![0x90].into(),
+                },
+            )),
+        }
+    }
+
+    /// A whole record's WAL copy carries the targets its install folds with
+    /// and the pins its validate is judged under, and decodes to them.
     #[test]
-    fn an_inline_redo_carries_its_install_targets() {
+    fn an_inline_redo_carries_its_install_targets_and_pins() {
         let record = inline();
         let bytes = record.to_bytes().expect("encode");
-        let stored =
-            RedoRecord::from_bytes(&redo_wal_payload(&bytes, &targets()).expect("payload").bytes)
-                .expect("decode");
+        let stored = RedoRecord::from_bytes(
+            &redo_wal_payload(&bytes, &targets(), &pins())
+                .expect("payload")
+                .bytes,
+        )
+        .expect("decode");
         assert_eq!(stored.sum_targets, targets());
+        assert_eq!(stored.pins, pins());
         assert_eq!(stored.ops, record.ops);
         assert_eq!(stored.row_changes, record.row_changes);
     }

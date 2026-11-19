@@ -405,6 +405,7 @@ impl CoreLoop {
                 calvin,
                 reads,
                 snapshot_ordinal,
+                pins: _,
             } => {
                 let committed =
                     crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {

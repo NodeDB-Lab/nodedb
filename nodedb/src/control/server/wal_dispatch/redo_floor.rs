@@ -24,6 +24,9 @@ use crate::wal::{RedoRecord, RedoStreamRef};
 /// The funnel calls it once the write's ordinal is fixed and before the
 /// write's WAL record exists, so the record holds the raised stamps.
 ///
+/// A whole record's bytes also take the plan's `sum_targets` and `pins`.
+/// So the WAL append stores the bytes as they are, with no second encode.
+///
 /// `Err` when the redo does not decode or re-encode.
 pub fn floor_redo_stamps(plan: &mut PhysicalPlan, ordinal: Option<i64>) -> crate::Result<()> {
     let Some(floor) = ordinal else {
@@ -31,8 +34,10 @@ pub fn floor_redo_stamps(plan: &mut PhysicalPlan, ordinal: Option<i64>) -> crate
     };
     let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
         redo,
+        sum_targets,
         origin: RedoOrigin::Commit,
         calvin: None,
+        pins,
         ..
     }) = plan
     else {
@@ -50,7 +55,15 @@ pub fn floor_redo_stamps(plan: &mut PhysicalPlan, ordinal: Option<i64>) -> crate
         *redo = record.to_bytes()?;
         return Ok(());
     }
-    if record.raise_stamps_to(floor)? {
+    let raised = record.raise_stamps_to(floor)?;
+    // A whole record's WAL copy holds the targets and pins its install uses.
+    // Writing them in this encode lets the WAL append store these bytes.
+    let folds = record.sum_targets != *sum_targets || record.pins != *pins;
+    if folds {
+        record.sum_targets = sum_targets.clone();
+        record.pins = pins.clone();
+    }
+    if raised || folds {
         *redo = record.to_bytes()?;
     }
     Ok(())
@@ -89,6 +102,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
         .to_bytes()
         .expect("encode redo");
@@ -100,6 +114,7 @@ mod tests {
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            pins: Default::default(),
         })
     }
 
@@ -137,5 +152,39 @@ mod tests {
             floor_redo_stamps(&mut plan, ordinal).expect("floor");
             assert_eq!(put_stamp(&plan), 100);
         }
+    }
+
+    /// A floored session commit's bytes hold the plan's pins, so the WAL
+    /// append stores them as they are.
+    #[test]
+    fn a_floored_commit_holds_its_pins_for_the_wal_append() {
+        use std::borrow::Cow;
+
+        use nodedb_physical::physical_plan::{CrsPin, RedoPins};
+
+        let pins = RedoPins {
+            configs: Vec::new(),
+            crs: Some(std::sync::Arc::new(CrsPin {
+                digest: 41,
+                bytes: vec![0x90].into(),
+            })),
+        };
+        let mut plan = redo_plan(RedoOrigin::Commit, None);
+        let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { pins: held, .. }) = &mut plan else {
+            panic!("a redo install");
+        };
+        *held = pins.clone();
+        floor_redo_stamps(&mut plan, Some(500)).expect("floor");
+        let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo, sum_targets, ..
+        }) = &plan
+        else {
+            panic!("a redo install");
+        };
+        let payload =
+            super::super::redo_marker::redo_wal_payload(redo, sum_targets, &pins).expect("payload");
+        assert!(matches!(payload.bytes, Cow::Borrowed(_)));
+        assert_eq!(RedoRecord::from_bytes(redo).expect("decode").pins, pins);
+        assert_eq!(put_stamp(&plan), 500);
     }
 }

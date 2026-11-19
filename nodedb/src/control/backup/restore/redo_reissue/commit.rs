@@ -128,6 +128,7 @@ fn row_batch(
         // A restored row was judged when it was first written.
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     }
     .to_bytes()?;
     Ok(RestoredRedo {

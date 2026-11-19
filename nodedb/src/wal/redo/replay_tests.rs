@@ -57,6 +57,7 @@ fn reconstitute_preserves_type_payload_and_header() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let outer = redo_wal_record(77, 9, 3, &redo);
 
@@ -103,6 +104,7 @@ fn reconstitute_carries_the_record_system_ordinal() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let outer = WalRecord::new_stamped(
         WalRecordArgs {
@@ -194,6 +196,7 @@ fn lower_lsn_redo_op_is_ordered_before_a_higher_lsn_autocommit() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     // The transaction committed at LSN 50; an autocommit overwrote the same
     // key at LSN 100.
@@ -245,6 +248,7 @@ fn merge_preserves_intra_transaction_order() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let standalone = vec![redo_wal_record(7, 0, 0, &redo)];
     let recon = reconstitute(&standalone).expect("well-formed redo");
@@ -276,6 +280,7 @@ fn merge_is_deterministic_across_repeated_replays() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let standalone = vec![
         put_wal_record(1, vec![1]),
@@ -371,6 +376,7 @@ fn op_index_counts_sub_records_of_their_record_only() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let group = WriteGroupRecord {
         schemas: Vec::new(),
@@ -462,6 +468,7 @@ fn op_index_continues_the_count_through_continuations() {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let records = vec![
         redo_wal_record(7, 0, 0, &redo),
@@ -539,6 +546,7 @@ fn marker_wal() -> MarkerWal {
         cross_shard_applied: None,
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     push_frame(&mut content, RedoFrameTag::Header, &header).expect("header");
     for op in &ops {

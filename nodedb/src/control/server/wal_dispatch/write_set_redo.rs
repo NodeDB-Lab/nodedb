@@ -1021,6 +1021,7 @@ mod tests {
                 calvin,
                 reads: Vec::new(),
                 snapshot_ordinal: None,
+                pins: Default::default(),
             })
         };
         assert_eq!(plan_record_group(&plan(None)), Some(String::new()));

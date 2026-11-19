@@ -353,6 +353,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
     }
 

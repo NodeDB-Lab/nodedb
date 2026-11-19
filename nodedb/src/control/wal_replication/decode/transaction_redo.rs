@@ -60,6 +60,8 @@ impl ChunkedRedo {
             reads: Vec::new(),
             snapshot_ordinal: self.snapshot_ordinal,
             adds_storage: false,
+            // The install reads the pins from the content header.
+            pins: Default::default(),
         }
     }
 
@@ -103,6 +105,7 @@ fn payload_of(
         reads: content.reads,
         snapshot_ordinal,
         adds_storage: false,
+        pins: content.pins,
     }
 }
 
@@ -188,6 +191,7 @@ mod tests {
                 row_changes: Vec::new(),
                 user_roles: vec!["approver".into()],
                 sum_targets: Vec::new(),
+                pins: Default::default(),
             },
             collections: vec!["accounts".into(), "entries".into()],
             incarnation_names: vec![
@@ -214,6 +218,25 @@ mod tests {
             }],
             snapshot_ordinal: Some(1_700_000_000_000_000_123),
             adds_storage: false,
+            pins: nodedb_physical::physical_plan::RedoPins {
+                configs: vec![std::sync::Arc::new(
+                    nodedb_physical::physical_plan::ConfigPin {
+                        key: nodedb_physical::physical_plan::ConfigPinKey {
+                            database_id: DatabaseId::new(5),
+                            tenant_id: TenantId::new(1),
+                            collection: "5/entries".into(),
+                        },
+                        digest: 17,
+                        wire: vec![1, 2, 3].into(),
+                    },
+                )],
+                crs: Some(std::sync::Arc::new(
+                    nodedb_physical::physical_plan::CrsPin {
+                        digest: 18,
+                        bytes: vec![0x90].into(),
+                    },
+                )),
+            },
         }
     }
 
@@ -247,6 +270,8 @@ mod tests {
         assert_eq!(decoded.collections, original.collections);
         assert_eq!(decoded.sum_targets, original.sum_targets);
         assert_eq!(decoded.identities, original.identities);
+        // The pins reach every replica's apply.
+        assert_eq!(decoded.pins, original.pins);
         assert_eq!(decoded.event_source, EventSource::Trigger);
         assert_eq!(decoded.origin, RedoOrigin::Restore);
         // The reads and the snapshot reach every replica's apply.
@@ -377,6 +402,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(content.reads, original.reads);
+        assert_eq!(content.pins, original.pins);
         // The final entry's own fields travel on the marker payload.
         let marker = chunked.marker_payload(content.redo);
         assert_eq!(marker.event_source, EventSource::Trigger);
@@ -389,7 +415,9 @@ mod tests {
         let original = payload();
         let plan = original.apply_plan().expect("plan builds");
         let nodedb_physical::physical_plan::PhysicalPlan::Meta(
-            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo { redo, origin, .. },
+            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo {
+                redo, origin, pins, ..
+            },
         ) = plan
         else {
             panic!("apply plan must be ApplyTransactionRedo");
@@ -397,6 +425,8 @@ mod tests {
         let redo = RedoRecord::from_bytes(&redo).expect("redo decodes");
         assert_eq!(redo, original.redo);
         assert_eq!(origin, RedoOrigin::Restore);
+        // The core receives the pins on the apply plan.
+        assert_eq!(pins, original.pins);
     }
 
     #[test]

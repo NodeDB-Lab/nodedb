@@ -129,6 +129,7 @@ pub fn lists_record(bytes: &[u8]) -> crate::Result<crate::wal::RedoRecord> {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     for frame in RedoFrames::new(bytes) {
         let (tag, body) = frame?;

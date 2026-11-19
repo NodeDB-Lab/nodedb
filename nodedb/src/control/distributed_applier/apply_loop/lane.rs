@@ -755,6 +755,7 @@ mod tests {
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
                 sum_targets: Vec::new(),
+                pins: Default::default(),
             },
             collections: vec!["orders".into()],
             incarnation_names: Vec::new(),
@@ -772,6 +773,7 @@ mod tests {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
+            pins: Default::default(),
         };
         let mut entry = crate::control::wal_replication::encode::transaction_redo_entry(
             crate::types::TenantId::new(4),

@@ -119,6 +119,7 @@ mod tests {
                 user_write,
                 mirror: false,
             }),
+            pins: Default::default(),
         })
     }
 

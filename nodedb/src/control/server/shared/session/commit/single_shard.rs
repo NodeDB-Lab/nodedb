@@ -111,6 +111,7 @@ pub(super) async fn dispatch_single_shard(
         // roles of the identity that commits.
         user_roles: identity.role_names(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
 
     // What the record's apply needs beside its resolved lists. The redo
@@ -218,6 +219,7 @@ pub(super) async fn commit_publishes(
         // A record of messages alone writes no row for a transition to judge.
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     };
     let payload = match TransactionRedoPayload::from_commit(
         state,

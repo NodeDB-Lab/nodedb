@@ -152,6 +152,7 @@ impl Ring {
             calvin,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            pins: Default::default(),
         })
     }
 
@@ -175,6 +176,7 @@ impl Ring {
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: spec.snapshot,
+            pins: Default::default(),
         })
     }
 

@@ -79,6 +79,14 @@ impl DocConfigWire {
     pub fn digest(&self) -> Result<u64, DocConfigWireError> {
         Ok(xxhash_rust::xxh3::xxh3_64(&self.canonical_bytes()?))
     }
+
+    /// The canonical bytes and their digest, as a config pin carries them.
+    /// The digest equals [`Self::digest`].
+    pub fn pin_parts(&self) -> Result<(Vec<u8>, u64), DocConfigWireError> {
+        let bytes = self.canonical_bytes()?;
+        let digest = xxhash_rust::xxh3::xxh3_64(&bytes);
+        Ok((bytes, digest))
+    }
 }
 
 #[cfg(test)]
@@ -213,5 +221,12 @@ mod tests {
     #[test]
     fn the_same_config_gives_the_same_digest() {
         assert_eq!(digest(&base()), digest(&base()));
+    }
+
+    #[test]
+    fn pin_parts_carry_the_digest_of_the_canonical_bytes() {
+        let (bytes, pinned) = base().pin_parts().expect("pin parts");
+        assert_eq!(pinned, digest(&base()));
+        assert_eq!(bytes, base().canonical_bytes().expect("canonical"));
     }
 }

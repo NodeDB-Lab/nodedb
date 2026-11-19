@@ -484,6 +484,8 @@ pub struct SharedState {
     /// Per-database DML audit mode cache.
     /// Updated by `ALTER DATABASE SET AUDIT_DML`; consulted by the Event Plane consumer.
     pub audit_dml_cache: Arc<super::audit_dml_cache::AuditDmlCache>,
+    /// Config pins of committed catalog state, read by every redo commit.
+    pub config_pins: Arc<super::config_pin_cache::ConfigPinCache>,
     /// Per-database idle session timeout cache.
     /// Updated by `ALTER DATABASE SET IDLE_TIMEOUT`; consulted by the idle-sweep loop.
     pub idle_timeout_cache: Arc<super::idle_timeout_cache::IdleTimeoutCache>,

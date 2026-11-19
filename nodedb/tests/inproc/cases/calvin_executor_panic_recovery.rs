@@ -119,6 +119,7 @@ fn stage_then_install(
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     }));
     request.wal_lsn = Some(nodedb::types::Lsn::new(epoch * 10));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();

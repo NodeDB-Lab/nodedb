@@ -206,6 +206,7 @@ fn install(
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     }));
     request.wal_lsn = Some(Lsn::new(10 + epoch));
     send(core, tx, rx, request)

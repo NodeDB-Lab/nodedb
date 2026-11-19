@@ -727,6 +727,7 @@ fn journalled_task(
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            pins: Default::default(),
         },
     );
     request.wal_lsn = Some(Lsn::new(LSN));

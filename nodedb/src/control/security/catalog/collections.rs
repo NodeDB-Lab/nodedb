@@ -347,6 +347,21 @@ impl SystemCatalog {
             Err(e) => Err(catalog_err("get collection", e)),
         }
     }
+
+    /// Committed-only listing of a tenant's active collections, bypassing
+    /// the transaction DDL overlay. A cache shared by every session reads
+    /// through this.
+    pub fn load_committed_collections_for_tenant(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<StoredCollection>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn", e))?;
+        load_collections_for_tenant_in(&read_txn, database_id, tenant_id)
+    }
 }
 
 /// Body of [`SystemCatalog::load_collections_for_tenant`], over an already-open

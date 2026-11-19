@@ -157,6 +157,9 @@ impl FramedRedo {
             // The install folds with the targets the header carries, so a
             // reader of the installed record folds with the same ones.
             sum_targets: self.header.sum_targets,
+            // A reader of the installed record judges under the pins the
+            // header carries.
+            pins: self.header.pins,
         };
         if let Some(floor) = reference.stamp_floor {
             record.raise_stamps_to(floor)?;
@@ -178,6 +181,28 @@ mod tests {
             cross_shard_applied: None,
             user_roles: vec!["writer".into()],
             sum_targets: Vec::new(),
+            pins: pins(),
+        }
+    }
+
+    fn pins() -> nodedb_physical::physical_plan::RedoPins {
+        use std::sync::Arc;
+
+        use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+        RedoPins {
+            configs: vec![Arc::new(ConfigPin {
+                key: ConfigPinKey {
+                    database_id: nodedb_types::DatabaseId::DEFAULT,
+                    tenant_id: nodedb_types::TenantId::new(1),
+                    collection: "orders".into(),
+                },
+                digest: 11,
+                wire: vec![0x90, 0x01].into(),
+            })],
+            crs: Some(Arc::new(CrsPin {
+                digest: 12,
+                bytes: vec![0x90].into(),
+            })),
         }
     }
 
@@ -253,6 +278,8 @@ mod tests {
             .expect("installed");
         assert_eq!(installed.ops.len(), 3);
         assert_eq!(installed.user_roles, vec!["writer".to_string()]);
+        // The stream header carries the pins to the installed record.
+        assert_eq!(installed.pins, pins());
         assert_eq!(installed.publishes[0].position, reference.publish_position);
         assert_eq!(RedoStreamRef::of(&installed).expect("ref"), None);
     }

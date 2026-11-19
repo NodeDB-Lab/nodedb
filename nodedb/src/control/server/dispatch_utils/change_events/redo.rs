@@ -75,6 +75,7 @@ mod tests {
             row_changes,
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
         .to_bytes()
         .expect("encode redo")

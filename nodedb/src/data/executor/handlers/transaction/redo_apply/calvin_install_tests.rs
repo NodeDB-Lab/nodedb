@@ -102,6 +102,7 @@ fn install_plan(
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     })
 }
 

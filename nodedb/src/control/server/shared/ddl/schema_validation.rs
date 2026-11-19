@@ -32,65 +32,9 @@ fn expand_serial_type(collection: &str, field: &str, type_str: &str) -> Option<S
     })
 }
 
-/// Parse FIELDS clause from CREATE COLLECTION parts.
-///
-/// Syntax: `CREATE COLLECTION name FIELDS (field1 type1, field2 type2, ...)`
-/// Returns empty vec if no FIELDS clause.
-///
-/// SERIAL and BIGSERIAL expand to their backing type plus a `nextval` DEFAULT
-/// naming the sequence the caller creates for that column.
-///
-/// The second return value lists field names that had SERIAL/BIGSERIAL types,
-/// so the caller can create the implicit sequences.
-pub(crate) fn parse_fields_clause(
-    collection: &str,
-    parts: &[&str],
-) -> (Vec<(String, String)>, Vec<String>) {
-    let fields_idx = parts.iter().position(|p| p.eq_ignore_ascii_case("FIELDS"));
-    let fields_idx = match fields_idx {
-        Some(i) => i,
-        None => return (Vec::new(), Vec::new()),
-    };
-
-    let rest = parts[fields_idx + 1..].join(" ");
-    let rest = rest.trim();
-    let inner = if rest.starts_with('(') && rest.ends_with(')') {
-        &rest[1..rest.len() - 1]
-    } else {
-        rest
-    };
-
-    let mut fields = Vec::new();
-    let mut serial_fields = Vec::new();
-
-    for pair in inner.split(',') {
-        let pair = pair.trim();
-        let mut tokens = pair.split_whitespace();
-        let Some(name) = tokens.next() else {
-            continue;
-        };
-        let name = name.to_string();
-        let type_name = tokens.next().unwrap_or("text").to_uppercase();
-
-        // Expand SERIAL/BIGSERIAL shorthand into type + nextval DEFAULT.
-        let actual_type = match expand_serial_type(collection, &name, &type_name) {
-            Some(expanded) => {
-                serial_fields.push(name.clone());
-                expanded
-            }
-            None => type_name,
-        };
-
-        fields.push((name, actual_type));
-    }
-
-    (fields, serial_fields)
-}
-
 /// Expand pre-parsed `(name, type)` column pairs, handling SERIAL/BIGSERIAL.
 ///
-/// Mirrors `parse_fields_clause` but operates on already-tokenised pairs
-/// instead of raw SQL parts. Used by the typed-AST collection handlers.
+/// The typed-AST collection handlers call it with already-tokenised pairs.
 ///
 /// Returns `(fields, serial_fields)` where `serial_fields` holds the names
 /// of columns whose type was expanded from SERIAL / BIGSERIAL so the caller

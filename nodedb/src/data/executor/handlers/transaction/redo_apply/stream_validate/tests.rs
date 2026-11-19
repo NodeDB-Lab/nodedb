@@ -154,6 +154,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn record(
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     }
 }
 
@@ -171,6 +172,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn framed(
         cross_shard_applied: redo.cross_shard_applied.clone(),
         user_roles: redo.user_roles.clone(),
         sum_targets: sum_targets.to_vec(),
+        pins: Default::default(),
     };
     push_frame(&mut out, RedoFrameTag::Header, &header).expect("header");
     for publish in &redo.publishes {

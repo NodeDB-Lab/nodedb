@@ -87,6 +87,7 @@ fn append_marker(live: &mut Live, redo: &RedoRecord) -> (PhysicalPlan, Lsn) {
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     });
     let origin = append_group_origin(WalAppendRequest {
         wal: live.wal.manager().appender(NO_APPLY_KEY),

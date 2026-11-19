@@ -10,10 +10,11 @@
 //! A copied row passed its rules when the source first wrote it, so the
 //! apply runs the UNIQUE check alone, and a copy fires no AFTER trigger.
 
-use nodedb_physical::physical_plan::RedoOrigin;
+use nodedb_physical::physical_plan::{RedoOrigin, RedoPins};
 use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection, TenantId};
 
 use crate::control::state::SharedState;
+use crate::control::wal_replication::transaction_redo::pins::redo_pins;
 use crate::control::wal_replication::transaction_redo::{
     RedoTarget, TransactionRedoPayload, propose_transaction_redo,
 };
@@ -80,7 +81,15 @@ async fn commit_copies<R>(
         for row in pending.by_ref().take(ROWS_PER_RECORD) {
             parts.push(part(row, stored.as_str(), target.collection)?);
         }
-        let payload = copy_payload(stored.as_str(), parts);
+        // A copy writes one collection and folds into no sum target.
+        let pins = redo_pins(
+            state,
+            target.database_id,
+            target.tenant_id,
+            [stored.as_str()],
+            &[],
+        )?;
+        let payload = copy_payload(stored.as_str(), parts, pins);
         let deadline =
             crate::control::server::shared::session::StatementDeadline::of_statement(state)
                 .tokio_instant();
@@ -89,8 +98,13 @@ async fn commit_copies<R>(
     Ok(())
 }
 
-/// One record of copied rows into the collection `stored`.
-fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayload {
+/// One record of copied rows into the collection `stored`, judged under
+/// `pins`.
+fn copy_payload(
+    stored: &str,
+    parts: Vec<CopyRecordPart>,
+    pins: RedoPins,
+) -> TransactionRedoPayload {
     let mut ops = Vec::with_capacity(parts.len());
     let mut identities = Vec::with_capacity(parts.len());
     for part in parts {
@@ -113,6 +127,8 @@ fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayl
             // Only the installed WAL record carries sum targets, and a copy
             // derives none.
             sum_targets: Vec::new(),
+            // The payload carries the pins.
+            pins: RedoPins::default(),
         },
         collections: vec![stored.to_string()],
         // A copy writes rows of one user collection.
@@ -131,5 +147,6 @@ fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayl
         snapshot_ordinal: None,
         // A copy writes rows into the clone.
         adds_storage: true,
+        pins,
     }
 }

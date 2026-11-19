@@ -11,6 +11,7 @@
 //! - [`abandon`]: the retry of a failed stream abandon.
 //! - [`sum_targets`]: what the payload derives from the commit's buffered
 //!   plans.
+//! - [`pins`]: the config content the proposer pins for the validate.
 //! - [`stream_header`]: the Control Plane's reads of a chunked redo's
 //!   content, one page at a time.
 
@@ -18,6 +19,7 @@ pub mod abandon;
 pub mod apply;
 pub mod chunks;
 pub mod payload;
+pub mod pins;
 pub mod propose;
 pub mod propose_stream;
 pub mod stream_header;

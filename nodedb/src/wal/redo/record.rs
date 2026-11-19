@@ -71,10 +71,20 @@ pub struct RedoRecord {
     /// writes into, keyed by source collection. The `TransactionRedo` WAL
     /// record of a whole record carries the targets its install used, so
     /// boot can fold a record whose install never became durable. A stream
-    /// marker's content header carries them instead. Empty on every other
-    /// copy of a record.
+    /// marker's content header carries them instead. A floored session
+    /// commit's apply plan carries them too. Empty on every other copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
+    /// The config content the proposer pinned for the validate. The
+    /// `TransactionRedo` WAL record of a whole record carries the pins its
+    /// install was judged under. A stream marker's content header carries
+    /// them instead. A floored session commit's apply plan carries them too.
+    /// Empty on every other copy.
+    #[serde(
+        default,
+        skip_serializing_if = "nodedb_physical::physical_plan::RedoPins::is_empty"
+    )]
+    pub pins: nodedb_physical::physical_plan::RedoPins,
 }
 
 /// One `PUBLISH TO` message a committed transaction owes its topic.
@@ -402,6 +412,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         let decoded = RedoRecord::from_bytes(&bytes).expect("decode");
@@ -433,6 +444,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -470,6 +482,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         let decoded = RedoRecord::from_bytes(&bytes).expect("decode");
@@ -512,6 +525,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: vec!["approver".into(), "readwrite".into()],
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -533,6 +547,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -555,6 +570,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
@@ -582,6 +598,42 @@ mod tests {
                     nodedb_types::Surrogate::new(42),
                 )],
             }],
+            pins: Default::default(),
+        };
+        let bytes = record.to_bytes().expect("encode");
+        assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);
+    }
+
+    /// The pins a whole record's WAL copy carries decode to the same pins
+    /// on every replica and at every restart.
+    #[test]
+    fn roundtrip_with_pins() {
+        use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+        let record = RedoRecord {
+            version: 1,
+            ops: sample_ops(),
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+            sum_targets: Vec::new(),
+            pins: RedoPins {
+                configs: vec![std::sync::Arc::new(ConfigPin {
+                    key: ConfigPinKey {
+                        database_id: nodedb_types::DatabaseId::new(7),
+                        tenant_id: nodedb_types::TenantId::new(1),
+                        collection: "7/orders".into(),
+                    },
+                    digest: 99,
+                    wire: vec![0x93, 0x01, 0x02, 0x03].into(),
+                })],
+                crs: Some(std::sync::Arc::new(CrsPin {
+                    digest: 5,
+                    bytes: vec![0x90].into(),
+                })),
+            },
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(RedoRecord::from_bytes(&bytes).expect("decode"), record);

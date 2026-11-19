@@ -205,9 +205,10 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
             calvin,
             reads,
             snapshot_ordinal,
+            pins,
             ..
         }) => {
-            let payload = super::redo_marker::redo_wal_payload(redo, sum_targets)?;
+            let payload = super::redo_marker::redo_wal_payload(redo, sum_targets, pins)?;
             stream_marker = payload.stream_marker;
             if calvin.is_some() {
                 Some(wal.append_transaction_redo_bytes(
@@ -309,6 +310,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
         .to_bytes()
         .expect("encode redo");
@@ -321,6 +323,7 @@ mod tests {
                 reads: Vec::new(),
                 snapshot_ordinal: None,
                 calvin: None,
+                pins: Default::default(),
             },
         );
 

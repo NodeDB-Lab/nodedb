@@ -194,6 +194,7 @@ fn judge_task(record: &WalRecord, judged: &JudgedRedo) -> ExecutionTask {
             calvin: None,
             reads: boundary.reads.clone(),
             snapshot_ordinal: boundary.snapshot_ordinal,
+            pins: Default::default(),
         },
     );
     ExecutionTask::new(Request {

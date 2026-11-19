@@ -59,6 +59,7 @@ fn whole(ops: Vec<RedoSubRecord>, snapshot: Option<i64>) -> PhysicalPlan {
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: snapshot,
+        pins: Default::default(),
     })
 }
 
@@ -74,6 +75,7 @@ fn marker(node: &mut Node, ops: Vec<RedoSubRecord>) -> PhysicalPlan {
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     })
 }
 
@@ -352,6 +354,7 @@ fn a_calvin_slice_is_not_judged() {
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     });
     let lsn = append(&node, &calvin);
     let records = node.wal.manager().replay().expect("replay");

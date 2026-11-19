@@ -1908,6 +1908,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         });
         dst.replay_transaction_redo_wal(
             std::slice::from_ref(&seed),
@@ -1999,6 +2000,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         });
         core.replay_transaction_redo_wal(
             std::slice::from_ref(&seed),
@@ -4326,6 +4328,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         });
         core.replay_transaction_redo_wal(
             std::slice::from_ref(&seed),

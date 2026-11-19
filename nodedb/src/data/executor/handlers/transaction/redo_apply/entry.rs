@@ -136,6 +136,7 @@ impl CoreLoop {
                 calvin: None,
                 reads: Vec::new(),
                 snapshot_ordinal: None,
+                pins: Default::default(),
             },
         );
         let root = ExecutionTask::new(request);
@@ -472,6 +473,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
         .to_bytes()
         .expect("encode redo")
@@ -545,6 +547,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         }
         .to_bytes()
         .expect("encode redo");

@@ -8,7 +8,7 @@
 //! core frames the resolved lists, and the proposer frames the rest, so a
 //! proposer joins the parts it pulls to its own header frames.
 
-use nodedb_physical::physical_plan::RedoSumTargets;
+use nodedb_physical::physical_plan::{RedoPins, RedoSumTargets};
 
 use nodedb_types::calvin::VersionedReadEntry;
 
@@ -34,6 +34,7 @@ pub struct RedoContentView<'a, I: Iterator<Item = ReplicatedIdentity>> {
     /// The identities, made one at a time as the framer reads them.
     pub identities: I,
     pub reads: &'a [VersionedReadEntry],
+    pub pins: &'a RedoPins,
 }
 
 impl<I: Iterator<Item = ReplicatedIdentity>> RedoContentView<'_, I> {
@@ -46,6 +47,7 @@ impl<I: Iterator<Item = ReplicatedIdentity>> RedoContentView<'_, I> {
             cross_shard_applied: self.redo.cross_shard_applied.clone(),
             user_roles: self.redo.user_roles.clone(),
             sum_targets: self.sum_targets.to_vec(),
+            pins: self.pins.clone(),
         };
         push_frame(out, RedoFrameTag::Header, &header)?;
         for publish in &self.redo.publishes {
@@ -89,6 +91,7 @@ impl RedoContent {
             sum_targets: &self.sum_targets,
             identities: self.identities.iter().cloned(),
             reads: &self.reads,
+            pins: &self.pins,
         }
     }
 
@@ -129,10 +132,12 @@ impl RedoContent {
                 row_changes: Vec::new(),
                 user_roles: header.user_roles,
                 sum_targets: Vec::new(),
+                pins: RedoPins::default(),
             },
             sum_targets: header.sum_targets,
             identities: Vec::new(),
             reads: Vec::new(),
+            pins: header.pins,
         };
         for frame in frames {
             let (tag, body) = frame?;
@@ -198,6 +203,7 @@ mod tests {
                 }],
                 user_roles: vec!["writer".into()],
                 sum_targets: Vec::new(),
+                pins: RedoPins::default(),
             },
             sum_targets: Vec::new(),
             identities: vec![ReplicatedIdentity {
@@ -206,6 +212,25 @@ mod tests {
                 surrogate: 5,
             }],
             reads: Vec::new(),
+            pins: RedoPins {
+                configs: vec![std::sync::Arc::new(
+                    nodedb_physical::physical_plan::ConfigPin {
+                        key: nodedb_physical::physical_plan::ConfigPinKey {
+                            database_id: nodedb_types::DatabaseId::DEFAULT,
+                            tenant_id: nodedb_types::TenantId::new(1),
+                            collection: "orders".into(),
+                        },
+                        digest: 3,
+                        wire: vec![7; 40].into(),
+                    },
+                )],
+                crs: Some(std::sync::Arc::new(
+                    nodedb_physical::physical_plan::CrsPin {
+                        digest: 4,
+                        bytes: vec![0x90].into(),
+                    },
+                )),
+            },
         }
     }
 

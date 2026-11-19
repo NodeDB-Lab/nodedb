@@ -4,7 +4,7 @@
 //! the data-group log and as every replica applies it.
 
 use nodedb_physical::physical_plan::{
-    CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets,
+    CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin, RedoPins, RedoSumTargets,
 };
 
 use nodedb_types::calvin::VersionedReadEntry;
@@ -17,6 +17,7 @@ use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoRecord;
 
+use super::pins::redo_pins;
 use super::sum_targets::redo_sum_targets;
 use crate::control::planner::calvin::incarnation_names::{NamedIncarnation, incarnation_names};
 use nodedb_physical::physical_plan::written_collections;
@@ -56,6 +57,9 @@ pub struct TransactionRedoPayload {
     /// submit classified it. A payload decoded from an entry reads `false`,
     /// because only the leader gate reads the flag.
     pub adds_storage: bool,
+    /// The config content the proposer pinned for every replica's validate.
+    /// Empty on a stream marker's payload: the content header carries them.
+    pub pins: RedoPins,
 }
 
 /// What a committed Calvin slice's redo carries beside its record, derived
@@ -82,13 +86,22 @@ impl TransactionRedoPayload {
         plans: &[PhysicalPlan],
         event_source: EventSource,
     ) -> crate::Result<Self> {
+        let collections = written_collections(plans);
+        let sum_targets = redo_sum_targets(plans);
+        let pins = redo_pins(
+            state,
+            database_id,
+            tenant_id,
+            collections.iter().map(String::as_str),
+            &sum_targets,
+        )?;
         Ok(Self {
             redo,
-            collections: written_collections(plans),
+            collections,
             incarnation_names: incarnation_names(plans, |plan| {
                 written_collections(std::slice::from_ref(plan))
             }),
-            sum_targets: redo_sum_targets(plans),
+            sum_targets,
             identities: collect_plan_identities(
                 &state.surrogate_assigner,
                 database_id,
@@ -101,6 +114,7 @@ impl TransactionRedoPayload {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: plans.iter().any(plan_adds_storage),
+            pins,
         })
     }
 
@@ -137,6 +151,9 @@ impl TransactionRedoPayload {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
+            // U7c-5: build the Calvin pins in TxClass at submit. A Calvin
+            // slice carries no pin here.
+            pins: RedoPins::default(),
         }
     }
 
@@ -163,6 +180,7 @@ impl TransactionRedoPayload {
             calvin: self.calvin_install()?,
             reads: self.reads.clone(),
             snapshot_ordinal: self.snapshot_ordinal,
+            pins: self.pins.clone(),
         }))
     }
 
@@ -214,6 +232,7 @@ mod tests {
                 row_changes: Vec::new(),
                 user_roles: Vec::new(),
                 sum_targets: Vec::new(),
+                pins: RedoPins::default(),
             },
             collections: vec!["orders".into()],
             incarnation_names: Vec::new(),
@@ -225,6 +244,7 @@ mod tests {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
+            pins: RedoPins::default(),
         }
     }
 

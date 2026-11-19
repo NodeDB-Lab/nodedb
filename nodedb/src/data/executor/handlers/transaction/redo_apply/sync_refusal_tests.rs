@@ -89,6 +89,7 @@ fn assert_group_rolls_back(refused: RedoSubRecord) {
         row_changes: Vec::new(),
         user_roles: Vec::new(),
         sum_targets: Vec::new(),
+        pins: Default::default(),
     }
     .to_bytes()
     .unwrap();
@@ -199,6 +200,7 @@ fn append_group(wal: &crate::wal::manager::WalManager, refused: RedoSubRecord, w
                     row_changes: Vec::new(),
                     user_roles: Vec::new(),
                     sum_targets: Vec::new(),
+                    pins: Default::default(),
                 },
             )
             .unwrap();

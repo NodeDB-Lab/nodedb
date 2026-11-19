@@ -18,7 +18,8 @@ nodedb-graph = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-types = { workspace = true }
 rust_decimal = { workspace = true }
-serde = { workspace = true }
+# `rc` derives serde for the shared pins of a redo.
+serde = { workspace = true, features = ["rc"] }
 thiserror = { workspace = true }
 zerompk = { workspace = true }
 

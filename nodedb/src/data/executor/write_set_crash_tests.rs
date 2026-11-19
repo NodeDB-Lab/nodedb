@@ -524,6 +524,7 @@ fn calvin_install() -> PhysicalPlan {
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
+        pins: Default::default(),
     })
 }
 

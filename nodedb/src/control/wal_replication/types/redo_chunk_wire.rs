@@ -2,7 +2,7 @@
 
 //! Wire shapes of a committed redo body: inline, or chunked across entries.
 
-use nodedb_physical::physical_plan::RedoSumTargets;
+use nodedb_physical::physical_plan::{RedoPins, RedoSumTargets};
 
 use super::transaction_redo_wire::ReplicatedIdentity;
 use crate::wal::RedoStreamId;
@@ -30,6 +30,9 @@ pub struct RedoContent {
     /// validates them at the entry's snapshot ordinal before it installs.
     /// They travel in the content, so a large read set chunks with the redo.
     pub reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
+    /// The config content the proposer pinned for every replica's validate.
+    /// They travel in the content, so their bytes count in the entry size.
+    pub pins: RedoPins,
 }
 
 /// Where a `TransactionRedo` entry's content is.

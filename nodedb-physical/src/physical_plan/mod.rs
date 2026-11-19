@@ -28,6 +28,7 @@ pub mod meta_version_purge;
 pub mod plan;
 pub mod query;
 pub mod redo_origin;
+pub mod redo_pins;
 pub mod redo_stream_page;
 pub mod resolve_part;
 pub mod returning_accessor;
@@ -84,6 +85,7 @@ pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHi
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;
+pub use redo_pins::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
 pub use redo_stream_page::{RedoStreamPage, RedoStreamSection};
 pub use resolve_part::{RejectedLines, ResolvedTxnOpen, ResolvedTxnPart};
 pub use routing::plan_contains_cluster_partitioned_leaf;

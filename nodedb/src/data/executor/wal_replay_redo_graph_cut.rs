@@ -207,6 +207,7 @@ mod tests {
             row_changes: Vec::new(),
             user_roles: Vec::new(),
             sum_targets: Vec::new(),
+            pins: Default::default(),
         };
         nodedb_wal::WalRecord::new(WalRecordArgs {
             record_type: RecordType::TransactionRedo as u32,

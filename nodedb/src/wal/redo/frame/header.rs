@@ -3,7 +3,7 @@
 //! The header record of framed redo content: the fields of a redo that are
 //! not row-sized lists.
 
-use nodedb_physical::physical_plan::RedoSumTargets;
+use nodedb_physical::physical_plan::{RedoPins, RedoSumTargets};
 
 use crate::wal::{CalvinStamp, CrossShardAppliedKey};
 
@@ -16,4 +16,6 @@ pub struct RedoContentHeader {
     pub cross_shard_applied: Option<CrossShardAppliedKey>,
     pub user_roles: Vec<String>,
     pub sum_targets: Vec<RedoSumTargets>,
+    /// The config content the proposer pinned for the validate.
+    pub pins: RedoPins,
 }

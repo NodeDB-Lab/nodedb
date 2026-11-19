@@ -542,6 +542,7 @@ mod tests {
                 reads: Vec::new(),
                 snapshot_ordinal: None,
                 calvin: None,
+                pins: Default::default(),
             }),
         ] {
             for table in [None, Some(single_node_table())] {
