@@ -140,3 +140,31 @@ fn upsert_on_conflict_in_range_values_are_accepted() {
     )
     .expect("in-range i32 literal must be accepted");
 }
+
+// ---- clauses the engine does not evaluate are refused ----
+
+#[test]
+fn on_conflict_do_update_where_is_refused_not_ignored() {
+    let err = plan_sql(
+        "INSERT INTO probe (id, n) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET n = 2 WHERE probe.n IS NULL",
+        &Catalog,
+    )
+    .expect_err("the WHERE is not evaluated, so the statement must not plan");
+    assert!(
+        matches!(&err, SqlError::FeatureNotSupported { detail } if detail.contains("WHERE")),
+        "expected FeatureNotSupported naming WHERE, got {err:?}"
+    );
+}
+
+#[test]
+fn on_conflict_target_other_than_the_primary_key_is_refused() {
+    let err = plan_sql(
+        "INSERT INTO probe (id, n) VALUES (1, 1) ON CONFLICT (n) DO UPDATE SET n = 2",
+        &Catalog,
+    )
+    .expect_err("the conflict is decided by the primary key, not by n");
+    assert!(
+        matches!(&err, SqlError::FeatureNotSupported { detail } if detail.contains("primary key")),
+        "expected FeatureNotSupported naming the primary key, got {err:?}"
+    );
+}

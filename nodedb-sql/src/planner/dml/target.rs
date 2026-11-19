@@ -11,7 +11,9 @@ use super::super::dml_helpers::{
     coerce_and_check_rows, convert_value_rows, materialize_defaults_in_rows,
 };
 use crate::error::{Result, SqlError};
-use crate::parser::normalize::{normalize_insert_column, normalize_object_name_checked};
+use crate::parser::normalize::{
+    normalize_ident, normalize_insert_column, normalize_object_name_checked,
+};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
 use crate::resolver::expr::convert_expr;
@@ -113,7 +115,14 @@ pub(super) enum OnConflict {
     DoUpdate(Vec<(String, SqlExpr)>),
 }
 
-pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Result<OnConflict> {
+/// `primary_key` is the key an `ON CONFLICT` target must name. The engine
+/// decides every conflict by the primary key and evaluates no `DO UPDATE ...
+/// WHERE`, so a clause that says otherwise is refused instead of ignored.
+pub(super) fn classify_on_conflict(
+    ins: &ast::Insert,
+    scope: &TableScope,
+    primary_key: Option<&str>,
+) -> Result<OnConflict> {
     let Some(on) = ins.on.as_ref() else {
         return Ok(OnConflict::None);
     };
@@ -123,6 +132,14 @@ pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Res
     match &oc.action {
         ast::OnConflictAction::DoNothing => Ok(OnConflict::DoNothing),
         ast::OnConflictAction::DoUpdate(do_update) => {
+            if do_update.selection.is_some() {
+                return Err(SqlError::FeatureNotSupported {
+                    detail: "ON CONFLICT DO UPDATE ... WHERE is not supported: the engine \
+                             cannot leave a conflicting row unchanged on a condition"
+                        .into(),
+                });
+            }
+            check_conflict_target(oc.conflict_target.as_ref(), primary_key)?;
             let mut pairs = Vec::with_capacity(do_update.assignments.len());
             for a in &do_update.assignments {
                 let name = match &a.target {
@@ -139,6 +156,32 @@ pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Res
             }
             Ok(OnConflict::DoUpdate(pairs))
         }
+    }
+}
+
+/// Refuse a conflict target that is not exactly the primary key.
+fn check_conflict_target(
+    target: Option<&ast::ConflictTarget>,
+    primary_key: Option<&str>,
+) -> Result<()> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let names_primary_key = match (target, primary_key) {
+        (ast::ConflictTarget::Columns(cols), Some(pk)) => {
+            cols.len() == 1 && normalize_ident(&cols[0]) == pk.to_lowercase()
+        }
+        (ast::ConflictTarget::Columns(_), None) => true,
+        (ast::ConflictTarget::OnConstraint(_), _) => false,
+    };
+    if names_primary_key {
+        Ok(())
+    } else {
+        Err(SqlError::FeatureNotSupported {
+            detail: "ON CONFLICT target must be the primary key: the engine decides \
+                     every conflict by the primary key"
+                .into(),
+        })
     }
 }
 
