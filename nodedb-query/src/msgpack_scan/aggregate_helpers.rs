@@ -117,7 +117,9 @@ pub fn extract_str(
     crs: &CrsContext<'_>,
 ) -> Result<Option<String>, EvalError> {
     if let Some(expr) = expr {
-        return Ok(eval_expr(doc, expr, crs)?.map(|v| value_ops::value_to_display_string(&v)));
+        return Ok(eval_expr(doc, expr, crs)?
+            .filter(|v| !matches!(v, Value::Null))
+            .map(|v| value_ops::value_to_display_string(&v)));
     }
     if let Some(value) = native_field(doc, field)? {
         return Ok(value.and_then(|value| match value {

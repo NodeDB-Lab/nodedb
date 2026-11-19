@@ -84,6 +84,7 @@ impl AggAccum {
                 let frac = idx - lo as f64;
                 Value::Float(values[lo] * (1.0 - frac) + values[hi] * frac)
             }
+            AggAccum::StringAgg { parts } if parts.is_empty() => Value::Null,
             AggAccum::StringAgg { parts } => Value::String(parts.join(",")),
         })
     }
@@ -113,7 +114,9 @@ fn welford_finalize(function: &str, moments: &Moments) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::AggAccum;
     use super::welford_finalize;
+    use nodedb_physical::physical_plan::AggregateSpec;
     use nodedb_types::Value;
     use nodedb_types::array_agg::Moments;
 
@@ -176,5 +179,34 @@ mod tests {
                 Value::Null
             ));
         }
+    }
+
+    fn string_agg_spec() -> AggregateSpec {
+        AggregateSpec {
+            function: "string_agg".to_string(),
+            alias: "string_agg(v)".to_string(),
+            user_alias: None,
+            field: "v".to_string(),
+            expr: None,
+            param: None,
+        }
+    }
+
+    #[test]
+    fn string_agg_over_only_null_parts_is_null() {
+        let out = AggAccum::StringAgg { parts: Vec::new() }
+            .finalize(&string_agg_spec())
+            .unwrap();
+        assert!(matches!(out, Value::Null));
+    }
+
+    #[test]
+    fn string_agg_joins_non_null_parts() {
+        let out = AggAccum::StringAgg {
+            parts: vec!["a".to_string(), "b".to_string()],
+        }
+        .finalize(&string_agg_spec())
+        .unwrap();
+        assert_eq!(out, Value::String("a,b".to_string()));
     }
 }
