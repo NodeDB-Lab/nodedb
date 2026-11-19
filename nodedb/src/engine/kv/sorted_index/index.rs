@@ -31,7 +31,7 @@ impl std::fmt::Debug for SortedIndex {
 impl SortedIndex {
     /// Build an index over `rows`, `(primary_key_bytes, value_bytes)` pairs.
     ///
-    /// A row that lacks a sort column is left out. Returns the index and the
+    /// A row whose sort column is missing or NULL is left out. Returns the index and the
     /// number of rows it holds.
     pub fn build(
         def: SortedIndexDef,
@@ -129,7 +129,7 @@ impl SortedIndex {
 }
 
 /// The sort key of a MessagePack-encoded KV value. `None` when the value is
-/// not a map or lacks a sort column.
+/// not a map, or a sort column is missing or NULL.
 pub(super) fn extract_sort_key_from_value(
     def: &SortedIndexDef,
     value_bytes: &[u8],
