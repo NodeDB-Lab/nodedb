@@ -26,3 +26,17 @@ pub fn custom_crs_set_not_applied(err: &crate::Error, cause: &'static str, entri
     .with_backtrace()
     .emit();
 }
+
+/// Report a core's user-defined CRS set that did not encode, so the core
+/// holds no digest of it. Called from the one site that derives the digest.
+pub fn custom_crs_set_digest_unencoded(err: &zerompk::Error, core: usize) {
+    let ctx = context::CustomCrsSetDigestUnencoded { core };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "user-defined CRS set: the set a core holds does not encode, so it has no digest",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

@@ -14,7 +14,7 @@ use nodedb_physical::physical_plan::{RedoOrigin, RedoPins};
 use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection, TenantId};
 
 use crate::control::state::SharedState;
-use crate::control::wal_replication::transaction_redo::pins::redo_pins;
+use crate::control::wal_replication::transaction_redo::pins::{PinScope, redo_pins};
 use crate::control::wal_replication::transaction_redo::{
     RedoTarget, TransactionRedoPayload, propose_transaction_redo,
 };
@@ -65,6 +65,8 @@ async fn commit_copies<R>(
     part: fn(R, &str, &str) -> crate::Result<CopyRecordPart>,
 ) -> crate::Result<()> {
     let stored = QualifiedCollection::new(target.database_id, target.collection);
+    // A copy writes document rows, so its collection requires a pin.
+    let required = [stored.as_str().to_owned()];
     let redo_target = RedoTarget {
         tenant_id: target.tenant_id,
         database_id: target.database_id,
@@ -81,12 +83,16 @@ async fn commit_copies<R>(
         for row in pending.by_ref().take(ROWS_PER_RECORD) {
             parts.push(part(row, stored.as_str(), target.collection)?);
         }
-        // A copy writes one collection and folds into no sum target.
+        // A copy writes the document rows of one collection and folds into
+        // no sum target.
         let pins = redo_pins(
             state,
-            target.database_id,
-            target.tenant_id,
+            PinScope {
+                database_id: target.database_id,
+                tenant_id: target.tenant_id,
+            },
             [stored.as_str()],
+            &required,
             &[],
         )?;
         let payload = copy_payload(stored.as_str(), parts, pins);

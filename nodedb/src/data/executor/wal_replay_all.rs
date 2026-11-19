@@ -314,6 +314,7 @@ mod tests {
                 redo,
                 collections: &[collection.to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
         assert_eq!(

@@ -39,6 +39,7 @@ use crate::wal::redo::frame::{
 use crate::wal::{RedoPublish, RedoRowChange, RedoRowSource, RedoStreamReader, RedoSubRecord};
 
 use super::super::batched::{ActiveArms, InstallSpace};
+use super::super::config_pins::check_written_pinned;
 
 use super::super::passes::{ValidateBatches, final_refusal};
 use super::super::streamed::unreadable;
@@ -134,7 +135,24 @@ impl CoreLoop {
 
     /// Walk the next batch of `validation`. `Err` is the verdict: content
     /// that does not decode or read refuses at once.
+    ///
+    /// A pin that did not decode outranks every refusal, an undecodable
+    /// frame included: the checks after it read configs the record was not
+    /// judged under.
     pub(in crate::data::executor::handlers::transaction::redo_apply) fn step_stream_validate(
+        &mut self,
+        validation: &mut StreamValidation,
+        input: &StreamValidateInput<'_>,
+    ) -> Result<ValidateSlice, ErrorCode> {
+        let stepped = self.walk_stream_slice(validation, input);
+        if stepped.is_err() {
+            self.end_judging()?;
+        }
+        stepped
+    }
+
+    /// [`Self::step_stream_validate`] under the judged view.
+    fn walk_stream_slice(
         &mut self,
         validation: &mut StreamValidation,
         input: &StreamValidateInput<'_>,
@@ -164,7 +182,21 @@ impl CoreLoop {
     /// End `validation` once its stream ended: the checks over the whole
     /// record run, and the verdict is the error the whole-record path
     /// refuses with.
+    ///
+    /// The judged view's validate ends here on every exit. A pin that did
+    /// not decode outranks every refusal.
     pub(in crate::data::executor::handlers::transaction::redo_apply) fn finish_stream_validate(
+        &mut self,
+        validation: StreamValidation,
+        input: &StreamValidateInput<'_>,
+    ) -> Result<StreamValidated, ErrorCode> {
+        let finished = self.finish_stream_walk(validation, input);
+        self.end_judging()?;
+        finished
+    }
+
+    /// [`Self::finish_stream_validate`] under the judged view.
+    fn finish_stream_walk(
         &mut self,
         validation: StreamValidation,
         input: &StreamValidateInput<'_>,
@@ -227,11 +259,22 @@ impl CoreLoop {
             match tag {
                 RedoFrameTag::Header => {
                     let header: RedoContentHeader = decode_frame(tag, body).map_err(undecodable)?;
+                    // A pinned stream pins every sum target it folds into.
+                    // The content is judged under its pins from here on.
+                    check_written_pinned(
+                        &header.pins,
+                        input.task.request.database_id,
+                        crate::types::TenantId::new(input.tid),
+                        std::iter::empty::<&str>(),
+                        &header.sum_targets,
+                    )?;
+                    self.begin_judging(&header.pins)?;
                     walk.batches = Some(ValidateBatches::open(&header.sum_targets, input.origin));
                     walk.header = Some(StreamHeader {
                         version: header.version,
                         user_roles: header.user_roles,
                         sum_targets: header.sum_targets,
+                        pins: header.pins,
                     });
                     self.check_stream_window(walk, input);
                 }
@@ -241,7 +284,7 @@ impl CoreLoop {
                 }
                 RedoFrameTag::Op => {
                     let sub: RedoSubRecord = decode_frame(tag, body).map_err(undecodable)?;
-                    self.check_stream_op(walk, input, sub);
+                    self.check_stream_op(walk, input, sub)?;
                 }
                 RedoFrameTag::RowSource => {
                     let source: RedoRowSource = decode_frame(tag, body).map_err(undecodable)?;

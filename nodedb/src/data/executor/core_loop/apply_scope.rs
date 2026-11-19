@@ -5,6 +5,7 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
+use crate::data::executor::handlers::transaction::redo_apply::JudgedConfigs;
 
 /// Scratch a committed or replayed record sets around its apply, so every
 /// apply of the record writes the same version keys.
@@ -54,6 +55,12 @@ pub(in crate::data::executor) struct ApplyScope {
     /// a volatile DEFAULT: the proposer bound it into the body. A Calvin
     /// stage or resolve is the same, through `calvin_txn_ordinal`.
     pub(in crate::data::executor) journaled: bool,
+    /// The configs a pinned record is judged under, from its first slice to
+    /// the end of its apply. `None` for a record with no pins.
+    pub(in crate::data::executor) judged: Option<JudgedConfigs>,
+    /// The record's validate runs: its checks read `judged`. The install
+    /// that follows reads the current configs.
+    pub(in crate::data::executor) judging: bool,
 }
 
 impl ApplyScope {
@@ -62,6 +69,19 @@ impl ApplyScope {
     /// a governed write's resolve, is not one.
     pub(in crate::data::executor) fn applies_logged_record(&self) -> bool {
         self.journaled || self.calvin_txn_ordinal.is_some()
+    }
+
+    /// The judged view a validate check reads. `None` outside a pinned
+    /// record's validate.
+    pub(in crate::data::executor) fn judging_view(&self) -> Option<&JudgedConfigs> {
+        self.judged.as_ref().filter(|_| self.judging)
+    }
+
+    /// The RAM the judged view holds. 0 with no view.
+    pub(in crate::data::executor) fn judged_resident_bytes(&self) -> usize {
+        self.judged
+            .as_ref()
+            .map_or(0, JudgedConfigs::resident_bytes)
     }
 }
 

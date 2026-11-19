@@ -106,32 +106,51 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, crate::Error::from(e)),
         };
 
+        // The fields the wire form fixes map in the one place a config pin
+        // decode maps them too.
+        let wire = nodedb_physical::physical_plan::DocConfigWire {
+            bitemporal,
+            enforcement: enforcement.clone(),
+            storage_mode: storage_mode.clone(),
+            index_paths: indexes.to_vec(),
+            declared_key: declared_key.map(str::to_string),
+            vector_primary: vector_primary.cloned(),
+            declared_columns: declared_columns.to_vec(),
+            vector_fields: vector_fields.to_vec(),
+        };
+        let crate::data::executor::handlers::document::write::WireConfigFields {
+            index_paths,
+            storage_mode: registered_mode,
+            enforcement: registered_enforcement,
+            bitemporal,
+            vector_primary,
+            vector_fields,
+            declared_columns,
+            declared_key,
+            type_guards,
+        } = crate::data::executor::handlers::document::write::WireConfigFields::from_wire(
+            wire,
+            user_collection,
+        );
         // Struct literal with every field named — never `..Default::default()`.
         // A `CollectionConfig` field left unassigned here would make the
         // attribute silently absent on every registered collection instead of
         // failing to compile.
         let config = crate::engine::document::store::CollectionConfig {
             name: collection.to_string(),
-            index_paths: indexes
-                .iter()
-                .map(crate::engine::document::store::IndexPath::from_registered)
-                .collect(),
+            index_paths,
             crdt_enabled,
-            storage_mode: storage_mode.clone(),
-            enforcement: enforcement.clone(),
+            storage_mode: registered_mode,
+            enforcement: registered_enforcement,
             bitemporal,
             conflict_policy: conflict_policy.map(str::to_string),
             timeseries: timeseries.map(|ts| Box::new(ts.clone())),
-            vector_primary: vector_primary.map(|vp| Box::new(vp.clone())),
-            vector_fields: vector_fields.to_vec(),
-            declared_columns: declared_columns.to_vec(),
-            declared_key: declared_key.map(str::to_string),
+            vector_primary,
+            vector_fields,
+            declared_columns,
+            declared_key,
             text_fields: text_fields.clone(),
-            type_guards:
-                crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
-                    user_collection,
-                    &enforcement.type_guards,
-                ),
+            type_guards,
             incarnation,
             digest,
         };

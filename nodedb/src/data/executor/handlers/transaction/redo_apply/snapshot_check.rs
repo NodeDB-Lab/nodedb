@@ -179,6 +179,7 @@ mod tests {
             redo: &redo,
             collections: &["orders".to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         };
         match snapshot {
             Some(snapshot) => core.install_snapshot_redo(
@@ -304,6 +305,7 @@ mod tests {
                 redo: &redo,
                 collections: &["orders".to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
             RedoOrigin::Commit,
             RedoSnapshot {
@@ -402,6 +404,7 @@ mod tests {
                     redo: &redo,
                     collections: &["orders".to_string()],
                     sum_targets: &[],
+                    pins: &Default::default(),
                 },
                 RedoOrigin::Commit,
             );

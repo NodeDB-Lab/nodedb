@@ -30,8 +30,7 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
-        self.doc_configs
-            .get(&key)
+        self.judged_doc_config(&key)
             .and_then(|config| config.declared_key.clone())
             .unwrap_or_else(|| nodedb_types::DEFAULT_IDENTITY_COLUMN.to_string())
     }

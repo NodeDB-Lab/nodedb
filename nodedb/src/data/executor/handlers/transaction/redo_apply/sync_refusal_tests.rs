@@ -106,6 +106,7 @@ fn assert_group_rolls_back(refused: RedoSubRecord) {
                 "places".to_owned(),
             ],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     );
     assert_eq!(response.status, Status::Error);

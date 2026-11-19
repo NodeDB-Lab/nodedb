@@ -70,7 +70,8 @@ impl CoreLoop {
         if !enforce {
             return Ok(());
         }
-        let Some(config) = self.doc_configs.get(config_key) else {
+        // A pinned record's validate judges by the pinned rules.
+        let Some(config) = self.judged_doc_config(config_key) else {
             return Ok(());
         };
 

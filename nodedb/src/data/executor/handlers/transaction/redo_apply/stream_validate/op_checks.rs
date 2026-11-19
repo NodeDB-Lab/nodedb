@@ -19,6 +19,7 @@ use crate::data::executor::handlers::timeseries::TsStreamAt;
 use crate::wal::RedoSubRecord;
 
 use super::super::clone_copy::clone_probe_unreadable;
+use super::super::config_pins::check_written_pinned;
 use super::super::passes::final_refusal;
 use super::super::sub_ops::{RedoDocOp, document_op, kv_op, label_op};
 use super::super::validate::check_kv_row_image;
@@ -27,13 +28,14 @@ use super::verdict::Rank;
 use super::walk::{StreamValidateInput, StreamWalk};
 
 impl CoreLoop {
-    /// Check the content's next sub-record, `sub`.
+    /// Check the content's next sub-record, `sub`. `Err` only for a
+    /// pinned stream that writes a document collection with no pin.
     pub(super) fn check_stream_op(
         &self,
         walk: &mut StreamWalk,
         input: &StreamValidateInput<'_>,
         mut sub: RedoSubRecord,
-    ) {
+    ) -> Result<(), ErrorCode> {
         let op = walk.ops;
         walk.ops += 1;
         // Every version of the content stamps at least the floor, as the
@@ -45,11 +47,23 @@ impl CoreLoop {
             walk.verdict
                 .offer(Rank::Raise(op), final_refusal(error.into()));
         }
+        let doc = document_op(&sub);
+        // A pinned stream with an unpinned document write is malformed. It
+        // refuses at once, as content that does not decode refuses.
+        if let (Some(doc), Some(header)) = (&doc, &walk.header) {
+            check_written_pinned(
+                &header.pins,
+                input.task.request.database_id,
+                crate::types::TenantId::new(input.tid),
+                [doc.collection()],
+                &[],
+            )?;
+        }
         // Every later check of this op ranks after its clone probe.
         if !walk.verdict.admits(&Rank::CloneProbe(op)) {
-            return;
+            return Ok(());
         }
-        if let Some(doc) = document_op(&sub) {
+        if let Some(doc) = doc {
             self.check_stream_document(walk, input, op, &doc);
         }
         if let Some(kv) = kv_op(&sub) {
@@ -88,6 +102,7 @@ impl CoreLoop {
         {
             walk.verdict.offer(Rank::Local, post_state_failed(error));
         }
+        Ok(())
     }
 
     /// The clone probe, the row image and the collection checks of the

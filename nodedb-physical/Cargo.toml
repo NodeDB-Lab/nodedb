@@ -21,6 +21,8 @@ rust_decimal = { workspace = true }
 # `rc` derives serde for the shared pins of a redo.
 serde = { workspace = true, features = ["rc"] }
 thiserror = { workspace = true }
+# The content digest of a document config pin.
+xxhash-rust = { workspace = true }
 zerompk = { workspace = true }
 
 [dev-dependencies]

@@ -64,7 +64,7 @@ pub use crdt::{
     constraint_install_deferred, crdt_dead_letter_not_enqueued, crdt_dead_letter_not_restored,
     crdt_dead_letter_not_stored, history_compaction_not_applied,
 };
-pub use crs::custom_crs_set_not_applied;
+pub use crs::{custom_crs_set_digest_unencoded, custom_crs_set_not_applied};
 pub use cut_barrier::cut_barrier_not_placed;
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, calvin_stage_refused_internal,

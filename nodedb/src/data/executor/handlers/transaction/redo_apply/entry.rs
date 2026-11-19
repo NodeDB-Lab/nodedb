@@ -33,7 +33,7 @@
 //! 5. the fold target rows in `Response::write_set`, so the funnel
 //!    journals them.
 
-use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets};
+use nodedb_physical::physical_plan::{RedoOrigin, RedoPins, RedoSumTargets};
 use nodedb_types::calvin::VersionedReadEntry;
 
 use std::collections::HashSet;
@@ -58,6 +58,9 @@ pub(in crate::data::executor) struct CommittedRedo<'a> {
     pub redo: &'a [u8],
     pub collections: &'a [String],
     pub sum_targets: &'a [RedoSumTargets],
+    /// The config content the proposer pinned. A stream marker carries
+    /// none: its content header carries them.
+    pub pins: &'a RedoPins,
 }
 
 /// The read set of a single-shard snapshot commit and the snapshot ordinal
@@ -136,7 +139,7 @@ impl CoreLoop {
                 calvin: None,
                 reads: Vec::new(),
                 snapshot_ordinal: None,
-                pins: Default::default(),
+                pins: committed.pins.clone(),
             },
         );
         let root = ExecutionTask::new(request);
@@ -247,7 +250,28 @@ impl CoreLoop {
     /// Install one committed redo record from `origin`. When the record
     /// stored resolved timeseries batches, the response payload carries
     /// their `TsInstallCounts` and `ts_installs` receives what each stored.
+    ///
+    /// The record's apply starts with no judged view and drops its own
+    /// when it ends. A parked install took its view out of the core with
+    /// its apply scope.
     fn install_redo_into(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        committed: CommittedRedo<'_>,
+        origin: RedoOrigin,
+        ts_installs: &mut Vec<TsInstalled>,
+        boundary: RedoInstallBoundary<'_>,
+    ) -> Response {
+        let held = self.hold_judging();
+        let response =
+            self.install_redo_record(task, tid, committed, origin, ts_installs, boundary);
+        self.restore_judging(held);
+        response
+    }
+
+    /// [`Self::install_redo_into`] inside the record's judged scope.
+    fn install_redo_record(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
@@ -359,6 +383,7 @@ impl CoreLoop {
             redo: &redo,
             redo_bytes: committed.redo,
             sum_targets: committed.sum_targets,
+            pins: committed.pins,
             origin,
             snapshot,
             judged_at_ms,
@@ -559,6 +584,7 @@ mod tests {
                 redo: &redo,
                 collections: &["cache".to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
@@ -590,6 +616,7 @@ mod tests {
                 redo: &redo,
                 collections: &["cache".to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
@@ -622,6 +649,7 @@ mod tests {
                 redo: &redo,
                 collections: &collections,
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -663,12 +691,91 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
         assert_eq!(response.status, Status::Error);
         let now_ms = crate::engine::kv::current_ms();
         assert!(core.kv_engine.get(0, TID, "cache", b"k1", now_ms).is_none());
+    }
+
+    /// Pins as a proposer sets them: the CRS set, and no config pin.
+    fn pins_without_configs() -> RedoPins {
+        RedoPins {
+            configs: Vec::new(),
+            crs: Some(std::sync::Arc::new(
+                nodedb_physical::physical_plan::CrsPin {
+                    digest: 1,
+                    bytes: vec![0x90].into(),
+                },
+            )),
+        }
+    }
+
+    fn notes_row_stored(core: &CoreLoop) -> bool {
+        core.sparse
+            .get(
+                0,
+                TID,
+                "notes",
+                &StorageKey::for_surrogate(Surrogate::new(11)),
+            )
+            .expect("read document")
+            .is_some()
+    }
+
+    /// A pinned record that writes a document collection it carries no pin
+    /// of is malformed: the core refuses it as final and writes nothing.
+    #[test]
+    fn a_pinned_record_with_an_unpinned_document_write_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let redo = redo_bytes(vec![doc_put("notes", "n1", 11)]);
+
+        let response = core.execute_apply_transaction_redo(
+            &task_at(Some(50)),
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &["notes".to_string()],
+                sum_targets: &[],
+                pins: &pins_without_configs(),
+            },
+        );
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RejectedPrevalidation { reason }) if reason.contains("notes")
+            ),
+            "{:?}",
+            response.error_code
+        );
+        assert!(!notes_row_stored(&core), "a refused record writes nothing");
+    }
+
+    /// A record with no pins skips the pin check and installs.
+    #[test]
+    fn an_unpinned_record_installs_its_document_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let redo = redo_bytes(vec![doc_put("notes", "n1", 11)]);
+
+        let response = core.execute_apply_transaction_redo(
+            &task_at(Some(50)),
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &["notes".to_string()],
+                sum_targets: &[],
+                pins: &RedoPins::default(),
+            },
+        );
+
+        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+        assert!(notes_row_stored(&core));
     }
 
     fn metric_samples_sub(collection: &str, timestamp_ms: i64, value: f64) -> RedoSubRecord {
@@ -720,6 +827,7 @@ mod tests {
                     redo,
                     collections: &collections,
                     sum_targets: &[],
+                    pins: &Default::default(),
                 },
             );
             assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
@@ -806,6 +914,7 @@ mod tests {
                     redo,
                     collections: &collections,
                     sum_targets: &[],
+                    pins: &Default::default(),
                 },
             );
             assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
@@ -866,6 +975,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -924,6 +1034,7 @@ mod tests {
                 redo: &redo,
                 collections: &collections,
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1000,6 +1111,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1038,6 +1150,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1078,6 +1191,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1126,6 +1240,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1188,6 +1303,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 
@@ -1224,6 +1340,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
 

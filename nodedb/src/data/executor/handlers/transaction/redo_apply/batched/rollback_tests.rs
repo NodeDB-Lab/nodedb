@@ -202,6 +202,7 @@ fn seed_metrics(core: &mut CoreLoop) {
             redo: &seed,
             collections: &[METRICS.to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     );
     assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);

@@ -121,7 +121,10 @@ impl CoreLoop {
         }
         let response = match job.step(self, task) {
             Ok(StepOutcome::Ran) => {
-                let resident = job.resident_bytes(self.redo_apply.scope.as_ref());
+                // The judged view leaves the core with the apply scope.
+                let resident = job
+                    .resident_bytes(self.redo_apply.scope.as_ref())
+                    .saturating_add(self.apply_scope.judged_resident_bytes());
                 let context = match self.leave_install() {
                     Ok(context) => context,
                     Err(error) => return SliceEnd::Stopped(error.to_string()),

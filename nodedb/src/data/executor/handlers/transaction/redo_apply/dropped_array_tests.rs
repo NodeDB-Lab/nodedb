@@ -97,6 +97,7 @@ fn apply_with(extra: RedoSubRecord) -> (bool, Option<Vec<u8>>) {
             redo: &redo,
             collections: &collections,
             sum_targets: &sum_targets,
+            pins: &Default::default(),
         },
     );
     let row = core

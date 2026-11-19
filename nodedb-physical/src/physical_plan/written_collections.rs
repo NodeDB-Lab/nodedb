@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use nodedb_array::types::ArrayId;
 use nodedb_types::QualifiedCollection;
 
-use super::{GraphOp, MetaOp, PhysicalPlan, SpatialOp, VectorOp};
+use super::{GraphOp, MetaOp, PhysicalPlan, PinnedWrite, SpatialOp, VectorOp};
 
 /// The written collections of `plans`, sorted and deduplicated.
 pub fn written_collections(plans: &[PhysicalPlan]) -> Vec<String> {
@@ -55,6 +55,33 @@ fn collect_plan(plan: &PhysicalPlan, out: &mut BTreeSet<String>) {
     } else if let Some(collection) = plan.collection() {
         out.insert(collection.to_string());
     }
+}
+
+/// What `plan` writes, as its pins see it.
+fn pinned_write(plan: &PhysicalPlan) -> PinnedWrite {
+    if let PhysicalPlan::Document(_) | PhysicalPlan::Meta(MetaOp::RestoreRedo(_)) = plan {
+        PinnedWrite::DocumentRows
+    } else {
+        PinnedWrite::Other
+    }
+}
+
+/// The written collections of `plans` whose writes require a config pin,
+/// sorted and deduplicated. A RESTORE batch's arrays have no config, so
+/// they are not named.
+pub fn pin_required_collections(plans: &[PhysicalPlan]) -> Vec<String> {
+    let mut collections: BTreeSet<String> = BTreeSet::new();
+    for plan in plans {
+        if !pinned_write(plan).requires_pin() {
+            continue;
+        }
+        if let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan {
+            collections.extend(batch.collections.iter().cloned());
+        } else if let Some(collection) = plan.collection() {
+            collections.insert(collection.to_string());
+        }
+    }
+    collections.into_iter().collect()
 }
 
 /// The name an array's writes go by here. An `ArrayId` holds the bare name and

@@ -60,7 +60,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         // An unregistered collection declares no constraint to check.
-        let Some(config) = self.doc_configs.get(&config_key) else {
+        let Some(config) = self.judged_doc_config(&config_key) else {
             return;
         };
         let Some(header) = &walk.header else {
@@ -167,7 +167,7 @@ impl CoreLoop {
                 TenantId::new(input.tid),
                 collection.clone(),
             );
-            let Some(config) = self.doc_configs.get(&config_key) else {
+            let Some(config) = self.judged_doc_config(&config_key) else {
                 continue;
             };
             if commit

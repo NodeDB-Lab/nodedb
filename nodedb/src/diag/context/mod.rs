@@ -69,7 +69,7 @@ pub(in crate::diag) use crdt::{
 pub(in crate::diag) use crdt_dead_letter_store::{
     CrdtDeadLetterNotRestored, CrdtDeadLetterNotStored,
 };
-pub(in crate::diag) use crs::CustomCrsSetNotApplied;
+pub(in crate::diag) use crs::{CustomCrsSetDigestUnencoded, CustomCrsSetNotApplied};
 pub(in crate::diag) use cut_barrier::CutBarrierNotPlaced;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{

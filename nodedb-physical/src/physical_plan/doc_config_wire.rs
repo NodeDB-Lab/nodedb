@@ -1,19 +1,18 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
-//! The wire form of the document config a `DocumentOp::Register` carries,
-//! and its content digest.
+//! The wire form of the document config a write validate reads, and its
+//! content digest.
 //!
-//! The wire form holds every field a write validate reads. The digest is
-//! stable across nodes and boots: set-like lists are sorted, map entries
-//! are written in key order, and the hash is XXH3-64.
-
-use nodedb_physical::physical_plan::{
-    EnforcementOptions, MaterializedSumBinding, RegisteredIndex, StorageMode,
-};
+//! The digest is stable across nodes and boots: set-like lists are sorted,
+//! map entries are written in key order, and the hash is XXH3-64. A core
+//! decodes a config pin's wire form with no catalog.
 
 use super::doc_config_canon::{CanonError, canonicalize};
+use super::{
+    DeclaredColumn, EnforcementOptions, MaterializedSumBinding, RegisteredIndex, StorageMode,
+};
 
-/// The document config fields that validate reads.
+/// The document config fields that validate and install read.
 ///
 /// `enforcement` carries the type guards, the generated columns and the
 /// materialized-sum sources this collection drives.
@@ -25,6 +24,12 @@ pub struct DocConfigWire {
     pub index_paths: Vec<RegisteredIndex>,
     pub declared_key: Option<String>,
     pub vector_primary: Option<nodedb_types::VectorPrimaryConfig>,
+    /// Declared numeric columns of a schemaless or KV collection. A write
+    /// re-types each value stored under one of them.
+    pub declared_columns: Vec<DeclaredColumn>,
+    /// Declared `VECTOR(n)` columns of a schemaless collection, as
+    /// `(column, n)`.
+    pub vector_fields: Vec<(String, usize)>,
 }
 
 /// The wire form did not reduce to canonical bytes.
@@ -40,15 +45,6 @@ pub enum DocConfigWireError {
         #[from]
         source: CanonError,
     },
-}
-
-impl From<DocConfigWireError> for crate::Error {
-    fn from(e: DocConfigWireError) -> Self {
-        Self::Serialization {
-            format: "msgpack".into(),
-            detail: e.to_string(),
-        }
-    }
 }
 
 fn sum_source_key(binding: &MaterializedSumBinding) -> (&str, &str, &str) {
@@ -70,6 +66,8 @@ impl DocConfigWire {
             .enforcement
             .materialized_sum_sources
             .sort_by(|a, b| sum_source_key(a).cmp(&sum_source_key(b)));
+        sorted.declared_columns.sort_by(|a, b| a.name.cmp(&b.name));
+        sorted.vector_fields.sort();
         let encoded = zerompk::to_msgpack_vec(&sorted)
             .map_err(|source| DocConfigWireError::Encode { source })?;
         Ok(canonicalize(&encoded)?)
@@ -77,14 +75,14 @@ impl DocConfigWire {
 
     /// The XXH3-64 hash of [`Self::canonical_bytes`].
     pub fn digest(&self) -> Result<u64, DocConfigWireError> {
-        Ok(xxhash_rust::xxh3::xxh3_64(&self.canonical_bytes()?))
+        Ok(super::redo_pins::pin_digest(&self.canonical_bytes()?))
     }
 
     /// The canonical bytes and their digest, as a config pin carries them.
     /// The digest equals [`Self::digest`].
     pub fn pin_parts(&self) -> Result<(Vec<u8>, u64), DocConfigWireError> {
         let bytes = self.canonical_bytes()?;
-        let digest = xxhash_rust::xxh3::xxh3_64(&bytes);
+        let digest = super::redo_pins::pin_digest(&bytes);
         Ok((bytes, digest))
     }
 }
@@ -92,7 +90,7 @@ impl DocConfigWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodedb_physical::physical_plan::{BalancedDef, PeriodLockConfig, RegisteredIndexState};
+    use crate::physical_plan::{BalancedDef, PeriodLockConfig, RegisteredIndexState};
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
 
     fn index(name: &str, path: &str) -> RegisteredIndex {
@@ -114,7 +112,13 @@ mod tests {
             index_paths: vec![index("a", "$.a"), index("b", "$.b")],
             declared_key: None,
             vector_primary: None,
+            declared_columns: vec![column("a", "INTEGER"), column("b", "REAL")],
+            vector_fields: vec![("e".into(), 3), ("f".into(), 4)],
         }
+    }
+
+    fn column(name: &str, declared: &str) -> DeclaredColumn {
+        DeclaredColumn::from_declared(name, declared).expect("numeric column")
     }
 
     fn digest(wire: &DocConfigWire) -> u64 {
@@ -206,6 +210,22 @@ mod tests {
         w.vector_primary = Some(nodedb_types::VectorPrimaryConfig::default());
         variants.push(w);
 
+        let mut w = base();
+        w.declared_columns.push(column("c", "BIGINT"));
+        variants.push(w);
+
+        let mut w = base();
+        w.declared_columns[0] = column("a", "SMALLINT");
+        variants.push(w);
+
+        let mut w = base();
+        w.vector_fields.push(("g".into(), 8));
+        variants.push(w);
+
+        let mut w = base();
+        w.vector_fields[0].1 = 5;
+        variants.push(w);
+
         for (i, variant) in variants.iter().enumerate() {
             assert_ne!(digest(variant), base_digest, "variant {i} kept the digest");
         }
@@ -215,7 +235,22 @@ mod tests {
     fn set_like_lists_in_another_order_give_one_digest() {
         let mut reordered = base();
         reordered.index_paths.reverse();
+        reordered.declared_columns.reverse();
+        reordered.vector_fields.reverse();
         assert_eq!(digest(&reordered), digest(&base()));
+    }
+
+    /// The canonical bytes decode to the wire form they came from. The base
+    /// holds every list sorted already.
+    #[test]
+    fn canonical_bytes_decode_back_to_the_wire_form() {
+        let mut wire = base();
+        wire.enforcement.append_only = true;
+        wire.declared_key = Some("sku".into());
+        let bytes = wire.canonical_bytes().expect("canonical");
+        let decoded: DocConfigWire = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded, wire);
+        assert_eq!(digest(&decoded), digest(&wire));
     }
 
     #[test]

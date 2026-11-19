@@ -92,8 +92,18 @@ impl CoreLoop {
         }
     }
 
-    /// Run the live validate of the record `input` names.
+    /// Run the live validate of the record `input` names. The record is
+    /// judged under the pins its WAL copy carries, and its judged view
+    /// drops when the validate ends.
     fn judge_validate(&mut self, input: JudgeInput<'_>) -> Result<(), ErrorCode> {
+        let held = self.hold_judging();
+        let verdict = self.judge_validate_record(input);
+        self.restore_judging(held);
+        verdict
+    }
+
+    /// [`Self::judge_validate`] inside the record's judged scope.
+    fn judge_validate_record(&mut self, input: JudgeInput<'_>) -> Result<(), ErrorCode> {
         let JudgeInput {
             task,
             redo,
@@ -132,6 +142,7 @@ impl CoreLoop {
                     redo,
                     redo_bytes,
                     sum_targets: &redo.sum_targets,
+                    pins: &redo.pins,
                     origin: boundary.origin,
                     snapshot: boundary.snapshot_ordinal.map(|ordinal| RedoSnapshot {
                         reads: &boundary.reads,

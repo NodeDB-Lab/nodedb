@@ -84,6 +84,7 @@ fn install(
             redo: &redo,
             collections: &[COLL.to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     )
 }

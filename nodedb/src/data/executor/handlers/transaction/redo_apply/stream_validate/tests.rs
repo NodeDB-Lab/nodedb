@@ -165,6 +165,16 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn framed(
     sum_targets: &[RedoSumTargets],
     reads: &[VersionedReadEntry],
 ) -> Vec<u8> {
+    framed_pinned(redo, sum_targets, reads, &Default::default())
+}
+
+/// [`framed`] with a header that carries `pins`.
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn framed_pinned(
+    redo: &RedoRecord,
+    sum_targets: &[RedoSumTargets],
+    reads: &[VersionedReadEntry],
+    pins: &nodedb_physical::physical_plan::RedoPins,
+) -> Vec<u8> {
     let mut out = Vec::new();
     let header = RedoContentHeader {
         version: redo.version,
@@ -172,7 +182,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn framed(
         cross_shard_applied: redo.cross_shard_applied.clone(),
         user_roles: redo.user_roles.clone(),
         sum_targets: sum_targets.to_vec(),
-        pins: Default::default(),
+        pins: pins.clone(),
     };
     push_frame(&mut out, RedoFrameTag::Header, &header).expect("header");
     for publish in &redo.publishes {
@@ -855,6 +865,7 @@ fn a_snapshot_commit_validates_alike() {
             redo: &seed,
             collections: &["orders".to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
         RedoOrigin::Commit,
     );
@@ -999,6 +1010,7 @@ fn a_marker_install_answers_with_the_streamed_verdict() {
                 redo: &bytes,
                 collections: &[handover::COLL.to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         )
     };

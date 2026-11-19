@@ -579,6 +579,7 @@ mod tests {
                 redo: &redo,
                 collections: &[],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
         assert_eq!(response.status, Status::Ok, "apply: {response:?}");

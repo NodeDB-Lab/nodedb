@@ -183,7 +183,11 @@ impl CoreLoop {
     /// its run. A journal window that cannot leave fail-stopped the core:
     /// the task answers, and the job goes.
     fn park_job(&mut self, job: StreamJob, task: &ExecutionTask, lsn: Lsn) -> Response {
-        let resident = job.resident_bytes(self.redo_apply.scope.as_ref());
+        // The judged view leaves the core with the apply scope, so the
+        // parked charge holds it too.
+        let resident = job
+            .resident_bytes(self.redo_apply.scope.as_ref())
+            .saturating_add(self.apply_scope.judged_resident_bytes());
         let context = match self.leave_install() {
             Ok(context) => context,
             Err(error) => {

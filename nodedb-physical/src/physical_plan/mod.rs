@@ -14,6 +14,8 @@ pub mod cluster_event;
 pub mod collection;
 pub mod columnar;
 pub mod crdt;
+pub mod doc_config_canon;
+pub mod doc_config_wire;
 pub mod document;
 pub mod exchange;
 pub mod gathered_source;
@@ -55,6 +57,8 @@ pub use cluster_array::ClusterArrayOp;
 pub use cluster_event::{ClusterEventOp, MAX_REMOTE_CDC_COMMITTED_OFFSETS};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};
 pub use crdt::{CrdtOp, CrdtWriteVerb, decode_fields_body, encode_fields_body};
+pub use doc_config_canon::CanonError;
+pub use doc_config_wire::{DocConfigWire, DocConfigWireError};
 pub use document::{
     BalancedDef, DeclaredColumn, DocumentOp, DocumentPageSource, DocumentResolveOutcome,
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
@@ -85,7 +89,7 @@ pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHi
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;
-pub use redo_pins::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+pub use redo_pins::{ConfigPin, ConfigPinKey, CrsPin, PinnedWrite, RedoPins, pin_digest};
 pub use redo_stream_page::{RedoStreamPage, RedoStreamSection};
 pub use resolve_part::{RejectedLines, ResolvedTxnOpen, ResolvedTxnPart};
 pub use routing::plan_contains_cluster_partitioned_leaf;
@@ -103,4 +107,4 @@ pub use vector::{
     VectorResolvedMutation, VectorWriteTargets,
 };
 pub use wire::{decode, encode};
-pub use written_collections::written_collections;
+pub use written_collections::{pin_required_collections, written_collections};

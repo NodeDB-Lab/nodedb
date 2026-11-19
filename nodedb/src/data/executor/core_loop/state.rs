@@ -347,6 +347,8 @@ pub struct CoreLoop {
 
     /// This core's copy of the user-defined CRS set, swapped by `MetaOp::SetCustomCrsSet`.
     pub(in crate::data::executor) crs_set: Arc<nodedb_crs::CustomCrsSet>,
+    /// The content digest of `crs_set`, as a CRS pin of it carries.
+    pub(in crate::data::executor) crs_digest: u64,
 
     /// Per-core io_uring reader for batched columnar segment reads.
     /// `None` if io_uring is not available. `RefCell`: `&self` scans borrow it.

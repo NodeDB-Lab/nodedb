@@ -155,7 +155,7 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let Some(config) = self.doc_configs.get(&config_key) else {
+        let Some(config) = self.judged_doc_config(&config_key) else {
             return StoredImage::AsStored;
         };
         let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
@@ -272,7 +272,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         matches!(
-            self.doc_configs.get(&config_key).map(|c| &c.storage_mode),
+            self.judged_doc_config(&config_key).map(|c| &c.storage_mode),
             Some(nodedb_physical::physical_plan::StorageMode::Schemaless)
         )
     }

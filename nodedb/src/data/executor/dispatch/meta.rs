@@ -405,13 +405,14 @@ impl CoreLoop {
                 calvin,
                 reads,
                 snapshot_ordinal,
-                pins: _,
+                pins,
             } => {
                 let committed =
                     crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
                         redo,
                         collections,
                         sum_targets,
+                        pins,
                     };
                 match (calvin, snapshot_ordinal) {
                     // A Calvin slice's stage vote validated its snapshot.

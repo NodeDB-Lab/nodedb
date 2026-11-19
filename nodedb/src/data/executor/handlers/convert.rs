@@ -135,7 +135,8 @@ impl CoreLoop {
     }
 
     /// Give `collection`'s config on this core the converted mode, so a later
-    /// entry of the log encodes in it.
+    /// entry of the log encodes in it. The config then matches no pin, so
+    /// its digest is 0.
     pub(super) fn take_converted_mode(
         &mut self,
         database_id: u64,
@@ -150,6 +151,7 @@ impl CoreLoop {
         );
         if let Some(config) = self.doc_configs.get_mut(&key) {
             config.storage_mode = target.clone();
+            config.digest = 0;
         }
     }
 
@@ -231,4 +233,36 @@ pub(super) fn with_target_identity(
     fields
         .entry(identity_column.to_string())
         .or_insert(identity);
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::columnar::ColumnType;
+
+    use super::*;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::engine::document::store::CollectionConfig;
+    use crate::types::{DatabaseId, TenantId};
+
+    /// A converted config holds a mode no Register digest covers, so its
+    /// digest is 0 and no pin matches it.
+    #[test]
+    fn a_converted_config_resets_its_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        let key = (DatabaseId::DEFAULT, TenantId::new(1), "orders".to_string());
+        let mut config = CollectionConfig::new("orders");
+        config.digest = 7;
+        core.doc_configs.insert(key.clone(), config);
+        let target = StorageMode::Strict {
+            schema: StrictSchema::new(vec![ColumnDef::required("id", ColumnType::String)])
+                .expect("schema"),
+        };
+
+        core.take_converted_mode(DatabaseId::DEFAULT.as_u64(), 1, "orders", &target);
+
+        let converted = core.doc_configs.get(&key).expect("config");
+        assert_eq!(converted.storage_mode, target);
+        assert_eq!(converted.digest, 0);
+    }
 }

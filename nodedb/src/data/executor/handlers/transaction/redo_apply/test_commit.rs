@@ -130,6 +130,7 @@ impl CoreLoop {
                 redo,
                 collections: &collections,
                 sum_targets: &sum_targets,
+                pins: &Default::default(),
             },
         )
     }

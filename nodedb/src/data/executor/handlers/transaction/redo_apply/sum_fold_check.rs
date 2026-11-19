@@ -338,7 +338,7 @@ impl CoreLoop {
             TenantId::new(scope.tid),
             collection.to_string(),
         );
-        let Some(config) = self.doc_configs.get(&config_key) else {
+        let Some(config) = self.judged_doc_config(&config_key) else {
             return Ok(());
         };
         if !config.index_paths.iter().any(|path| path.unique) {

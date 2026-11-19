@@ -53,7 +53,7 @@ impl CoreLoop {
     /// Collections flagged `bitemporal: true` on registration route every
     /// write to the versioned redb table and every read via the Ceiling
     /// resolver, enabling `FOR SYSTEM_TIME AS OF` / `FOR VALID_TIME`
-    /// queries.
+    /// queries. A pinned record's validate reads the pinned flag.
     #[inline]
     pub(in crate::data::executor) fn is_bitemporal(
         &self,
@@ -61,12 +61,12 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
     ) -> bool {
-        let key = (
+        self.judged_doc_config_of(
             crate::types::DatabaseId::new(database_id),
             TenantId::new(tid),
-            collection.to_string(),
-        );
-        self.doc_configs.get(&key).is_some_and(|c| c.bitemporal)
+            collection,
+        )
+        .is_some_and(|c| c.bitemporal)
     }
 
     /// The system-time ordinal a bitemporal document write stamps.

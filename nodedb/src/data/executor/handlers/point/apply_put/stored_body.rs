@@ -164,7 +164,7 @@ impl CoreLoop {
         frozen: &super::frozen_body::FrozenDocumentBody,
     ) -> crate::Result<Option<crate::types::hash_chain::ChainHead>> {
         let config_key = &frozen.config_key;
-        if !self.doc_configs.contains_key(config_key) {
+        if self.judged_doc_config(config_key).is_none() {
             return Ok(None);
         }
         match self
@@ -209,7 +209,7 @@ impl CoreLoop {
         } = stamp;
         let config_key = &frozen.config_key;
         let value = frozen.value.clone();
-        let Some(config) = self.doc_configs.get(config_key) else {
+        let Some(config) = self.judged_doc_config(config_key) else {
             return Ok(StoredBody {
                 stored: value.clone(),
                 value,

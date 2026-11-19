@@ -43,6 +43,35 @@ impl DomainContext for CustomCrsSetNotApplied<'_> {
     }
 }
 
+/// A user-defined CRS set whose MessagePack encode failed on a core, so the
+/// core holds no digest of it.
+pub(in crate::diag) struct CustomCrsSetDigestUnencoded {
+    /// The core that holds the set.
+    pub core: usize,
+}
+
+impl DomainContext for CustomCrsSetDigestUnencoded {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.custom_crs_set_digest_unencoded"
+    }
+
+    fn grouping_key(&self) -> String {
+        // One encode bug files one report, whichever core met it.
+        String::from("crs_set_encode")
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "core": self.core,
+            "effect": "the core matches no CRS pin by its digest, so every pinned record it \
+                       validates decodes its CRS pin: the verdict stands, at the cost of a \
+                       decode per record",
+            "operator_action": "report this: a user-defined CRS set that the catalog holds \
+                                does not encode as MessagePack",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

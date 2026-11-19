@@ -163,6 +163,7 @@ fn restart_replay_applies_the_journalled_fold_rows_not_the_stamp() {
             redo: &redo,
             collections: &[SOURCE.to_string()],
             sum_targets: &sum_targets(),
+            pins: &Default::default(),
         },
     );
     assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);

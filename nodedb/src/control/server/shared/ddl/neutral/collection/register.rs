@@ -187,66 +187,6 @@ fn build_timeseries_schema(
     }))
 }
 
-/// The declared `VECTOR(n)` columns of a schemaless collection, as
-/// `(column, n)`.
-///
-/// Empty for every other collection. A strict schema carries its vector
-/// columns in its storage mode. A vector-primary collection keeps its vector
-/// in the index and never in the stored row.
-fn declared_vector_fields(coll: &StoredCollection) -> Vec<(String, usize)> {
-    if !coll.collection_type.is_schemaless() || coll.vector_primary.is_some() {
-        return Vec::new();
-    }
-    crate::control::server::shared::ddl::schema_validation::extract_vector_fields(&coll.fields)
-        .into_iter()
-        .map(|(name, dim, _metric)| (name, dim))
-        .collect()
-}
-
-/// The declared numeric columns of a schemaless or KV collection, which the
-/// Data Plane re-types on every write.
-///
-/// A schemaless collection reads them from its declared text. A KV
-/// collection reads them from its typed schema, the source its wire types
-/// come from. Empty for every other collection. Strict and columnar re-type
-/// through their typed schema. A vector-primary collection stores tagged
-/// metadata sidecars, not field maps. A CRDT collection stores the state its
-/// replicas converged on, and a refusal there would split them.
-///
-/// The primary key is left out. The engines key a row on the literal as
-/// written, and a lookup renders its own literal the same way, so a re-typed
-/// key would no longer match its row.
-fn declared_columns(
-    coll: &StoredCollection,
-) -> Vec<nodedb_physical::physical_plan::DeclaredColumn> {
-    use nodedb_physical::physical_plan::DeclaredColumn;
-    match &coll.collection_type {
-        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Schemaless) => {
-            if coll.vector_primary.is_some() || coll.crdt {
-                return Vec::new();
-            }
-            let primary_key = coll
-                .declared_primary_key
-                .as_deref()
-                .unwrap_or(nodedb_types::DEFAULT_IDENTITY_COLUMN);
-            coll.fields
-                .iter()
-                .filter(|(name, _)| !primary_key.eq_ignore_ascii_case(name))
-                .filter_map(|(name, declared)| DeclaredColumn::from_declared(name, declared))
-                .collect()
-        }
-        nodedb_types::CollectionType::KeyValue(config) => config
-            .schema
-            .columns
-            .iter()
-            .filter(|column| !column.primary_key)
-            .filter_map(DeclaredColumn::from_column_def)
-            .collect(),
-        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Strict(_))
-        | nodedb_types::CollectionType::Columnar(_) => Vec::new(),
-    }
-}
-
 /// Build the `CollectionConfig` a `DocumentOp::Register` will install in
 /// `doc_configs`, straight from the durable catalog — storage mode,
 /// enforcement options, generated columns, and secondary indexes.
@@ -275,9 +215,10 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
     );
 
     // The wire form holds the storage mode, the enforcement options, the
-    // indexes, the declared key and the vector-primary config. Its digest
-    // is the one a config pin of this collection carries.
-    let wire = super::DocConfigWire::from_stored(catalog, tenant_id, coll, indexes);
+    // indexes, the declared key, the vector-primary config, the declared
+    // columns and the vector fields. Its digest is the one a config pin of
+    // this collection carries.
+    let wire = super::doc_config_wire_from_stored(catalog, tenant_id, coll, indexes);
 
     // Written as a struct literal with every field named — and deliberately
     // NOT `..Default::default()`. A field added to `CollectionConfig` that is
@@ -291,11 +232,13 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         &wire.enforcement.type_guards,
     );
     let digest = wire.digest()?;
-    let super::DocConfigWire {
+    let nodedb_physical::physical_plan::DocConfigWire {
         enforcement,
         storage_mode,
         declared_key,
         vector_primary,
+        declared_columns,
+        vector_fields,
         ..
     } = wire;
     Ok(crate::engine::document::store::CollectionConfig {
@@ -312,8 +255,8 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         conflict_policy: coll.conflict_policy.clone(),
         timeseries: build_timeseries_schema(coll),
         vector_primary: vector_primary.map(Box::new),
-        vector_fields: declared_vector_fields(coll),
-        declared_columns: declared_columns(coll),
+        vector_fields,
+        declared_columns,
         declared_key,
         text_fields,
         incarnation: coll.incarnation,
@@ -545,13 +488,15 @@ mod tests {
         let first = built_config(&EmptyCatalog, &coll);
         let second = built_config(&EmptyCatalog, &coll);
         assert_eq!(first.digest, second.digest);
-        let wire = super::super::DocConfigWire {
+        let wire = nodedb_physical::physical_plan::DocConfigWire {
             bitemporal: first.bitemporal,
             enforcement: first.enforcement.clone(),
             storage_mode: first.storage_mode.clone(),
             index_paths: Vec::new(),
             declared_key: first.declared_key.clone(),
             vector_primary: first.vector_primary.as_deref().cloned(),
+            declared_columns: first.declared_columns.clone(),
+            vector_fields: first.vector_fields.clone(),
         };
         assert_eq!(first.digest, wire.digest().expect("digest"));
     }

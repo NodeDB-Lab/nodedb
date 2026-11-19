@@ -407,6 +407,7 @@ fn fts_documents(refuse: bool) -> u32 {
             redo: &redo,
             collections: &["docs".to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     );
     if refuse {
@@ -538,6 +539,7 @@ fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
             redo: &redo,
             collections: &[],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     );
 

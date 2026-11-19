@@ -52,7 +52,7 @@ impl CoreLoop {
             TenantId::new(row.tid),
             row.collection.to_string(),
         );
-        if let Some(config) = self.doc_configs.get(&key) {
+        if let Some(config) = self.judged_doc_config(&key) {
             compatible(&image.schema, &config.storage_mode, &image.stored)?;
         }
         Ok(())

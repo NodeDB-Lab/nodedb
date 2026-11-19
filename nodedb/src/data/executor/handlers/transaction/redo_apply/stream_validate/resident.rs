@@ -9,7 +9,9 @@
 
 use std::mem::size_of;
 
-use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
+use nodedb_physical::physical_plan::{
+    ConfigPin, CrsPin, RedoPins, RedoSumTargets, ResolvedSumTarget,
+};
 
 use crate::data::executor::core_loop::install_fence::FenceKey;
 
@@ -99,6 +101,32 @@ fn header_bytes(header: &StreamHeader) -> usize {
             .map(|role| string_bytes(role))
             .sum::<usize>()
         + sum_targets_bytes(&header.sum_targets)
+        + unshared_pins_bytes(&header.pins)
+}
+
+/// The pins' bytes no judged view counts. A pinned record's view shares
+/// each pin of its header and counts it, so its header counts none.
+fn unshared_pins_bytes(pins: &RedoPins) -> usize {
+    if pins.pinned() { 0 } else { pins_bytes(pins) }
+}
+
+/// The estimate of a record's pins: each pin's share, size and bytes.
+fn pins_bytes(pins: &RedoPins) -> usize {
+    let configs: usize = pins
+        .configs
+        .iter()
+        .map(|pin| {
+            size_of::<std::sync::Arc<ConfigPin>>()
+                + size_of::<ConfigPin>()
+                + pin.key.collection.len()
+                + pin.wire.len()
+        })
+        .sum();
+    let crs = pins
+        .crs
+        .as_ref()
+        .map_or(0, |pin| size_of::<CrsPin>() + pin.bytes.len());
+    configs + crs
 }
 
 fn track_bytes(track: &CollectionTrack) -> usize {

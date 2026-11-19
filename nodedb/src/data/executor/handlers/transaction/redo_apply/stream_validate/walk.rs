@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets, ResolvedSumTarget};
+use nodedb_physical::physical_plan::{RedoOrigin, RedoPins, RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::calvin::VersionedReadEntry;
 
 use crate::data::executor::array_install_flush::ArrayStreamLoads;
@@ -93,6 +93,8 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamHe
     pub(in crate::data::executor::handlers::transaction::redo_apply) user_roles: Vec<String>,
     pub(in crate::data::executor::handlers::transaction::redo_apply) sum_targets:
         Vec<RedoSumTargets>,
+    /// The config content the proposer pinned for the stream's content.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) pins: RedoPins,
 }
 
 /// What one collection's checks read once.

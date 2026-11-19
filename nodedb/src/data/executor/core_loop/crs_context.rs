@@ -18,14 +18,36 @@ impl CoreLoop {
     /// It resolves this core's copy of the catalog's user-defined CRSs
     /// first, then the built-in registry: NodeDB's own CRSs and every EPSG
     /// CRS.
+    ///
+    /// A pinned record's validate resolves against the set its pin fixes.
     pub(crate) fn crs_context(&self) -> CrsContext<'static> {
-        CrsContext::shared(Arc::clone(&self.crs_set))
+        match self.apply_scope.judging_view() {
+            Some(view) => CrsContext::shared(Arc::clone(view.crs())),
+            None => CrsContext::shared(Arc::clone(&self.crs_set)),
+        }
     }
 
     /// Install `set` as this core's user-defined CRS set. Boot installs the
     /// catalog's set before WAL replay; `MetaOp::SetCustomCrsSet` installs
     /// each committed change.
     pub fn set_crs_set(&mut self, set: Arc<CustomCrsSet>) {
+        self.crs_digest = crs_set_digest(&set, self.core_id);
         self.crs_set = set;
+    }
+}
+
+/// The content digest of `set`, the CRS set core `core` holds, as a CRS
+/// pin carries it: the hash of its MessagePack bytes.
+///
+/// A set that does not encode files one report here and takes digest 0.
+/// 0 matches no pin, so a record pinned against it decodes its pin and
+/// keeps its verdict.
+pub(in crate::data::executor) fn crs_set_digest(set: &CustomCrsSet, core: usize) -> u64 {
+    match zerompk::to_msgpack_vec(set) {
+        Ok(bytes) => nodedb_physical::physical_plan::pin_digest(&bytes),
+        Err(error) => {
+            crate::diag::custom_crs_set_digest_unencoded(&error, core);
+            0
+        }
     }
 }

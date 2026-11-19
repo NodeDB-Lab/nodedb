@@ -51,6 +51,7 @@ pub(super) fn install_whole(
             redo: &bytes,
             collections,
             sum_targets,
+            pins: &Default::default(),
         },
     )
 }
@@ -635,6 +636,7 @@ fn tag_pressed(core: &mut CoreLoop) {
             redo: &seed,
             collections: &[METRICS.to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     );
     assert_eq!(response.status, Status::Ok, "{}", error_text(&response));

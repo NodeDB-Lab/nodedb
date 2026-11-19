@@ -480,6 +480,7 @@ mod tests {
                 redo,
                 collections: &[COLL.to_string()],
                 sum_targets: &[],
+                pins: &Default::default(),
             },
         );
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);

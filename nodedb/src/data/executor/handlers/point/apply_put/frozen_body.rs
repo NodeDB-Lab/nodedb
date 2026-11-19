@@ -40,7 +40,7 @@ impl FrozenDocumentBody {
     ) -> crate::Result<()> {
         if self.config_key != *key
             || self.surrogate != surrogate
-            || !self.witness.matches(core.doc_configs.get(key))
+            || !self.witness.matches(core.judged_doc_config(key))
         {
             return Err(crate::Error::DataPlane(
                 crate::bridge::envelope::ErrorCode::ConflictRetry,
@@ -56,7 +56,8 @@ impl CoreLoop {
         &self,
         input: FreezeDocumentBodyInput<'_>,
     ) -> crate::Result<FrozenDocumentBody> {
-        let config = self.doc_configs.get(input.config_key);
+        // A pinned record's validate freezes the body under its pin.
+        let config = self.judged_doc_config(input.config_key);
         // `input.value` is the body a write submits, so a body that is not a
         // document object is the request's fault, never a storage fault.
         let mut doc = doc_format::decode_document_value(input.value).map_err(|error| {

@@ -22,7 +22,7 @@ use nodedb_types::{CollectionKey, DatabaseId};
 
 use crate::bootstrap::constraint_reconcile::CollectionSource;
 use crate::control::security::catalog::{StoredCollection, StoredIndexRecord, SystemCatalog};
-use crate::control::server::shared::ddl::neutral::collection::DocConfigWire;
+use crate::control::server::shared::ddl::neutral::collection::doc_config_wire_from_stored;
 use crate::control::server::shared::ddl::neutral::collection::register::{
     derive_auto_indexes, extend_with_catalog_indexes,
 };
@@ -106,7 +106,7 @@ pub fn crs_pin_of(set: &CustomCrsSet) -> crate::Result<CrsPin> {
         detail: format!("custom CRS set pin encode: {e}"),
     })?;
     Ok(CrsPin {
-        digest: xxhash_rust::xxh3::xxh3_64(&bytes),
+        digest: nodedb_physical::physical_plan::pin_digest(&bytes),
         bytes: bytes.into(),
     })
 }
@@ -129,7 +129,7 @@ fn derive_config_pin(
     if !coll.is_active {
         return Ok(None);
     }
-    let wire = DocConfigWire::from_stored(
+    let wire = doc_config_wire_from_stored(
         &Committed(catalog),
         key.tenant_id,
         &coll,
@@ -240,7 +240,10 @@ mod tests {
         let pinned = pin(&ConfigPinCache::new(), &catalog, "orders");
         assert_ne!(config.digest, 0);
         assert_eq!(pinned.digest, config.digest);
-        assert_eq!(pinned.digest, xxhash_rust::xxh3::xxh3_64(&pinned.wire));
+        assert_eq!(
+            pinned.digest,
+            nodedb_physical::physical_plan::pin_digest(&pinned.wire)
+        );
     }
 
     /// The cache answers the pin it holds while the catalog is unchanged,

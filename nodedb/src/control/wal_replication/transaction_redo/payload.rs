@@ -17,10 +17,11 @@ use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoRecord;
 
-use super::pins::redo_pins;
+use super::pins::{PinScope, redo_pins};
 use super::sum_targets::redo_sum_targets;
 use crate::control::planner::calvin::incarnation_names::{NamedIncarnation, incarnation_names};
-use nodedb_physical::physical_plan::written_collections;
+use nodedb_cluster::calvin::types::IncarnationKind;
+use nodedb_physical::physical_plan::{pin_required_collections, written_collections};
 
 /// Everything a replica needs to apply one committed transaction's redo.
 #[derive(Debug, Clone)]
@@ -88,19 +89,25 @@ impl TransactionRedoPayload {
     ) -> crate::Result<Self> {
         let collections = written_collections(plans);
         let sum_targets = redo_sum_targets(plans);
-        let pins = redo_pins(
-            state,
+        let incarnation_names = incarnation_names(plans, |plan| {
+            written_collections(std::slice::from_ref(plan))
+        });
+        // The written names that are user collections. An array has no
+        // document config, so it takes no pin.
+        let pinned_names = incarnation_names
+            .iter()
+            .filter(|(_, kind)| matches!(kind, IncarnationKind::Collection))
+            .map(|(name, _)| name.as_str());
+        let scope = PinScope {
             database_id,
             tenant_id,
-            collections.iter().map(String::as_str),
-            &sum_targets,
-        )?;
+        };
+        let required = pin_required_collections(plans);
+        let pins = redo_pins(state, scope, pinned_names, &required, &sum_targets)?;
         Ok(Self {
             redo,
             collections,
-            incarnation_names: incarnation_names(plans, |plan| {
-                written_collections(std::slice::from_ref(plan))
-            }),
+            incarnation_names,
             sum_targets,
             identities: collect_plan_identities(
                 &state.surrogate_assigner,
@@ -151,8 +158,7 @@ impl TransactionRedoPayload {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
-            // U7c-5: build the Calvin pins in TxClass at submit. A Calvin
-            // slice carries no pin here.
+            // A Calvin slice carries no pin: its submit pins nothing.
             pins: RedoPins::default(),
         }
     }
@@ -350,5 +356,98 @@ mod tests {
             }
             other => panic!("apply plan must be ApplyTransactionRedo, got {other:?}"),
         }
+    }
+
+    fn commit_state() -> (std::sync::Arc<SharedState>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let wal = std::sync::Arc::new(
+            crate::wal::WalManager::open_for_testing(&directory.path().join("pins.wal"))
+                .expect("wal"),
+        );
+        let (dispatcher, _data_sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("state");
+        (state, directory)
+    }
+
+    fn empty_redo() -> RedoRecord {
+        payload(None, None).redo
+    }
+
+    fn commit_of(
+        state: &SharedState,
+        plans: &[PhysicalPlan],
+    ) -> crate::Result<TransactionRedoPayload> {
+        TransactionRedoPayload::from_commit(
+            state,
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            empty_redo(),
+            plans,
+            EventSource::User,
+        )
+    }
+
+    fn delete_from(collection: &str) -> PhysicalPlan {
+        PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::PointDelete {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+            document_id: "d1".into(),
+            surrogate: None,
+            pk_bytes: b"d1".to_vec(),
+            returning: None,
+            rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            resolved_sum_targets: Vec::new(),
+        })
+    }
+
+    /// A commit that writes a collection with no catalog row cannot pin
+    /// it, so it is refused with `42P01`.
+    #[test]
+    fn a_commit_to_a_collection_with_no_row_is_refused() {
+        let (state, _dir) = commit_state();
+        let refused = commit_of(&state, &[delete_from("ghost")]).expect_err("refused");
+        assert!(
+            matches!(&refused, crate::Error::CollectionNotFound { collection, .. } if collection == "ghost"),
+            "{refused:?}"
+        );
+    }
+
+    /// An array has no document config. A commit that writes one with no
+    /// collection row of its name pins it nothing.
+    #[test]
+    fn a_commit_to_an_array_pins_no_config() {
+        let (state, _dir) = commit_state();
+        let array_delete = PhysicalPlan::Array(nodedb_physical::physical_plan::ArrayOp::Delete {
+            array_id: nodedb_array::types::ArrayId::new(TenantId::new(1), "grid"),
+            coords_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+            vshard_id: 0,
+        });
+        let committed = commit_of(&state, &[array_delete]).expect("commit");
+        assert!(committed.pins.pinned());
+        assert!(committed.pins.configs.is_empty());
+    }
+
+    /// An edge write accepts a collection with no catalog row, so a commit
+    /// that writes edges of one is not refused. Its collection takes no
+    /// pin.
+    #[test]
+    fn a_commit_to_an_edge_collection_with_no_row_commits() {
+        let (state, _dir) = commit_state();
+        let edge_put = PhysicalPlan::Graph(nodedb_physical::physical_plan::GraphOp::EdgePut {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "social"),
+            src_id: "alice".into(),
+            label: "follows".into(),
+            dst_id: "bob".into(),
+            properties: Vec::new(),
+            src_surrogate: nodedb_types::Surrogate::new(1),
+            dst_surrogate: nodedb_types::Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
+        });
+        let committed = commit_of(&state, &[edge_put]).expect("commit");
+        assert!(committed.pins.pinned());
+        assert!(committed.pins.configs.is_empty());
     }
 }

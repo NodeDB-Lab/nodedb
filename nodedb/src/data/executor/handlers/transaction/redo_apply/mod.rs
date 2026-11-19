@@ -24,6 +24,10 @@
 //! - [`fold_ledger`]: the ops and target rows a batched install folded
 //!   durably.
 //! - [`events`]: the record's Event Plane output.
+//! - [`config_pins`]: the decode of a config pin, and the refusal of a
+//!   pinned record that leaves a written collection unpinned.
+//! - [`judged_configs`]: the configs a pinned record's validate judges
+//!   under, and [`judged_scope`]: that view on the core.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
 //! - [`test_commit`]: a test driver for a session commit on one core.
@@ -46,6 +50,7 @@ mod calvin_install;
 #[cfg(test)]
 mod calvin_install_tests;
 mod clone_copy;
+mod config_pins;
 #[cfg(test)]
 mod cross_shard_fold_tests;
 mod document;
@@ -58,6 +63,10 @@ mod folded_store;
 #[cfg(test)]
 mod install_refusal_tests;
 mod installed_document;
+mod judged_configs;
+mod judged_scope;
+#[cfg(test)]
+mod judged_tests;
 mod passes;
 mod replay_fold;
 #[cfg(test)]
@@ -82,6 +91,7 @@ mod write_keys;
 pub(in crate::data::executor) use batched::is_park_placeholder;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
+pub(in crate::data::executor) use judged_configs::JudgedConfigs;
 pub(in crate::data::executor) use state::{
     RedoApplyPass, RedoApplyScope, RedoApplyState, TsInstalled,
 };

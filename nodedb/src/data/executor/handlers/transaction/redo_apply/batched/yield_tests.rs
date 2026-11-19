@@ -1504,3 +1504,185 @@ fn the_governor_charge_follows_the_validate() {
     assert_ok(ring.tick_until_answered(INSTALL));
     assert_eq!(query(&ring.core), before, "the charge is released");
 }
+
+// ── judged view across slices ────────────────────────────────────────────
+
+/// The wire form of [`FILL`], with a UNIQUE index on `n` when `unique`.
+fn fill_wire(unique: bool) -> nodedb_physical::physical_plan::DocConfigWire {
+    use nodedb_physical::physical_plan::{
+        DocConfigWire, EnforcementOptions, RegisteredIndex, RegisteredIndexState, StorageMode,
+    };
+    let index_paths = if unique {
+        vec![RegisteredIndex {
+            name: "n".into(),
+            path: "n".into(),
+            unique: true,
+            case_insensitive: false,
+            state: RegisteredIndexState::Ready,
+            predicate: None,
+        }]
+    } else {
+        Vec::new()
+    };
+    DocConfigWire {
+        bitemporal: false,
+        enforcement: EnforcementOptions::default(),
+        storage_mode: StorageMode::Schemaless,
+        index_paths,
+        declared_key: None,
+        vector_primary: None,
+        declared_columns: Vec::new(),
+        vector_fields: Vec::new(),
+    }
+}
+
+/// Pins as a proposer sets them for a record that writes [`FILL`], whose
+/// proposer saw it with or without UNIQUE.
+fn fill_pins(unique: bool) -> nodedb_physical::physical_plan::RedoPins {
+    use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+    use std::sync::Arc;
+    let (wire, digest) = fill_wire(unique).pin_parts().expect("pin parts");
+    let set = zerompk::to_msgpack_vec(&nodedb_crs::CustomCrsSet::new()).expect("encode set");
+    RedoPins {
+        configs: vec![Arc::new(ConfigPin {
+            key: ConfigPinKey {
+                database_id: DatabaseId::DEFAULT,
+                tenant_id: TenantId::new(TID),
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, FILL)
+                    .as_str()
+                    .to_owned(),
+            },
+            digest,
+            wire: wire.into(),
+        })],
+        crs: Some(Arc::new(CrsPin {
+            digest: nodedb_physical::physical_plan::pin_digest(&set),
+            bytes: set.into(),
+        })),
+    }
+}
+
+/// Filler rows across many batches, then one more row whose `n` repeats
+/// the first row's. Only a UNIQUE index on `n` refuses it.
+fn fill_with_late_duplicate() -> Vec<RedoSubRecord> {
+    let mut ops = fill(FILL_FROM, MANY_ROWS);
+    let body =
+        nodedb_types::json_to_msgpack(&serde_json::json!({"n": FILL_FROM})).expect("encode body");
+    let late = FILL_FROM + MANY_ROWS;
+    ops.push(doc_put_sub_record(FILL, &format!("f{late}"), &body, late));
+    ops
+}
+
+impl Ring {
+    /// Queue the install of `ops`, which write [`FILL`], pinned with
+    /// `pins`, as request [`INSTALL`].
+    fn push_pinned_install_of(
+        &mut self,
+        ops: Vec<RedoSubRecord>,
+        pins: &nodedb_physical::physical_plan::RedoPins,
+    ) {
+        let content =
+            super::super::stream_validate::tests::framed_pinned(&record(ops), &[], &[], pins);
+        let reference = self.wal.write(&content);
+        let marker = reference.marker(None, None, Vec::new()).expect("marker");
+        let plan = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo: marker.to_bytes().expect("encode marker"),
+            collections: vec![FILL.to_string()],
+            sum_targets: Vec::new(),
+            origin: RedoOrigin::Commit,
+            calvin: None,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
+            pins: Default::default(),
+        });
+        self.push(install_request(INSTALL, plan, LSN), None);
+    }
+
+    /// Whether the core holds a judged view now, as a task would see it.
+    fn sees_judged_view(&self) -> bool {
+        self.core.apply_scope.judged.is_some() || self.core.apply_scope.judging
+    }
+}
+
+fn is_unique_violation(response: &Response) -> bool {
+    matches!(
+        response.error_code.as_deref(),
+        Some(ErrorCode::RejectedConstraint { constraint, .. }) if constraint == "unique"
+    )
+}
+
+/// The judged view leaves the core with each park and returns with each
+/// slice: the duplicate in the validate's last batch is judged under the
+/// pinned UNIQUE index. A task between slices sees no view.
+#[test]
+fn the_judged_view_survives_a_yield_and_no_task_between_slices_sees_it() {
+    let mut ring = Ring::open(plain_core);
+    ring.push_pinned_install_of(fill_with_late_duplicate(), &fill_pins(true));
+    ring.tick();
+    assert!(ring.validating(), "the validate parked");
+    assert!(
+        !ring.sees_judged_view(),
+        "the parked view is out of the core"
+    );
+
+    ring.push(foreign_put(FOREIGN), None);
+    ring.tick();
+    assert_ok(
+        ring.answer(FOREIGN)
+            .expect("the foreign write ran between validate slices"),
+    );
+    assert!(ring.validating(), "the write ran between validate slices");
+    assert!(!ring.sees_judged_view());
+
+    let answer = ring.tick_until_answered(INSTALL).clone();
+    assert!(is_unique_violation(&answer), "{:?}", answer.error_code);
+    assert!(!ring.sees_judged_view(), "the view drops with the record");
+}
+
+/// A `Register` of [`FILL`] that lands between validate slices changes no
+/// verdict: the record is judged under its pin either way.
+#[test]
+fn a_register_between_validate_slices_changes_nothing() {
+    for pinned_unique in [true, false] {
+        let mut ring = Ring::open(plain_core);
+        ring.push_pinned_install_of(fill_with_late_duplicate(), &fill_pins(pinned_unique));
+        ring.tick();
+        assert!(ring.validating(), "the validate parked");
+
+        // The register lands the config the proposer did not see.
+        let registered = fill_wire(!pinned_unique);
+        let digest = registered.digest().expect("digest");
+        let collection = QualifiedCollection::new(DatabaseId::DEFAULT, FILL);
+        let response = ring.core.execute_register_document_collection(
+            &make_default_task(),
+            crate::data::executor::handlers::document::write::RegisterDocumentCollectionParams {
+                tid: TID,
+                collection: collection.as_str(),
+                indexes: &registered.index_paths,
+                crdt_enabled: false,
+                storage_mode: &registered.storage_mode,
+                enforcement: &registered.enforcement,
+                bitemporal: false,
+                conflict_policy: None,
+                timeseries: None,
+                vector_primary: None,
+                vector_fields: &[],
+                declared_columns: &[],
+                declared_key: None,
+                text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
+                incarnation: nodedb_types::Hlc::ZERO,
+                digest,
+            },
+        );
+        assert_ok(&response);
+        assert!(ring.validating(), "the register landed between slices");
+
+        let answer = ring.tick_until_answered(INSTALL).clone();
+        assert_eq!(
+            is_unique_violation(&answer),
+            pinned_unique,
+            "pinned unique {pinned_unique}: {:?}",
+            answer.error_code
+        );
+    }
+}

@@ -293,3 +293,31 @@ async fn direction_both_lists_a_self_loop_once() {
     );
     server.client.simple_query("ROLLBACK").await.unwrap();
 }
+
+/// A transaction that inserts an edge into a collection with no
+/// `CREATE COLLECTION` commits, and the edge reads after the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_edge_into_an_uncreated_collection_commits_and_reads() {
+    let server = TestServer::start().await;
+    for sql in [
+        "BEGIN",
+        "GRAPH INSERT EDGE IN 'g_uncreated' FROM 'a' TO 'b' TYPE 'l'",
+        "COMMIT",
+    ] {
+        server
+            .exec(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+
+    let rows = server
+        .query_text("GRAPH NEIGHBORS IN 'g_uncreated' OF 'a' LABEL 'l' DIRECTION out")
+        .await
+        .unwrap();
+    let nodes: Vec<String> = rows
+        .iter()
+        .flat_map(|row| serde_json::from_str::<Vec<serde_json::Value>>(row).unwrap_or_default())
+        .filter_map(|entry| entry.get("node")?.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(nodes, vec!["b".to_string()]);
+}

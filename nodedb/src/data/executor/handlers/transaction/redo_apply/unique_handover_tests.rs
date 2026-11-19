@@ -78,6 +78,7 @@ fn install(core: &mut CoreLoop, lsn: u64, ops: Vec<RedoSubRecord>) -> Response {
             redo: &redo,
             collections: &[COLL.to_string()],
             sum_targets: &[],
+            pins: &Default::default(),
         },
     )
 }

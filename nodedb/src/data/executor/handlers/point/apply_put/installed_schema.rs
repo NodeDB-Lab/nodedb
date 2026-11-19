@@ -155,7 +155,7 @@ impl CoreLoop {
         key: &(DatabaseId, TenantId, String),
         image: &SharedInstalledDocument,
     ) -> crate::Result<InstalledReadProjection> {
-        let projection = match self.doc_configs.get(key) {
+        let projection = match self.judged_doc_config(key) {
             Some(config) => {
                 compatible(&image.schema, &config.storage_mode, &image.stored)?;
                 let native = match &config.storage_mode {
@@ -213,8 +213,7 @@ impl CoreLoop {
     ) -> crate::Result<Arc<StorageMode>> {
         let schemaless = StorageMode::Schemaless;
         let mode = self
-            .doc_configs
-            .get(key)
+            .judged_doc_config(key)
             .map(|config| &config.storage_mode)
             .unwrap_or(&schemaless);
         let mut schemas = self
