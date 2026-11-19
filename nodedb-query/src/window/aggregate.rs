@@ -18,7 +18,7 @@ use nodedb_types::Value;
 use super::arg::{ArgValues, arg_at, eval_arg_values};
 use super::extremum::value_replaces;
 use super::frame::{build_peer_groups, evaluate_frame_bounds};
-use super::helpers::{as_f64, set_window_col};
+use super::helpers::set_window_col;
 use super::running::running_aggregate;
 use super::spec::{FrameBound, WindowFuncSpec};
 use crate::numeric_sum::{ExactSum, sum_input};
@@ -86,17 +86,12 @@ fn per_row_aggregate(
         Vec::new()
     };
 
-    // Numeric view of the evaluated argument, one slot per partition position.
-    let all_vals: Vec<Option<f64>> = (0..len)
-        .map(|pos| as_f64(&arg_at(arg_values, pos)))
-        .collect();
-
     let results: Vec<Value> = (0..len)
         .map(|pos| {
             let (start_idx, end_idx) =
                 evaluate_frame_bounds(&spec.frame, pos, len, &order_values, &peer_groups);
 
-            aggregate_slice(&all_vals, arg_values, spec, start_idx, end_idx)
+            aggregate_slice(arg_values, spec, start_idx, end_idx)
         })
         .collect::<Result<_, _>>()?;
 
@@ -123,7 +118,6 @@ fn frame_sum(arg_values: &ArgValues, start_idx: usize, end_idx: usize) -> ExactS
 /// Aggregate the evaluated argument over the frame slice
 /// `[start_idx, end_idx]` (partition positions, not row indices).
 fn aggregate_slice(
-    all_vals: &[Option<f64>],
     arg_values: &ArgValues,
     spec: &WindowFuncSpec,
     start_idx: usize,
@@ -151,10 +145,7 @@ fn aggregate_slice(
             };
             let frame_values = values.get(start_idx..=end_idx).unwrap_or(&[]);
             let mut best: Option<&Value> = None;
-            for (numeric, candidate) in all_vals[start_idx..=end_idx].iter().zip(frame_values) {
-                if numeric.is_none() {
-                    continue;
-                }
+            for candidate in frame_values.iter().filter(|v| !v.is_null()) {
                 if value_replaces(candidate, best, want_max) {
                     best = Some(candidate);
                 }
@@ -601,5 +592,26 @@ mod tests {
         assert_eq!(res(&rows[3]), Value::Integer(8));
         // pos=4 (group 2): same
         assert_eq!(res(&rows[4]), Value::Integer(8));
+    }
+
+    #[test]
+    fn frame_min_max_over_text_return_the_text() {
+        let vals = [
+            Value::String("pear".into()),
+            Value::Null,
+            Value::String("apple".into()),
+            Value::String("zebra".into()),
+        ];
+        let indices: Vec<usize> = (0..4).collect();
+
+        let mut rows = keyed(&vals);
+        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole()), &crs())
+            .unwrap();
+        assert_eq!(res(&rows[0]), Value::String("apple".into()));
+
+        let mut rows = keyed(&vals);
+        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole()), &crs())
+            .unwrap();
+        assert_eq!(res(&rows[0]), Value::String("zebra".into()));
     }
 }

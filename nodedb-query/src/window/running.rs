@@ -53,13 +53,14 @@ pub(super) fn running_aggregate(
     for pos in 0..len {
         let i = indices[pos];
         let val = arg_at(arg_values, pos);
+        if let Some(want_max) = extremum_dir
+            && !val.is_null()
+            && value_replaces(&val, running_extreme.as_ref(), want_max)
+        {
+            running_extreme = Some(val.clone());
+        }
         if sum_input(&val).is_some_and(|n| running_sum.add_value(&n)) {
             running_count += 1;
-            if let Some(want_max) = extremum_dir
-                && value_replaces(&val, running_extreme.as_ref(), want_max)
-            {
-                running_extreme = Some(val);
-            }
         } else if spec.func_name == "count" && (arg_values.is_none() || !val.is_null()) {
             // `COUNT(*)` counts every row; `COUNT(expr)` counts rows whose
             // argument is non-NULL, including non-numeric values.
