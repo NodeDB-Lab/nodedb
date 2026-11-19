@@ -21,18 +21,23 @@
 //! - [`document`]: document rows written while the apply scope is open, or
 //!   while restart replay folds a record whose install never became durable.
 //! - [`replay_fold`]: restart replay's fold of such a record.
+//! - [`replay_pins`]: the pins restart replay derives a pinned record's
+//!   row bodies under.
 //! - [`fold_ledger`]: the ops and target rows a batched install folded
 //!   durably.
 //! - [`events`]: the record's Event Plane output.
+//! - [`fold_layout`]: the strict layout a folded target row encodes under.
 //! - [`config_pins`]: the decode of a config pin, and the refusal of a
 //!   pinned record that leaves a written collection unpinned.
 //! - [`judged_configs`]: the configs a pinned record's validate judges
-//!   under, and [`judged_scope`]: that view on the core.
+//!   and its install derives row bodies under, and [`judged_scope`]: that
+//!   view on the core.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
 //! - [`test_commit`]: a test driver for a session commit on one core.
 //! - [`install_refusal_tests`]: one committed and one refused install per
 //!   engine kind.
+//! - [`install_pin_tests`]: a pinned record's rows derive under its pins.
 //! - [`calvin_fold_tests`]: a Calvin record's fold rows journal as parts,
 //!   and restart replay applies them.
 //! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
@@ -58,8 +63,11 @@ mod document;
 mod dropped_array_tests;
 mod entry;
 mod events;
+mod fold_layout;
 mod fold_ledger;
 mod folded_store;
+#[cfg(test)]
+mod install_pin_tests;
 #[cfg(test)]
 mod install_refusal_tests;
 mod installed_document;
@@ -69,6 +77,7 @@ mod judged_scope;
 mod judged_tests;
 mod passes;
 mod replay_fold;
+mod replay_pins;
 #[cfg(test)]
 mod retention_instant_tests;
 mod settle;
@@ -91,6 +100,7 @@ mod write_keys;
 pub(in crate::data::executor) use batched::is_park_placeholder;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
+pub(in crate::data::executor) use fold_layout::RowLayout;
 pub(in crate::data::executor) use judged_configs::JudgedConfigs;
 pub(in crate::data::executor) use state::{
     RedoApplyPass, RedoApplyScope, RedoApplyState, TsInstalled,

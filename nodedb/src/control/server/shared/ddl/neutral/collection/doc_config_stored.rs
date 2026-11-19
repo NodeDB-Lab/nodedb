@@ -162,6 +162,7 @@ pub(crate) fn doc_config_wire_from_stored<S: CollectionSource + ?Sized>(
     );
     DocConfigWire {
         bitemporal: coll.bitemporal,
+        crdt_enabled: coll.crdt,
         enforcement: enforcement(catalog, tenant_id, coll, &name),
         storage_mode: storage_mode(coll),
         index_paths: indexes.to_vec(),

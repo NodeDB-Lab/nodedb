@@ -64,6 +64,7 @@ use super::install_cursor::{InstallCursors, RedoInstallError};
 use super::op_index::RedoOpIndex;
 use super::replay_arm::RedoArm;
 use super::replay_arms::ArmReplayInput;
+use super::replay_continued::{ContinuedOps, continuation_first_op, last_continuation_of};
 use super::replay_origin::GroupedReplayOrigins;
 use super::stream_expand::StreamContents;
 use super::{RedoRecord, RedoStreamRef, WriteGroupRecord, read_stream_content};
@@ -79,6 +80,12 @@ struct ReconstitutedReplay {
     /// The sum targets each committed record's install folded with, by the
     /// record's LSN. Only records that carry targets appear.
     sum_targets: Vec<(u64, Vec<nodedb_physical::physical_plan::RedoSumTargets>)>,
+    /// The pins each pinned committed record's install derived its rows
+    /// under, by the record's LSN.
+    pins: Vec<(u64, nodedb_physical::physical_plan::RedoPins)>,
+    /// The origin LSN of each record whose last continuation this read
+    /// holds. No row of it replays after this read.
+    ended: Vec<u64>,
 }
 
 /// Reconstitute every sub-record of every `TransactionRedo` record into a flat,
@@ -118,8 +125,9 @@ struct ReconstitutedReplay {
 /// ended part way, which no checkpoint passed: its chunks missing is
 /// [`RedoInstallError::ChunksMissing`].
 ///
-/// A committed record's sum targets come from where its install read them:
-/// a whole record's WAL copy, or a stream marker's content header.
+/// A committed record's sum targets and pins come from where its install
+/// read them: a whole record's WAL copy, or a stream marker's content
+/// header.
 ///
 /// A `TransactionRedo` sub-record is tagged with its index among the
 /// record's ops, the index the fold ledger counts. A continuation of a split
@@ -136,6 +144,8 @@ fn reconstitute_redo_records(
     let mut op_tags = Vec::new();
     let mut grouped_origins = GroupedReplayOrigins::default();
     let mut sum_targets = Vec::new();
+    let mut pins = Vec::new();
+    let mut ended = Vec::new();
     let mut continued: HashMap<u64, ContinuedOps> = HashMap::new();
     for record in records {
         let (lsn, ops, first_op) = match RecordType::from_raw(record.logical_record_type()) {
@@ -156,6 +166,9 @@ fn reconstitute_redo_records(
                 };
                 if !installed.sum_targets.is_empty() {
                     sum_targets.push((record.header.lsn, installed.sum_targets));
+                }
+                if installed.pins.pinned() {
+                    pins.push((record.header.lsn, installed.pins));
                 }
                 continued.insert(
                     record.header.lsn,
@@ -179,6 +192,14 @@ fn reconstitute_redo_records(
                     }
                 }
                 let first_op = continuation_first_op(&mut continued, &group.group, ops.len())?;
+                ended.extend(last_continuation_of(&group.group));
+                // A continuation carries its origin's pins, for a WAL that
+                // holds no origin record.
+                if let Some(metadata) = group.redo
+                    && metadata.pins.pinned()
+                {
+                    pins.push((group.group.origin_at(record.header.lsn), metadata.pins));
+                }
                 (group.group.origin_at(record.header.lsn), ops, first_op)
             }
             _ => continue,
@@ -212,51 +233,9 @@ fn reconstitute_redo_records(
         op_tags,
         grouped_origins,
         sum_targets,
+        pins,
+        ended,
     })
-}
-
-/// The op count of a `TransactionRedo` record its continuations extend.
-struct ContinuedOps {
-    /// The record op index of the next continuation's first sub-record.
-    next_op: u64,
-    /// The index (from 1) of the record's next continuation.
-    next_continuation: u32,
-}
-
-/// The record op index of the first sub-record of the `WriteGroup` record
-/// `group`, which holds `len` sub-records. `None` unless it is a
-/// continuation whose origin record this read holds: a part journalled
-/// after apply is no op of the record, and a continuation without its
-/// origin replays no fold.
-///
-/// A continuation out of order is refused: its ops would apply in another
-/// order than the live install applied them.
-fn continuation_first_op(
-    continued: &mut HashMap<u64, ContinuedOps>,
-    group: &super::WriteGroup,
-    len: usize,
-) -> crate::Result<Option<u64>> {
-    let is_continuation = group.opens() && group.origin != 0 && group.parts > 0;
-    if !is_continuation {
-        return Ok(None);
-    }
-    let Some(ops) = continued.get_mut(&group.origin) else {
-        return Ok(None);
-    };
-    if group.parts != ops.next_continuation {
-        return Err(crate::Error::Internal {
-            detail: format!(
-                "continuation {} of the transaction record at lsn {} follows continuation {}",
-                group.parts,
-                group.origin,
-                ops.next_continuation.saturating_sub(1)
-            ),
-        });
-    }
-    let first = ops.next_op;
-    ops.next_op = first.saturating_add(len as u64);
-    ops.next_continuation = ops.next_continuation.saturating_add(1);
-    Ok(Some(first))
 }
 
 /// Merge the standalone records with the reconstituted redo sub-records into
@@ -447,9 +426,13 @@ impl CoreLoop {
             op_tags,
             grouped_origins,
             sum_targets,
+            pins,
+            ended,
         } = reconstitute_redo_records(records, &mut contents, self.boot_install_cursors())?;
         // A never-durable record folds with the targets its install used.
         self.keep_replay_fold_targets(sum_targets);
+        // Every pinned record's rows derive under the pins its install used.
+        self.keep_replay_pins(pins)?;
         let MergedReplay {
             records: ordered,
             ops,
@@ -465,6 +448,8 @@ impl CoreLoop {
             tombstones,
         };
         run(self, &input);
+        // A record whose last continuation replayed releases its pins.
+        self.release_replay_pins(&ended);
         Ok(())
     }
 

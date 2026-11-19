@@ -90,6 +90,7 @@ impl CoreLoop {
         self.apply_scope.journaled = previous_journaled;
         // Replay is over: no arm applies a registered record again.
         self.record_stamps.clear();
+        self.forget_replay_pins();
         if let Err(e) = replayed {
             error!(
                 core_id,

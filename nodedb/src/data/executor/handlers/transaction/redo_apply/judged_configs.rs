@@ -14,13 +14,18 @@
 //!
 //! A decoded config judges by the pinned rules but reads stored rows in
 //! the core's current storage mode: the stored bytes are in that mode.
+//!
+//! Row bodies derive under a second decoded config, the install config, in
+//! the validate and the install alike. It takes the pin's storage mode when
+//! its kind is the core's current kind.
+//! Otherwise it takes the current mode: a CONVERT applies in data-log order.
 
 use std::cell::OnceCell;
 use std::mem::size_of;
 use std::sync::Arc;
 
 use nodedb_crs::CustomCrsSet;
-use nodedb_physical::physical_plan::{ConfigPin, CrsPin, RedoPins, pin_digest};
+use nodedb_physical::physical_plan::{ConfigPin, CrsPin, RedoPins, StorageMode, pin_digest};
 
 use crate::data::executor::core_loop::doc_config_key::DocConfigRef;
 use crate::data::executor::core_loop::state_types::DocConfigs;
@@ -36,6 +41,9 @@ pub(in crate::data::executor) struct JudgedConfigs {
     pins: RedoPins,
     /// The decoded config of each pin in `pins.configs`, at its index.
     decoded: Vec<OnceCell<CollectionConfig>>,
+    /// The decoded config each pin's install derives row bodies under, at
+    /// its index.
+    installed: Vec<OnceCell<CollectionConfig>>,
     /// The hash of each pin's raw wire bytes, at its index, once a lookup
     /// read it.
     hashed: Vec<OnceCell<u64>>,
@@ -70,6 +78,7 @@ impl JudgedConfigs {
         Ok(Some(Self {
             pins: pins.clone(),
             decoded: pins.configs.iter().map(|_| OnceCell::new()).collect(),
+            installed: pins.configs.iter().map(|_| OnceCell::new()).collect(),
             hashed: pins.configs.iter().map(|_| OnceCell::new()).collect(),
             crs,
             crs_decoded,
@@ -118,6 +127,65 @@ impl JudgedConfigs {
         }
     }
 
+    /// The install config: the one `collection`'s row bodies derive under. A
+    /// collection with no pin reads its current config. `Err` when its pin
+    /// does not decode.
+    pub(in crate::data::executor) fn install_config<'a>(
+        &'a self,
+        doc_configs: &'a DocConfigs,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        collection: &str,
+    ) -> Result<Option<&'a CollectionConfig>, ConfigPinError> {
+        let current = doc_configs.get(&DocConfigRef {
+            database_id,
+            tenant_id,
+            collection,
+        });
+        match self.pins.position_named(database_id, tenant_id, collection) {
+            Some(index) => self.install_config_at(index, current),
+            None => Ok(current),
+        }
+    }
+
+    /// The install config of the pin at `index`, over `current`, the
+    /// core's config of the pin's key.
+    fn install_config_at<'a>(
+        &'a self,
+        index: usize,
+        current: Option<&'a CollectionConfig>,
+    ) -> Result<Option<&'a CollectionConfig>, ConfigPinError> {
+        if let Some(installed) = self.installed[index].get() {
+            return Ok(Some(installed));
+        }
+        let pin = &self.pins.configs[index];
+        let derived = *self.hashed[index].get_or_init(|| pin_digest(pin.wire.as_slice()));
+        check_config_pin_hash(pin, derived)?;
+        if let Some(config) = current
+            && config.digest != 0
+            && config.digest == pin.digest
+        {
+            return Ok(Some(config));
+        }
+        let config = judged_for_install(current, pin, derived)?;
+        Ok(Some(self.installed[index].get_or_init(|| config)))
+    }
+
+    /// Derive the install config of every pin. A pin that does not decode
+    /// is kept as the refusal, so the validate refuses before any write.
+    pub(in crate::data::executor) fn prime_install(&self, doc_configs: &DocConfigs) {
+        for (index, pin) in self.pins.configs.iter().enumerate() {
+            let current = doc_configs.get(&DocConfigRef {
+                database_id: pin.key.database_id,
+                tenant_id: pin.key.tenant_id,
+                collection: &pin.key.collection,
+            });
+            if let Err(error) = self.install_config_at(index, current) {
+                self.refuse(error);
+            }
+        }
+    }
+
     /// Keep `error` as the record's refusal, unless one is kept already.
     /// The validate refuses at its end. Until then its checks read the
     /// current config, and their verdict is discarded.
@@ -138,22 +206,24 @@ impl JudgedConfigs {
     /// The RAM the view holds: each pin once, as its wire bytes, plus the
     /// estimate of each config and CRS set it decoded.
     pub(in crate::data::executor) fn resident_bytes(&self) -> usize {
+        let cell_bytes = |cell: &OnceCell<CollectionConfig>, wire_len: usize| {
+            cell.get()
+                .map_or(0, |config| decoded_config_bytes(config, wire_len))
+        };
         let configs: usize = self
             .pins
             .configs
             .iter()
-            .zip(&self.decoded)
-            .map(|(pin, decoded)| {
-                let decoded = decoded
-                    .get()
-                    .map_or(0, |config| decoded_config_bytes(config, pin.wire.len()));
+            .zip(self.decoded.iter().zip(&self.installed))
+            .map(|(pin, (decoded, installed))| {
                 size_of::<Arc<ConfigPin>>()
                     + size_of::<ConfigPin>()
                     + pin.key.collection.len()
                     + pin.wire.len()
-                    + size_of::<OnceCell<CollectionConfig>>()
+                    + 2 * size_of::<OnceCell<CollectionConfig>>()
                     + size_of::<OnceCell<u64>>()
-                    + decoded
+                    + cell_bytes(decoded, pin.wire.len())
+                    + cell_bytes(installed, pin.wire.len())
             })
             .sum();
         let crs = self.pins.crs.as_ref().map_or(0, |pin| {
@@ -171,6 +241,15 @@ impl JudgedConfigs {
     #[cfg(test)]
     pub(in crate::data::executor) fn decoded_configs(&self) -> usize {
         self.decoded
+            .iter()
+            .filter(|cell| cell.get().is_some())
+            .count()
+    }
+
+    /// How many install configs the view decoded.
+    #[cfg(test)]
+    pub(in crate::data::executor) fn installed_configs(&self) -> usize {
+        self.installed
             .iter()
             .filter(|cell| cell.get().is_some())
             .count()
@@ -237,6 +316,27 @@ fn judged_for_validate(
     Ok(judged)
 }
 
+/// The config an install derives row bodies under: `pin` over `current`.
+/// It keeps the pin's storage mode only when its kind is the current kind.
+/// A core with no current config holds schemaless rows.
+fn judged_for_install(
+    current: Option<&CollectionConfig>,
+    pin: &ConfigPin,
+    derived: u64,
+) -> Result<CollectionConfig, ConfigPinError> {
+    let mut judged = judged_config_from_pin(current, pin, derived)?;
+    let current_mode = current.map(|config| &config.storage_mode);
+    let pinned_kind = std::mem::discriminant(&judged.storage_mode);
+    let same_kind = match current_mode {
+        Some(mode) => std::mem::discriminant(mode) == pinned_kind,
+        None => matches!(judged.storage_mode, StorageMode::Schemaless),
+    };
+    if !same_kind {
+        judged.storage_mode = current_mode.cloned().unwrap_or_default();
+    }
+    Ok(judged)
+}
+
 /// The CRS set `pin` carries. Its bytes passed [`check_crs_pin_hash`].
 fn decode_crs(pin: &CrsPin) -> Result<CustomCrsSet, ConfigPinError> {
     zerompk::from_msgpack(pin.bytes.as_slice()).map_err(|e| ConfigPinError::CrsUndecodable {
@@ -263,10 +363,15 @@ mod tests {
     }
 
     fn pin() -> ConfigPin {
+        pin_with(StorageMode::Schemaless)
+    }
+
+    fn pin_with(storage_mode: StorageMode) -> ConfigPin {
         let wire = DocConfigWire {
             bitemporal: true,
+            crdt_enabled: false,
             enforcement: EnforcementOptions::default(),
-            storage_mode: StorageMode::Schemaless,
+            storage_mode,
             index_paths: Vec::new(),
             declared_key: None,
             vector_primary: None,
@@ -376,6 +481,79 @@ mod tests {
         let config = lookup(&judged, &configs).expect("judged config");
         assert!(config.bitemporal);
         assert_eq!(config.storage_mode, current.storage_mode);
+    }
+
+    fn strict(columns: &[&str]) -> StorageMode {
+        let columns = columns
+            .iter()
+            .map(|name| {
+                nodedb_types::columnar::ColumnDef::nullable(
+                    *name,
+                    nodedb_types::columnar::ColumnType::String,
+                )
+            })
+            .collect();
+        StorageMode::Strict {
+            schema: nodedb_types::columnar::StrictSchema::new(columns).expect("schema"),
+        }
+    }
+
+    fn install_lookup<'a>(
+        view: &'a JudgedConfigs,
+        configs: &'a DocConfigs,
+    ) -> Option<&'a CollectionConfig> {
+        view.install_config(configs, DatabaseId::DEFAULT, TenantId::new(1), COLLECTION)
+            .expect("install config")
+    }
+
+    /// The install config keeps the pin's storage mode only when its kind
+    /// is the core's current kind. The validate config keeps the current
+    /// mode always.
+    #[test]
+    fn the_install_config_takes_the_pinned_mode_of_the_current_kind() {
+        let current_mode = strict(&["a", "b"]);
+        let mut configs = DocConfigs::new();
+        configs.insert(
+            key(),
+            CollectionConfig::new(COLLECTION).with_storage_mode(current_mode.clone()),
+        );
+
+        let pinned_mode = strict(&["a"]);
+        let same_kind = view(pin_with(pinned_mode.clone()));
+        let installed = install_lookup(&same_kind, &configs).expect("install config");
+        assert_eq!(installed.storage_mode, pinned_mode);
+        assert!(installed.bitemporal, "the pinned flag");
+        let judged = lookup(&same_kind, &configs).expect("judged config");
+        assert_eq!(judged.storage_mode, current_mode);
+        assert_eq!(same_kind.installed_configs(), 1);
+
+        let other_kind = view(pin());
+        let installed = install_lookup(&other_kind, &configs).expect("install config");
+        assert_eq!(installed.storage_mode, current_mode);
+
+        let unregistered = view(pin_with(pinned_mode));
+        let none = DocConfigs::new();
+        let installed = install_lookup(&unregistered, &none).expect("install config");
+        assert_eq!(installed.storage_mode, StorageMode::Schemaless);
+    }
+
+    /// Priming decodes every install config, and a malformed pin is kept
+    /// as the refusal.
+    #[test]
+    fn priming_refuses_a_malformed_pin() {
+        let configs = DocConfigs::new();
+        let primed = view(pin());
+        primed.prime_install(&configs);
+        assert_eq!(primed.installed_configs(), 1);
+
+        let mut bad = pin();
+        bad.wire = vec![0xc1].into();
+        let mut refused = view(bad);
+        refused.prime_install(&configs);
+        assert!(matches!(
+            refused.take_failure(),
+            Some(ConfigPinError::DigestMismatch { .. })
+        ));
     }
 
     /// A CRS pin that does not hash to its digest refuses the view.

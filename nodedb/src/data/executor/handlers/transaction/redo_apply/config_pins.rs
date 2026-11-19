@@ -5,7 +5,7 @@
 //! - [`judged_config_from_pin`] decodes one pin, with no catalog, into the
 //!   config a validate judges under.
 //! - [`check_written_pinned`] refuses a pinned record that writes a
-//!   document collection it carries no pin of.
+//!   document or KV collection it carries no pin of.
 //!
 //! Every replica holds the same pin bytes, so each refusal here is final.
 
@@ -119,15 +119,15 @@ pub(in crate::data::executor) fn judged_config_from_pin(
     Ok(config)
 }
 
-/// Refuse a pinned record that writes document rows of one of
-/// `collections`, each database-qualified, or folds into a target
+/// Refuse a pinned record that makes one of `writes`, each a write kind
+/// and a database-qualified collection, or folds into a target
 /// `sum_targets` resolves, with no pin of it. A record with no pins passes.
 /// `PinnedWrite` names what requires a pin, as the proposer reads it.
 pub(in crate::data::executor) fn check_written_pinned<'a>(
     pins: &RedoPins,
     database_id: DatabaseId,
     tenant_id: TenantId,
-    collections: impl IntoIterator<Item = &'a str>,
+    writes: impl IntoIterator<Item = (PinnedWrite, &'a str)>,
     sum_targets: &[RedoSumTargets],
 ) -> Result<(), ConfigPinError> {
     if !pins.pinned() {
@@ -137,10 +137,9 @@ pub(in crate::data::executor) fn check_written_pinned<'a>(
         pins.config_named(database_id, tenant_id, collection)
             .is_none()
     };
-    if PinnedWrite::DocumentRows.requires_pin()
-        && let Some(collection) = collections
-            .into_iter()
-            .find(|collection| unpinned(collection))
+    if let Some((_, collection)) = writes
+        .into_iter()
+        .find(|(write, collection)| write.requires_pin() && unpinned(collection))
     {
         return Err(ConfigPinError::Unpinned {
             collection: collection.to_string(),
@@ -206,6 +205,7 @@ mod tests {
             });
         DocConfigWire {
             bitemporal: true,
+            crdt_enabled: false,
             enforcement,
             storage_mode: StorageMode::Schemaless,
             index_paths: vec![RegisteredIndex {
@@ -305,7 +305,8 @@ mod tests {
         current.digest = 5;
         let pin = pin_of(&wire());
         let judged = decode(Some(&current), &pin).expect("decode");
-        assert!(judged.crdt_enabled);
+        // The wire fixes `crdt_enabled`, so the pin's value replaces the current one.
+        assert!(!judged.crdt_enabled);
         assert_eq!(judged.incarnation, nodedb_types::Hlc::new(9, 0));
         assert!(judged.bitemporal);
         assert_eq!(judged.declared_key.as_deref(), Some("sku"));
@@ -342,27 +343,31 @@ mod tests {
     #[test]
     fn a_pinned_record_must_pin_every_written_collection() {
         let pinned = pins(vec![pin_of(&wire())]);
-        let at = |collection| {
+        let at = |write, collection| {
             check_written_pinned(
                 &pinned,
                 DatabaseId::DEFAULT,
                 TenantId::new(TID),
-                [COLLECTION, collection],
+                [(PinnedWrite::DocumentRows, COLLECTION), (write, collection)],
                 &[],
             )
         };
-        assert!(at(COLLECTION).is_ok());
-        assert!(matches!(
-            at("ghost"),
-            Err(ConfigPinError::Unpinned { collection }) if collection == "ghost"
-        ));
+        assert!(at(PinnedWrite::DocumentRows, COLLECTION).is_ok());
+        for write in [PinnedWrite::DocumentRows, PinnedWrite::KvRows] {
+            assert!(matches!(
+                at(write, "ghost"),
+                Err(ConfigPinError::Unpinned { collection }) if collection == "ghost"
+            ));
+        }
+        // A write that requires no pin passes unpinned.
+        assert!(at(PinnedWrite::Other, "ghost").is_ok());
         // Another tenant's collection of the same name has no pin here.
         assert!(
             check_written_pinned(
                 &pinned,
                 DatabaseId::DEFAULT,
                 TenantId::new(2),
-                [COLLECTION],
+                [(PinnedWrite::DocumentRows, COLLECTION)],
                 &[]
             )
             .is_err()
@@ -373,7 +378,7 @@ mod tests {
                 &RedoPins::default(),
                 DatabaseId::DEFAULT,
                 TenantId::new(TID),
-                ["ghost"],
+                [(PinnedWrite::KvRows, "ghost")],
                 &[],
             )
             .is_ok()
@@ -401,7 +406,7 @@ mod tests {
                 &pinned,
                 DatabaseId::DEFAULT,
                 TenantId::new(TID),
-                [COLLECTION],
+                [(PinnedWrite::DocumentRows, COLLECTION)],
                 &sum_targets(target),
             )
         };
@@ -416,7 +421,7 @@ mod tests {
                 &RedoPins::default(),
                 DatabaseId::DEFAULT,
                 TenantId::new(TID),
-                std::iter::empty::<&str>(),
+                std::iter::empty::<(PinnedWrite, &str)>(),
                 &sum_targets("accounts"),
             )
             .is_ok()

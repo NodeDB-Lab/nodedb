@@ -1526,6 +1526,7 @@ fn fill_wire(unique: bool) -> nodedb_physical::physical_plan::DocConfigWire {
     };
     DocConfigWire {
         bitemporal: false,
+        crdt_enabled: false,
         enforcement: EnforcementOptions::default(),
         storage_mode: StorageMode::Schemaless,
         index_paths,

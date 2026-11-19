@@ -3,11 +3,21 @@
 //! The judged view on the core: opened for a record's validate, read by
 //! every validate check, and dropped when the record's apply ends.
 //!
+//! One rule picks the config a read takes while the view is open:
+//!
+//! - A body-shape read takes the install config, in the validate and the
+//!   install alike: the freeze, its witness, the encode, the chain link,
+//!   the body's CRS set, the bitemporal flag, the KV declared columns and
+//!   the layout a folded target row encodes under. So the validate judges
+//!   the row image the install stores.
+//! - A rule or enforcement read takes the validate view during the
+//!   validate, and the current config during the install.
+//!
 //! The view lives in the apply scope, which a parked install takes out of
 //! the core whole. So it survives every yield, and a task between slices
 //! reads the core's current configs.
 
-use nodedb_physical::physical_plan::RedoPins;
+use nodedb_physical::physical_plan::{DeclaredColumn, RedoPins};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::doc_config_key::DocConfigKey;
@@ -40,15 +50,15 @@ impl CoreLoop {
     }
 
     /// End the validate. The view stays until the record's apply ends.
-    /// `Err` with the first pin that did not decode.
+    /// Every pin's install config is derived here, so a pin that does not
+    /// decode refuses before any write. `Err` with the first such pin.
     pub(in crate::data::executor) fn end_judging(&mut self) -> Result<(), ConfigPinError> {
         self.apply_scope.judging = false;
-        match self
-            .apply_scope
-            .judged
-            .as_mut()
-            .and_then(JudgedConfigs::take_failure)
-        {
+        let Some(view) = self.apply_scope.judged.as_mut() else {
+            return Ok(());
+        };
+        view.prime_install(&self.doc_configs);
+        match view.take_failure() {
             Some(error) => Err(error),
             None => Ok(()),
         }
@@ -89,5 +99,47 @@ impl CoreLoop {
             Some(view) => view.config(&self.doc_configs, database_id, tenant_id, collection),
             None => self.doc_config(database_id.as_u64(), tenant_id.as_u64(), collection),
         }
+    }
+
+    /// The config a row body for `key` derives under. While a pinned
+    /// record's view is open, it is the pin's install config, in the
+    /// validate and the install. Otherwise it is the current config. `Err`
+    /// when the pin does not decode.
+    pub(in crate::data::executor) fn install_doc_config(
+        &self,
+        key: &DocConfigKey,
+    ) -> Result<Option<&CollectionConfig>, ConfigPinError> {
+        self.install_doc_config_of(key.0, key.1, &key.2)
+    }
+
+    /// [`Self::install_doc_config`] by the key's parts.
+    pub(in crate::data::executor) fn install_doc_config_of(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        collection: &str,
+    ) -> Result<Option<&CollectionConfig>, ConfigPinError> {
+        match self.apply_scope.judged.as_ref() {
+            Some(view) => {
+                view.install_config(&self.doc_configs, database_id, tenant_id, collection)
+            }
+            None => Ok(self.doc_config(database_id.as_u64(), tenant_id.as_u64(), collection)),
+        }
+    }
+
+    /// The declared columns a KV value of `collection` re-types under, from
+    /// [`Self::install_doc_config_of`]. Empty when it declares none.
+    pub(in crate::data::executor) fn install_declared_columns_of(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+    ) -> Result<&[DeclaredColumn], ConfigPinError> {
+        let config = self.install_doc_config_of(
+            DatabaseId::new(database_id),
+            TenantId::new(tid),
+            collection,
+        )?;
+        Ok(config.map_or(&[][..], |config| config.declared_columns.as_slice()))
     }
 }

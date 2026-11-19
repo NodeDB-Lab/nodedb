@@ -19,6 +19,8 @@ use super::{
 #[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct DocConfigWire {
     pub bitemporal: bool,
+    /// The collection stores CRDT state. A CRDT write injects no type guard.
+    pub crdt_enabled: bool,
     pub enforcement: EnforcementOptions,
     pub storage_mode: StorageMode,
     pub index_paths: Vec<RegisteredIndex>,
@@ -107,6 +109,7 @@ mod tests {
     fn base() -> DocConfigWire {
         DocConfigWire {
             bitemporal: false,
+            crdt_enabled: false,
             enforcement: EnforcementOptions::default(),
             storage_mode: StorageMode::Schemaless,
             index_paths: vec![index("a", "$.a"), index("b", "$.b")],

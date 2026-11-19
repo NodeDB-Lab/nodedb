@@ -186,6 +186,11 @@ impl CoreLoop {
                 )
             }
         };
+        // The folded row encodes under the newer of the pin's schema and its
+        // stored layout, as the install's fold encodes it.
+        let config_key = (database_id, tenant, step.target_collection.to_string());
+        let layout =
+            self.fold_target_layout(&config_key, step.surrogate, &prior_stored, &mut target_doc)?;
         let current = target_doc
             .get(step.target_column)
             .and_then(json_to_decimal)
@@ -204,7 +209,10 @@ impl CoreLoop {
             step.target_column.to_string(),
             serde_json::Value::String((current + step.delta).to_string()),
         );
-        let stored = self.check_folded_image_size(scope, &step, &target_doc, &prior_stored)?;
+        let outer_layout = self.set_row_layout(layout);
+        let stored = self.check_folded_image_size(scope, &step, &target_doc, &prior_stored);
+        self.set_row_layout(outer_layout);
+        let stored = stored?;
         drop(prior_stored);
         drop(folded_row);
         self.check_folded_unique(
@@ -294,15 +302,16 @@ impl CoreLoop {
             valid_from_ms: i64::MIN,
             valid_until_ms: i64::MAX,
         };
+        let bitemporal = self.install_is_bitemporal(
+            config_key.0.as_u64(),
+            config_key.1.as_u64(),
+            &config_key.2,
+        )?;
         let body = self.build_stored_body(StoredBodyInput {
             config_key,
             surrogate,
             value: submitted,
-            bitemporal: self.is_bitemporal(
-                config_key.0.as_u64(),
-                config_key.1.as_u64(),
-                &config_key.2,
-            ),
+            bitemporal,
             sys_from: version.sys_from,
             valid_from_ms: version.valid_from_ms,
             valid_until_ms: version.valid_until_ms,

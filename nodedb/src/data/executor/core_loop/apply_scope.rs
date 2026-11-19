@@ -2,10 +2,10 @@
 
 //! The version keys a record's apply forces on the rows and edges it writes.
 
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
-use crate::data::executor::handlers::transaction::redo_apply::JudgedConfigs;
+use crate::data::executor::handlers::transaction::redo_apply::{JudgedConfigs, RowLayout};
 
 /// Scratch a committed or replayed record sets around its apply, so every
 /// apply of the record writes the same version keys.
@@ -55,12 +55,15 @@ pub(in crate::data::executor) struct ApplyScope {
     /// a volatile DEFAULT: the proposer bound it into the body. A Calvin
     /// stage or resolve is the same, through `calvin_txn_ordinal`.
     pub(in crate::data::executor) journaled: bool,
-    /// The configs a pinned record is judged under, from its first slice to
-    /// the end of its apply. `None` for a record with no pins.
+    /// The pinned view of the record being applied, open from its first
+    /// slice to the end of its apply. `None` for a record with no pins.
     pub(in crate::data::executor) judged: Option<JudgedConfigs>,
-    /// The record's validate runs: its checks read `judged`. The install
-    /// that follows reads the current configs.
+    /// The record's validate runs: its rule checks read `judged`. Row bodies
+    /// derive under `judged` whether or not it is set.
     pub(in crate::data::executor) judging: bool,
+    /// The layout of the folded target row a fold is writing, when its
+    /// stored layout is newer than the install config's schema.
+    pub(in crate::data::executor) row_layout: RefCell<Option<Rc<RowLayout>>>,
 }
 
 impl ApplyScope {

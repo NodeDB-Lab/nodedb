@@ -15,6 +15,35 @@ use crate::types::document_event::DocumentPutEvent;
 /// How many characters of a row id a refusal names.
 const ROW_ID_SHOWN: usize = 64;
 
+/// The refusal of an installed document row's image. Each is a pure
+/// function of the row, so every replica refuses the same row alike.
+#[derive(Debug, Clone)]
+pub(crate) enum RowImageRefusal {
+    /// An accepted or stored body over [`MAX_ROW_IMAGE_BYTES`].
+    TooLarge(ErrorCode),
+    /// A stored body with a map key that is not a string.
+    NonStringKey(ErrorCode),
+}
+
+impl RowImageRefusal {
+    /// The code the refusal answers with.
+    pub(crate) fn code(&self) -> &ErrorCode {
+        match self {
+            Self::TooLarge(code) | Self::NonStringKey(code) => code,
+        }
+    }
+}
+
+impl From<RowImageRefusal> for crate::Error {
+    fn from(refusal: RowImageRefusal) -> Self {
+        match refusal {
+            RowImageRefusal::TooLarge(code) | RowImageRefusal::NonStringKey(code) => {
+                Self::DataPlane(code)
+            }
+        }
+    }
+}
+
 /// The refusal of a row image of `bytes` bytes, over the limit.
 pub(crate) fn row_image_too_large(collection: &str, row_id: &str, bytes: usize) -> ErrorCode {
     ErrorCode::ProgramLimitExceeded {

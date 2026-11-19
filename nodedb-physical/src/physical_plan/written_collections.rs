@@ -61,6 +61,8 @@ fn collect_plan(plan: &PhysicalPlan, out: &mut BTreeSet<String>) {
 fn pinned_write(plan: &PhysicalPlan) -> PinnedWrite {
     if let PhysicalPlan::Document(_) | PhysicalPlan::Meta(MetaOp::RestoreRedo(_)) = plan {
         PinnedWrite::DocumentRows
+    } else if let PhysicalPlan::Kv(_) = plan {
+        PinnedWrite::KvRows
     } else {
         PinnedWrite::Other
     }

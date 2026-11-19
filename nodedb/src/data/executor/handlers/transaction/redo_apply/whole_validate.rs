@@ -8,7 +8,7 @@
 //! stream, and applies the record only when it passes. Both reach the same
 //! verdict on the same state.
 
-use nodedb_physical::physical_plan::{RedoOrigin, RedoPins, RedoSumTargets};
+use nodedb_physical::physical_plan::{PinnedWrite, RedoOrigin, RedoPins, RedoSumTargets};
 use nodedb_wal::WalRecord;
 
 use crate::bridge::envelope::ErrorCode;
@@ -21,7 +21,7 @@ use super::clone_copy::clone_probe_unreadable;
 use super::config_pins::check_written_pinned;
 use super::entry::RedoSnapshot;
 use super::passes::{RedoTarget, redo_wal_record};
-use super::sub_ops::{RedoDocOp, document_ops, kv_ops};
+use super::sub_ops::{RedoDocOp, RedoKvOp, document_ops, kv_ops};
 use super::validate::CommitBoundary;
 
 /// What the validate of a whole record reads.
@@ -61,17 +61,27 @@ impl CoreLoop {
         input: &WholeValidateInput<'_>,
     ) -> Result<WholeValidated, ErrorCode> {
         let doc_ops = document_ops(&input.redo.ops);
-        // A pinned record with an unpinned document write or sum target is
-        // malformed, so every replica refuses it before any other check.
+        let kv_writes = kv_ops(&input.redo.ops);
+        // A pinned record with an unpinned document or KV write, or sum
+        // target, is malformed, so every replica refuses it before any other
+        // check.
+        let writes = doc_ops
+            .iter()
+            .map(|op| (PinnedWrite::DocumentRows, op.collection()))
+            .chain(
+                kv_writes
+                    .iter()
+                    .map(|op| (PinnedWrite::KvRows, op.collection())),
+            );
         check_written_pinned(
             input.pins,
             input.task.request.database_id,
             crate::types::TenantId::new(input.tid),
-            doc_ops.iter().map(RedoDocOp::collection),
+            writes,
             input.sum_targets,
         )?;
         self.begin_judging(input.pins)?;
-        let verdict = self.judge_whole_redo(input, doc_ops);
+        let verdict = self.judge_whole_redo(input, doc_ops, kv_writes);
         // A pin that did not decode outranks every check: the checks after
         // it read configs the record was not judged under.
         self.end_judging()?;
@@ -79,11 +89,12 @@ impl CoreLoop {
     }
 
     /// Every check of the whole record `input` names, over its document
-    /// writes `doc_ops`, under the judged view.
+    /// writes `doc_ops` and KV writes `kv_writes`, under the judged view.
     fn judge_whole_redo(
         &mut self,
         input: &WholeValidateInput<'_>,
         doc_ops: Vec<RedoDocOp>,
+        kv_writes: Vec<RedoKvOp>,
     ) -> Result<WholeValidated, ErrorCode> {
         let WholeValidateInput {
             task,
@@ -106,7 +117,6 @@ impl CoreLoop {
         // Nothing is written when a check refuses the record, so the refusal
         // is final on every replica. A role-guarded transition is judged
         // against the roles the record carries.
-        let kv_writes = kv_ops(&redo.ops);
         self.check_commit_boundary(&CommitBoundary {
             database_id,
             tid,

@@ -13,6 +13,8 @@
 //! each KV key, a node-label delta, the load a timeseries op adds, and the
 //! cells an array op writes.
 
+use nodedb_physical::physical_plan::PinnedWrite;
+
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::TsStreamAt;
@@ -29,7 +31,7 @@ use super::walk::{StreamValidateInput, StreamWalk};
 
 impl CoreLoop {
     /// Check the content's next sub-record, `sub`. `Err` only for a
-    /// pinned stream that writes a document collection with no pin.
+    /// pinned stream that writes a document or KV collection with no pin.
     pub(super) fn check_stream_op(
         &self,
         walk: &mut StreamWalk,
@@ -48,14 +50,20 @@ impl CoreLoop {
                 .offer(Rank::Raise(op), final_refusal(error.into()));
         }
         let doc = document_op(&sub);
-        // A pinned stream with an unpinned document write is malformed. It
-        // refuses at once, as content that does not decode refuses.
-        if let (Some(doc), Some(header)) = (&doc, &walk.header) {
+        let kv = kv_op(&sub);
+        // A pinned stream with an unpinned document or KV write is
+        // malformed. It refuses at once, as content that does not decode
+        // refuses.
+        if let Some(header) = &walk.header {
+            let writes = doc
+                .iter()
+                .map(|doc| (PinnedWrite::DocumentRows, doc.collection()))
+                .chain(kv.iter().map(|kv| (PinnedWrite::KvRows, kv.collection())));
             check_written_pinned(
                 &header.pins,
                 input.task.request.database_id,
                 crate::types::TenantId::new(input.tid),
-                [doc.collection()],
+                writes,
                 &[],
             )?;
         }
@@ -66,7 +74,7 @@ impl CoreLoop {
         if let Some(doc) = doc {
             self.check_stream_document(walk, input, op, &doc);
         }
-        if let Some(kv) = kv_op(&sub) {
+        if let Some(kv) = kv {
             if walk.verdict.admits(&Rank::KvRowImage(op))
                 && let Err(error) = check_kv_row_image(&kv)
             {

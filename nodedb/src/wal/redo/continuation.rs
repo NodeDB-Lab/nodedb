@@ -23,8 +23,10 @@ pub const SUB_RECORD_OVERHEAD: usize = 32;
 /// Bytes a record's encoding adds beyond its fields, at most.
 pub const RECORD_OVERHEAD: usize = 64;
 
-/// The row metadata of a committed transaction record a continuation's
-/// events read: which rows ran with another source, and each row's net kind.
+/// The metadata of a committed transaction record a continuation carries:
+/// which rows ran with another source, each row's net kind, and the pins
+/// its rows derive under. Replay reads the pins from here when the WAL
+/// holds no origin record.
 #[derive(
     Debug,
     Clone,
@@ -40,6 +42,11 @@ pub const RECORD_OVERHEAD: usize = 64;
 pub struct ContinuedRedo {
     pub row_sources: Vec<RedoRowSource>,
     pub row_changes: Vec<RedoRowChange>,
+    #[serde(
+        default,
+        skip_serializing_if = "nodedb_physical::physical_plan::RedoPins::is_empty"
+    )]
+    pub pins: nodedb_physical::physical_plan::RedoPins,
 }
 
 /// A committed transaction record split to fit the WAL record limit.
@@ -58,6 +65,7 @@ pub fn split_redo(record: &RedoRecord, max_payload: usize) -> crate::Result<Spli
     let metadata = ContinuedRedo {
         row_sources: record.row_sources.clone(),
         row_changes: record.row_changes.clone(),
+        pins: record.pins.clone(),
     };
     let mut origin = record.clone();
     origin.ops = Vec::new();

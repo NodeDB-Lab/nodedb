@@ -57,6 +57,7 @@ fn wire(unique: bool) -> DocConfigWire {
     };
     DocConfigWire {
         bitemporal: false,
+        crdt_enabled: false,
         enforcement: EnforcementOptions::default(),
         storage_mode: StorageMode::Schemaless,
         index_paths,
@@ -67,7 +68,7 @@ fn wire(unique: bool) -> DocConfigWire {
     }
 }
 
-fn pin_of(collection: &str, wire: &DocConfigWire) -> ConfigPin {
+pub(super) fn pin_of(collection: &str, wire: &DocConfigWire) -> ConfigPin {
     let (bytes, digest) = wire.pin_parts().expect("pin parts");
     ConfigPin {
         key: ConfigPinKey {
@@ -90,7 +91,7 @@ fn crs_pin() -> CrsPin {
 }
 
 /// Pins as a proposer sets them: `configs` and the CRS set.
-fn pins(configs: Vec<ConfigPin>) -> RedoPins {
+pub(super) fn pins(configs: Vec<ConfigPin>) -> RedoPins {
     RedoPins {
         configs: configs.into_iter().map(Arc::new).collect(),
         crs: Some(Arc::new(crs_pin())),

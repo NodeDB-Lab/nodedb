@@ -110,6 +110,7 @@ impl CoreLoop {
         // decode maps them too.
         let wire = nodedb_physical::physical_plan::DocConfigWire {
             bitemporal,
+            crdt_enabled,
             enforcement: enforcement.clone(),
             storage_mode: storage_mode.clone(),
             index_paths: indexes.to_vec(),
@@ -120,6 +121,7 @@ impl CoreLoop {
         };
         let crate::data::executor::handlers::document::write::WireConfigFields {
             index_paths,
+            crdt_enabled,
             storage_mode: registered_mode,
             enforcement: registered_enforcement,
             bitemporal,

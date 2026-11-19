@@ -100,7 +100,7 @@ impl CoreLoop {
         // row's newest version. A `bitemporal=true` collection carries the
         // stamp into its strict tuple's temporal columns. Any other
         // collection's body carries no temporal column.
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let bitemporal = self.install_is_bitemporal(database_id, tid, collection)?;
         let carried = if fresh {
             None
         } else {

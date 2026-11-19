@@ -233,6 +233,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
     );
     let digest = wire.digest()?;
     let nodedb_physical::physical_plan::DocConfigWire {
+        crdt_enabled,
         enforcement,
         storage_mode,
         declared_key,
@@ -248,7 +249,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
             .iter()
             .map(crate::engine::document::store::IndexPath::from_registered)
             .collect(),
-        crdt_enabled: coll.crdt,
+        crdt_enabled,
         storage_mode,
         enforcement,
         bitemporal: coll.bitemporal,
@@ -490,6 +491,7 @@ mod tests {
         assert_eq!(first.digest, second.digest);
         let wire = nodedb_physical::physical_plan::DocConfigWire {
             bitemporal: first.bitemporal,
+            crdt_enabled: first.crdt_enabled,
             enforcement: first.enforcement.clone(),
             storage_mode: first.storage_mode.clone(),
             index_paths: Vec::new(),

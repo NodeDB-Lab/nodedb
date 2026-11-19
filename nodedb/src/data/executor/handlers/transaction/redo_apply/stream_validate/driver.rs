@@ -26,6 +26,7 @@
 
 use std::collections::BTreeSet;
 
+use nodedb_physical::physical_plan::PinnedWrite;
 use nodedb_types::calvin::VersionedReadEntry;
 
 use crate::bridge::envelope::ErrorCode;
@@ -265,7 +266,7 @@ impl CoreLoop {
                         &header.pins,
                         input.task.request.database_id,
                         crate::types::TenantId::new(input.tid),
-                        std::iter::empty::<&str>(),
+                        std::iter::empty::<(PinnedWrite, &str)>(),
                         &header.sum_targets,
                     )?;
                     self.begin_judging(&header.pins)?;

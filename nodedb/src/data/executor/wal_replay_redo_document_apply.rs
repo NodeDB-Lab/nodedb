@@ -9,8 +9,8 @@
 //!
 //! ## Hash-chained collections
 //!
-//! An unmigrated submitted redo put carries the SUBMITTED body. The chain link is derived at install
-//! time from the head the install sees, so it is in no WAL record. Replay
+//! A submitted redo put carries the submitted body. The chain link derives
+//! at install from the head the install sees, so it is in no WAL record. Replay
 //! therefore marks the row through [`ChainGuard::chain_redo_put`]: a row
 //! already installed is stored again with its durable bytes and the head
 //! stays, and a row the crash kept from installing links from the durable
@@ -25,6 +25,7 @@ use super::enforcement::chain_guard::{
 };
 use super::handlers::point::apply_delete::PointDeleteParams;
 use super::handlers::point::apply_put::PointPutParams;
+use super::row_image_limit::RowImageRefusal;
 use crate::engine::document::store::StorageKey;
 
 /// One document row a restart-replay delete removes.
@@ -35,6 +36,15 @@ pub(super) struct ReplayDocDelete<'a> {
     /// The row's client key. The deleted-node tracker keys nodes by it.
     pub document_id: &'a str,
     pub surrogate: u32,
+    pub record_lsn: u64,
+}
+
+/// Why a replayed document write did not apply.
+enum ReplayWriteError {
+    /// The row's image check refused it.
+    Refused(RowImageRefusal),
+    /// Any other error.
+    Failed(crate::Error),
 }
 
 /// One document row a restart-replay put writes.
@@ -51,6 +61,11 @@ impl CoreLoop {
     /// transaction. `enforce = false`: replayed writes were admission-checked
     /// when first committed. Returns whether the write was applied and
     /// committed.
+    ///
+    /// A put that fails halts replay, with one exception. A row the image
+    /// check refuses is rejected and skipped: over the row image limit, or
+    /// with a map key that is not a string. Every replica refuses it alike,
+    /// so the record changed no state anywhere.
     pub(super) fn apply_document_put(&mut self, row: ReplayDocPut<'_>, value: &[u8]) -> bool {
         let collection = row.collection;
         let surrogate = Surrogate::new(row.surrogate);
@@ -58,11 +73,10 @@ impl CoreLoop {
 
         let mut chain = ChainGuard::begin(self, row.database_id, row.tenant_id, collection);
         if let Err(e) = self.mark_replayed_put(&mut chain, &row, &storage_key, value) {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                error = %e,
-                "WAL document redo: hash-chain link failed; skipping put"
+            self.replay_write_failed(
+                row.record_lsn,
+                "put_chain_link",
+                ReplayWriteError::Failed(e),
             );
             return false;
         }
@@ -71,11 +85,10 @@ impl CoreLoop {
             Ok(t) => t,
             Err(e) => {
                 chain.restore(self);
-                tracing::warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "WAL document redo: begin_write failed; skipping put"
+                self.replay_write_failed(
+                    row.record_lsn,
+                    "put_begin_write",
+                    ReplayWriteError::Failed(e),
                 );
                 return false;
             }
@@ -86,29 +99,54 @@ impl CoreLoop {
         // A replayed put installs a logged record: it never evaluates a
         // volatile DEFAULT.
         let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, true);
-        let applied = self
-            .apply_point_put(
-                &txn,
-                PointPutParams {
-                    database_id: row.database_id,
-                    tid: row.tenant_id,
-                    collection,
-                    storage_key,
-                    surrogate,
-                    value,
-                    index_text: true,
-                    user_roles: &[],
-                    enforce: false,
-                    // Replay reinstalls committed history: its commit judged
-                    // UNIQUE on each record's post-state.
-                    unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
-                    resolved_targets: &[],
-                    wal_lsn: (row.record_lsn != 0).then(|| crate::types::Lsn::new(row.record_lsn)),
-                    // A redo carries the submitted body: the guards inject
-                    // again, and the commit already judged them.
-                    guards: crate::data::executor::enforcement::typeguard::GuardScope::InjectOnly,
-                },
+        let prepared = self.prepare_point_put(
+            &txn,
+            PointPutParams {
+                database_id: row.database_id,
+                tid: row.tenant_id,
+                collection,
+                storage_key,
+                surrogate,
+                value,
+                index_text: true,
+                user_roles: &[],
+                enforce: false,
+                // Replay reinstalls committed history: its commit judged
+                // UNIQUE on each record's post-state.
+                unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
+                resolved_targets: &[],
+                wal_lsn: (row.record_lsn != 0).then(|| crate::types::Lsn::new(row.record_lsn)),
+                // A redo carries the submitted body: the guards inject
+                // again, and the commit already judged them.
+                guards: crate::data::executor::enforcement::typeguard::GuardScope::InjectOnly,
+            },
+        );
+        // The image check runs here as well as in the apply, so its typed
+        // refusal reaches the replay policy.
+        let refused = prepared.as_ref().ok().and_then(|prepared| {
+            self.check_installed_image_size(
+                row.database_id,
+                row.tenant_id,
+                collection,
+                storage_key,
+                prepared.installed(),
             )
+            .err()
+        });
+        if let Some(refusal) = refused {
+            self.apply_scope.journaled = previous_journaled;
+            let e = abort_after_apply(
+                self,
+                &mut chain,
+                AbandonedWrite::row(row.database_id, row.tenant_id, collection, &storage_key),
+                crate::Error::from(refusal.clone()),
+            );
+            self.fail_stop_on_failed_undo(&e);
+            self.replay_write_failed(row.record_lsn, "put", ReplayWriteError::Refused(refusal));
+            return false;
+        }
+        let applied = prepared
+            .and_then(|prepared| self.apply_prepared_point_put(&txn, prepared))
             .and_then(|mut outcome| {
                 memory_undo = std::mem::take(&mut outcome.memory_undo);
                 chain.settle(self, surrogate, &outcome.installed.stored)
@@ -136,13 +174,24 @@ impl CoreLoop {
                     e,
                 );
                 self.fail_stop_on_failed_undo(&e);
-                tracing::warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "WAL document redo: put failed; skipping put"
-                );
+                self.replay_write_failed(row.record_lsn, "put", ReplayWriteError::Failed(e));
                 false
+            }
+        }
+    }
+
+    /// Settle a replayed write that did not apply at `stage`. A row the
+    /// image check refused is rejected and skipped. Every other error halts
+    /// replay.
+    fn replay_write_failed(&mut self, record_lsn: u64, stage: &str, error: ReplayWriteError) {
+        match error {
+            ReplayWriteError::Refused(refusal) => {
+                let code = refusal.code().clone();
+                let detail = format!("document {stage} row refused by its image check: {code:?}");
+                self.replay_record_rejected("document", record_lsn, Some(Box::new(code)), &detail);
+            }
+            ReplayWriteError::Failed(error) => {
+                self.replay_record_unapplied("document", stage, record_lsn, &error.to_string());
             }
         }
     }
@@ -185,6 +234,7 @@ impl CoreLoop {
     /// write transaction. `enforce = false` for the same reason as the put
     /// path. The row's node keeps its edges: the WAL names every tombstone
     /// the delete's transaction stamped. Returns whether a row was removed.
+    /// A delete that fails halts replay.
     pub(super) fn apply_document_delete(&mut self, row: ReplayDocDelete<'_>) -> bool {
         let ReplayDocDelete {
             database_id,
@@ -192,16 +242,16 @@ impl CoreLoop {
             collection,
             document_id,
             surrogate: surrogate_u32,
+            record_lsn,
         } = row;
         let surrogate = Surrogate::new(surrogate_u32);
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "WAL document redo: begin_write failed; skipping delete"
+                self.replay_write_failed(
+                    record_lsn,
+                    "delete_begin_write",
+                    ReplayWriteError::Failed(e),
                 );
                 return false;
             }
@@ -238,11 +288,10 @@ impl CoreLoop {
                         },
                     );
                     self.fail_stop_on_failed_undo(&e);
-                    tracing::warn!(
-                        core = self.core_id,
-                        %collection,
-                        error = %e,
-                        "WAL document redo: commit failed; skipping delete"
+                    self.replay_write_failed(
+                        record_lsn,
+                        "delete_commit",
+                        ReplayWriteError::Failed(e),
                     );
                     false
                 }
@@ -250,12 +299,7 @@ impl CoreLoop {
             Err(e) => {
                 // The write txn is dropped un-committed (rolled back) on the
                 // early return.
-                tracing::warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "WAL document redo: apply_point_delete failed; skipping delete"
-                );
+                self.replay_write_failed(record_lsn, "delete", ReplayWriteError::Failed(e));
                 false
             }
         }

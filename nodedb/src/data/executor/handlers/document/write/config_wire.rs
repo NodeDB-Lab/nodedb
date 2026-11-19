@@ -16,6 +16,7 @@ use crate::engine::document::store::{CollectionConfig, IndexPath};
 /// The `CollectionConfig` fields a wire form fixes.
 pub(in crate::data::executor) struct WireConfigFields {
     pub index_paths: Vec<IndexPath>,
+    pub crdt_enabled: bool,
     pub storage_mode: StorageMode,
     pub enforcement: EnforcementOptions,
     pub bitemporal: bool,
@@ -34,6 +35,7 @@ impl WireConfigFields {
         // error here.
         let DocConfigWire {
             bitemporal,
+            crdt_enabled,
             enforcement,
             storage_mode,
             index_paths,
@@ -45,6 +47,7 @@ impl WireConfigFields {
         let type_guards = CompiledTypeGuard::compile_all(user_collection, &enforcement.type_guards);
         Self {
             index_paths: index_paths.iter().map(IndexPath::from_registered).collect(),
+            crdt_enabled,
             storage_mode,
             enforcement,
             bitemporal,
@@ -61,6 +64,7 @@ impl WireConfigFields {
     pub(in crate::data::executor) fn overwrite(self, config: &mut CollectionConfig) {
         let Self {
             index_paths,
+            crdt_enabled,
             storage_mode,
             enforcement,
             bitemporal,
@@ -71,6 +75,7 @@ impl WireConfigFields {
             type_guards,
         } = self;
         config.index_paths = index_paths;
+        config.crdt_enabled = crdt_enabled;
         config.storage_mode = storage_mode;
         config.enforcement = enforcement;
         config.bitemporal = bitemporal;

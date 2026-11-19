@@ -7,6 +7,7 @@ use std::sync::Arc;
 use nodedb_crs::{CrsContext, CustomCrsSet};
 
 use super::state::CoreLoop;
+use crate::data::executor::handlers::transaction::redo_apply::JudgedConfigs;
 
 impl CoreLoop {
     /// The CRS context for one request on this core. Build it once per
@@ -21,7 +22,18 @@ impl CoreLoop {
     ///
     /// A pinned record's validate resolves against the set its pin fixes.
     pub(crate) fn crs_context(&self) -> CrsContext<'static> {
-        match self.apply_scope.judging_view() {
+        self.crs_context_under(self.apply_scope.judging_view())
+    }
+
+    /// The CRS context a row body derives under. A pinned record resolves
+    /// against its pinned set from its first slice to the end of its apply.
+    pub(in crate::data::executor) fn install_crs_context(&self) -> CrsContext<'static> {
+        self.crs_context_under(self.apply_scope.judged.as_ref())
+    }
+
+    /// The context over `view`'s pinned set, else this core's set.
+    fn crs_context_under(&self, view: Option<&JudgedConfigs>) -> CrsContext<'static> {
+        match view {
             Some(view) => CrsContext::shared(Arc::clone(view.crs())),
             None => CrsContext::shared(Arc::clone(&self.crs_set)),
         }

@@ -323,32 +323,35 @@ impl CoreLoop {
                     self.apply_scope.bitemporal_stamps.insert(surrogate_u32, s);
                 }
                 let folds = self.redo_folds_op(record_lsn, op);
-                let applied = if folds {
-                    self.apply_committed_document_put(
-                        CommittedDocWrite {
-                            database_id,
-                            tenant_id,
-                            collection: &collection,
-                            document_id: &document_id,
-                            surrogate: surrogate_u32,
-                            record_lsn,
-                            op,
-                            clone_copy,
-                        },
-                        &value,
-                    )
-                } else {
-                    self.apply_document_put(
-                        ReplayDocPut {
-                            database_id,
-                            tenant_id,
-                            collection: &collection,
-                            surrogate: surrogate_u32,
-                            record_lsn,
-                        },
-                        &value,
-                    )
-                };
+                // The body derives under the pins the record's install used.
+                let applied = self.under_replay_pins(record_lsn, false, |core| {
+                    if folds {
+                        core.apply_committed_document_put(
+                            CommittedDocWrite {
+                                database_id,
+                                tenant_id,
+                                collection: &collection,
+                                document_id: &document_id,
+                                surrogate: surrogate_u32,
+                                record_lsn,
+                                op,
+                                clone_copy,
+                            },
+                            &value,
+                        )
+                    } else {
+                        core.apply_document_put(
+                            ReplayDocPut {
+                                database_id,
+                                tenant_id,
+                                collection: &collection,
+                                surrogate: surrogate_u32,
+                                record_lsn,
+                            },
+                            &value,
+                        )
+                    }
+                });
                 if stamp.is_some() {
                     self.apply_scope.bitemporal_stamps.remove(&surrogate_u32);
                 }
@@ -436,6 +439,7 @@ impl CoreLoop {
                         collection: &collection,
                         document_id: &document_id,
                         surrogate: surrogate_u32,
+                        record_lsn,
                     })
                 };
                 if sys_from.is_some() {

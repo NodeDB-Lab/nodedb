@@ -295,7 +295,8 @@ impl CoreLoop {
         collection: &str,
         storage_key: nodedb_types::StorageKey,
         installed: &SharedInstalledDocument,
-    ) -> crate::Result<()> {
+    ) -> Result<(), crate::data::executor::row_image_limit::RowImageRefusal> {
+        use crate::data::executor::row_image_limit::RowImageRefusal;
         let largest = installed.canonical.len().max(installed.stored.len());
         let key = nodedb_types::find_body_non_string_key(&installed.stored);
         if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES && key.is_none() {
@@ -307,20 +308,23 @@ impl CoreLoop {
             Some(column.as_str()),
             storage_key,
         );
-        let refusal = match key {
+        Err(match key {
             Some(key) if largest <= nodedb_types::MAX_ROW_IMAGE_BYTES => {
-                crate::data::executor::row_field_names::non_string_key_refusal(
-                    collection,
-                    identity.as_str(),
-                    &key,
+                RowImageRefusal::NonStringKey(
+                    crate::data::executor::row_field_names::non_string_key_refusal(
+                        collection,
+                        identity.as_str(),
+                        &key,
+                    ),
                 )
             }
-            Some(_) | None => crate::data::executor::row_image_limit::row_image_too_large(
-                collection,
-                identity.as_str(),
-                largest,
+            Some(_) | None => RowImageRefusal::TooLarge(
+                crate::data::executor::row_image_limit::row_image_too_large(
+                    collection,
+                    identity.as_str(),
+                    largest,
+                ),
             ),
-        };
-        Err(crate::Error::DataPlane(refusal))
+        })
     }
 }

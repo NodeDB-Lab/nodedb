@@ -164,7 +164,10 @@ impl CoreLoop {
         frozen: &super::frozen_body::FrozenDocumentBody,
     ) -> crate::Result<Option<crate::types::hash_chain::ChainHead>> {
         let config_key = &frozen.config_key;
-        if self.judged_doc_config(config_key).is_none() {
+        if self
+            .body_doc_config(config_key, frozen.surrogate.as_u32())?
+            .is_none()
+        {
             return Ok(None);
         }
         match self
@@ -209,7 +212,10 @@ impl CoreLoop {
         } = stamp;
         let config_key = &frozen.config_key;
         let value = frozen.value.clone();
-        let Some(config) = self.judged_doc_config(config_key) else {
+        // A pinned install encodes under the pin's strict schema only when
+        // the core's current mode is strict too.
+        let body_config = self.body_doc_config(config_key, frozen.surrogate.as_u32())?;
+        let Some(config) = body_config.as_deref() else {
             return Ok(StoredBody {
                 stored: value.clone(),
                 value,
@@ -249,6 +255,8 @@ impl CoreLoop {
         };
         let stored = encode(&value)?;
 
+        // The stored bytes decode under the current mode, which holds every
+        // older tuple layout.
         let schema = self.capture_storage_schema(config_key)?;
         let value = super::installed_schema::canonical_stored(
             &stored,

@@ -78,8 +78,15 @@ impl CoreLoop {
             return Some(0);
         }
         // The record holds the body the write supplied. The live apply
-        // re-typed its declared numeric columns, so replay does too.
-        let declared = self.declared_columns_of(database_id, tenant_id, &collection);
+        // re-typed its declared numeric columns, so replay does too. A
+        // pinned record re-types under its pin.
+        let declared = match self.install_declared_columns_of(database_id, tenant_id, &collection) {
+            Ok(declared) => declared,
+            Err(e) => {
+                self.replay_record_unapplied("kv", "put_config_pin", record_lsn, &e.to_string());
+                return Some(0);
+            }
+        };
         let coerced = match coerce_kv_body(&value, declared) {
             Ok(Cow::Owned(bytes)) => Some(bytes),
             Ok(Cow::Borrowed(_)) => None,
@@ -231,7 +238,8 @@ impl CoreLoop {
         }
 
         // Each entry holds the body the write supplied. The live apply
-        // re-typed its declared numeric columns, so replay does too.
+        // re-typed its declared numeric columns, so replay does too. Only a
+        // standalone write appends this record, so no pin applies.
         let mut entries = entries;
         for (_, value) in entries.iter_mut() {
             let declared = self.declared_columns_of(database_id, tenant_id, &collection);

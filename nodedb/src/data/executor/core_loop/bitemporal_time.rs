@@ -69,6 +69,22 @@ impl CoreLoop {
         .is_some_and(|c| c.bitemporal)
     }
 
+    /// [`Self::is_bitemporal`] for a row body: the flag of the install
+    /// config the body derives under. `Err` when a pin does not decode.
+    pub(in crate::data::executor) fn install_is_bitemporal(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+    ) -> crate::Result<bool> {
+        let config = self.install_doc_config_of(
+            crate::types::DatabaseId::new(database_id),
+            TenantId::new(tid),
+            collection,
+        )?;
+        Ok(config.is_some_and(|config| config.bitemporal))
+    }
+
     /// The system-time ordinal a bitemporal document write stamps.
     ///
     /// Inside a Calvin stage or resolve it is the transaction's ordinal,

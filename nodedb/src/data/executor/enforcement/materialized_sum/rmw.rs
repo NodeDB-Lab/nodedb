@@ -127,6 +127,19 @@ impl CoreLoop {
         };
 
         let mut target_doc = decode_scanned_document(&old_bytes, format.as_format_ref())?;
+        // The folded row encodes under the newer of the pin's schema and its
+        // stored layout.
+        let config_key = (
+            DatabaseId::new(params.database_id),
+            TenantId::new(params.tid),
+            params.target_collection.to_string(),
+        );
+        let layout = self.fold_target_layout(
+            &config_key,
+            params.surrogate.as_u32(),
+            &old_bytes,
+            &mut target_doc,
+        )?;
         let current = target_doc
             .get(params.target_column)
             .and_then(json_to_decimal)
@@ -158,6 +171,7 @@ impl CoreLoop {
 
         // No chain guard: DDL refuses a HASH_CHAIN collection as a
         // materialized-sum target, so this write never reaches a chained row.
+        let outer_layout = self.set_row_layout(layout);
         let put = self.apply_point_put(
             txn,
             PointPutParams {
@@ -184,6 +198,7 @@ impl CoreLoop {
                 guards: crate::data::executor::enforcement::typeguard::GuardScope::InjectOnly,
             },
         );
+        self.set_row_layout(outer_layout);
         let mut outcome = match put {
             Ok(outcome) => outcome,
             Err(e) => {

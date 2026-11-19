@@ -82,6 +82,15 @@ pub(in crate::data::executor) enum RedoKvOp {
     },
 }
 
+impl RedoKvOp {
+    /// The database-qualified collection the write goes to.
+    pub(in crate::data::executor) fn collection(&self) -> &str {
+        match self {
+            Self::Put { collection, .. } | Self::Delete { collection, .. } => collection,
+        }
+    }
+}
+
 type KvPut = (String, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32);
 type KvDelete = (String, String, Vec<Vec<u8>>);
 

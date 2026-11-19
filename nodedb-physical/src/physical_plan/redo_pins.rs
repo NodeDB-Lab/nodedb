@@ -28,6 +28,9 @@ pub enum PinnedWrite {
     DocumentRows,
     /// A materialized-sum target a document write folds into.
     SumTarget,
+    /// KV rows: a KV plan's writes. The install re-types each value under
+    /// the collection's declared columns, which its config holds.
+    KvRows,
     /// Any other write, such as a graph edge. Its collection may have no
     /// catalog row, and it is pinned only when one exists.
     Other,
@@ -37,7 +40,7 @@ impl PinnedWrite {
     /// Whether a pinned redo must carry a pin of the collection.
     pub fn requires_pin(self) -> bool {
         match self {
-            Self::DocumentRows | Self::SumTarget => true,
+            Self::DocumentRows | Self::SumTarget | Self::KvRows => true,
             Self::Other => false,
         }
     }

@@ -38,9 +38,12 @@ impl FrozenDocumentBody {
         key: &(DatabaseId, TenantId, String),
         surrogate: Surrogate,
     ) -> crate::Result<()> {
+        // The witness reads the config the freeze read.
         if self.config_key != *key
             || self.surrogate != surrogate
-            || !self.witness.matches(core.judged_doc_config(key))
+            || !self
+                .witness
+                .matches(core.body_doc_config(key, surrogate.as_u32())?.as_deref())
         {
             return Err(crate::Error::DataPlane(
                 crate::bridge::envelope::ErrorCode::ConflictRetry,
@@ -56,8 +59,11 @@ impl CoreLoop {
         &self,
         input: FreezeDocumentBodyInput<'_>,
     ) -> crate::Result<FrozenDocumentBody> {
-        // A pinned record's validate freezes the body under its pin.
-        let config = self.judged_doc_config(input.config_key);
+        // A pinned record freezes the body under the pin's install config,
+        // in its validate and its install. A folded row whose stored layout
+        // is newer freezes under that layout.
+        let body_config = self.body_doc_config(input.config_key, input.surrogate.as_u32())?;
+        let config = body_config.as_deref();
         // `input.value` is the body a write submits, so a body that is not a
         // document object is the request's fault, never a storage fault.
         let mut doc = doc_format::decode_document_value(input.value).map_err(|error| {
@@ -78,7 +84,7 @@ impl CoreLoop {
             });
         };
         if let Some(config) = config {
-            let crs = self.crs_context();
+            let crs = self.install_crs_context();
             if let nodedb_physical::physical_plan::StorageMode::Strict { schema } =
                 &config.storage_mode
             {
@@ -128,7 +134,8 @@ impl CoreLoop {
             }
         }
         if let Value::Object(fields) = &mut doc {
-            strict_format::coerce_declared_row(fields, self.declared_columns(input.config_key))?;
+            let declared = config.map_or(&[][..], |config| config.declared_columns.as_slice());
+            strict_format::coerce_declared_row(fields, declared)?;
             if let Some(config) = config
                 && matches!(
                     config.storage_mode,

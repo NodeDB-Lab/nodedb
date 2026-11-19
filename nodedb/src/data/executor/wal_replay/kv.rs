@@ -96,7 +96,11 @@ impl CoreLoop {
                     record_lsn,
                 };
 
-                if let Some(applied) = self.try_replay_kv_put(&kv_record, tombstones) {
+                // A pinned record's value re-types under its pins.
+                let put = self.under_replay_pins(record_lsn, Some(0), |core| {
+                    core.try_replay_kv_put(&kv_record, tombstones)
+                });
+                if let Some(applied) = put {
                     puts += applied;
                     continue;
                 }

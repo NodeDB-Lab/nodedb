@@ -6,8 +6,8 @@
 //! materialized-sum target the redo folds into, plus the CRS set pin. The
 //! read set needs no pin: the validate reads no config of it.
 //!
-//! A core refuses a pinned redo that leaves a document-row write or a sum
-//! target unpinned. So such a collection with no active committed catalog
+//! A core refuses a pinned redo that leaves a document-row write, a KV-row
+//! write or a sum target unpinned. So such a collection with no active committed catalog
 //! row refuses the commit here, with SQLSTATE `42P01`. Any other written
 //! collection, such as a graph edge collection, is pinned when it has a
 //! row and skipped when it has none. `PinnedWrite` holds that one rule.
@@ -93,8 +93,10 @@ pub(crate) fn pins_from_catalog<'a, 'r>(
     for name in written {
         keys.entry(key(name.to_owned())).or_default();
     }
+    // Every name in `required` is a write whose `PinnedWrite` requires a
+    // pin.
     for name in required {
-        *keys.entry(key(name.clone())).or_default() |= PinnedWrite::DocumentRows.requires_pin();
+        *keys.entry(key(name.clone())).or_default() = true;
     }
     // A binding names its target bare. The core keys the target's config
     // by its qualified name.

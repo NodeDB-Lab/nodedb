@@ -20,6 +20,7 @@ pub mod record;
 pub mod replay;
 pub(crate) mod replay_arm;
 pub(crate) mod replay_arms;
+mod replay_continued;
 pub(crate) mod replay_origin;
 pub mod row_changes;
 pub mod row_sources;

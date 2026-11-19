@@ -43,6 +43,9 @@ pub(in crate::data::executor) struct RedoApplyState {
     /// Restart replay's folds of the records whose install never became
     /// durable.
     pub(in crate::data::executor) replay_folds: super::replay_fold::ReplayFolds,
+    /// The pins restart replay derives each pinned record's row bodies
+    /// under. Empty outside boot replay.
+    pub(in crate::data::executor) replay_pins: super::replay_pins::ReplayPins,
     /// The batched install cursors this core's store held at boot. Restart
     /// replay completes each one's record, then boot drops them. Empty
     /// outside boot replay.
@@ -104,6 +107,7 @@ impl RedoApplyState {
                 .redo_stream_batch_bytes,
             scope: None,
             replay_folds: Default::default(),
+            replay_pins: Default::default(),
             install_cursors: Default::default(),
             boot_verdicts: Vec::new(),
             #[cfg(test)]

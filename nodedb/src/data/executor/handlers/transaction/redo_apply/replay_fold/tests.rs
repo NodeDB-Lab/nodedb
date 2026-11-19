@@ -464,6 +464,7 @@ fn split_record(records: &[WalRecord], origin: u64, chunks: &[usize]) -> Vec<Wal
     let metadata = crate::wal::ContinuedRedo {
         row_sources: redo.row_sources.clone(),
         row_changes: redo.row_changes.clone(),
+        pins: redo.pins.clone(),
     };
     let mut split = records.to_vec();
     split[position] = record(

@@ -76,7 +76,11 @@ impl CoreLoop {
             .apply_scope
             .bitemporal_stamps
             .contains_key(&surrogate.as_u32())
-            || self.is_bitemporal(config_key.0.as_u64(), config_key.1.as_u64(), &config_key.2);
+            || self.install_is_bitemporal(
+                config_key.0.as_u64(),
+                config_key.1.as_u64(),
+                &config_key.2,
+            )?;
         let stored = self
             .build_stored_body(StoredBodyInput {
                 config_key,
