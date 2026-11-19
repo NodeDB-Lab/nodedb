@@ -421,3 +421,16 @@ fn update_without_limit_plans() {
 fn delete_without_limit_plans() {
     let _ = plan_one("DELETE FROM articles WHERE id = '1'");
 }
+
+#[test]
+fn distinct_on_is_refused_not_planned_as_plain_distinct() {
+    let err = plan_sql(
+        "SELECT DISTINCT ON (name) name, id FROM articles ORDER BY name, id",
+        &Catalog,
+    )
+    .expect_err("DISTINCT ON has no operator, so it must not plan");
+    assert!(
+        matches!(&err, nodedb_sql::SqlError::FeatureNotSupported { detail } if detail.contains("DISTINCT ON")),
+        "expected FeatureNotSupported naming DISTINCT ON, got {err:?}"
+    );
+}
