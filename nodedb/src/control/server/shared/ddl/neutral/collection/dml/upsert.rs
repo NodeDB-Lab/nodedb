@@ -15,7 +15,7 @@ use crate::control::state::SharedState;
 
 use super::parse::ParsedInsert;
 use super::parse::{
-    authorize_write_target, fields_to_upsert_sql, parse_write_statement, plan_and_dispatch,
+    authorize_write_target, fields_to_upsert_sqls, parse_write_statement, plan_and_dispatch,
 };
 use crate::control::trigger::statement_txn::{fires_joined_body, in_block, with_statement_txn};
 use crate::control::trigger::{DmlEvent, TriggerScope};
@@ -138,27 +138,34 @@ async fn upsert_parsed(
     // has to be re-attached here. Otherwise the planner never sees it and the
     // clause is silently dropped, with the caller's own submitted values
     // echoed back in its place.
-    let mut upsert_sql = fields_to_upsert_sql(&parsed.coll_name, &rows);
-    if let Some(ref columns) = parsed.returning_clause {
-        upsert_sql.push_str(" RETURNING ");
-        upsert_sql.push_str(columns);
+    let statements = fields_to_upsert_sqls(&parsed.coll_name, &rows);
+    if statements.len() > 1 && parsed.returning_clause.is_some() {
+        return Err(ddl_err(
+            "0A000",
+            "UPSERT with RETURNING needs every object literal to name the same keys",
+        ));
     }
-    let returned_rows = match plan_and_dispatch(
-        state,
-        identity,
-        tenant_id,
-        database_id,
-        &upsert_sql,
-        txn_ctx,
-        // The route fires the write's row bodies for the family the row it
-        // finds makes the upsert.
-        true,
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return Err(e),
-    };
+    let mut returned_rows = Vec::new();
+    for mut upsert_sql in statements {
+        if let Some(ref columns) = parsed.returning_clause {
+            upsert_sql.push_str(" RETURNING ");
+            upsert_sql.push_str(columns);
+        }
+        returned_rows.extend(
+            plan_and_dispatch(
+                state,
+                identity,
+                tenant_id,
+                database_id,
+                &upsert_sql,
+                txn_ctx,
+                // The route fires the write's row bodies for the family the
+                // row it finds makes the upsert.
+                true,
+            )
+            .await?,
+        );
+    }
 
     if !returned_rows.is_empty() {
         return Ok(returned_rows);

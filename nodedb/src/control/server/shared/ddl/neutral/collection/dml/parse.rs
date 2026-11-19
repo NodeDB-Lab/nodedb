@@ -19,7 +19,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) use dispatch_wr
     authorize_write_target, dispatch_plan,
 };
 pub(in crate::control::server::shared::ddl::neutral::collection) use encoding::fields_to_insert_sql;
-pub(super) use encoding::{fields_to_upsert_sql, rows_to_insert_sql};
+pub(super) use encoding::{fields_to_upsert_sqls, rows_to_insert_sqls};
 pub(in crate::control::server::shared::ddl::neutral::collection) use plan_statement::PlanBuilder;
 pub(super) use statement::parse_write_statement;
 pub(super) use types::{ParsedInsert, extract_vector_fields};
