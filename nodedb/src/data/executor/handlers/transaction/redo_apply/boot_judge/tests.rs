@@ -11,7 +11,7 @@
 //! boot does.
 
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinReplySpec, MetaOp, PhysicalPlan, RedoOrigin,
+    CalvinInstall, CalvinReplySpec, MetaOp, PhysicalPlan, RedoOrigin, RedoPins,
 };
 use nodedb_types::{StorageKey, Surrogate};
 use nodedb_wal::record::RecordType;
@@ -27,7 +27,7 @@ use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::{BootVerdict, BootVerdictOutcome, RedoSubRecord};
 
 use super::super::replay_fold::tests::settle;
-use super::super::stream_validate::tests::{StreamWal, TID, framed, record};
+use super::super::stream_validate::tests::{StreamWal, TID, framed_pinned, record};
 use super::super::test_commit::test_stamp;
 use super::super::unique_handover_tests::{COLL, put, unique_core};
 
@@ -35,12 +35,12 @@ use super::super::unique_handover_tests::{COLL, put, unique_core};
 const KEY: u64 = 0xB007;
 
 /// A node's stores and WAL, with no core open.
-struct Node {
+pub(super) struct Node {
     dir: tempfile::TempDir,
     wal: StreamWal,
 }
 
-fn node() -> Node {
+pub(super) fn node() -> Node {
     let dir = tempfile::tempdir().expect("tempdir");
     let (core, req, resp) = unique_core(dir.path());
     let wal = StreamWal::open(&core);
@@ -51,6 +51,15 @@ fn node() -> Node {
 /// A whole committed record of `ops`, whose transaction read at
 /// `snapshot`.
 fn whole(ops: Vec<RedoSubRecord>, snapshot: Option<i64>) -> PhysicalPlan {
+    whole_pinned(ops, snapshot, &RedoPins::default())
+}
+
+/// [`whole`] whose plan carries `pins`, which the WAL copy then holds.
+pub(super) fn whole_pinned(
+    ops: Vec<RedoSubRecord>,
+    snapshot: Option<i64>,
+    pins: &RedoPins,
+) -> PhysicalPlan {
     PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
         redo: record(ops).to_bytes().expect("encode redo"),
         collections: vec![COLL.to_string()],
@@ -59,13 +68,22 @@ fn whole(ops: Vec<RedoSubRecord>, snapshot: Option<i64>) -> PhysicalPlan {
         calvin: None,
         reads: Vec::new(),
         snapshot_ordinal: snapshot,
-        pins: Default::default(),
+        pins: pins.clone(),
     })
 }
 
 /// A stream marker of `ops`, its content in the node's WAL.
 fn marker(node: &mut Node, ops: Vec<RedoSubRecord>) -> PhysicalPlan {
-    let reference = node.wal.write(&framed(&record(ops), &[], &[]));
+    marker_pinned(node, ops, &RedoPins::default())
+}
+
+/// [`marker`] whose content header carries `pins`.
+pub(super) fn marker_pinned(
+    node: &mut Node,
+    ops: Vec<RedoSubRecord>,
+    pins: &RedoPins,
+) -> PhysicalPlan {
+    let reference = node.wal.write(&framed_pinned(&record(ops), &[], &[], pins));
     let marker = reference.marker(None, None, Vec::new()).expect("marker");
     PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
         redo: marker.to_bytes().expect("encode marker"),
@@ -81,7 +99,7 @@ fn marker(node: &mut Node, ops: Vec<RedoSubRecord>) -> PhysicalPlan {
 
 /// Append `plan`'s records as the funnel does before it dispatches, and
 /// make them durable. Returns the record's LSN.
-fn append(node: &Node, plan: &PhysicalPlan) -> u64 {
+pub(super) fn append(node: &Node, plan: &PhysicalPlan) -> u64 {
     let origin = append_group_origin(WalAppendRequest {
         wal: node.wal.manager().appender(KEY),
         event_source: crate::event::EventSource::User,
@@ -99,16 +117,30 @@ fn append(node: &Node, plan: &PhysicalPlan) -> u64 {
 }
 
 /// A booted core and the verdicts its replay reached.
-struct Booted {
-    core: CoreLoop,
+pub(super) struct Booted {
+    pub(super) core: CoreLoop,
     _ends: Box<dyn std::any::Any>,
-    verdicts: Vec<BootVerdict>,
+    pub(super) verdicts: Vec<BootVerdict>,
 }
+
+/// Builds the core a boot opens over a directory of stores.
+pub(super) type MakeCore =
+    fn(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>, Box<dyn std::any::Any>);
 
 /// Boot a core over the node's stores, replaying `records` with the
 /// settle's verdicts.
 fn boot(node: &Node, outcome: &SettleOutcome, records: &[WalRecord]) -> Booted {
-    let (mut core, req, resp) = unique_core(node.dir.path());
+    boot_with(node, outcome, records, unique_core)
+}
+
+/// [`boot`] of the core `make_core` builds.
+fn boot_with(
+    node: &Node,
+    outcome: &SettleOutcome,
+    records: &[WalRecord],
+    make_core: MakeCore,
+) -> Booted {
+    let (mut core, req, resp) = make_core(node.dir.path());
     core.set_never_durable_redos(&outcome.never_durable)
         .expect("fold ledger");
     core.replay_all_wal(records, 1, &TombstoneSet::new())
@@ -123,13 +155,18 @@ fn boot(node: &Node, outcome: &SettleOutcome, records: &[WalRecord]) -> Booted {
 
 /// Settle and boot, then write the verdicts to the WAL as boot does.
 fn boot_and_close(node: &Node) -> Booted {
+    boot_and_close_with(node, unique_core)
+}
+
+/// [`boot_and_close`] of the core `make_core` builds.
+pub(super) fn boot_and_close_with(node: &Node, make_core: MakeCore) -> Booted {
     let (outcome, records) = settle(node.wal.manager(), node.dir.path());
-    let booted = boot(node, &outcome, &records);
+    let booted = boot_with(node, &outcome, &records, make_core);
     close_judged_redos(node.wal.manager(), &booted.verdicts, &[]).expect("close judged");
     booted
 }
 
-fn outcome_of(verdicts: &[BootVerdict], lsn: u64) -> Option<BootVerdictOutcome> {
+pub(super) fn outcome_of(verdicts: &[BootVerdict], lsn: u64) -> Option<BootVerdictOutcome> {
     verdicts
         .iter()
         .find(|verdict| verdict.judged.lsn == lsn)
@@ -149,7 +186,7 @@ fn owners(core: &CoreLoop, code: &str) -> Vec<u32> {
 }
 
 /// Whether the row of `surrogate` is stored.
-fn stored(core: &CoreLoop, surrogate: u32) -> bool {
+pub(super) fn stored(core: &CoreLoop, surrogate: u32) -> bool {
     core.current_row_body(
         0,
         TID,

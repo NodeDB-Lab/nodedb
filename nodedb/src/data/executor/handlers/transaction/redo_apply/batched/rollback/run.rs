@@ -112,7 +112,9 @@ impl CoreLoop {
         #[cfg(test)]
         {
             self.redo_apply.last_rollback = super::super::super::state::UndoReport {
+                #[cfg(feature = "failpoints")]
                 spill_lane: undo.spill_lane_len(),
+                #[cfg(feature = "failpoints")]
                 spill_lane_hot_bytes: undo.hot_bytes(),
                 ram_lane: undo.ram_lane_len(),
             };

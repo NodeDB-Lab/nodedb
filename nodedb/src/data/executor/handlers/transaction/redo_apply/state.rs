@@ -82,8 +82,11 @@ pub(in crate::data::executor) struct RedoApplyState {
 #[cfg(test)]
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::data::executor) struct UndoReport {
+    /// Entries the spill lane held. Only the failpoint rollback tests read it.
+    #[cfg(feature = "failpoints")]
     pub spill_lane: u64,
     /// RAM the spill lane held when the rollback began.
+    #[cfg(feature = "failpoints")]
     pub spill_lane_hot_bytes: usize,
     pub ram_lane: usize,
 }

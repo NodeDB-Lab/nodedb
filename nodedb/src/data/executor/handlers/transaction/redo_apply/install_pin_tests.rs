@@ -116,7 +116,12 @@ pub(super) fn register(core: &mut CoreLoop, wire: &DocConfigWire, digest: u64) {
 }
 
 /// Register `wire` as the current config of `collection`, with `digest`.
-fn register_as(core: &mut CoreLoop, collection: &str, wire: &DocConfigWire, digest: u64) {
+pub(super) fn register_as(
+    core: &mut CoreLoop,
+    collection: &str,
+    wire: &DocConfigWire,
+    digest: u64,
+) {
     let response = core.execute_register_document_collection(
         &make_default_task(),
         RegisterDocumentCollectionParams {

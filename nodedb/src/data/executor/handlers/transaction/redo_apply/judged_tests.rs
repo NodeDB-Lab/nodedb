@@ -37,12 +37,12 @@ fn seeded_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
     (core, Box::new((req, resp)))
 }
 
-fn config_key() -> (DatabaseId, TenantId, String) {
+pub(super) fn config_key() -> (DatabaseId, TenantId, String) {
     (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string())
 }
 
 /// The wire form of `codes`, with a UNIQUE index on `code` when `unique`.
-fn wire(unique: bool) -> DocConfigWire {
+pub(super) fn wire(unique: bool) -> DocConfigWire {
     let index_paths = if unique {
         vec![RegisteredIndex {
             name: "code".into(),
@@ -99,12 +99,12 @@ pub(super) fn pins(configs: Vec<ConfigPin>) -> RedoPins {
 }
 
 /// The pins of a record whose proposer saw `codes` with or without UNIQUE.
-fn codes_pins(unique: bool) -> RedoPins {
+pub(super) fn codes_pins(unique: bool) -> RedoPins {
     pins(vec![pin_of(COLL, &wire(unique))])
 }
 
 /// Give `codes` on `core` a current config with no UNIQUE index.
-fn drop_current_unique(core: &mut CoreLoop) {
+pub(super) fn drop_current_unique(core: &mut CoreLoop) {
     core.doc_configs
         .insert(config_key(), CollectionConfig::new(COLL));
 }
