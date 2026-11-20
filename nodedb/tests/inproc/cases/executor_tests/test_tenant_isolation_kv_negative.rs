@@ -23,6 +23,7 @@ fn kv_cross_tenant_put_does_not_overwrite() {
         &mut rx,
         TENANT_A,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "cache",
@@ -45,6 +46,7 @@ fn kv_cross_tenant_put_does_not_overwrite() {
         &mut rx,
         TENANT_B,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "cache",
@@ -100,6 +102,7 @@ fn kv_cross_tenant_delete_does_not_affect_owner() {
         &mut rx,
         TENANT_A,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",

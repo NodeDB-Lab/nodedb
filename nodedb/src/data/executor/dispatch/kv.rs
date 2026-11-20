@@ -46,8 +46,9 @@ impl CoreLoop {
             return self.response_error(task, refusal);
         }
         // Every row body the op supplies whole holds its declared numeric
-        // columns' values before any handler sees it.
-        let coerced = match self.coerce_kv_op_bodies(did, tid, op) {
+        // columns' values before any handler sees it. The op carries the
+        // columns its write re-types under.
+        let coerced = match self.coerce_kv_op_bodies(op) {
             Ok(coerced) => coerced,
             Err(e) => return self.response_error(task, e),
         };

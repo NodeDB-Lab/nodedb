@@ -168,6 +168,8 @@ pub(super) async fn handle_hset(
             nodedb_types::DatabaseId::DEFAULT,
             &session.collection,
         ),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         updates,
         surrogate,

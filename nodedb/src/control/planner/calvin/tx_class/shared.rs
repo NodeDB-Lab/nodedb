@@ -273,6 +273,7 @@ mod lockstep_tests {
     #[test]
     fn kv_incr_gate_key_matches_scheduler_key() {
         assert_gate_matches_scheduler(PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "counters",
@@ -289,6 +290,7 @@ mod lockstep_tests {
     #[test]
     fn kv_cas_gate_key_matches_scheduler_key() {
         assert_gate_matches_scheduler(PhysicalPlan::Kv(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "counters",

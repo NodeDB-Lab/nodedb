@@ -107,6 +107,7 @@ async fn a_proposal_committed_twice_moves_the_counter_once() {
                     .await
                     .expect("the seeded key has a surrogate");
                 let plan = PhysicalPlan::Kv(KvOp::Incr {
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                     collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
                     key: b"ctr".to_vec(),
                     delta: 3,

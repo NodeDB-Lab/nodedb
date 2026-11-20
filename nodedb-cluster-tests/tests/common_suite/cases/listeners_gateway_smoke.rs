@@ -69,6 +69,7 @@ async fn pgwire_gateway_smoke_cache_hit() {
 
     // Pre-populate a KV entry.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "gw_smoke_pgwire",
@@ -141,6 +142,7 @@ async fn http_gateway_smoke_cache_hit() {
 
     // Put then Get to verify round-trip.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "gw_smoke_http",
@@ -207,6 +209,7 @@ async fn resp_gateway_smoke_cache_hit() {
     let ctx = test_ctx(0xC0DE_6003);
 
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "gw_smoke_resp",
@@ -276,6 +279,7 @@ async fn ilp_gateway_smoke_cache_hit() {
     let ctx = test_ctx(0xC0DE_6004);
 
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "gw_smoke_ilp",
@@ -342,6 +346,7 @@ async fn native_gateway_smoke_cache_hit() {
     let ctx = test_ctx(0xC0DE_6005);
 
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "gw_smoke_native",

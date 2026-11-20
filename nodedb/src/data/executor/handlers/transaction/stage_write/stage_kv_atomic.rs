@@ -37,7 +37,7 @@
 //! `KvEngine` atomic path, which ignores the overlay's surrogate entirely).
 
 use nodedb_physical::kv_atomic::compute as atomic_compute;
-use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
+use nodedb_physical::physical_plan::{DeclaredColumn, KvCounterShape, KvOp};
 use nodedb_types::Surrogate;
 
 use super::context::StageCtx;
@@ -67,6 +67,17 @@ fn synthetic_kv_surrogate(key: &[u8]) -> u32 {
     if hash == 0 { 1 } else { hash }
 }
 
+/// The rules a staged atomic image meets: the write policy, and the declared
+/// columns the plan carries.
+pub(super) type ImageRules<'a> = (&'a nodedb_types::RlsWriteCheck, &'a [DeclaredColumn]);
+
+/// The image a staged KV write stores for the image it computed: fitted to
+/// the declared columns the plan carries, the rule the durable apply runs. A
+/// value past a declared column is refused here, at statement time.
+fn stage_fit_kv_image(image: Vec<u8>, declared: &[DeclaredColumn]) -> crate::Result<Vec<u8>> {
+    Ok(fit_kv_image(&image, declared)?.unwrap_or(image))
+}
+
 impl CoreLoop {
     /// Route a stageable KV atomic op (`Incr`, `IncrFloat`, `Cas`, `GetSet`,
     /// `BatchPut`) to its staging handler.
@@ -80,6 +91,7 @@ impl CoreLoop {
         match op {
             KvOp::Incr {
                 collection,
+                declared_columns,
                 key,
                 delta,
                 ttl_ms,
@@ -90,6 +102,11 @@ impl CoreLoop {
                 rls_write_check,
                 shape,
             } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
                 let ctx = match self
                     .kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key)
                     .and_then(|ctx| self.stage_kv_ttl_side_effect(&ctx, *ttl_ms).map(|()| ctx))
@@ -97,41 +114,83 @@ impl CoreLoop {
                     Ok(ctx) => ctx,
                     Err(e) => return self.response_error(task, e),
                 };
-                self.stage_kv_incr(&ctx, key, *delta, shape, rls_write_check)
+                self.stage_kv_incr(&ctx, key, *delta, shape, (rls_write_check, declared))
             }
             KvOp::IncrFloat {
                 collection,
+                declared_columns,
                 key,
                 delta,
                 surrogate: _,
                 rls_write_check,
                 shape,
-            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
-                Ok(ctx) => self.stage_kv_incr_float(&ctx, key, delta, shape, rls_write_check),
-                Err(e) => self.response_error(task, e),
-            },
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                    Ok(ctx) => self.stage_kv_incr_float(
+                        &ctx,
+                        key,
+                        delta,
+                        shape,
+                        (rls_write_check, declared),
+                    ),
+                    Err(e) => self.response_error(task, e),
+                }
+            }
             KvOp::Cas {
                 collection,
+                declared_columns,
                 key,
                 expected,
                 new_value,
                 surrogate: _,
                 rls_write_check,
-            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
-                Ok(ctx) => self.stage_kv_cas(&ctx, key, expected, new_value, rls_write_check),
-                Err(e) => self.response_error(task, e),
-            },
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                    Ok(ctx) => self.stage_kv_cas(
+                        &ctx,
+                        key,
+                        expected,
+                        new_value,
+                        (rls_write_check, declared),
+                    ),
+                    Err(e) => self.response_error(task, e),
+                }
+            }
             KvOp::GetSet {
                 collection,
+                declared_columns,
                 key,
                 new_value,
                 surrogate: _,
                 rls_filters,
                 rls_write_check,
-            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
-                Ok(ctx) => self.stage_kv_getset(&ctx, key, new_value, rls_filters, rls_write_check),
-                Err(e) => self.response_error(task, e),
-            },
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                    Ok(ctx) => self.stage_kv_getset(
+                        &ctx,
+                        key,
+                        new_value,
+                        rls_filters,
+                        (rls_write_check, declared),
+                    ),
+                    Err(e) => self.response_error(task, e),
+                }
+            }
             // Three slots are deliberately elided. The plan's per-entry
             // cross-engine surrogates are applied by the durable COMMIT-time
             // replay through `execute_kv_batch_put`; the staging overlay keys
@@ -144,21 +203,30 @@ impl CoreLoop {
             // projection it could honour.
             KvOp::BatchPut {
                 collection,
+                declared_columns,
                 entries,
                 ttl_ms,
                 intent,
                 ..
-            } => self.stage_kv_batch_put(
-                task,
-                StageKvBatch {
-                    tid,
-                    txn_id,
-                    collection: collection.as_str(),
-                    entries,
-                    ttl_ms: *ttl_ms,
-                    intent,
-                },
-            ),
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                self.stage_kv_batch_put(
+                    task,
+                    StageKvBatch {
+                        tid,
+                        txn_id,
+                        collection: collection.as_str(),
+                        entries,
+                        ttl_ms: *ttl_ms,
+                        intent,
+                        declared,
+                    },
+                )
+            }
             other => unreachable!(
                 "execute_stage_kv_atomic called on a non-atomic KvOp; \
                  caller invariant broken: {other:?}"
@@ -210,7 +278,7 @@ impl CoreLoop {
         key: &[u8],
         delta: i64,
         shape: &KvCounterShape,
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): ImageRules<'_>,
     ) -> Response {
         let current = match self.resolve_kv_current(ctx, key) {
             Ok(current) => current,
@@ -218,7 +286,7 @@ impl CoreLoop {
         };
         match atomic_compute::incr(current.as_deref(), delta, shape) {
             Ok((new_i64, computed)) => {
-                let new_bytes = match self.stage_fit_kv_image(ctx, computed) {
+                let new_bytes = match stage_fit_kv_image(computed, declared) {
                     Ok(bytes) => bytes,
                     Err(e) => return self.response_error(ctx.task, e),
                 };
@@ -245,7 +313,7 @@ impl CoreLoop {
         key: &[u8],
         delta: &str,
         shape: &KvCounterShape,
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): ImageRules<'_>,
     ) -> Response {
         let current = match self.resolve_kv_current(ctx, key) {
             Ok(current) => current,
@@ -253,7 +321,6 @@ impl CoreLoop {
         };
         match atomic_compute::incr_float(current.as_deref(), delta, shape) {
             Ok((computed_f64, computed)) => {
-                let declared = self.declared_columns(&ctx.coll_key);
                 let (new_f64, new_bytes) = match fit_kv_image(&computed, declared) {
                     Ok(None) => (computed_f64, computed),
                     Ok(Some(fitted)) => {
@@ -277,15 +344,6 @@ impl CoreLoop {
             }
             Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e.into()),
         }
-    }
-
-    /// The image a staged KV write stores for the image it computed: fitted
-    /// to the collection's declared numeric columns, the rule the durable
-    /// apply runs. A value past a declared column is refused here, at
-    /// statement time.
-    fn stage_fit_kv_image(&self, ctx: &StageCtx<'_>, image: Vec<u8>) -> crate::Result<Vec<u8>> {
-        let declared = self.declared_columns(&ctx.coll_key);
-        Ok(fit_kv_image(&image, declared)?.unwrap_or(image))
     }
 
     /// Decide one staged KV image against the compiled write policy, naming
@@ -318,7 +376,7 @@ impl CoreLoop {
         key: &[u8],
         expected: &[u8],
         new_value: &[u8],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): ImageRules<'_>,
     ) -> Response {
         let current = match self.resolve_kv_current(ctx, key) {
             Ok(current) => current,
@@ -331,7 +389,7 @@ impl CoreLoop {
             };
 
         if matches {
-            let write_bytes = match self.stage_fit_kv_image(ctx, write_bytes) {
+            let write_bytes = match stage_fit_kv_image(write_bytes, declared) {
                 Ok(bytes) => bytes,
                 Err(e) => return self.response_error(ctx.task, e),
             };
@@ -368,7 +426,7 @@ impl CoreLoop {
         key: &[u8],
         new_value: &[u8],
         rls_filters: &[u8],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): ImageRules<'_>,
     ) -> Response {
         let current = match self.resolve_kv_current(ctx, key) {
             Ok(current) => current,
@@ -378,7 +436,7 @@ impl CoreLoop {
             Ok(bytes) => bytes,
             Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e.into()),
         };
-        let write_bytes = match self.stage_fit_kv_image(ctx, write_bytes) {
+        let write_bytes = match stage_fit_kv_image(write_bytes, declared) {
             Ok(bytes) => bytes,
             Err(e) => return self.response_error(ctx.task, e),
         };

@@ -134,6 +134,8 @@ pub(crate) async fn build_batch_put(
 
     Ok(PhysicalPlan::Kv(KvOp::BatchPut {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         entries,
         ttl_ms,
         intent: nodedb_physical::physical_plan::KvBatchIntent::Put,
@@ -183,6 +185,7 @@ pub(crate) async fn build_field_set(
 
     Ok(PhysicalPlan::Kv(KvOp::FieldSet {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         updates,
         surrogate,
@@ -240,6 +243,7 @@ pub(crate) async fn build_cas(
 
     Ok(PhysicalPlan::Kv(KvOp::Cas {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         expected,
         new_value,
@@ -269,6 +273,7 @@ pub(crate) async fn build_getset(
 
     Ok(PhysicalPlan::Kv(KvOp::GetSet {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         new_value,
         surrogate,

@@ -32,6 +32,7 @@ impl CoreLoop {
             rls_write_check,
             returning,
             rls_filters,
+            declared,
         } = params;
         debug!(core = self.core_id, %collection, "kv insert-on-conflict-update");
 
@@ -52,7 +53,7 @@ impl CoreLoop {
             existing_bytes.as_deref(),
             value,
             updates,
-            self.declared_columns_of(did, tid, collection),
+            declared,
             &self.crs_context(),
         ) {
             Ok(b) => b,

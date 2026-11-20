@@ -3,7 +3,7 @@
 //! Statement-time staging for `KvOp::BatchPut`, and the TTL side effect a
 //! non-zero `ttl_ms` on `Incr` or `BatchPut` stages.
 
-use nodedb_physical::physical_plan::KvBatchIntent;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvBatchIntent};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::Response;
@@ -22,6 +22,8 @@ pub(super) struct StageKvBatch<'a> {
     pub(super) entries: &'a [(Vec<u8>, Vec<u8>)],
     pub(super) ttl_ms: u64,
     pub(super) intent: &'a KvBatchIntent,
+    /// The declared columns the plan carries.
+    pub(super) declared: &'a [DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -40,6 +42,7 @@ impl CoreLoop {
             entries,
             ttl_ms,
             intent,
+            declared,
         } = batch;
         let did = task.request.database_id.as_u64();
         // Every key is read under BASE ∪ OVERLAY, so a row this transaction
@@ -48,7 +51,7 @@ impl CoreLoop {
             collection,
             entries,
             intent,
-            self.declared_columns_of(did, tid, collection),
+            declared,
             &self.crs_context(),
             |key| {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key)?;

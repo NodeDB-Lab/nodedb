@@ -127,19 +127,26 @@ impl CoreLoop {
         }
     }
 
-    /// The declared columns a KV value of `collection` re-types under, from
-    /// [`Self::install_doc_config_of`]. Empty when it declares none.
-    pub(in crate::data::executor) fn install_declared_columns_of(
+    /// The declared columns a KV value of `collection` re-types under while
+    /// a pinned record's view is open: its pin's install config. `None` when
+    /// no view is open. Then the record's own columns apply.
+    pub(in crate::data::executor) fn pinned_declared_columns_of(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
-    ) -> Result<&[DeclaredColumn], ConfigPinError> {
-        let config = self.install_doc_config_of(
+    ) -> Result<Option<&[DeclaredColumn]>, ConfigPinError> {
+        let Some(view) = self.apply_scope.judged.as_ref() else {
+            return Ok(None);
+        };
+        let config = view.install_config(
+            &self.doc_configs,
             DatabaseId::new(database_id),
             TenantId::new(tid),
             collection,
         )?;
-        Ok(config.map_or(&[][..], |config| config.declared_columns.as_slice()))
+        Ok(Some(config.map_or(&[][..], |config| {
+            config.declared_columns.as_slice()
+        })))
     }
 }

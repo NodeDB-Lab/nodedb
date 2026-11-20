@@ -93,6 +93,7 @@ mod tests {
 
     fn kv_put() -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             value: b"v".to_vec(),

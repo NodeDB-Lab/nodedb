@@ -2,9 +2,13 @@
 
 //! Encode `PhysicalPlan::Kv` variants into `ReplicatedWrite`.
 
+use std::sync::Arc;
+
 use super::super::types::ReplicatedWrite;
 use super::entry::{encode_provenance, encode_returning};
-use nodedb_physical::physical_plan::{KvBatchIntent, KvCounterShape, ReturningSpec, UpdateValue};
+use nodedb_physical::physical_plan::{
+    DeclaredColumn, KvBatchIntent, KvCounterShape, ReturningSpec, UpdateValue,
+};
 use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
 
@@ -27,9 +31,16 @@ pub(super) struct WireReturning<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// The collection a KV write lands in, and the declared columns the
+/// proposer resolved for it.
+pub(super) struct WireTarget<'a> {
+    pub collection: &'a str,
+    pub declared_columns: Arc<Vec<DeclaredColumn>>,
+}
+
 /// The row a KV put writes, and the identity it is written under.
 pub(super) struct WirePut<'a> {
-    pub collection: &'a str,
+    pub target: WireTarget<'a>,
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub ttl_ms: u64,
@@ -42,14 +53,15 @@ pub(super) fn put(
     provenance: &Option<SyncProvenance>,
 ) -> ReplicatedWrite {
     let WirePut {
-        collection,
+        target,
         key,
         value,
         ttl_ms,
         surrogate,
     } = put;
     ReplicatedWrite::KvPut {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -76,16 +88,17 @@ pub(super) fn delete(
     }
 }
 
-pub(super) fn insert(
-    collection: &str,
-    key: &[u8],
-    value: &[u8],
-    ttl_ms: u64,
-    surrogate: u32,
-    returning: WireReturning<'_>,
-) -> ReplicatedWrite {
+pub(super) fn insert(row: WirePut<'_>, returning: WireReturning<'_>) -> ReplicatedWrite {
+    let WirePut {
+        target,
+        key,
+        value,
+        ttl_ms,
+        surrogate,
+    } = row;
     ReplicatedWrite::KvInsert {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -97,16 +110,20 @@ pub(super) fn insert(
 }
 
 pub(super) fn insert_on_conflict_update(
-    collection: &str,
-    key: &[u8],
-    value: &[u8],
-    ttl_ms: u64,
+    row: WirePut<'_>,
     updates: &[(String, UpdateValue)],
-    surrogate: u32,
     returning: WireReturning<'_>,
 ) -> ReplicatedWrite {
+    let WirePut {
+        target,
+        key,
+        value,
+        ttl_ms,
+        surrogate,
+    } = row;
     ReplicatedWrite::KvInsertOnConflictUpdate {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -119,7 +136,7 @@ pub(super) fn insert_on_conflict_update(
 }
 
 pub(super) fn batch_put(
-    collection: &str,
+    target: WireTarget<'_>,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
     intent: KvBatchIntent,
@@ -127,7 +144,8 @@ pub(super) fn batch_put(
     returning: WireReturning<'_>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvBatchPut {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         entries: entries.to_vec(),
         ttl_ms,
         intent,
@@ -156,7 +174,7 @@ pub(super) fn persist(collection: &str, key: &[u8]) -> ReplicatedWrite {
 }
 
 pub(super) fn incr(
-    collection: &str,
+    target: WireTarget<'_>,
     key: &[u8],
     delta: i64,
     ttl_ms: u64,
@@ -164,7 +182,8 @@ pub(super) fn incr(
     shape: &KvCounterShape,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvIncr {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         delta,
         ttl_ms,
@@ -175,14 +194,15 @@ pub(super) fn incr(
 }
 
 pub(super) fn incr_float(
-    collection: &str,
+    target: WireTarget<'_>,
     key: &[u8],
     delta: &str,
     surrogate: u32,
     shape: &KvCounterShape,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvIncrFloat {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         delta: delta.to_owned(),
         surrogate,
@@ -191,14 +211,15 @@ pub(super) fn incr_float(
 }
 
 pub(super) fn cas(
-    collection: &str,
+    target: WireTarget<'_>,
     key: &[u8],
     expected: &[u8],
     new_value: &[u8],
     surrogate: u32,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvCas {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         expected: expected.to_vec(),
         new_value: new_value.to_vec(),
@@ -207,14 +228,15 @@ pub(super) fn cas(
 }
 
 pub(super) fn get_set(
-    collection: &str,
+    target: WireTarget<'_>,
     key: &[u8],
     new_value: &[u8],
     surrogate: u32,
     rls_filters: &[u8],
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvGetSet {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         new_value: new_value.to_vec(),
         surrogate,
@@ -277,7 +299,7 @@ pub(super) fn drop_index(collection: &str, field: &str) -> ReplicatedWrite {
 }
 
 pub(super) fn field_set(
-    collection: &str,
+    target: WireTarget<'_>,
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
@@ -285,7 +307,8 @@ pub(super) fn field_set(
     returning: WireReturning<'_>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvFieldSet {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         key: key.to_vec(),
         updates: updates.to_vec(),
         surrogate,
@@ -296,7 +319,7 @@ pub(super) fn field_set(
 }
 
 pub(super) fn transfer(
-    collection: &str,
+    target: WireTarget<'_>,
     source_key: &[u8],
     dest_key: &[u8],
     field: &str,
@@ -305,7 +328,8 @@ pub(super) fn transfer(
     credit_surrogate: u32,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvTransfer {
-        collection: collection.to_owned(),
+        collection: target.collection.to_owned(),
+        declared_columns: target.declared_columns,
         source_key: source_key.to_vec(),
         dest_key: dest_key.to_vec(),
         field: field.to_owned(),
@@ -418,16 +442,19 @@ pub(super) fn resolved_write(
     }
 }
 
+/// `dest` names the destination and the columns the moved item re-types
+/// under.
 pub(super) fn transfer_item(
     source_collection: &str,
-    dest_collection: &str,
+    dest: WireTarget<'_>,
     item_key: &[u8],
     dest_key: &[u8],
     surrogate: u32,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvTransferItem {
         source_collection: source_collection.to_owned(),
-        dest_collection: dest_collection.to_owned(),
+        dest_collection: dest.collection.to_owned(),
+        declared_columns: dest.declared_columns,
         item_key: item_key.to_vec(),
         dest_key: dest_key.to_vec(),
         surrogate,

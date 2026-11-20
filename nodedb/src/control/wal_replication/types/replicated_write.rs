@@ -9,9 +9,11 @@ use super::wire_shapes::{
 };
 use crate::wal::RedoStreamId;
 use nodedb_physical::physical_plan::document::MergeClauseOp;
+use std::sync::Arc;
+
 use nodedb_physical::physical_plan::{
-    ColumnarInsertIntent, CrdtWriteVerb, KvBatchIntent, KvCounterShape, RowSource, UpdateValue,
-    VectorDirectWriteIntent, VectorResolvedMutation,
+    ColumnarInsertIntent, CrdtWriteVerb, DeclaredColumn, KvBatchIntent, KvCounterShape, RowSource,
+    UpdateValue, VectorDirectWriteIntent, VectorResolvedMutation,
 };
 use nodedb_types::{PayloadIndexKind, Surrogate, VectorQuantization, VectorStorageDtype};
 
@@ -351,6 +353,9 @@ pub enum ReplicatedWrite {
     },
     KvPut {
         collection: String,
+        /// The declared columns the proposer resolved. Every replica re-types
+        /// the value under these, never under its own catalog.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -377,6 +382,8 @@ pub enum ReplicatedWrite {
     },
     KvInsert {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -391,6 +398,8 @@ pub enum ReplicatedWrite {
     },
     KvInsertOnConflictUpdate {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -405,6 +414,8 @@ pub enum ReplicatedWrite {
     },
     KvBatchPut {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         entries: Vec<(Vec<u8>, Vec<u8>)>,
         ttl_ms: u64,
         /// See `KvOp::BatchPut::intent`. Every replica judges a stored key
@@ -431,6 +442,8 @@ pub enum ReplicatedWrite {
     },
     KvIncr {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         delta: i64,
         ttl_ms: u64,
@@ -442,6 +455,8 @@ pub enum ReplicatedWrite {
     },
     KvIncrFloat {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         /// The client's decimal text.
         delta: String,
@@ -451,6 +466,8 @@ pub enum ReplicatedWrite {
     },
     KvCas {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         expected: Vec<u8>,
         new_value: Vec<u8>,
@@ -458,6 +475,8 @@ pub enum ReplicatedWrite {
     },
     KvGetSet {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         new_value: Vec<u8>,
         surrogate: u32,
@@ -491,6 +510,8 @@ pub enum ReplicatedWrite {
     },
     KvFieldSet {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         key: Vec<u8>,
         updates: Vec<(String, Vec<u8>)>,
         surrogate: u32,
@@ -503,6 +524,8 @@ pub enum ReplicatedWrite {
     },
     KvTransfer {
         collection: String,
+        /// See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         source_key: Vec<u8>,
         dest_key: Vec<u8>,
         field: String,
@@ -514,6 +537,8 @@ pub enum ReplicatedWrite {
     KvTransferItem {
         source_collection: String,
         dest_collection: String,
+        /// The destination's columns. See `KvPut::declared_columns`.
+        declared_columns: Arc<Vec<DeclaredColumn>>,
         item_key: Vec<u8>,
         dest_key: Vec<u8>,
         surrogate: u32,

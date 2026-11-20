@@ -127,6 +127,45 @@ mod tests {
         ));
     }
 
+    /// A KV write staged under `n INT` holds the collection at the version
+    /// it was planned against. A declared-column change commits as the next
+    /// version, so the COMMIT aborts as retryable and never installs a value
+    /// staging fitted under the old columns.
+    #[test]
+    fn a_kv_declared_column_change_after_staging_aborts_the_commit() {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+
+        let schema = |n: ColumnType| {
+            StrictSchema::new(vec![
+                ColumnDef::required("key", ColumnType::String).with_primary_key(),
+                ColumnDef::nullable("n", n),
+            ])
+            .expect("schema")
+        };
+        let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
+        let mut kv = StoredCollection::stamped_for_test(TENANT, "kv", "owner");
+        kv.collection_type = nodedb_types::CollectionType::kv(schema(ColumnType::Int64));
+        kv.descriptor_version = 3;
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &kv)
+            .expect("store collection");
+        let staged = [hold(DescriptorKind::Collection, "kv", 3)];
+        assert!(
+            check(&catalog, &staged).is_none(),
+            "unchanged columns commit"
+        );
+
+        kv.collection_type = nodedb_types::CollectionType::kv(schema(ColumnType::Float64));
+        kv.descriptor_version = 4;
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &kv)
+            .expect("store collection");
+        assert!(matches!(
+            check(&catalog, &staged),
+            Some(AbortReason::SchemaChanged { .. })
+        ));
+    }
+
     #[test]
     fn a_session_with_no_buffered_writes_has_nothing_to_fence() {
         let catalog = catalog_with(&[("orders", 3)]);

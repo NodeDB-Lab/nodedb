@@ -436,6 +436,7 @@ mod tests {
                 0u64,
                 None::<u64>,
                 4u32,
+                Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
             ))
             .expect("encode"),
         );

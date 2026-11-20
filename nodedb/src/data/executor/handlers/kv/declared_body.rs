@@ -8,17 +8,19 @@
 
 use std::borrow::Cow;
 
-use nodedb_physical::physical_plan::{DeclaredColumn, KvOp};
+use nodedb_physical::physical_plan::{DeclaredColumn, KvDeclaredColumns, KvOp};
 use nodedb_query::msgpack_scan::{KvBodyError, kv_body_to_row, row_to_kv_body};
 use nodedb_types::Value;
 
+use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::strict_format::coerce_declared;
+use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::AtomicError;
 
 /// `body` with every declared column re-typed. Borrowed when no value
 /// changes.
-pub(in crate::data::executor) fn coerce_kv_body<'a>(
+pub(crate) fn coerce_kv_body<'a>(
     body: &'a [u8],
     declared: &[DeclaredColumn],
 ) -> crate::Result<Cow<'a, [u8]>> {
@@ -102,8 +104,21 @@ pub(in crate::data::executor) fn fit_replayed_kv_image(
 }
 
 impl CoreLoop {
-    /// `op` with every row body it supplies whole re-typed to its
-    /// collection's declared numeric columns. `None` when no body changes.
+    /// The declared columns a KV write on `collection` carries, or the
+    /// refusal of a write whose columns never resolved.
+    pub(in crate::data::executor) fn kv_op_columns<'c>(
+        &self,
+        task: &ExecutionTask,
+        columns: &'c KvDeclaredColumns,
+        collection: &str,
+    ) -> Result<&'c [DeclaredColumn], Response> {
+        columns
+            .columns(collection)
+            .map_err(|pending| self.response_error(task, crate::Error::from(pending)))
+    }
+
+    /// `op` with every row body it supplies whole re-typed to the declared
+    /// columns it carries. `None` when no body changes.
     ///
     /// Covers `Put`, `Insert`, `InsertIfAbsent`, and `BatchPut`. A field
     /// merge re-types its merged row in `merge_field_updates`, a conflict
@@ -111,15 +126,29 @@ impl CoreLoop {
     /// atomic or a transfer fits the image it computes.
     pub(in crate::data::executor) fn coerce_kv_op_bodies(
         &self,
-        did: u64,
-        tid: u64,
         op: &KvOp,
     ) -> crate::Result<Option<KvOp>> {
-        let collection = match op {
-            KvOp::Put { collection, .. }
-            | KvOp::Insert { collection, .. }
-            | KvOp::InsertIfAbsent { collection, .. }
-            | KvOp::BatchPut { collection, .. } => collection.as_str(),
+        let declared = match op {
+            KvOp::Put {
+                collection,
+                declared_columns,
+                ..
+            }
+            | KvOp::Insert {
+                collection,
+                declared_columns,
+                ..
+            }
+            | KvOp::InsertIfAbsent {
+                collection,
+                declared_columns,
+                ..
+            }
+            | KvOp::BatchPut {
+                collection,
+                declared_columns,
+                ..
+            } => declared_columns.columns(collection.as_str())?,
             // These ops carry no row body supplied whole. A field merge and a
             // conflict upsert re-type the row they compute, in the merge. An
             // atomic and a transfer fit the image they compute through
@@ -157,7 +186,6 @@ impl CoreLoop {
             | KvOp::PredicateUpdate { .. }
             | KvOp::PredicateDelete { .. } => return Ok(None),
         };
-        let declared = self.declared_columns_of(did, tid, collection);
         if declared.is_empty() {
             return Ok(None);
         }

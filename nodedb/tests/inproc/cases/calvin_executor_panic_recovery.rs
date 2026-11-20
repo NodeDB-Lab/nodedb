@@ -146,6 +146,7 @@ fn assert_panic_refusal(resp: &nodedb::bridge::envelope::Response) {
 #[cfg(feature = "failpoints")]
 fn kv_put_in(coll: &str, key: &[u8], value: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, coll),
         key: key.to_vec(),
         value: value.to_vec(),

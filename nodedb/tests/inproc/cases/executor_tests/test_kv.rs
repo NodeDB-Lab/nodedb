@@ -21,6 +21,7 @@ fn kv_put_get_delete() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "cache",
@@ -101,6 +102,7 @@ fn kv_overwrite_returns_ok() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -121,6 +123,7 @@ fn kv_overwrite_returns_ok() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -172,6 +175,7 @@ fn kv_batch_put_and_get() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -219,6 +223,7 @@ fn kv_scan_returns_entries() {
             &mut tx,
             &mut rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "scantest",
@@ -273,6 +278,7 @@ fn kv_scan_with_match_pattern() {
                 &mut tx,
                 &mut rx,
                 PhysicalPlan::Kv(KvOp::Put {
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                     collection: nodedb_types::QualifiedCollection::new(
                         nodedb_types::DatabaseId::DEFAULT,
                         "mixed",
@@ -332,6 +338,7 @@ fn kv_expire_and_persist() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -421,6 +428,7 @@ fn kv_register_index_and_lookup() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -439,6 +447,7 @@ fn kv_register_index_and_lookup() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -499,6 +508,7 @@ fn kv_drop_index() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -542,6 +552,7 @@ fn kv_tenant_isolation() {
     let req = nodedb::bridge::envelope::Request {
         tenant_id: nodedb::types::TenantId::new(1),
         ..make_request(PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "shared",
@@ -565,6 +576,7 @@ fn kv_tenant_isolation() {
     let req = nodedb::bridge::envelope::Request {
         tenant_id: nodedb::types::TenantId::new(2),
         ..make_request(PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "shared",

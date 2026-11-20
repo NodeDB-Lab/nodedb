@@ -101,6 +101,7 @@ mod tests {
     /// A write-class plan: `plan_is_write` returns true for `KvOp::Put`.
     fn write_plan() -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             value: b"v".to_vec(),
@@ -230,6 +231,7 @@ mod tests {
         dest: nodedb_types::RlsWriteCheck,
     ) -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "src"),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "dst"),
             item_key: b"item".to_vec(),

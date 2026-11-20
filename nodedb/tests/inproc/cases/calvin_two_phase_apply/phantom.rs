@@ -43,6 +43,7 @@ fn absent_kv_key_phantom_insert_causes_abort() {
             vshard: phantom_vshard,
             collection: "phantomkv",
             plans: vec![PhysicalPlan::Kv(KvOp::Insert {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "phantomkv"),
                 key: b"newkey".to_vec(),
                 value: b"v".to_vec(),

@@ -12,6 +12,9 @@ use nodedb_physical::physical_plan::{DocumentOp, KvOp};
 /// Classify a KV op for transaction resolve: collect the collection of a
 /// row-level write into `collections`, skip read-only ops, and reject the ops
 /// that have no row-level redo representation.
+///
+/// The op's declared columns are never read here, so a pending set is
+/// accepted. The redo serializes the staged value, which staging fitted.
 pub(super) fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Result<()> {
     match op {
         // Row-level writes: the resolved post-image (value or tombstone) is in
@@ -172,5 +175,36 @@ pub(super) fn classify_document_op(
         | DocumentOp::BackfillIndex { .. } => Err(crate::Error::PlanError {
             detail: "document index/DDL op is not supported in transaction resolve".to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A resolve part's KV op with pending columns classifies like any
+    /// other: its collection is collected and no columns are read.
+    #[test]
+    fn a_pending_kv_op_classifies_by_its_collection() {
+        let op = KvOp::Put {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                "c",
+            ),
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::new(1),
+            returning: None,
+            rls_filters: Vec::new(),
+            provenance: None,
+        };
+        let mut collections = BTreeSet::new();
+        classify_kv_op(&op, &mut collections).expect("a pending op classifies");
+        assert_eq!(
+            collections.into_iter().collect::<Vec<_>>(),
+            vec!["c".to_string()]
+        );
     }
 }

@@ -46,6 +46,7 @@ impl CoreLoop {
             rls_write_check,
             returning,
             rls_filters,
+            declared,
         } = params;
 
         if self.kv_engine.is_over_budget() {
@@ -61,7 +62,7 @@ impl CoreLoop {
             existing_bytes.as_deref(),
             value,
             updates,
-            self.declared_columns_of(did, tid, collection),
+            declared,
             &self.crs_context(),
         )?;
 
@@ -240,6 +241,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
             ..
         } = ctx;
         let KvFieldSetArgs {
@@ -270,7 +272,7 @@ impl CoreLoop {
             collection,
             current.as_deref(),
             updates,
-            self.declared_columns_of(did, tid, collection),
+            declared,
         )?;
         admit_kv_row(
             rls_write_check,

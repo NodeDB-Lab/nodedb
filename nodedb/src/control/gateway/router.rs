@@ -365,6 +365,7 @@ mod tests {
     #[test]
     fn no_routing_table_routes_locally() {
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
             key: vec![],
             value: vec![],

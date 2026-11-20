@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The declared numeric columns a schemaless document or KV write re-types,
-//! read from the collection's registered config.
+//! The declared numeric columns a schemaless document write re-types, read
+//! from the collection's registered config. A KV write carries its own.
 
 use nodedb_physical::physical_plan::DeclaredColumn;
 
@@ -22,19 +22,5 @@ impl CoreLoop {
             .get(config_key)
             .map(|config| config.declared_columns.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// [`Self::declared_columns`] for a collection named by its parts.
-    pub(in crate::data::executor) fn declared_columns_of(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-    ) -> &[DeclaredColumn] {
-        self.declared_columns(&(
-            DatabaseId::new(database_id),
-            TenantId::new(tid),
-            collection.to_string(),
-        ))
     }
 }

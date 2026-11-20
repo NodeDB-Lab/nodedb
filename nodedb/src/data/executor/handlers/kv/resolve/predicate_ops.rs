@@ -14,7 +14,7 @@ use crate::data::executor::handlers::kv::rls::admit_kv_row;
 use crate::data::executor::handlers::returning_rows::kv_stored_rows_payload;
 use crate::data::executor::response_codec;
 use crate::engine::kv::current_ms;
-use nodedb_physical::physical_plan::KvResolveOutcome;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvResolveOutcome};
 use nodedb_types::DatabaseId;
 
 impl CoreLoop {
@@ -25,6 +25,7 @@ impl CoreLoop {
         &self,
         ctx: KvPredicateCtx<'_>,
         updates: &[(String, Vec<u8>)],
+        declared: &[DeclaredColumn],
     ) -> ResolveResult {
         let KvPredicateCtx {
             did,
@@ -38,7 +39,6 @@ impl CoreLoop {
         let now_ms = current_ms();
         let matched = self.kv_predicate_matches(did, tid, collection, filters, now_ms)?;
 
-        let declared = self.declared_columns_of(did, tid, collection);
         let mut writes: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::with_capacity(matched.len());
         for (key, body) in matched {
             let computed =

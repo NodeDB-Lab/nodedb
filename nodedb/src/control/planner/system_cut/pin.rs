@@ -462,6 +462,7 @@ mod tests {
                 system_time: current,
             }),
             PhysicalPlan::Kv(KvOp::PredicateUpdate {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: collection(),
                 filters: Vec::new(),
                 updates: Vec::new(),

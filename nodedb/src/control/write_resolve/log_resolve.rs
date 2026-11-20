@@ -5,7 +5,8 @@
 //! A record is a Raft entry, a sequenced Calvin transaction, or a WAL record.
 //! Every install applies it, so every value an install would compute
 //! differently is computed here, once: a volatile DEFAULT binds into the
-//! body, and a timeseries ingest resolves to its rows.
+//! body, and a timeseries ingest resolves to its rows. A KV write's declared
+//! columns resolve in place on the plan its proposer owns, before this runs.
 
 use nodedb_physical::physical_task::PhysicalTask;
 

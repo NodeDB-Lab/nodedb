@@ -95,7 +95,8 @@ fn check_carried_bytes(tx_class: &TxClass) -> crate::Result<()> {
 /// here on the submitter. Every participant replica executes the sequenced
 /// plans on its own, so a DEFAULT left for the apply would draw a different
 /// value on each. The class's plan bytes re-encode only when a body changed.
-/// A class an earlier submit already bound binds nothing again.
+/// A class an earlier submit already bound binds nothing again. Each KV
+/// write's pending declared columns resolve here too.
 fn bind_volatile_defaults(
     state: &SharedState,
     tx_class: &mut TxClass,
@@ -112,6 +113,13 @@ fn bind_volatile_defaults(
             *plan = bound;
             changed = true;
         }
+        // Every participant re-types a KV value under the declared columns
+        // resolved here, on the submitter.
+        changed |= crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+            state,
+            tx_class.tenant_id,
+            plan,
+        )?;
     }
     if changed {
         tx_class.plans =

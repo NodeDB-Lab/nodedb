@@ -140,6 +140,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         let KvFieldSetArgs {
             updates,
@@ -175,7 +176,7 @@ impl CoreLoop {
             collection,
             current.as_deref(),
             updates,
-            self.declared_columns_of(did, tid, collection),
+            declared,
         ) {
             Ok(c) => c,
             Err(e) => return self.response_error(task, e),
@@ -278,6 +279,7 @@ mod tests {
                     key: b"k",
                     surrogate: Surrogate::new(1),
                     rls_write_check: &check,
+                    declared: &[],
                 },
                 KvFieldSetArgs {
                     updates: &updates,

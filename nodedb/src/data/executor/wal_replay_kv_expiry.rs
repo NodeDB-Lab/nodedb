@@ -265,6 +265,7 @@ mod tests {
         // at replay time would install a value far larger than 6000, since
         // real wall-clock time is vastly greater than 1000.
         let put_seed = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok1".to_vec(),
             value: b"payload".to_vec(),
@@ -319,6 +320,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
         let put_seed = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok2".to_vec(),
             value: b"payload".to_vec(),
@@ -391,6 +393,7 @@ mod tests {
         // silently: the key would still carry its TTL after replay. This
         // assertion is what bites on that code path.
         let put_p = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok3".to_vec(),
             value: b"payload".to_vec(),

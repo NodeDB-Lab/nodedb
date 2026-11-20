@@ -110,6 +110,7 @@ fn star() -> Option<ReturningSpec> {
 
 fn kv_put(key: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
         key: key.to_vec(),
         value: b"v1".to_vec(),

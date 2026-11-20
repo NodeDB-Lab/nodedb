@@ -242,6 +242,7 @@ mod tests {
 
     fn kv_write_plan() -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: Vec::new(),
             value: Vec::new(),

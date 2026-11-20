@@ -158,6 +158,7 @@ mod tests {
             ),
             kv_task(
                 KvOp::Put {
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, &dest),
                     key: b"bob:sword".to_vec(),
                     value: b"item".to_vec(),

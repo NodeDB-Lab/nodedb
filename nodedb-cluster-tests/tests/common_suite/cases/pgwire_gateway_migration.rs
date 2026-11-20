@@ -183,6 +183,7 @@ async fn pgwire_gateway_migration_plan_cache_hits() {
     {
         // Pre-populate a key.
         let put_plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(
                 nodedb_types::id::DatabaseId::DEFAULT,
                 "pgwire_gw_cache",

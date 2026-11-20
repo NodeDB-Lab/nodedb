@@ -69,6 +69,7 @@ fn large_edge(len: usize) -> PhysicalPlan {
 
 fn large_kv_put(len: usize) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
         key: b"k".to_vec(),
         value: vec![0u8; len],

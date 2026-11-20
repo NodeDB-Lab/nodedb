@@ -33,6 +33,9 @@ pub(in crate::data::executor) struct TransferParams<'a> {
     /// Compiled row-level-security WRITE predicate for the collection both
     /// rows live in.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The declared columns the plan carries. Both written rows re-type
+    /// under them.
+    pub declared: &'a [nodedb_physical::physical_plan::DeclaredColumn],
 }
 
 /// Parameters for an atomic non-fungible item transfer.
@@ -53,6 +56,9 @@ pub(in crate::data::executor) struct TransferItemParams<'a> {
     /// two collections carry independent policies, so the two checks stay
     /// separate.
     pub dest_rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The destination's declared columns the plan carries. The moved row
+    /// re-types under them.
+    pub declared: &'a [nodedb_physical::physical_plan::DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -75,6 +81,7 @@ impl CoreLoop {
             debit_surrogate,
             credit_surrogate,
             rls_write_check,
+            declared,
         } = params;
         debug!(core = self.core_id, %collection, %field, %amount, "kv transfer");
 
@@ -102,7 +109,6 @@ impl CoreLoop {
         } else {
             Some(dest_bytes.as_slice())
         };
-        let declared = self.declared_columns_of(did, tid, collection);
         let computed = match compute_transfer(&source_bytes, dest_ref, field, amount, declared) {
             Ok(c) => c,
             Err(TransferError::Declared(e)) => return self.response_error(task, e),
@@ -250,6 +256,7 @@ impl CoreLoop {
             surrogate,
             source_rls_write_check,
             dest_rls_write_check,
+            declared,
         } = params;
         debug!(core = self.core_id, %source_collection, %dest_collection, "kv transfer item");
 
@@ -269,10 +276,7 @@ impl CoreLoop {
 
         // The row arriving at the destination meets the destination's
         // declared numeric columns, decided before either half runs.
-        let fitted = match fit_kv_image(
-            &item_data,
-            self.declared_columns_of(did, tid, dest_collection),
-        ) {
+        let fitted = match fit_kv_image(&item_data, declared) {
             Ok(fitted) => fitted,
             Err(e) => return self.response_error(task, e),
         };

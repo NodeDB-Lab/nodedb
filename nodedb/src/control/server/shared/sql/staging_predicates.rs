@@ -533,6 +533,7 @@ mod tests {
     #[test]
     fn is_stageable_write_accepts_the_kv_atomics_and_batch_put() {
         assert!(is_stageable_write(&kv_plan(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             delta: 1,
@@ -542,6 +543,7 @@ mod tests {
             shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::IncrFloat {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             delta: "1".into(),
@@ -550,6 +552,7 @@ mod tests {
             shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             expected: vec![],
@@ -558,6 +561,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::GetSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             new_value: b"v".to_vec(),
@@ -566,6 +570,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             entries: vec![(b"k".to_vec(), b"v".to_vec())],
             ttl_ms: 0,
@@ -581,6 +586,7 @@ mod tests {
         let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "value": 5 })).unwrap();
         for op in [
             KvOp::Incr {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 delta: 1,
@@ -590,6 +596,7 @@ mod tests {
                 shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
             KvOp::IncrFloat {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 delta: "1".into(),
@@ -598,6 +605,7 @@ mod tests {
                 shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
             KvOp::Cas {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 expected: vec![],
@@ -606,6 +614,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             },
             KvOp::GetSet {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 new_value: b"v".to_vec(),
@@ -626,6 +635,7 @@ mod tests {
     fn staged_kv_put_is_the_upsert_tag() {
         let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 1 })).unwrap();
         let op = KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             value: Vec::new(),
@@ -645,6 +655,7 @@ mod tests {
     fn kv_write_shape_batch_put_is_insert() {
         let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "inserted": 2 })).unwrap();
         let batch = |intent| KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             entries: vec![(b"k".to_vec(), b"v".to_vec())],
             ttl_ms: 0,
@@ -911,6 +922,7 @@ mod tests {
     #[test]
     fn kv_write_shape_predicate_update_and_delete_stage_as_update_and_delete() {
         let update = KvOp::PredicateUpdate {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             filters: Vec::new(),
             updates: Vec::new(),

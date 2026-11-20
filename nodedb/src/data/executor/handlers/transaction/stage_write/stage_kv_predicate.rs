@@ -45,6 +45,9 @@ pub(in crate::data::executor) struct StageKvPredicateUpdateParams<'a> {
     /// The cut BASE is matched at: `None` for the current rows, `Some` for
     /// the block's snapshot ordinal.
     pub system_as_of: Option<i64>,
+    /// The declared columns the plan carries. Each merged row re-types
+    /// under them.
+    pub declared: &'a [nodedb_physical::physical_plan::DeclaredColumn],
 }
 
 /// Routing identity + payload for one staged `KvOp::PredicateDelete`.
@@ -89,6 +92,7 @@ impl CoreLoop {
             updates,
             rls_write_check,
             system_as_of,
+            declared,
         } = params;
         let did = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
@@ -103,15 +107,12 @@ impl CoreLoop {
 
         let mut affected = 0usize;
         for row in matched {
-            let computed = match merge_field_updates(
-                collection,
-                Some(row.body.as_slice()),
-                updates,
-                self.declared_columns(&coll_key),
-            ) {
-                Ok(c) => c,
-                Err(e) => return self.response_error(task, e),
-            };
+            let computed =
+                match merge_field_updates(collection, Some(row.body.as_slice()), updates, declared)
+                {
+                    Ok(c) => c,
+                    Err(e) => return self.response_error(task, e),
+                };
             if let Err(e) =
                 crate::engine::kv::KvRowTooLarge::check(collection, &row.key, &computed.new_value)
             {
@@ -448,6 +449,7 @@ mod tests {
             updates: &updates,
             rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
             system_as_of: None,
+            declared: &[],
         });
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(

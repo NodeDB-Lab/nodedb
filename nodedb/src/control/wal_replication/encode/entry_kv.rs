@@ -9,8 +9,22 @@
 
 use super::super::types::ReplicatedWrite;
 use super::kv;
-use super::kv::{WirePut, WireReturning};
-use nodedb_physical::physical_plan::KvOp;
+use super::kv::{WirePut, WireReturning, WireTarget};
+use nodedb_physical::physical_plan::{KvDeclaredColumns, KvOp};
+use nodedb_types::QualifiedCollection;
+
+/// The collection `collection` with the columns the proposer resolved for it.
+/// A write whose columns are still pending is refused: every replica must
+/// re-type under the proposer's columns, never under its own catalog.
+fn target<'a>(
+    collection: &'a QualifiedCollection,
+    declared_columns: &KvDeclaredColumns,
+) -> crate::Result<WireTarget<'a>> {
+    Ok(WireTarget {
+        collection: collection.as_str(),
+        declared_columns: declared_columns.shared(collection.as_str())?,
+    })
+}
 
 /// Encode a `KvOp` write variant, `Ok(None)` when not a single-shard replicated
 /// write, or an error when it can't replicate safely. `PredicateUpdate` /
@@ -19,6 +33,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
     Ok(Some(match op {
         KvOp::Put {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -28,7 +43,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             provenance,
         } => kv::put(
             WirePut {
-                collection: collection.as_str(),
+                target: target(collection, declared_columns)?,
                 key,
                 value,
                 ttl_ms: *ttl_ms,
@@ -61,6 +76,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         ),
         KvOp::Insert {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -68,11 +84,13 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             returning,
             rls_filters,
         } => kv::insert(
-            collection.as_str(),
-            key,
-            value,
-            *ttl_ms,
-            surrogate.as_u32(),
+            WirePut {
+                target: target(collection, declared_columns)?,
+                key,
+                value,
+                ttl_ms: *ttl_ms,
+                surrogate: surrogate.as_u32(),
+            },
             WireReturning {
                 returning,
                 rls_filters,
@@ -97,6 +115,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         }
         KvOp::InsertOnConflictUpdate {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -107,12 +126,14 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             returning,
             rls_filters,
         } => kv::insert_on_conflict_update(
-            collection.as_str(),
-            key,
-            value,
-            *ttl_ms,
+            WirePut {
+                target: target(collection, declared_columns)?,
+                key,
+                value,
+                ttl_ms: *ttl_ms,
+                surrogate: surrogate.as_u32(),
+            },
             updates,
-            surrogate.as_u32(),
             WireReturning {
                 returning,
                 rls_filters,
@@ -120,6 +141,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         ),
         KvOp::BatchPut {
             collection,
+            declared_columns,
             entries,
             ttl_ms,
             intent,
@@ -127,7 +149,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             returning,
             rls_filters,
         } => kv::batch_put(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             entries,
             *ttl_ms,
             intent.clone(),
@@ -153,6 +175,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::Incr {
             collection,
+            declared_columns,
             key,
             delta,
             ttl_ms,
@@ -160,7 +183,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             rls_write_check: _,
             shape,
         } => kv::incr(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             key,
             *delta,
             *ttl_ms,
@@ -170,22 +193,30 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::IncrFloat {
             collection,
+            declared_columns,
             key,
             delta,
             surrogate,
             rls_write_check: _,
             shape,
-        } => kv::incr_float(collection.as_str(), key, delta, surrogate.as_u32(), shape),
+        } => kv::incr_float(
+            target(collection, declared_columns)?,
+            key,
+            delta,
+            surrogate.as_u32(),
+            shape,
+        ),
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::Cas {
             collection,
+            declared_columns,
             key,
             expected,
             new_value,
             surrogate,
             rls_write_check: _,
         } => kv::cas(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             key,
             expected,
             new_value,
@@ -193,6 +224,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         ),
         KvOp::GetSet {
             collection,
+            declared_columns,
             key,
             new_value,
             surrogate,
@@ -200,7 +232,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
             rls_write_check: _,
         } => kv::get_set(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             key,
             new_value,
             surrogate.as_u32(),
@@ -236,6 +268,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::FieldSet {
             collection,
+            declared_columns,
             key,
             updates,
             surrogate,
@@ -244,7 +277,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             returning,
             rls_filters,
         } => kv::field_set(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             key,
             updates,
             surrogate.as_u32(),
@@ -257,6 +290,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::Transfer {
             collection,
+            declared_columns,
             source_key,
             dest_key,
             field,
@@ -265,7 +299,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             credit_surrogate,
             rls_write_check: _,
         } => kv::transfer(
-            collection.as_str(),
+            target(collection, declared_columns)?,
             source_key,
             dest_key,
             field,
@@ -277,6 +311,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         KvOp::TransferItem {
             source_collection,
             dest_collection,
+            declared_columns,
             item_key,
             dest_key,
             surrogate,
@@ -284,7 +319,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             dest_rls_write_check: _,
         } => kv::transfer_item(
             source_collection.as_str(),
-            dest_collection.as_str(),
+            target(dest_collection, declared_columns)?,
             item_key,
             dest_key,
             surrogate.as_u32(),

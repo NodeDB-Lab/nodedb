@@ -96,6 +96,8 @@ pub async fn rate_check(
     .map_err(|e| DdlError::from_error_in_context("RATE_CHECK", &e))?;
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, RATE_COLLECTION),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: rate_key.as_bytes().to_vec(),
         delta: 1,
         ttl_ms: actual_ttl,

@@ -91,6 +91,7 @@ mod tests {
     #[test]
     fn a_kv_put_is_a_user_data_write() {
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: collection(),
             key: b"k".to_vec(),
             value: b"v".to_vec(),

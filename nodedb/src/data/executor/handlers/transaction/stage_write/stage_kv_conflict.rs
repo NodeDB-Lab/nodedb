@@ -31,7 +31,7 @@ impl CoreLoop {
         value: &[u8],
         updates: &[(String, UpdateValue)],
         ttl_ms: u64,
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): super::stage_kv_atomic::ImageRules<'_>,
     ) -> Response {
         let existing = match self.resolve_kv_current(ctx, key) {
             Ok(existing) => existing,
@@ -46,7 +46,7 @@ impl CoreLoop {
             existing.as_deref(),
             value,
             updates,
-            self.declared_columns_of(ctx.database_id, ctx.tid, ctx.collection),
+            declared,
             &self.crs_context(),
         ) {
             Ok(b) => b,

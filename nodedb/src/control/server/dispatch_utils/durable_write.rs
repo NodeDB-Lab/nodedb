@@ -42,8 +42,15 @@ use super::types::AutocommitWrite;
 /// on its own, so it takes the local `AppendHere` route.
 pub(crate) async fn dispatch_durable_autocommit_write(
     shared: &SharedState,
-    write: AutocommitWrite,
+    mut write: AutocommitWrite,
 ) -> crate::Result<Response> {
+    // A KV write's declared columns resolve here, in place, so the proposal
+    // and the local dispatch below carry the same columns.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        shared,
+        write.tenant_id,
+        &mut write.plan,
+    )?;
     if write.txn_id.is_none()
         && let Some(response) = propose_if_replicable(
             shared,
@@ -191,6 +198,9 @@ struct WriteTarget {
 ///
 /// A Data-Plane verdict comes back as `Err(Error::DataPlane(code))`, the shape
 /// the pgwire replicated path returns.
+///
+/// A KV write in `plan` carries resolved declared columns: the gate resolves
+/// a checked task, and the autocommit route resolves its own plan.
 async fn propose_if_replicable(
     shared: &SharedState,
     target: WriteTarget,

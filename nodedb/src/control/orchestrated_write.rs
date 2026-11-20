@@ -44,13 +44,17 @@ pub(crate) async fn apply_orchestrated_write(
         nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.vshard();
     // The orchestrator built these bodies after planning, so their volatile
     // DEFAULTs bind here, once, before the entry exists.
-    let plan = crate::control::write_resolve::bind_volatile_defaults(
+    let mut plan = crate::control::write_resolve::bind_volatile_defaults(
         state,
         tenant_id,
         database_id,
         &plan,
     )?
     .unwrap_or(plan);
+    // Every replica re-types a KV value under the columns resolved here.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        state, tenant_id, &mut plan,
+    )?;
     let replicable = ReplicableWrite::decide_for_replication(&plan)?;
     let entry = to_replicated_entry(tenant_id, database_id, vshard_id, &replicable)?
         .ok_or_else(|| crate::Error::Internal {

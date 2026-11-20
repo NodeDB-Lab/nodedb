@@ -192,6 +192,8 @@ pub async fn weighted_pick(
                 DatabaseId::DEFAULT,
                 "_system_random_audit",
             ),
+            // Resolved from the catalog before the write is journaled.
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
             key: audit_key_bytes,
             value: audit_value,
             ttl_ms: 0,

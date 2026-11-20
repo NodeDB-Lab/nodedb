@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::{
-    KvBatchIntent, KvResolveOutcome, KvResolvedMutation, ReturningSpec,
+    DeclaredColumn, KvBatchIntent, KvResolveOutcome, KvResolvedMutation, ReturningSpec,
 };
 use nodedb_types::{DatabaseId, Surrogate};
 
@@ -35,6 +35,8 @@ pub(super) struct ResolveKvBatch<'a> {
     pub surrogates: &'a [Surrogate],
     pub returning: Option<&'a ReturningSpec>,
     pub rls_filters: &'a [u8],
+    /// The declared columns the wrapped op carries.
+    pub declared: &'a [DeclaredColumn],
 }
 
 /// A `KvOp::InsertIfAbsent` to resolve.
@@ -48,6 +50,8 @@ pub(super) struct ResolveKvPoint<'a> {
     pub surrogate: Surrogate,
     pub returning: Option<&'a ReturningSpec>,
     pub rls_filters: &'a [u8],
+    /// The declared columns the wrapped op carries.
+    pub declared: &'a [DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -68,6 +72,7 @@ impl CoreLoop {
             surrogate,
             returning,
             rls_filters,
+            declared,
         } = point;
         let entries = [(key.to_vec(), value.to_vec())];
         self.resolve_kv_batch_put(
@@ -82,6 +87,7 @@ impl CoreLoop {
                 surrogates: std::slice::from_ref(&surrogate),
                 returning,
                 rls_filters,
+                declared,
             },
         )
     }
@@ -105,6 +111,7 @@ impl CoreLoop {
             surrogates,
             returning,
             rls_filters,
+            declared,
         } = batch;
 
         if self.kv_engine.is_over_budget() {
@@ -121,7 +128,7 @@ impl CoreLoop {
             collection,
             entries,
             intent,
-            self.declared_columns_of(did, tid, collection),
+            declared,
             &self.crs_context(),
             |key| {
                 let body = self.kv_resolve_read(did, tid, collection, key, now_ms);

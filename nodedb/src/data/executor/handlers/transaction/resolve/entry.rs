@@ -552,6 +552,7 @@ mod tests {
     /// picks up that collection's overlay entries.
     fn kv_write_plan(collection: &str) -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             key: Vec::new(),
             value: Vec::new(),
@@ -566,12 +567,11 @@ mod tests {
     /// Decode a `kv_put` redo payload in the shape resolve emits.
     #[allow(clippy::type_complexity)]
     fn decode_kv_put(payload: &[u8]) -> (String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32) {
-        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate) =
-            zerompk::from_msgpack::<(String, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
-                payload,
-            )
-            .expect("decode kv_put");
+        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate, declared) =
+            zerompk::from_msgpack::<crate::data::executor::wal_replay::kv_put::KvPutTuple>(payload)
+                .expect("decode kv_put");
         assert_eq!(disc, "kv_put");
+        assert!(declared.is_empty(), "staging fitted the value");
         (collection, key, value, ttl_ms, expire_at_ms, surrogate)
     }
 
@@ -589,6 +589,7 @@ mod tests {
                 TID,
                 txn,
                 &KvOp::Incr {
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                     key: b"c".to_vec(),
                     delta,

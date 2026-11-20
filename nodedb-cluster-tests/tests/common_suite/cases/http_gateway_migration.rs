@@ -68,6 +68,7 @@ async fn http_gateway_migration_single_node_query() {
 
     // PUT — write path (mirrors HTTP POST /query with INSERT SQL).
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "http_gw_single_node",
@@ -149,6 +150,7 @@ async fn http_gateway_migration_cross_node_query() {
 
     // First PUT to ensure the collection has data.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "http_gw_cross_node",

@@ -110,6 +110,8 @@ impl KvPushDispatcher for SharedStateKvDispatcher<'_> {
                     .await?;
                 PhysicalPlan::Kv(KvOp::Put {
                     collection: qualified,
+                    // Resolved from the catalog before the write is journaled.
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
                     key: key.clone(),
                     value: body,
                     ttl_ms,

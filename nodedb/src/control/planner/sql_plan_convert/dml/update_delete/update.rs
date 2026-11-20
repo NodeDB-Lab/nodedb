@@ -101,6 +101,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                 database_id: ctx.database_id,
                 plan: PhysicalPlan::Kv(KvOp::PredicateUpdate {
                     collection: qualified_collection.clone(),
+                    // Resolved from the catalog before the write is journaled.
+                    declared_columns: KvDeclaredColumns::pending(),
                     filters: filter_bytes,
                     updates: literal_updates,
                     rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
@@ -134,6 +136,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                 database_id: ctx.database_id,
                 plan: PhysicalPlan::Kv(KvOp::FieldSet {
                     collection: qualified_collection.clone(),
+                    declared_columns: KvDeclaredColumns::pending(),
                     key: key_bytes,
                     updates: field_updates,
                     surrogate,

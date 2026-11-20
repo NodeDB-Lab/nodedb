@@ -92,7 +92,7 @@ pub(crate) async fn dispatch_write_replicated(
     )
     .await?;
     // The apply's write funnel records the write's mark on every replica.
-    propose_sync_plan(state, owner, &plan, event_source, deadline, user_roles).await
+    propose_sync_plan(state, owner, plan, event_source, deadline, user_roles).await
 }
 
 #[cfg(test)]

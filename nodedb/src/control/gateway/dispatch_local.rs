@@ -38,7 +38,7 @@ pub(super) struct LocalContext<'a> {
 /// Carries `txn_id` so the Data Plane can resolve this session transaction's
 /// staging overlay (read-your-own-writes) for in-block SQL and direct ops.
 pub(super) async fn dispatch_local(
-    route: TaskRoute,
+    mut route: TaskRoute,
     ctx: LocalContext<'_>,
 ) -> Result<DispatchOutcome, Error> {
     let LocalContext {
@@ -69,6 +69,14 @@ pub(super) async fn dispatch_local(
     {
         return Err(Error::CrdtApplyForbiddenInTransaction);
     }
+
+    // A KV write's declared columns resolve here, in place, before it is
+    // proposed or staged.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        shared,
+        tenant_id,
+        &mut route.plan,
+    )?;
 
     // A proposal carries resolved rows: the proposer resolves a timeseries
     // ingest before its entry exists.

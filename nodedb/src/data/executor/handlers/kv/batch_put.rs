@@ -33,6 +33,9 @@ pub(in crate::data::executor) struct KvBatchPutArgs<'a> {
     pub returning: Option<&'a nodedb_physical::physical_plan::ReturningSpec>,
     /// Compiled read policy bounding which of those rows may be shown back.
     pub rls_filters: &'a [u8],
+    /// The declared columns the plan carries. A merged row re-types under
+    /// them.
+    pub declared: &'a [nodedb_physical::physical_plan::DeclaredColumn],
 }
 
 /// One `(key, value)` pair of a batch put.
@@ -54,6 +57,7 @@ impl CoreLoop {
             surrogates,
             returning,
             rls_filters,
+            declared,
         } = args;
         debug!(core = self.core_id, %collection, count = entries.len(), "kv batch put");
 
@@ -74,7 +78,7 @@ impl CoreLoop {
             collection,
             entries,
             intent,
-            self.declared_columns_of(did, tid, collection),
+            declared,
             &self.crs_context(),
             |key| Ok(self.kv_engine.get(did, tid, collection, key, now_ms)),
         ) {

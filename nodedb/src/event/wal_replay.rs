@@ -8,7 +8,8 @@
 //!
 //! Each WAL record type has a known payload format (see `wal_dispatch.rs`):
 //! - `Put`: `(collection, document_id, value)` for documents,
-//!   `("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate)` for
+//!   `("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate,
+//!   declared)` for
 //!   KV, a map-encoded `EdgePutRedo` carrying both endpoint surrogates for
 //!   graph edges
 //! - `Delete`: `(collection, document_id)` for documents,
@@ -487,6 +488,7 @@ mod tests {
             0u64,
             None::<u64>,
             1u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
         ))
         .unwrap();
         let record = make_record(RecordType::Put, &payload, 1, 0, 102);
@@ -705,9 +707,17 @@ mod tests {
         use crate::wal::{RedoRecord, RedoSubRecord};
 
         let doc_payload = doc_put("orders", "order-9", b"doc-value");
-        let kv_payload =
-            zerompk::to_msgpack_vec(&("kv_put", "cache", b"k9", b"v9", 0u64, None::<u64>, 9u32))
-                .unwrap();
+        let kv_payload = zerompk::to_msgpack_vec(&(
+            "kv_put",
+            "cache",
+            b"k9",
+            b"v9",
+            0u64,
+            None::<u64>,
+            9u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
+        ))
+        .unwrap();
         let redo = RedoRecord {
             version: 1,
             ops: vec![
@@ -1370,9 +1380,17 @@ mod tests {
         use crate::wal::{RedoRecord, RedoSubRecord};
 
         let doc = doc_put("orders", "order-9", b"doc");
-        let kv =
-            zerompk::to_msgpack_vec(&("kv_put", "cache", b"k9", b"v9", 0u64, None::<u64>, 9u32))
-                .unwrap();
+        let kv = zerompk::to_msgpack_vec(&(
+            "kv_put",
+            "cache",
+            b"k9",
+            b"v9",
+            0u64,
+            None::<u64>,
+            9u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
+        ))
+        .unwrap();
         let redo = RedoRecord {
             version: 1,
             ops: vec![

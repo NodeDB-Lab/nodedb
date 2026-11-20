@@ -41,6 +41,8 @@ pub(crate) async fn build_incr(
 
     Ok(PhysicalPlan::Kv(KvOp::Incr {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         delta,
         ttl_ms,
@@ -76,6 +78,7 @@ pub(crate) async fn build_incr_float(
 
     Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         delta: delta.to_string(),
         surrogate,

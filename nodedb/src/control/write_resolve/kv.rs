@@ -164,6 +164,14 @@ impl EngineWriteResolver for KvWriteResolver {
         op: PhysicalPlan,
     ) -> crate::Result<ResolvedRows> {
         let collection = &self.collection;
+        // The resolve fits each image under the declared columns resolved
+        // here. The resolved rows carry the fitted bytes.
+        let mut op = op;
+        crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+            state,
+            ctx.tenant_id,
+            &mut op,
+        )?;
         let resp =
             dispatch_local(state, ctx.tenant_id, ctx.database_id, collection, op, None).await?;
         if resp.status != Status::Ok {

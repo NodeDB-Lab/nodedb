@@ -23,6 +23,7 @@ use super::helpers::*;
 
 fn kv_put(key: &[u8], value: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "kv_coll",
@@ -236,6 +237,7 @@ fn rollback_matrix_kv_batch_put_then_doc_fail() {
         &mut rx,
         vec![
             PhysicalPlan::Kv(KvOp::BatchPut {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "kv_coll",

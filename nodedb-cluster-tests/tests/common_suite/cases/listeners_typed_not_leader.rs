@@ -171,6 +171,7 @@ async fn pgwire_not_leader_retry_uses_shared_gateway() {
 
     // Direct gateway execute via shared.gateway (not Gateway::new).
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "nl_pgwire_shared_gw",
@@ -237,6 +238,7 @@ async fn http_not_leader_gateway_error_mapping() {
         .get()
         .expect("gateway installed by harness");
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "nl_http_shared_gw",
@@ -310,6 +312,7 @@ async fn resp_not_leader_gateway_error_mapping() {
         .get()
         .expect("gateway installed by harness");
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "nl_resp_shared_gw",
@@ -447,6 +450,7 @@ async fn native_not_leader_gateway_error_mapping() {
         .get()
         .expect("gateway installed by harness");
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "nl_native_shared_gw",

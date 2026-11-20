@@ -95,6 +95,8 @@ pub async fn transfer(
     };
     let plan = PhysicalPlan::Kv(KvOp::Transfer {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         source_key: source_bytes,
         dest_key: dest_bytes,
         field,
@@ -174,6 +176,7 @@ pub async fn transfer_item(
     let plan = PhysicalPlan::Kv(KvOp::TransferItem {
         source_collection: nodedb_types::QualifiedCollection::new(database_id, &source_collection),
         dest_collection: nodedb_types::QualifiedCollection::new(database_id, &dest_collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         item_key: item_key.into_bytes(),
         dest_key: dest_bytes,
         surrogate,

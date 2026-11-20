@@ -361,6 +361,7 @@ mod tests {
     fn kv_incr_yields_kv_lock_key() {
         assert_eq!(
             kv_key(KvOp::Incr {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
                 delta: 1,
@@ -380,6 +381,7 @@ mod tests {
     fn kv_incr_float_yields_kv_lock_key() {
         assert_eq!(
             kv_key(KvOp::IncrFloat {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
                 delta: "1.5".into(),
@@ -398,6 +400,7 @@ mod tests {
     fn kv_cas_yields_kv_lock_key() {
         assert_eq!(
             kv_key(KvOp::Cas {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
                 expected: vec![],
@@ -416,6 +419,7 @@ mod tests {
     fn kv_get_set_yields_kv_lock_key() {
         assert_eq!(
             kv_key(KvOp::GetSet {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
                 new_value: vec![],
@@ -434,6 +438,7 @@ mod tests {
     fn kv_field_set_yields_kv_lock_key() {
         assert_eq!(
             kv_key(KvOp::FieldSet {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
                 updates: vec![],
@@ -454,6 +459,7 @@ mod tests {
     fn kv_batch_put_stays_unfenced() {
         assert_eq!(
             kv_point_key(&KvOp::BatchPut {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 entries: vec![(b"k1".to_vec(), vec![]), (b"k2".to_vec(), vec![])],
                 ttl_ms: 0,

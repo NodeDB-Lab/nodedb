@@ -290,6 +290,7 @@ mod tests {
 
     fn kv_put_row(collection: &str, owner_id: &str) -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 collection,
@@ -364,6 +365,7 @@ mod tests {
     fn an_opaque_scalar_value_is_rejected_under_a_write_policy() {
         let store = store_with_write_policy("sessions");
         let mut plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -404,6 +406,7 @@ mod tests {
     fn batch_put_is_rejected_when_any_row_violates_the_policy() {
         let store = store_with_write_policy("sessions");
         let mut plan = PhysicalPlan::Kv(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -457,6 +460,7 @@ mod tests {
     fn field_set_carries_the_write_predicate() {
         let store = store_with_write_policy("sessions");
         let mut plan = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -493,6 +497,7 @@ mod tests {
             },
             KvOp::FieldSet {
                 collection: collection(),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: b"k1".to_vec(),
                 updates: Vec::new(),
                 surrogate: nodedb_types::Surrogate::new(1),
@@ -503,6 +508,7 @@ mod tests {
             },
             KvOp::PredicateUpdate {
                 collection: collection(),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 filters: Vec::new(),
                 updates: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
@@ -543,6 +549,7 @@ mod tests {
     fn incr_carries_the_write_predicate() {
         let store = store_with_write_policy("counters");
         let mut plan = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "counters",
@@ -573,6 +580,7 @@ mod tests {
             },
         );
         let mut plan = PhysicalPlan::Kv(KvOp::GetSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -609,6 +617,7 @@ mod tests {
     fn transfer_item_carries_a_predicate_for_each_side() {
         let store = store_with_write_policy("vault");
         let mut plan = PhysicalPlan::Kv(KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "vault",

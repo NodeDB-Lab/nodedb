@@ -69,6 +69,7 @@ async fn native_gateway_migration_single_node_select() {
 
     // INSERT — mirrors native SQL INSERT going through dispatch_task_via_gateway.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "native_gw_single",
@@ -141,6 +142,7 @@ async fn native_gateway_migration_cross_node_select() {
 
     // Seed a KV entry on the leader.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "native_gw_cross",

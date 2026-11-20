@@ -67,6 +67,7 @@ mod tests {
     #[test]
     fn kv_put_is_a_write() {
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",

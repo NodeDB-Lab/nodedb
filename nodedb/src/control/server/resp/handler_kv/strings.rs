@@ -139,6 +139,8 @@ pub(in crate::control::server::resp) async fn handle_set(
     };
     let plan = PhysicalPlan::Kv(KvOp::Put {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         value,
         ttl_ms,
@@ -248,6 +250,8 @@ pub(in crate::control::server::resp) async fn handle_getset(
     };
     let plan = PhysicalPlan::Kv(KvOp::GetSet {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         new_value,
         surrogate,

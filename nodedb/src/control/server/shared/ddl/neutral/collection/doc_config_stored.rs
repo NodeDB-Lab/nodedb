@@ -118,7 +118,7 @@ fn declared_vector_fields(coll: &StoredCollection) -> Vec<(String, usize)> {
 /// The primary key is left out. The engines key a row on the literal as
 /// written, and a lookup renders its own literal the same way, so a re-typed
 /// key would no longer match its row.
-fn declared_columns(coll: &StoredCollection) -> Vec<DeclaredColumn> {
+pub(crate) fn declared_columns(coll: &StoredCollection) -> Vec<DeclaredColumn> {
     match &coll.collection_type {
         nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Schemaless) => {
             if coll.vector_primary.is_some() || coll.crdt {

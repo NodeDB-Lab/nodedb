@@ -137,9 +137,14 @@ pub(crate) async fn dispatch_on_this_node(
     tenant_id: TenantId,
     database_id: DatabaseId,
     vshard_id: VShardId,
-    plan: PhysicalPlan,
+    mut plan: PhysicalPlan,
     txn_id: Option<TxnId>,
 ) -> crate::Result<Response> {
+    // This dispatch skips the write funnel, so a KV write's declared columns
+    // resolve here, before the core.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        state, tenant_id, &mut plan,
+    )?;
     let req_id = RequestId::new(state.request_id_counter.fetch_add(1, Ordering::Relaxed));
     let deadline = StatementDeadline::of_statement(state);
     let req = Request {

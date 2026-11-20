@@ -22,6 +22,7 @@ fn kv_protocol_command_sequence() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "default",
@@ -60,6 +61,7 @@ fn kv_protocol_command_sequence() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "default",
@@ -154,6 +156,7 @@ fn kv_protocol_command_sequence() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "default",
@@ -234,6 +237,7 @@ fn kv_and_vector_coexist() {
             &mut tx,
             &mut rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "users",
@@ -330,6 +334,7 @@ fn ttl_expiry_produces_expired_key_info() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -376,6 +381,7 @@ fn ttl_expiry_produces_expired_key_info() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
@@ -434,6 +440,7 @@ fn kv_field_get_and_set() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "users",
@@ -474,6 +481,7 @@ fn kv_field_get_and_set() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "users",
@@ -527,6 +535,7 @@ fn kv_truncate_clears_all() {
             &mut tx,
             &mut rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "ephemeral",
@@ -619,6 +628,7 @@ fn kv_index_write_amp_ratio_matches() {
             &mut tx,
             &mut rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "indexed",
@@ -680,6 +690,7 @@ fn kv_mass_expiry_respects_reap_budget() {
             &mut tx,
             &mut rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "mass_expire",
@@ -703,6 +714,7 @@ fn kv_mass_expiry_respects_reap_budget() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "mass_expire",

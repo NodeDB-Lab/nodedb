@@ -85,6 +85,7 @@ pub(super) fn kv_put(value: &str) -> PhysicalPlan {
 /// A KV put of `value` under `key`, with `RETURNING v`.
 pub(super) fn kv_put_at(key: &[u8], surrogate: u32, value: &str) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: coll("cache"),
         key: key.to_vec(),
         value: object(&[("v", text(value))]),

@@ -785,6 +785,7 @@ mod tests {
         let plan = PhysicalPlan::Kv(KvOp::TransferItem {
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inbox"),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "archive"),
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             item_key: vec![1, 2, 3],
             dest_key: vec![4, 5, 6],
             surrogate: Surrogate::new(1),

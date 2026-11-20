@@ -107,6 +107,8 @@ pub async fn move_item_across_shards(
         database_id: mv.database_id,
         plan: PhysicalPlan::Kv(KvOp::Put {
             collection: mv.dest_collection.clone(),
+            // Resolved from the catalog when the class is submitted.
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
             key: mv.dest_key.clone(),
             value,
             ttl_ms: 0,

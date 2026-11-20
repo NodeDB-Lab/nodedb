@@ -148,7 +148,7 @@ impl LocalPlanExecutor {
     /// One-shot execution: validate + decode, fan across all local cores,
     /// merge, and return the merged payload.
     async fn execute_plan_inner(&self, req: ExecuteRequest) -> ExecuteResponse {
-        let (plan, database_id, deadline) = match self.validate_and_decode(&req).await {
+        let (mut plan, database_id, deadline) = match self.validate_and_decode(&req).await {
             Ok(t) => t,
             Err(e) => return ExecuteResponse::err(e),
         };
@@ -210,6 +210,15 @@ impl LocalPlanExecutor {
         let vshard_id = crate::types::VShardId::new(vshard_raw);
         if let Err(error) = reject_unadmitted_crdt_apply(&plan) {
             return ExecuteResponse::err(error);
+        }
+        // This node proposes the write, so a KV write's declared columns
+        // resolve here, in place, before the entry exists.
+        if let Err(e) = crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+            &self.state,
+            tenant_id,
+            &mut plan,
+        ) {
+            return ExecuteResponse::err(execution_error_to_typed(e));
         }
 
         {

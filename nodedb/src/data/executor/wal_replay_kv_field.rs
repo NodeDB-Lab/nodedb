@@ -36,10 +36,16 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, updates, surrogate, if_present) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32, bool)>(
-                payload,
-            )
+        let (disc, collection, key, updates, surrogate, if_present, declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<(String, Vec<u8>)>,
+                u32,
+                bool,
+                Vec<nodedb_physical::physical_plan::DeclaredColumn>,
+            )>(payload)
             .ok()?;
         if disc != "kv_field_set" {
             return None;
@@ -62,7 +68,8 @@ impl CoreLoop {
             &collection,
             current.as_deref(),
             &updates,
-            self.declared_columns_of(database_id, tenant_id, &collection),
+            // The columns the live merge re-typed under, which the record holds.
+            &declared,
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -191,6 +198,7 @@ mod tests {
     #[test]
     fn kv_field_set_merges_onto_existing_document_and_survives_replay() {
         let put_p1 = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p1".to_vec(),
             value: nodedb_types::json_to_msgpack(&serde_json::json!({ "hp": 10 }))
@@ -202,6 +210,7 @@ mod tests {
             provenance: None,
         });
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p1".to_vec(),
             updates: vec![("mana".to_string(), json_field_bytes(serde_json::json!(5)))],
@@ -240,6 +249,7 @@ mod tests {
     #[test]
     fn kv_field_set_onto_absent_key_creates_from_empty_object() {
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"fresh".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(100)))],
@@ -278,6 +288,7 @@ mod tests {
         // SQL form, RESP `SET`). A field set against it is a type mismatch
         // live, so replay skips the record and the seed survives untouched.
         let put_scalar = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p2".to_vec(),
             value: b"42".to_vec(),
@@ -288,6 +299,7 @@ mod tests {
             provenance: None,
         });
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p2".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(1)))],
@@ -326,6 +338,7 @@ mod tests {
     #[test]
     fn kv_field_set_surrogate_survives_replay() {
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p3".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(7)))],

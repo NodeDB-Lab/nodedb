@@ -21,7 +21,7 @@
 //! Like every KV put-family record, `kv_incr` carries the row's surrogate,
 //! and replay binds the same one.
 
-use nodedb_physical::physical_plan::KvCounterShape;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvCounterShape};
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
@@ -39,6 +39,7 @@ type KvIncrRecord<'a> = (
     u32,
     KvCounterShape,
     Option<u64>,
+    Vec<DeclaredColumn>,
 );
 
 impl CoreLoop {
@@ -58,7 +59,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, delta, ttl_ms, surrogate, shape, expire_at_ms) =
+        let (disc, collection, key, delta, ttl_ms, surrogate, shape, expire_at_ms, declared) =
             zerompk::from_msgpack::<KvIncrRecord<'_>>(payload).ok()?;
         if disc != "kv_incr" {
             return None;
@@ -78,10 +79,8 @@ impl CoreLoop {
         // Replay re-applies a write the policy already admitted when it was
         // first accepted. Re-deciding it here would make recovery depend on
         // the policies of whoever happens to be connected. The declared
-        // column rule is part of the computation, so it runs again.
-        let declared = self
-            .declared_columns_of(database_id, tenant_id, &collection)
-            .to_vec();
+        // column rule is part of the computation, so it runs again under the
+        // columns the live write used, which the record holds.
         let gate = |image: &[u8]| fit_replayed_kv_image(image, &declared);
         let admit: crate::engine::kv::AtomicImageGate<'_> = &gate;
         let result = match expire_at_ms {
@@ -302,6 +301,7 @@ mod tests {
     #[test]
     fn kv_incr_survives_wal_replay_from_empty() {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
             value: b"5".to_vec(),
@@ -312,6 +312,7 @@ mod tests {
             provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
             delta: 3,
@@ -336,6 +337,7 @@ mod tests {
     #[test]
     fn kv_incr_replayed_twice_does_not_double_count() {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
             value: b"5".to_vec(),
@@ -346,6 +348,7 @@ mod tests {
             provenance: None,
         });
         let incr1 = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
             delta: 3,
@@ -355,6 +358,7 @@ mod tests {
             shape: KvCounterShape::Raw,
         });
         let incr2 = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
             delta: 3,
@@ -379,6 +383,7 @@ mod tests {
     #[test]
     fn kv_incr_with_zero_ttl_preserves_existing_expiry() {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"temp".to_vec(),
             value: b"5".to_vec(),
@@ -389,6 +394,7 @@ mod tests {
             provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"temp".to_vec(),
             delta: 3,
@@ -418,6 +424,7 @@ mod tests {
         // at replay time would install a value far larger than 6000, since
         // real wall-clock time is vastly greater than 1000.
         let put_seed = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"daily".to_vec(),
             value: b"0".to_vec(),
@@ -435,6 +442,7 @@ mod tests {
             surrogate: 1,
             shape: &KvCounterShape::Raw,
             expire_at_ms: Some(6_000),
+            declared: &[],
         })
         .expect("encode kv_incr with absolute expiry");
 
@@ -474,6 +482,7 @@ mod tests {
     #[test]
     fn kv_incr_over_non_numeric_value_replays_as_noop() {
         let put_str = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"str".to_vec(),
             value: b"hello".to_vec(),
@@ -484,6 +493,7 @@ mod tests {
             provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"str".to_vec(),
             delta: 1,
@@ -521,6 +531,7 @@ mod tests {
         let template = nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(template_row))
             .expect("encode template");
         let incr = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"fresh".to_vec(),
             delta: 5,
@@ -570,6 +581,7 @@ mod tests {
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
 
         let plan = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"daily".to_vec(),
             delta: 1,
@@ -599,7 +611,7 @@ mod tests {
             .find(|r| r.header.tenant_id == TID)
             .expect("incr record present");
 
-        let (disc, _collection, _key, _delta, ttl_ms_field, _surrogate, _shape, expire_at_ms) =
+        let (disc, _collection, _key, _delta, ttl_ms_field, _surrogate, _shape, expire_at_ms, _) =
             zerompk::from_msgpack::<super::KvIncrRecord<'_>>(&record.payload)
                 .expect("kv_incr record");
         assert_eq!(disc, "kv_incr");

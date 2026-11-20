@@ -172,6 +172,7 @@ fn kv_no_ttl_byte_identical() {
     let ops: Vec<PhysicalPlan> = (0..100)
         .map(|i| {
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "kv_coll",
@@ -357,6 +358,7 @@ fn kv_with_ttl_byte_identical() {
     let ops: Vec<PhysicalPlan> = (0..100)
         .map(|i| {
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "kv_coll",

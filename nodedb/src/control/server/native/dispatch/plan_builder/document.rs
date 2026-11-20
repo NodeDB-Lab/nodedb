@@ -71,6 +71,8 @@ pub(crate) async fn build_point_put(
             let surrogate = super::helpers::assign_surrogate(ctx, collection, &key).await?;
             Ok(PhysicalPlan::Kv(KvOp::Put {
                 collection: QualifiedCollection::new(ctx.database_id(), collection),
+                // Resolved from the catalog before the write is journaled.
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
                 key,
                 value,
                 ttl_ms: 0,

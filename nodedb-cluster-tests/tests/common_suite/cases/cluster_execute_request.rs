@@ -35,6 +35,7 @@ fn make_kv_put_request(
     let value_bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::String("hello".into()))
         .expect("encode value");
     let plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(nodedb_types::id::DatabaseId::DEFAULT, collection),
         key: b"test-key".to_vec(),
         value: value_bytes,
@@ -283,6 +284,7 @@ async fn execute_request_cross_node_dispatch() {
             let value_bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::String("v1".into()))
                 .expect("encode value");
             let plan = PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(
                     nodedb_types::id::DatabaseId::DEFAULT,
                     "cross_node_kv",

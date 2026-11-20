@@ -21,6 +21,7 @@ fn kv_get_isolated() {
         &mut rx,
         TENANT_A,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"session_abc".to_vec(),
             value: b"tenant_a_session_data".to_vec(),

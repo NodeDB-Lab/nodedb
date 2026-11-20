@@ -25,6 +25,7 @@ fn kv_put_scan_roundtrip() {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "prefs",
@@ -45,6 +46,7 @@ fn kv_put_scan_roundtrip() {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "prefs",

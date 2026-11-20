@@ -102,6 +102,7 @@ fn send_ok(
 
 fn kv_put(coll: &str, key: &[u8], value: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, coll),
         key: key.to_vec(),
         value: value.to_vec(),

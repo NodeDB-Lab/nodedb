@@ -249,6 +249,14 @@ pub async fn intercept_and_authorize(
     {
         return Ok(CloneCheckedOutcome::Handled(answer.response));
     }
+    // A KV write's declared columns resolve here, in place, on the task
+    // this gate owns. Every proposer and dispatch of the checked task then
+    // carries them, with no copy of the plan.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        state,
+        task.tenant_id,
+        &mut task.plan,
+    )?;
     let authorized = authorize_task_set(
         identity,
         std::slice::from_ref(&task),

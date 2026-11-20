@@ -120,6 +120,7 @@ mod tests {
 
     fn put(surrogate: Surrogate) -> KvOp {
         KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
             key: b"k".to_vec(),
             value: b"v".to_vec(),
@@ -133,6 +134,7 @@ mod tests {
 
     fn batch(surrogates: Vec<Surrogate>) -> KvOp {
         KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
             entries: vec![
                 (b"a".to_vec(), b"1".to_vec()),

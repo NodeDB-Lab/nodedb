@@ -48,6 +48,7 @@ fn single_core_cross_type_hash_join() {
             &mut ctx.tx,
             &mut ctx.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",
@@ -167,6 +168,7 @@ fn single_core_left_join_with_nulls() {
             &mut ctx.tx,
             &mut ctx.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",

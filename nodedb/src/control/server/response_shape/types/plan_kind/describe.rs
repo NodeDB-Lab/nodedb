@@ -187,6 +187,7 @@ mod tests {
         };
         let plans = [
             PhysicalPlan::Kv(KvOp::Insert {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 value: Vec::new(),
@@ -196,6 +197,7 @@ mod tests {
                 rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::InsertIfAbsent {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 value: Vec::new(),
@@ -205,6 +207,7 @@ mod tests {
                 rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 value: Vec::new(),
@@ -216,6 +219,7 @@ mod tests {
                 rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
                 value: Vec::new(),
@@ -226,6 +230,7 @@ mod tests {
                 provenance: None,
             }),
             PhysicalPlan::Kv(KvOp::BatchPut {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 entries: Vec::new(),
                 ttl_ms: 0,
@@ -255,6 +260,7 @@ mod tests {
 
     fn kv_put() -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             value: Vec::new(),
@@ -281,6 +287,7 @@ mod tests {
     #[test]
     fn kv_insert_on_conflict_update_is_decided_by_op() {
         let plan = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
             value: Vec::new(),

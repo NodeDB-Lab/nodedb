@@ -80,6 +80,7 @@ mod tests {
         use crate::control::server::response_shape::calvin_fold::calvin_tag_for_plan;
 
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "items"),
             key: Vec::new(),
             value: Vec::new(),

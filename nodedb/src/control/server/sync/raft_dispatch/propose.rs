@@ -37,7 +37,7 @@ use crate::event::EventSource;
 pub(crate) async fn propose_sync_plan(
     state: &SharedState,
     owner: RecordOwner,
-    plan: &PhysicalPlan,
+    mut plan: PhysicalPlan,
     event_source: EventSource,
     deadline: StatementDeadline,
     user_roles: Vec<String>,
@@ -48,6 +48,12 @@ pub(crate) async fn propose_sync_plan(
         vshard_id,
     } = owner;
     let proposer = state.async_raft_proposer()?;
+    // A KV write's declared columns resolve here, in place, before the entry
+    // exists.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        state, tenant_id, &mut plan,
+    )?;
+    let plan = &plan;
     // The entry carries resolved rows: a timeseries ingest resolves here, on
     // the proposer, before the entry exists.
     let resolved = crate::control::write_resolve::resolve_for_log(

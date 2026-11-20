@@ -26,6 +26,16 @@ impl From<nodedb_types::sync::wire::SyncWireVersionMismatch> for Error {
     }
 }
 
+/// A KV write whose declared columns were never resolved is a broken
+/// invariant of the Control Plane, never a request error.
+impl From<nodedb_physical::physical_plan::KvColumnsPending> for Error {
+    fn from(e: nodedb_physical::physical_plan::KvColumnsPending) -> Self {
+        Self::Internal {
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<nodedb_types::NotScalar> for Error {
     fn from(e: nodedb_types::NotScalar) -> Self {
         Self::BadRequest {

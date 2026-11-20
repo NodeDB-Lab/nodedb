@@ -44,6 +44,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         if self.kv_engine.is_over_budget() {
             return Err(ErrorCode::ResourcesExhausted);
@@ -54,7 +55,6 @@ impl CoreLoop {
             .map_err(|e| atomic_error_code(e.into(), collection))?;
         // The declared column rule fits the computed row, as the live engine
         // gate does. It never changes an integer it accepts.
-        let declared = self.declared_columns_of(did, tid, collection);
         let new_bytes = fit_kv_image(&computed, declared)?.unwrap_or(computed);
         admit_kv_row(
             rls_write_check,
@@ -104,6 +104,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
             ..
         } = ctx;
         if self.kv_engine.is_over_budget() {
@@ -115,7 +116,6 @@ impl CoreLoop {
             .map_err(|e| atomic_error_code(e.into(), collection))?;
         // The declared column rule fits the computed row, as the live engine
         // gate does, and the reply carries the value the fitted row stores.
-        let declared = self.declared_columns_of(did, tid, collection);
         let (new_value, new_bytes) = match fit_kv_image(&computed, declared)? {
             None => (computed_value, computed),
             Some(fitted) => (
@@ -167,6 +167,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
             ..
         } = ctx;
         if self.kv_engine.is_over_budget() {
@@ -180,7 +181,6 @@ impl CoreLoop {
         // `execute_kv_cas`: a swap into a typed row stores the row, not
         // `new_value` itself.
         let write_bytes = if matches {
-            let declared = self.declared_columns_of(did, tid, collection);
             let fitted = fit_kv_image(&computed, declared)?.unwrap_or(computed);
             admit_kv_row(
                 rls_write_check,
@@ -238,6 +238,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
             ..
         } = ctx;
         if self.kv_engine.is_over_budget() {
@@ -249,7 +250,6 @@ impl CoreLoop {
             .map_err(|e| atomic_error_code(e.into(), collection))?;
         // Fitted and decided on the image the write stores, same as
         // `execute_kv_getset`.
-        let declared = self.declared_columns_of(did, tid, collection);
         let write_bytes = fit_kv_image(&computed, declared)?.unwrap_or(computed);
         admit_kv_row(
             rls_write_check,
@@ -416,6 +416,7 @@ mod tests {
 
     fn incr_op(key: &[u8], delta: i64) -> KvOp {
         KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             key: key.to_vec(),
             delta,
@@ -470,6 +471,7 @@ mod tests {
         seed(&mut h.core, COLLECTION, b"slot", &stored_value);
 
         let op = KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             key: b"slot".to_vec(),
             expected: b"not-the-stored-value".to_vec(),
@@ -502,6 +504,7 @@ mod tests {
         seed(&mut h.core, COLLECTION, b"slot", b"actual");
 
         let op = KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             key: b"slot".to_vec(),
             expected: b"actual".to_vec(),

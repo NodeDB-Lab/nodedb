@@ -22,7 +22,7 @@
 //! resolves a stable overlay slot per key and the plan surrogate is ignored
 //! here.
 
-use nodedb_physical::physical_plan::KvOp;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvOp};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -55,6 +55,8 @@ struct StageTransfer<'a> {
     amount: nodedb_physical::physical_plan::TransferAmount,
     /// Compiled RLS write predicate for the collection both rows live in.
     rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The declared columns the plan carries.
+    declared: &'a [DeclaredColumn],
 }
 
 /// The per-statement inputs of a staged cross-collection item move. The two
@@ -67,6 +69,8 @@ struct StageTransferItem<'a> {
     dest_key: &'a [u8],
     source_rls_write_check: &'a nodedb_types::RlsWriteCheck,
     dest_rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The destination's declared columns the plan carries.
+    declared: &'a [DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -85,6 +89,7 @@ impl CoreLoop {
         match op {
             KvOp::FieldSet {
                 collection,
+                declared_columns,
                 key,
                 updates,
                 // Durable identity binds at COMMIT-time replay; the overlay
@@ -96,14 +101,26 @@ impl CoreLoop {
                 // before the write is staged, so no row image is projected here.
                 returning: _,
                 rls_filters: _,
-            } => match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
-                Ok(ctx) => {
-                    self.stage_kv_field_set(&ctx, key, updates, *if_present, rls_write_check)
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                match self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key) {
+                    Ok(ctx) => self.stage_kv_field_set(
+                        &ctx,
+                        key,
+                        updates,
+                        *if_present,
+                        (rls_write_check, declared),
+                    ),
+                    Err(e) => self.response_error(task, e),
                 }
-                Err(e) => self.response_error(task, e),
-            },
+            }
             KvOp::Transfer {
                 collection,
+                declared_columns,
                 source_key,
                 dest_key,
                 field,
@@ -111,36 +128,53 @@ impl CoreLoop {
                 debit_surrogate: _,
                 credit_surrogate: _,
                 rls_write_check,
-            } => self.stage_kv_transfer(
-                &cx,
-                StageTransfer {
-                    collection: collection.as_str(),
-                    source_key,
-                    dest_key,
-                    field,
-                    amount: *amount,
-                    rls_write_check,
-                },
-            ),
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                self.stage_kv_transfer(
+                    &cx,
+                    StageTransfer {
+                        collection: collection.as_str(),
+                        source_key,
+                        dest_key,
+                        field,
+                        amount: *amount,
+                        rls_write_check,
+                        declared,
+                    },
+                )
+            }
             KvOp::TransferItem {
                 source_collection,
                 dest_collection,
+                declared_columns,
                 item_key,
                 dest_key,
                 surrogate: _,
                 source_rls_write_check,
                 dest_rls_write_check,
-            } => self.stage_kv_transfer_item(
-                &cx,
-                StageTransferItem {
-                    source_collection: source_collection.as_str(),
-                    dest_collection: dest_collection.as_str(),
-                    item_key,
-                    dest_key,
-                    source_rls_write_check,
-                    dest_rls_write_check,
-                },
-            ),
+            } => {
+                let declared =
+                    match self.kv_op_columns(task, declared_columns, dest_collection.as_str()) {
+                        Ok(declared) => declared,
+                        Err(refusal) => return refusal,
+                    };
+                self.stage_kv_transfer_item(
+                    &cx,
+                    StageTransferItem {
+                        source_collection: source_collection.as_str(),
+                        dest_collection: dest_collection.as_str(),
+                        item_key,
+                        dest_key,
+                        source_rls_write_check,
+                        dest_rls_write_check,
+                        declared,
+                    },
+                )
+            }
             other => unreachable!(
                 "execute_stage_kv_transfer called on an unexpected KvOp; \
                  caller invariant broken: {other:?}"
@@ -156,7 +190,7 @@ impl CoreLoop {
         key: &[u8],
         updates: &[(String, Vec<u8>)],
         if_present: bool,
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        (rls_write_check, declared): super::stage_kv_atomic::ImageRules<'_>,
     ) -> Response {
         let current = match self.resolve_kv_current(ctx, key) {
             Ok(current) => current,
@@ -175,15 +209,11 @@ impl CoreLoop {
                 Err(e) => self.response_error(ctx.task, e),
             };
         }
-        let computed = match merge_field_updates(
-            ctx.collection,
-            current.as_deref(),
-            updates,
-            self.declared_columns_of(ctx.database_id, ctx.tid, ctx.collection),
-        ) {
-            Ok(c) => c,
-            Err(e) => return self.response_error(ctx.task, e),
-        };
+        let computed =
+            match merge_field_updates(ctx.collection, current.as_deref(), updates, declared) {
+                Ok(c) => c,
+                Err(e) => return self.response_error(ctx.task, e),
+            };
         if let Err(e) = self.stage_admit_kv_image(ctx, &computed.new_value, rls_write_check) {
             return self.response_error(ctx.task, e);
         }
@@ -214,6 +244,7 @@ impl CoreLoop {
             field,
             amount,
             rls_write_check,
+            declared,
         } = params;
         let task = cx.task;
         let source_ctx =
@@ -236,7 +267,6 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
 
-        let declared = self.declared_columns(&source_ctx.coll_key);
         let computed = match compute_transfer(
             &source_bytes,
             dest_bytes.as_deref(),
@@ -323,6 +353,7 @@ impl CoreLoop {
             dest_key,
             source_rls_write_check,
             dest_rls_write_check,
+            declared,
         } = params;
         let task = cx.task;
         let source_ctx =
@@ -342,7 +373,7 @@ impl CoreLoop {
             };
         // The row arriving at the destination meets the destination's
         // declared numeric columns.
-        let fitted = match fit_kv_image(&item_bytes, self.declared_columns(&dest_ctx.coll_key)) {
+        let fitted = match fit_kv_image(&item_bytes, declared) {
             Ok(fitted) => fitted,
             Err(e) => return self.response_error(task, e),
         };

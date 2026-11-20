@@ -83,6 +83,7 @@ fn purge_removes_all_tenant_data() {
         &mut rx,
         TENANT_A,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",

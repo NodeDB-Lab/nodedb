@@ -17,7 +17,7 @@
 //! the same pre-state, fails identically, and mutates nothing — this
 //! converges rather than diverges, so no success-gate is applied here.
 
-use nodedb_physical::physical_plan::KvCounterShape;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvCounterShape};
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
@@ -85,9 +85,17 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, expected, new_value, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, Vec<u8>, u32)>(payload)
-                .ok()?;
+        let (disc, collection, key, expected, new_value, surrogate, declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                Vec<u8>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(payload)
+            .ok()?;
         if disc != "kv_cas" {
             return None;
         }
@@ -96,10 +104,8 @@ impl CoreLoop {
             return Some(0);
         }
         // Replay re-applies a write the policy already admitted when it was
-        // first accepted. The declared column rule is part of the computation.
-        let declared = self
-            .declared_columns_of(database_id, tenant_id, &collection)
-            .to_vec();
+        // first accepted. The declared column rule is part of the computation:
+        // it runs under the columns the live write used, which the record holds.
         let gate = |image: &[u8]| fit_replayed_kv_image(image, &declared);
         let result = self.kv_engine.cas(
             AtomicKeyCtx {
@@ -148,9 +154,16 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, delta, surrogate, shape) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, String, u32, KvCounterShape)>(payload)
-                .ok()?;
+        let (disc, collection, key, delta, surrogate, shape, declared) = zerompk::from_msgpack::<(
+            &str,
+            String,
+            Vec<u8>,
+            String,
+            u32,
+            KvCounterShape,
+            Vec<DeclaredColumn>,
+        )>(payload)
+        .ok()?;
         if disc != "kv_incr_float" {
             return None;
         }
@@ -161,10 +174,8 @@ impl CoreLoop {
         // Replay re-applies a write the policy already admitted when it was
         // first accepted; re-deciding it here would make recovery depend on
         // the policies of whoever happens to be connected. The declared column
-        // rule is part of the computation, so it runs again.
-        let declared = self
-            .declared_columns_of(database_id, tenant_id, &collection)
-            .to_vec();
+        // rule is part of the computation, so it runs again under the
+        // record's columns.
         let gate = |image: &[u8]| fit_replayed_kv_image(image, &declared);
         match self.kv_engine.incr_float(
             AtomicKeyCtx {
@@ -287,8 +298,11 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, new_value, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u32)>(payload).ok()?;
+        let (disc, collection, key, new_value, surrogate, declared) =
+            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u32, Vec<DeclaredColumn>)>(
+                payload,
+            )
+            .ok()?;
         if disc != "kv_getset" {
             return None;
         }
@@ -297,10 +311,8 @@ impl CoreLoop {
             return Some(0);
         }
         // Replay re-applies a write the policy already admitted when it was
-        // first accepted. The declared column rule is part of the computation.
-        let declared = self
-            .declared_columns_of(database_id, tenant_id, &collection)
-            .to_vec();
+        // first accepted. The declared column rule is part of the computation,
+        // under the record's columns.
         let gate = |image: &[u8]| fit_replayed_kv_image(image, &declared);
         let result = self.kv_engine.getset(
             AtomicKeyCtx {
@@ -466,6 +478,7 @@ mod tests {
     #[test]
     fn kv_cas_survives_wal_replay_from_empty() {
         let put_p1 = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
             key: b"p1".to_vec(),
             value: b"idle".to_vec(),
@@ -476,6 +489,7 @@ mod tests {
             provenance: None,
         });
         let cas = PhysicalPlan::Kv(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
             key: b"p1".to_vec(),
             expected: b"idle".to_vec(),
@@ -499,6 +513,7 @@ mod tests {
     #[test]
     fn kv_cas_mismatch_replays_as_noop() {
         let put_p1 = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
             key: b"p1".to_vec(),
             value: b"fighting".to_vec(),
@@ -512,6 +527,7 @@ mod tests {
         // the seeded value is "fighting"); the WAL record still exists
         // because `wal_append_if_write` appends before dispatch.
         let cas = PhysicalPlan::Kv(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
             key: b"p1".to_vec(),
             expected: b"idle".to_vec(),
@@ -536,6 +552,7 @@ mod tests {
     fn kv_cas_empty_expected_against_absent_key_replays_as_create() {
         // No prior put: the key is absent when this record replays.
         let cas = PhysicalPlan::Kv(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
             key: b"player1".to_vec(),
             expected: Vec::new(),
@@ -559,6 +576,7 @@ mod tests {
     #[test]
     fn kv_incr_float_survives_wal_replay_from_empty() {
         let incr1 = PhysicalPlan::Kv(KvOp::IncrFloat {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "scores"),
             key: b"dmg".to_vec(),
             delta: "3.0".into(),
@@ -567,6 +585,7 @@ mod tests {
             shape: KvCounterShape::Raw,
         });
         let incr2 = PhysicalPlan::Kv(KvOp::IncrFloat {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "scores"),
             key: b"dmg".to_vec(),
             delta: "1.5".into(),
@@ -590,6 +609,7 @@ mod tests {
     #[test]
     fn kv_incr_float_non_numeric_replays_as_noop() {
         let put_str = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "scores"),
             key: b"str".to_vec(),
             value: b"hello".to_vec(),
@@ -600,6 +620,7 @@ mod tests {
             provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::IncrFloat {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "scores"),
             key: b"str".to_vec(),
             delta: "1".into(),
@@ -623,6 +644,7 @@ mod tests {
     #[test]
     fn kv_getset_survives_wal_replay_from_empty() {
         let put_tok = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "session"),
             key: b"tok".to_vec(),
             value: b"old-token".to_vec(),
@@ -633,6 +655,7 @@ mod tests {
             provenance: None,
         });
         let getset = PhysicalPlan::Kv(KvOp::GetSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "session"),
             key: b"tok".to_vec(),
             new_value: b"new-token".to_vec(),
@@ -656,6 +679,7 @@ mod tests {
     #[test]
     fn kv_getset_against_absent_key_replays_as_create() {
         let getset = PhysicalPlan::Kv(KvOp::GetSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "session"),
             key: b"fresh".to_vec(),
             new_value: b"new-token".to_vec(),

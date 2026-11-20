@@ -121,6 +121,11 @@ pub(super) fn authorize_and_append(
                 .into(),
         });
     }
+    // A KV write re-types under the declared columns resolved here. Its
+    // record and its live apply carry the same columns.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        shared, tenant_id, &mut plan,
+    )?;
 
     let (marked_position, carried_ordinal) = match &durability {
         WalDurability::AppendHere {

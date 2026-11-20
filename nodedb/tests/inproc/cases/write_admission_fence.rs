@@ -82,6 +82,7 @@ pub(super) fn register_promotion_channel(
 /// A single-key KV point write to `collection` / `key`.
 pub(super) fn kv_put(collection: &str, key: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
         key: key.to_vec(),
         value: b"v".to_vec(),

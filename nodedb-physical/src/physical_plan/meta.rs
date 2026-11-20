@@ -629,7 +629,9 @@ pub enum MetaOp {
     /// `plans` is the transaction's buffered write set. Only part `0` reads
     /// it: the walk classifies every op and names the collections whose
     /// overlay entries serialize. An op class with no resolve serializer
-    /// raises a typed error, so no op class drops from the redo.
+    /// raises a typed error, so no op class drops from the redo. The core
+    /// reads no declared columns from `plans`, so a KV op there can be
+    /// pending.
     ResolveTxnPart {
         txn_id: nodedb_types::id::TxnId,
         plans: Vec<super::PhysicalPlan>,

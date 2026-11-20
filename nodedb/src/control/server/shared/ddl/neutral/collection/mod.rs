@@ -33,7 +33,7 @@ pub use copy_to::{CopyToOptions, copy_to_file};
 pub use create::{CreateCollectionRequest, create_collection, create_table};
 pub use describe::{describe_collection, show_collections};
 pub use dml::{insert_document, upsert_document};
-pub(crate) use doc_config_stored::doc_config_wire_from_stored;
+pub(crate) use doc_config_stored::{declared_columns, doc_config_wire_from_stored};
 pub use drop::{DropCollectionRequest, drop_collection};
 pub use index::{CreateIndexRequest, DropIndexRequest, create_index, drop_index};
 pub use register::{

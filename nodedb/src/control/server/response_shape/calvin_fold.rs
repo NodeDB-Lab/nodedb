@@ -240,6 +240,7 @@ mod tests {
     #[test]
     fn an_upsert_folds_without_a_round_trip() {
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "items"),
             key: Vec::new(),
             value: Vec::new(),

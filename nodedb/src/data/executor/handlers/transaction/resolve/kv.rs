@@ -8,7 +8,8 @@
 //! encoding:
 //!
 //! * A staged value ([`Staged::Put`]) → `RecordType::Put`, `encode_kv_put`'s
-//!   `("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate)`. The
+//!   `("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate,
+//!   declared)` with no declared columns: staging fitted the value. The
 //!   overlay holds the resolved ABSOLUTE post-image (an atomic
 //!   `Incr`/`Cas`/`GetSet` stages its computed value, never a delta), so resolve
 //!   emits exactly that. When the overlay carries an absolute expiry
@@ -125,6 +126,8 @@ pub(super) fn serialize_kv_collection(
                     RESOLVE_TTL_MS,
                     expire_at_ms,
                     surrogate,
+                    // Staging fitted the value under the plan's columns.
+                    &[],
                 )?;
                 ops.push(RedoSubRecord {
                     record_type: RecordType::Put as u32,

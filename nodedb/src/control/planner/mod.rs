@@ -6,6 +6,7 @@ pub mod catalog_adapter;
 pub mod context;
 pub mod descriptor_set;
 pub mod implicit_edges;
+pub mod kv_declared_columns;
 pub mod materialized_sum;
 pub mod period_lock;
 pub mod plan_children;

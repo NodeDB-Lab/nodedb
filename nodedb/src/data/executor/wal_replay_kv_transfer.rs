@@ -9,7 +9,7 @@
 //! `handlers/kv/transfer.rs` perform, against whatever state this core's KV
 //! engine holds at this point in LSN-ordered replay.
 
-use nodedb_physical::physical_plan::TransferAmount;
+use nodedb_physical::physical_plan::{DeclaredColumn, TransferAmount};
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
@@ -30,6 +30,8 @@ pub(super) struct ReplayKvTransferParams<'a> {
     pub amount: TransferAmount,
     pub debit_surrogate: u32,
     pub credit_surrogate: u32,
+    /// The columns the live write re-typed both rows under.
+    pub declared: &'a [DeclaredColumn],
 }
 
 /// Fields needed to replay one `kv_transfer_item` delta record.
@@ -43,6 +45,8 @@ pub(super) struct ReplayKvTransferItemParams<'a> {
     pub item_key: &'a [u8],
     pub dest_key: &'a [u8],
     pub surrogate: u32,
+    /// The destination's columns the live move re-typed the row under.
+    pub declared: &'a [DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -93,48 +97,47 @@ impl CoreLoop {
             Some(dest_bytes.as_slice())
         };
 
-        let declared = self.declared_columns_of(p.database_id, p.tenant_id, p.collection);
-        let computed = match compute_transfer(&source_bytes, dest_ref, p.field, p.amount, declared)
-        {
-            Ok(c) => c,
-            // The live write refused the same balance against the same
-            // pre-state, so the record converges to the same no-op.
-            Err(TransferError::Declared(error)) => {
-                warn!(
-                    core = self.core_id,
-                    collection = p.collection,
-                    source_key = %String::from_utf8_lossy(p.source_key),
-                    dest_key = %String::from_utf8_lossy(p.dest_key),
-                    %error,
-                    "WAL kv_transfer replay: declared column rule refused a balance, \
-                     skipping record"
-                );
-                return 0;
-            }
-            Err(TransferError::TypeMismatch(detail)) => {
-                warn!(
-                    core = self.core_id,
-                    collection = p.collection,
-                    source_key = %String::from_utf8_lossy(p.source_key),
-                    dest_key = %String::from_utf8_lossy(p.dest_key),
-                    %detail,
-                    "WAL kv_transfer replay: type mismatch, skipping record"
-                );
-                return 0;
-            }
-            Err(TransferError::InsufficientBalance { have, need }) => {
-                warn!(
-                    core = self.core_id,
-                    collection = p.collection,
-                    source_key = %String::from_utf8_lossy(p.source_key),
-                    dest_key = %String::from_utf8_lossy(p.dest_key),
-                    %have,
-                    %need,
-                    "WAL kv_transfer replay: insufficient balance, skipping record"
-                );
-                return 0;
-            }
-        };
+        let computed =
+            match compute_transfer(&source_bytes, dest_ref, p.field, p.amount, p.declared) {
+                Ok(c) => c,
+                // The live write refused the same balance against the same
+                // pre-state, so the record converges to the same no-op.
+                Err(TransferError::Declared(error)) => {
+                    warn!(
+                        core = self.core_id,
+                        collection = p.collection,
+                        source_key = %String::from_utf8_lossy(p.source_key),
+                        dest_key = %String::from_utf8_lossy(p.dest_key),
+                        %error,
+                        "WAL kv_transfer replay: declared column rule refused a balance, \
+                         skipping record"
+                    );
+                    return 0;
+                }
+                Err(TransferError::TypeMismatch(detail)) => {
+                    warn!(
+                        core = self.core_id,
+                        collection = p.collection,
+                        source_key = %String::from_utf8_lossy(p.source_key),
+                        dest_key = %String::from_utf8_lossy(p.dest_key),
+                        %detail,
+                        "WAL kv_transfer replay: type mismatch, skipping record"
+                    );
+                    return 0;
+                }
+                Err(TransferError::InsufficientBalance { have, need }) => {
+                    warn!(
+                        core = self.core_id,
+                        collection = p.collection,
+                        source_key = %String::from_utf8_lossy(p.source_key),
+                        dest_key = %String::from_utf8_lossy(p.dest_key),
+                        %have,
+                        %need,
+                        "WAL kv_transfer replay: insufficient balance, skipping record"
+                    );
+                    return 0;
+                }
+            };
 
         // Both rows are bound before either is written, so a replayed
         // transfer cannot half-apply.
@@ -219,9 +222,9 @@ impl CoreLoop {
         };
         // The row arriving at the destination meets the destination's
         // declared numeric columns. The live move refused a row they refuse,
-        // so the record converges to the same no-op.
-        let declared = self.declared_columns_of(p.database_id, p.tenant_id, p.dest_collection);
-        let dest_data = match fit_kv_image(&item_data, declared) {
+        // so the record converges to the same no-op. The record holds the
+        // columns the live move used.
+        let dest_data = match fit_kv_image(&item_data, p.declared) {
             Ok(fitted) => fitted.unwrap_or(item_data),
             Err(error) => {
                 warn!(
@@ -311,6 +314,7 @@ impl CoreLoop {
             amount,
             debit_surrogate,
             credit_surrogate,
+            declared,
         ) = zerompk::from_msgpack::<(
             &str,
             String,
@@ -320,6 +324,7 @@ impl CoreLoop {
             TransferAmount,
             u32,
             u32,
+            Vec<DeclaredColumn>,
         )>(payload)
         .ok()?;
         if disc != "kv_transfer" {
@@ -341,6 +346,7 @@ impl CoreLoop {
             amount,
             debit_surrogate,
             credit_surrogate,
+            declared: &declared,
         }))
     }
 
@@ -371,8 +377,17 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<(usize, usize)> {
-        let (disc, source_collection, dest_collection, item_key, dest_key, surrogate) =
-            zerompk::from_msgpack::<(&str, String, String, Vec<u8>, Vec<u8>, u32)>(payload).ok()?;
+        let (disc, source_collection, dest_collection, item_key, dest_key, surrogate, declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(payload)
+            .ok()?;
         if disc != "kv_transfer_item" {
             return None;
         }
@@ -392,6 +407,7 @@ impl CoreLoop {
             item_key: &item_key,
             dest_key: &dest_key,
             surrogate,
+            declared: &declared,
         }))
     }
 }
@@ -481,6 +497,7 @@ mod tests {
     #[test]
     fn kv_transfer_survives_wal_replay_from_empty() {
         let put_alice = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
             key: b"alice".to_vec(),
             value: kv_doc("balance", 100.0),
@@ -491,6 +508,7 @@ mod tests {
             provenance: None,
         });
         let put_bob = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
             key: b"bob".to_vec(),
             value: kv_doc("balance", 10.0),
@@ -501,6 +519,7 @@ mod tests {
             provenance: None,
         });
         let transfer = PhysicalPlan::Kv(KvOp::Transfer {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
             source_key: b"alice".to_vec(),
             dest_key: b"bob".to_vec(),
@@ -559,6 +578,7 @@ mod tests {
     #[test]
     fn kv_transfer_item_survives_wal_replay_from_empty() {
         let put_item = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inventory"),
             key: b"sword_1".to_vec(),
             value: kv_doc("power", 5.0),
@@ -569,6 +589,7 @@ mod tests {
             provenance: None,
         });
         let transfer_item = PhysicalPlan::Kv(KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inventory"),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "trades"),
             item_key: b"sword_1".to_vec(),

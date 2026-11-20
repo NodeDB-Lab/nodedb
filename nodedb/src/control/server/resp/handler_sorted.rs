@@ -90,6 +90,8 @@ pub(super) async fn handle_zadd(
 
         let plan = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(crate::types::DatabaseId::DEFAULT, &index_name),
+            // Resolved from the catalog before the write is journaled.
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
             key: member,
             value,
             ttl_ms: 0,

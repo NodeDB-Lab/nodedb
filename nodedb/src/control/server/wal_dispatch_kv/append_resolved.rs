@@ -41,6 +41,9 @@ pub(super) fn append_kv_resolved_mutation(
                 // "no expiry", not an absent field to re-derive `ttl_ms` from.
                 Some(*expire_at_ms),
                 surrogate.as_u32(),
+                // The resolve already fitted the image, so replay re-types
+                // nothing.
+                &[],
             )?;
             wal.append_put(tenant_id, vshard_id, database_id, &entry)
         }

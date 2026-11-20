@@ -1331,6 +1331,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Put {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 value: Vec::new(),
                 ttl_ms: 0,
@@ -1341,6 +1342,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Insert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 value: Vec::new(),
                 ttl_ms: 0,
@@ -1350,6 +1352,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::InsertIfAbsent {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 value: Vec::new(),
                 ttl_ms: 0,
@@ -1359,6 +1362,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 value: Vec::new(),
                 ttl_ms: 0,
@@ -1378,6 +1382,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::PredicateUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 filters: Vec::new(),
                 updates: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -1428,6 +1433,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::BatchPut {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 entries: Vec::new(),
                 ttl_ms: 0,
                 intent: nodedb_physical::physical_plan::KvBatchIntent::Put,
@@ -1444,6 +1450,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::FieldSet {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 updates: Vec::new(),
                 surrogate: Surrogate::new(1),
@@ -1454,6 +1461,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Incr {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 delta: 0,
                 ttl_ms: 0,
@@ -1463,6 +1471,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::IncrFloat {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 delta: "0".into(),
                 surrogate: Surrogate::new(1),
@@ -1471,6 +1480,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Cas {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 expected: Vec::new(),
                 new_value: Vec::new(),
@@ -1479,6 +1489,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::GetSet {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 key: Vec::new(),
                 new_value: Vec::new(),
                 surrogate: Surrogate::new(1),
@@ -1487,6 +1498,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Transfer {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 source_key: Vec::new(),
                 dest_key: Vec::new(),
                 field: "f".into(),
@@ -1497,6 +1509,7 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::TransferItem {
                 source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "s"),
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "d"),
                 item_key: Vec::new(),
                 dest_key: Vec::new(),

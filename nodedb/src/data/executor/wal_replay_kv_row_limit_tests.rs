@@ -83,7 +83,7 @@ fn a_put_journaled_before_its_refusal_replays_and_boots() {
     let journal = Journal::open();
     // One key byte makes the row one byte over the limit.
     let over = vec![0u8; MAX_ROW_IMAGE_BYTES];
-    journal.append(&encode_kv_put(COLLECTION, b"k", &over, 0, None, 7).expect("encode"));
+    journal.append(&encode_kv_put(COLLECTION, b"k", &over, 0, None, 7, &[]).expect("encode"));
     assert_eq!(replay(&journal.records()), None);
 }
 
@@ -99,10 +99,17 @@ fn a_size_refused_field_set_replays_the_same_on_every_replica() {
         Value::String("x".repeat(half)),
     )])))
     .expect("encode");
-    journal.append(&encode_kv_put(COLLECTION, b"k", &row, 0, None, 7).expect("encode"));
+    journal.append(&encode_kv_put(COLLECTION, b"k", &row, 0, None, 7, &[]).expect("encode"));
     journal.append(
-        &encode_kv_field_set(COLLECTION, b"k", &[("b".to_string(), text(half))], 7, true)
-            .expect("encode"),
+        &encode_kv_field_set(
+            COLLECTION,
+            b"k",
+            &[("b".to_string(), text(half))],
+            7,
+            true,
+            &[],
+        )
+        .expect("encode"),
     );
     let records = journal.records();
     let first = replay(&records);
@@ -117,6 +124,7 @@ fn a_size_refused_field_set_replays_the_same_on_every_replica() {
 fn the_control_plane_refuses_a_put_over_the_limit_before_the_append() {
     let journal = Journal::open();
     let op = KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
         key: b"k".to_vec(),
         value: vec![0u8; MAX_ROW_IMAGE_BYTES],

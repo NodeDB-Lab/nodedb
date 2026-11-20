@@ -89,6 +89,7 @@ mod tests {
             5_000,
             Some(6_000),
             1,
+            &[],
         )
         .expect("encode kv_put with absolute expiry");
 
@@ -129,6 +130,7 @@ mod tests {
             5_000,
             Some(6_000),
             &[1, 2],
+            &[],
         )
         .expect("encode kv_batch_put with absolute expiry");
 
@@ -169,6 +171,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok2".to_vec(),
             value: b"payload".to_vec(),
@@ -202,8 +205,8 @@ mod tests {
             .iter()
             .find(|r| r.header.tenant_id == TID)
             .expect("one record");
-        let (disc, _collection, _key, _value, ttl_ms, expire_at_ms, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
+        let (disc, _collection, _key, _value, ttl_ms, expire_at_ms, surrogate, _declared) =
+            zerompk::from_msgpack::<crate::data::executor::wal_replay::kv_put::KvPutTuple>(
                 &record.payload,
             )
             .expect("current kv_put shape");
@@ -221,6 +224,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok3".to_vec(),
             value: b"payload".to_vec(),
@@ -246,8 +250,8 @@ mod tests {
         wal.sync().expect("wal sync");
         let records = wal.replay().expect("wal replay read");
         let record = &records[0];
-        let (_disc, _collection, _key, _value, _ttl_ms, expire_at_ms, _surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
+        let (_disc, _collection, _key, _value, _ttl_ms, expire_at_ms, _surrogate, _declared) =
+            zerompk::from_msgpack::<crate::data::executor::wal_replay::kv_put::KvPutTuple>(
                 &record.payload,
             )
             .expect("current kv_put shape for a non-TTL write");
@@ -288,6 +292,7 @@ mod tests {
     fn execute_kv_put_installs_task_resolved_now_ms_verbatim() {
         let mut h = make_core();
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok4".to_vec(),
             value: b"payload".to_vec(),
@@ -334,6 +339,7 @@ mod tests {
         // `CoreLoop::kv_ttl_now_ms`, which this test pins for `execute_kv_insert`.
         let mut h = make_core();
         let plan = PhysicalPlan::Kv(KvOp::Insert {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"tok5".to_vec(),
             value: b"payload".to_vec(),

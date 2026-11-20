@@ -2,6 +2,7 @@
 
 //! Pure payload encoders for KV WAL records.
 
+use nodedb_physical::physical_plan::DeclaredColumn;
 use nodedb_physical::physical_plan::KvCounterShape;
 use nodedb_physical::physical_plan::TransferAmount;
 use nodedb_physical::physical_plan::UpdateValue;
@@ -16,8 +17,9 @@ fn encode<T: zerompk::ToMessagePack>(context: &str, value: &T) -> crate::Result<
 }
 
 /// Encode a `kv_put` WAL payload: `("kv_put", collection, key, value, ttl_ms,
-/// expire_at_ms, surrogate)`. `surrogate` is the row's bound identity. Replay
-/// refuses a record that carries `0`.
+/// expire_at_ms, surrogate, declared)`. `surrogate` is the row's bound
+/// identity. Replay refuses a record that carries `0`. `declared` holds the
+/// columns `value` re-types under. A value already fitted carries none.
 pub(crate) fn encode_kv_put(
     collection: &str,
     key: &[u8],
@@ -25,6 +27,7 @@ pub(crate) fn encode_kv_put(
     ttl_ms: u64,
     expire_at_ms: Option<u64>,
     surrogate: u32,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "put",
@@ -36,24 +39,43 @@ pub(crate) fn encode_kv_put(
             ttl_ms,
             expire_at_ms,
             surrogate,
+            declared,
         ),
     )
 }
 
+/// Fields of a `kv_insert_on_conflict_update` WAL payload.
+pub(crate) struct KvInsertOnConflictRecord<'a> {
+    pub collection: &'a str,
+    pub key: &'a [u8],
+    /// The pre-merge `EXCLUDED` row.
+    pub value: &'a [u8],
+    pub ttl_ms: u64,
+    /// The `DO UPDATE SET` inputs.
+    pub updates: &'a [(String, UpdateValue)],
+    pub expire_at_ms: Option<u64>,
+    /// The identity the live write binds the row to.
+    pub surrogate: u32,
+    /// The columns both branches re-type the row under.
+    pub declared: &'a [DeclaredColumn],
+}
+
 /// Encode a `kv_insert_on_conflict_update` WAL payload:
 /// `("kv_insert_on_conflict_update", collection, key, value, ttl_ms, updates,
-/// expire_at_ms, surrogate)`. Delta record: `value` is the pre-merge
-/// `EXCLUDED` row, `updates` carries `DO UPDATE SET` inputs, and replay re-runs
-/// the merge. `surrogate` is the identity the live write binds the row to.
+/// expire_at_ms, surrogate, declared)`. Delta record: replay re-runs the merge.
 pub(crate) fn encode_kv_insert_on_conflict_update(
-    collection: &str,
-    key: &[u8],
-    value: &[u8],
-    ttl_ms: u64,
-    updates: &[(String, UpdateValue)],
-    expire_at_ms: Option<u64>,
-    surrogate: u32,
+    record: KvInsertOnConflictRecord<'_>,
 ) -> crate::Result<Vec<u8>> {
+    let KvInsertOnConflictRecord {
+        collection,
+        key,
+        value,
+        ttl_ms,
+        updates,
+        expire_at_ms,
+        surrogate,
+        declared,
+    } = record;
     encode(
         "insert on conflict update",
         &(
@@ -65,6 +87,7 @@ pub(crate) fn encode_kv_insert_on_conflict_update(
             updates,
             expire_at_ms,
             surrogate,
+            declared,
         ),
     )
 }
@@ -79,10 +102,13 @@ pub(crate) struct KvTransferFields<'a> {
     pub amount: TransferAmount,
     pub debit_surrogate: u32,
     pub credit_surrogate: u32,
+    /// The columns both written rows re-type under.
+    pub declared: &'a [DeclaredColumn],
 }
 
 /// Encode a `kv_transfer` delta WAL payload: `("kv_transfer", collection,
-/// source_key, dest_key, field, amount, debit_surrogate, credit_surrogate)`.
+/// source_key, dest_key, field, amount, debit_surrogate, credit_surrogate,
+/// declared)`.
 /// Delta record: replay re-executes `compute_transfer`, not a captured post-image.
 pub(crate) fn encode_kv_transfer(f: KvTransferFields<'_>) -> crate::Result<Vec<u8>> {
     encode(
@@ -96,19 +122,22 @@ pub(crate) fn encode_kv_transfer(f: KvTransferFields<'_>) -> crate::Result<Vec<u
             f.amount,
             f.debit_surrogate,
             f.credit_surrogate,
+            f.declared,
         ),
     )
 }
 
 /// Encode a `kv_transfer_item` delta WAL payload: `("kv_transfer_item",
-/// source_collection, dest_collection, item_key, dest_key, surrogate)`. Replay
-/// re-verifies source ownership and re-executes the delete+insert pair.
+/// source_collection, dest_collection, item_key, dest_key, surrogate,
+/// declared)`. Replay re-verifies source ownership and re-executes the
+/// delete+insert pair. `declared` holds the destination's columns.
 pub(crate) fn encode_kv_transfer_item(
     source_collection: &str,
     dest_collection: &str,
     item_key: &[u8],
     dest_key: &[u8],
     surrogate: u32,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "transfer item",
@@ -119,46 +148,59 @@ pub(crate) fn encode_kv_transfer_item(
             item_key,
             dest_key,
             surrogate,
+            declared,
         ),
     )
 }
 
 /// Encode a `kv_cas` WAL payload: `("kv_cas", collection, key, expected,
-/// new_value, surrogate)`. Carries the CAS inputs, not the live result —
-/// replay re-runs the compare against whatever value is present.
+/// new_value, surrogate, declared)`. Carries the CAS inputs, not the live
+/// result — replay re-runs the compare against whatever value is present.
 pub(crate) fn encode_kv_cas(
     collection: &str,
     key: &[u8],
     expected: &[u8],
     new_value: &[u8],
     surrogate: u32,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "cas",
-        &("kv_cas", collection, key, expected, new_value, surrogate),
+        &(
+            "kv_cas", collection, key, expected, new_value, surrogate, declared,
+        ),
     )
 }
 
 /// Encode a `kv_incr_float` WAL payload: `("kv_incr_float", collection, key,
-/// delta, surrogate, shape)`. `delta` is the client's decimal text. Delta
-/// record: replay re-runs `incr_float` on the present value, and an absent key
-/// takes `shape`.
+/// delta, surrogate, shape, declared)`. `delta` is the client's decimal text.
+/// Delta record: replay re-runs `incr_float` on the present value, and an
+/// absent key takes `shape`.
 pub(crate) fn encode_kv_incr_float(
     collection: &str,
     key: &[u8],
     delta: &str,
     surrogate: u32,
     shape: &KvCounterShape,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "incr_float",
-        &("kv_incr_float", collection, key, delta, surrogate, shape),
+        &(
+            "kv_incr_float",
+            collection,
+            key,
+            delta,
+            surrogate,
+            shape,
+            declared,
+        ),
     )
 }
 
 /// Encode a `kv_field_set` WAL payload: `("kv_field_set", collection, key,
-/// updates, surrogate, if_present)`. Delta record: `updates` carries
-/// field-level inputs, not the post-merge document — replay re-runs
+/// updates, surrogate, if_present, declared)`. Delta record: `updates`
+/// carries field-level inputs, not the post-merge document — replay re-runs
 /// `merge_field_updates`. `if_present` pins the SQL-UPDATE-vs-HSET no-op
 /// rule so replay matches the live decision.
 pub(crate) fn encode_kv_field_set(
@@ -167,6 +209,7 @@ pub(crate) fn encode_kv_field_set(
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
     if_present: bool,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "field set",
@@ -177,21 +220,23 @@ pub(crate) fn encode_kv_field_set(
             updates,
             surrogate,
             if_present,
+            declared,
         ),
     )
 }
 
 /// Encode a `kv_getset` WAL payload: `("kv_getset", collection, key,
-/// new_value, surrogate)`.
+/// new_value, surrogate, declared)`.
 pub(crate) fn encode_kv_getset(
     collection: &str,
     key: &[u8],
     new_value: &[u8],
     surrogate: u32,
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "getset",
-        &("kv_getset", collection, key, new_value, surrogate),
+        &("kv_getset", collection, key, new_value, surrogate, declared),
     )
 }
 
@@ -201,14 +246,16 @@ pub(crate) fn encode_kv_delete(collection: &str, keys: &[Vec<u8>]) -> crate::Res
 }
 
 /// Encode a `kv_batch_put` WAL payload: `("kv_batch_put", collection, entries,
-/// ttl_ms, expire_at_ms, surrogates)`. `surrogates` is positional against
-/// `entries`, one bound identity per entry.
+/// ttl_ms, expire_at_ms, surrogates, declared)`. `surrogates` is positional
+/// against `entries`, one bound identity per entry. `declared` holds the
+/// columns every value re-types under.
 pub(crate) fn encode_kv_batch_put(
     collection: &str,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
     expire_at_ms: Option<u64>,
     surrogates: &[u32],
+    declared: &[DeclaredColumn],
 ) -> crate::Result<Vec<u8>> {
     encode(
         "batch put",
@@ -219,6 +266,7 @@ pub(crate) fn encode_kv_batch_put(
             ttl_ms,
             expire_at_ms,
             surrogates,
+            declared,
         ),
     )
 }
@@ -310,10 +358,12 @@ pub(crate) struct KvIncrRecord<'a> {
     /// The absolute expiry the live write resolved. `Some` only when
     /// `ttl_ms > 0`, so replay installs the exact instant.
     pub expire_at_ms: Option<u64>,
+    /// The columns the computed image re-types under.
+    pub declared: &'a [DeclaredColumn],
 }
 
 /// Encode a `kv_incr` WAL payload: `("kv_incr", collection, key, delta,
-/// ttl_ms, surrogate, shape, expire_at_ms)`.
+/// ttl_ms, surrogate, shape, expire_at_ms, declared)`.
 pub(crate) fn encode_kv_incr(record: KvIncrRecord<'_>) -> crate::Result<Vec<u8>> {
     let KvIncrRecord {
         collection,
@@ -323,6 +373,7 @@ pub(crate) fn encode_kv_incr(record: KvIncrRecord<'_>) -> crate::Result<Vec<u8>>
         surrogate,
         shape,
         expire_at_ms,
+        declared,
     } = record;
     encode(
         "incr",
@@ -335,6 +386,7 @@ pub(crate) fn encode_kv_incr(record: KvIncrRecord<'_>) -> crate::Result<Vec<u8>>
             surrogate,
             shape,
             expire_at_ms,
+            declared,
         ),
     )
 }
@@ -388,24 +440,34 @@ pub(crate) fn encode_kv_truncate(collection: &str) -> crate::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use nodedb_physical::physical_plan::{KvCounterShape, TransferAmount, UpdateValue};
+    use nodedb_physical::physical_plan::{
+        DeclaredColumn, KvCounterShape, TransferAmount, UpdateValue,
+    };
 
     use super::{
-        KvIncrRecord, KvTransferFields, encode_kv_batch_put, encode_kv_cas, encode_kv_expire,
-        encode_kv_field_set, encode_kv_getset, encode_kv_incr, encode_kv_incr_float,
-        encode_kv_insert_on_conflict_update, encode_kv_put, encode_kv_register_index,
-        encode_kv_transfer, encode_kv_transfer_item,
+        KvIncrRecord, KvInsertOnConflictRecord, KvTransferFields, encode_kv_batch_put,
+        encode_kv_cas, encode_kv_expire, encode_kv_field_set, encode_kv_getset, encode_kv_incr,
+        encode_kv_incr_float, encode_kv_insert_on_conflict_update, encode_kv_put,
+        encode_kv_register_index, encode_kv_transfer, encode_kv_transfer_item,
     };
 
     #[test]
     fn kv_put_carries_the_row_surrogate() {
-        let entry = encode_kv_put("users", b"k1", b"v1", 5_000, None, 77).unwrap();
+        let entry = encode_kv_put("users", b"k1", b"v1", 5_000, None, 77, &[]).unwrap();
 
-        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
-                &entry,
-            )
+        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate, declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                u64,
+                Option<u64>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(&entry)
             .unwrap();
+        assert!(declared.is_empty());
         assert_eq!(disc, "kv_put");
         assert_eq!(collection, "users");
         assert_eq!(key, b"k1");
@@ -428,13 +490,28 @@ mod tests {
 
     #[test]
     fn kv_put_with_expire_at_carries_absolute_instant() {
-        let entry =
-            encode_kv_put("users", b"k1", b"v1", 5_000, Some(1_700_000_000_000), 9).unwrap();
+        let entry = encode_kv_put(
+            "users",
+            b"k1",
+            b"v1",
+            5_000,
+            Some(1_700_000_000_000),
+            9,
+            &[],
+        )
+        .unwrap();
 
-        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
-                &entry,
-            )
+        let (disc, collection, key, value, ttl_ms, expire_at_ms, surrogate, _declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                u64,
+                Option<u64>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(&entry)
             .unwrap();
         assert_eq!(disc, "kv_put");
         assert_eq!(collection, "users");
@@ -451,9 +528,11 @@ mod tests {
             (b"k1".to_vec(), b"v1".to_vec()),
             (b"k2".to_vec(), b"v2".to_vec()),
         ];
-        let entry = encode_kv_batch_put("users", &entries, 5_000, None, &[3, 4]).unwrap();
+        let declared = vec![DeclaredColumn::from_declared("v", "INT").expect("int")];
+        let entry =
+            encode_kv_batch_put("users", &entries, 5_000, None, &[3, 4], &declared).unwrap();
 
-        let (disc, collection, decoded_entries, ttl_ms, expire_at_ms, surrogates) =
+        let (disc, collection, decoded_entries, ttl_ms, expire_at_ms, surrogates, decoded) =
             zerompk::from_msgpack::<(
                 &str,
                 String,
@@ -461,6 +540,7 @@ mod tests {
                 u64,
                 Option<u64>,
                 Vec<u32>,
+                Vec<DeclaredColumn>,
             )>(&entry)
             .unwrap();
         assert_eq!(disc, "kv_batch_put");
@@ -473,6 +553,7 @@ mod tests {
             vec![3, 4],
             "surrogates are positional against entries"
         );
+        assert_eq!(decoded, declared, "the record carries the write's columns");
 
         assert!(
             zerompk::from_msgpack::<(&str, String, Vec<(Vec<u8>, Vec<u8>)>, u64)>(&entry).is_err()
@@ -489,10 +570,17 @@ mod tests {
             (b"k1".to_vec(), b"v1".to_vec()),
             (b"k2".to_vec(), b"v2".to_vec()),
         ];
-        let entry = encode_kv_batch_put("users", &entries, 5_000, Some(1_700_000_000_000), &[3, 4])
-            .unwrap();
+        let entry = encode_kv_batch_put(
+            "users",
+            &entries,
+            5_000,
+            Some(1_700_000_000_000),
+            &[3, 4],
+            &[],
+        )
+        .unwrap();
 
-        let (disc, collection, decoded_entries, ttl_ms, expire_at_ms, surrogates) =
+        let (disc, collection, decoded_entries, ttl_ms, expire_at_ms, surrogates, _declared) =
             zerompk::from_msgpack::<(
                 &str,
                 String,
@@ -500,6 +588,7 @@ mod tests {
                 u64,
                 Option<u64>,
                 Vec<u32>,
+                Vec<DeclaredColumn>,
             )>(&entry)
             .unwrap();
         assert_eq!(disc, "kv_batch_put");
@@ -520,6 +609,7 @@ mod tests {
             amount: TransferAmount::Float(30.0),
             debit_surrogate: 7,
             credit_surrogate: 8,
+            declared: &[],
         })
         .unwrap();
 
@@ -532,6 +622,7 @@ mod tests {
             amount,
             debit_surrogate,
             credit_surrogate,
+            _declared,
         ) = zerompk::from_msgpack::<(
             &str,
             String,
@@ -541,6 +632,7 @@ mod tests {
             TransferAmount,
             u32,
             u32,
+            Vec<DeclaredColumn>,
         )>(&entry)
         .unwrap();
         assert_eq!(disc, "kv_transfer");
@@ -556,10 +648,20 @@ mod tests {
     #[test]
     fn kv_transfer_item_encodes_delta_shape_with_surrogate() {
         let entry =
-            encode_kv_transfer_item("inventory", "trades", b"sword_1", b"sword_moved", 42).unwrap();
+            encode_kv_transfer_item("inventory", "trades", b"sword_1", b"sword_moved", 42, &[])
+                .unwrap();
 
-        let (disc, source_collection, dest_collection, item_key, dest_key, surrogate) =
-            zerompk::from_msgpack::<(&str, String, String, Vec<u8>, Vec<u8>, u32)>(&entry).unwrap();
+        let (disc, source_collection, dest_collection, item_key, dest_key, surrogate, _declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(&entry)
+            .unwrap();
         assert_eq!(disc, "kv_transfer_item");
         assert_eq!(source_collection, "inventory");
         assert_eq!(dest_collection, "trades");
@@ -570,11 +672,19 @@ mod tests {
 
     #[test]
     fn kv_cas_encodes_expected_and_new_value_with_surrogate() {
-        let entry = encode_kv_cas("state", b"p1", b"idle", b"in_match", 9).unwrap();
+        let entry = encode_kv_cas("state", b"p1", b"idle", b"in_match", 9, &[]).unwrap();
 
-        let (disc, collection, key, expected, new_value, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, Vec<u8>, u32)>(&entry)
-                .unwrap();
+        let (disc, collection, key, expected, new_value, surrogate, _declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                Vec<u8>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(&entry)
+            .unwrap();
         assert_eq!(disc, "kv_cas");
         assert_eq!(collection, "state");
         assert_eq!(key, b"p1");
@@ -586,11 +696,18 @@ mod tests {
     #[test]
     fn kv_incr_float_encodes_decimal_delta_with_surrogate_and_shape() {
         let entry =
-            encode_kv_incr_float("scores", b"dmg", "3.125", 5, &KvCounterShape::Raw).unwrap();
+            encode_kv_incr_float("scores", b"dmg", "3.125", 5, &KvCounterShape::Raw, &[]).unwrap();
 
-        let (disc, collection, key, delta, surrogate, shape) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, String, u32, KvCounterShape)>(&entry)
-                .unwrap();
+        let (disc, collection, key, delta, surrogate, shape, _declared) = zerompk::from_msgpack::<(
+            &str,
+            String,
+            Vec<u8>,
+            String,
+            u32,
+            KvCounterShape,
+            Vec<DeclaredColumn>,
+        )>(&entry)
+        .unwrap();
         assert_eq!(disc, "kv_incr_float");
         assert_eq!(collection, "scores");
         assert_eq!(key, b"dmg");
@@ -605,12 +722,18 @@ mod tests {
             ("score".to_string(), b"42".to_vec()),
             ("name".to_string(), b"alice".to_vec()),
         ];
-        let entry = encode_kv_field_set("players", b"p1", &updates, 11, true).unwrap();
+        let entry = encode_kv_field_set("players", b"p1", &updates, 11, true, &[]).unwrap();
 
-        let (disc, collection, key, decoded_updates, surrogate, if_present) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32, bool)>(
-                &entry,
-            )
+        let (disc, collection, key, decoded_updates, surrogate, if_present, _declared) =
+            zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<(String, Vec<u8>)>,
+                u32,
+                bool,
+                Vec<DeclaredColumn>,
+            )>(&entry)
             .unwrap();
         assert_eq!(disc, "kv_field_set");
         assert_eq!(collection, "players");
@@ -624,29 +747,40 @@ mod tests {
     fn kv_insert_on_conflict_update_carries_updates_expiry_and_surrogate() {
         let updates = vec![("score".to_string(), UpdateValue::Literal(b"42".to_vec()))];
         for expire_at in [None, Some(1_700_000_000_000)] {
-            let entry = encode_kv_insert_on_conflict_update(
-                "players",
-                b"p1",
-                b"excluded",
-                5_000,
-                &updates,
-                expire_at,
-                17,
-            )
+            let entry = encode_kv_insert_on_conflict_update(KvInsertOnConflictRecord {
+                collection: "players",
+                key: b"p1",
+                value: b"excluded",
+                ttl_ms: 5_000,
+                updates: &updates,
+                expire_at_ms: expire_at,
+                surrogate: 17,
+                declared: &[],
+            })
             .unwrap();
 
-            let (disc, collection, key, value, ttl_ms, decoded_updates, expire_at_ms, surrogate) =
-                zerompk::from_msgpack::<(
-                    &str,
-                    String,
-                    Vec<u8>,
-                    Vec<u8>,
-                    u64,
-                    Vec<(String, UpdateValue)>,
-                    Option<u64>,
-                    u32,
-                )>(&entry)
-                .unwrap();
+            let (
+                disc,
+                collection,
+                key,
+                value,
+                ttl_ms,
+                decoded_updates,
+                expire_at_ms,
+                surrogate,
+                _declared,
+            ) = zerompk::from_msgpack::<(
+                &str,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+                u64,
+                Vec<(String, UpdateValue)>,
+                Option<u64>,
+                u32,
+                Vec<DeclaredColumn>,
+            )>(&entry)
+            .unwrap();
             assert_eq!(disc, "kv_insert_on_conflict_update");
             assert_eq!(collection, "players");
             assert_eq!(key, b"p1");
@@ -718,6 +852,7 @@ mod tests {
         u32,
         KvCounterShape,
         Option<u64>,
+        Vec<DeclaredColumn>,
     );
 
     #[test]
@@ -734,10 +869,11 @@ mod tests {
             surrogate: 7,
             shape: &shape,
             expire_at_ms: None,
+            declared: &[],
         })
         .unwrap();
 
-        let (disc, collection, key, delta, ttl_ms, surrogate, decoded_shape, expire_at_ms) =
+        let (disc, collection, key, delta, ttl_ms, surrogate, decoded_shape, expire_at_ms, _) =
             zerompk::from_msgpack::<IncrTuple>(&entry).unwrap();
         assert_eq!(disc, "kv_incr");
         assert_eq!(collection, "counters");
@@ -759,10 +895,11 @@ mod tests {
             surrogate: 9,
             shape: &KvCounterShape::Raw,
             expire_at_ms: Some(1_700_000_000_000),
+            declared: &[],
         })
         .unwrap();
 
-        let (disc, _, _, delta, ttl_ms, surrogate, _, expire_at_ms) =
+        let (disc, _, _, delta, ttl_ms, surrogate, _, expire_at_ms, _) =
             zerompk::from_msgpack::<IncrTuple>(&entry).unwrap();
         assert_eq!(disc, "kv_incr");
         assert_eq!(delta, 1);
@@ -773,10 +910,13 @@ mod tests {
 
     #[test]
     fn kv_getset_encodes_new_value_with_surrogate() {
-        let entry = encode_kv_getset("session", b"tok", b"new-token", 3).unwrap();
+        let entry = encode_kv_getset("session", b"tok", b"new-token", 3, &[]).unwrap();
 
-        let (disc, collection, key, new_value, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u32)>(&entry).unwrap();
+        let (disc, collection, key, new_value, surrogate, _declared) =
+            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u32, Vec<DeclaredColumn>)>(
+                &entry,
+            )
+            .unwrap();
         assert_eq!(disc, "kv_getset");
         assert_eq!(collection, "session");
         assert_eq!(key, b"tok");

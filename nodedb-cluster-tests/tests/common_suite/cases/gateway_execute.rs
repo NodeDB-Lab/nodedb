@@ -70,6 +70,7 @@ async fn gateway_execute_kv_put_get_single_node() {
 
     // Put.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(nodedb_types::id::DatabaseId::DEFAULT, "gw_kv_smoke"),
         key: b"smoke-key".to_vec(),
         value: mp_string("smoke-value"),

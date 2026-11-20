@@ -268,6 +268,7 @@ mod tests {
         );
 
         let kv_put = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
             key: vec![1],
             value: vec![2],

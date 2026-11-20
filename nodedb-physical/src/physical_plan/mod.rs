@@ -75,8 +75,8 @@ pub use graph::{
     RagVectorHit, WccSuperstepPlan, WccSuperstepResult,
 };
 pub use kv::{
-    KvBatchIntent, KvCounterShape, KvOp, KvResolveOutcome, KvResolvedMutation, SortedIndexRead,
-    SortedIndexSpec, TransferAmount,
+    KvBatchIntent, KvColumnsPending, KvCounterShape, KvDeclaredColumns, KvOp, KvResolveOutcome,
+    KvResolvedMutation, SortedIndexRead, SortedIndexSpec, TransferAmount,
 };
 pub use meta::MetaOp;
 pub use meta_restore::{

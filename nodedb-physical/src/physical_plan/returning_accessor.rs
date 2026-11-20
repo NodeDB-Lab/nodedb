@@ -364,6 +364,7 @@ mod tests {
     fn insert(returning: Option<ReturningSpec>) -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Insert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
+            declared_columns: crate::physical_plan::KvDeclaredColumns::none(),
             key: b"k".to_vec(),
             value: Vec::new(),
             ttl_ms: 0,

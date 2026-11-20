@@ -86,6 +86,7 @@ fn staged_expire_is_observed_by_in_tx_get_ttl_then_reverts_on_rollback() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -172,6 +173,7 @@ fn staged_persist_hides_base_ttl_then_reverts_on_rollback() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -269,6 +271,7 @@ fn staged_expire_with_zero_ttl_makes_key_appear_absent_to_in_tx_get() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",
@@ -370,6 +373,7 @@ fn staged_incr_with_ttl_is_observed_by_in_tx_get_ttl() {
     // Stage an INCR that also carries a TTL, on a fresh key.
     let stage_incr = PhysicalPlan::Meta(MetaOp::StageWrite {
         plan: Box::new(PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",

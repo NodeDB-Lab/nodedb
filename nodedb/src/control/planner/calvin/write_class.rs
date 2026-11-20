@@ -478,6 +478,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_field_set() {
         let plan = PhysicalPlan::Kv(KvOp::FieldSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
             updates: vec![("field".to_owned(), b"v".to_vec())],
@@ -493,6 +494,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_incr() {
         let plan = PhysicalPlan::Kv(KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
             delta: 1,
@@ -507,6 +509,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_incr_float() {
         let plan = PhysicalPlan::Kv(KvOp::IncrFloat {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
             delta: "1.5".into(),
@@ -520,6 +523,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_cas() {
         let plan = PhysicalPlan::Kv(KvOp::Cas {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
             expected: b"old".to_vec(),
@@ -533,6 +537,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_get_set() {
         let plan = PhysicalPlan::Kv(KvOp::GetSet {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
             new_value: b"new".to_vec(),
@@ -546,6 +551,7 @@ mod tests {
     #[test]
     fn is_write_plan_true_for_kv_transfer() {
         let plan = PhysicalPlan::Kv(KvOp::Transfer {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
             source_key: b"a".to_vec(),
             dest_key: b"b".to_vec(),

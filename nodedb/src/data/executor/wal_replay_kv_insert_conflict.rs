@@ -24,7 +24,7 @@ use tracing::warn;
 use super::core_loop::CoreLoop;
 use super::handlers::kv::conflict_merge::merge_kv_conflict_body;
 use crate::data::executor::core_loop::write_note::KeyRepr;
-use nodedb_physical::physical_plan::UpdateValue;
+use nodedb_physical::physical_plan::{DeclaredColumn, UpdateValue};
 
 /// Fields of a decoded `kv_insert_on_conflict_update` record, bundled so
 /// [`CoreLoop::apply_replayed_insert_on_conflict_update`] stays under the
@@ -43,6 +43,8 @@ struct ReplayedInsertOnConflictUpdate<'a> {
     updates: &'a [(String, UpdateValue)],
     expire_at_ms: Option<u64>,
     surrogate: nodedb_types::Surrogate,
+    /// The columns the live merge re-typed both branches under.
+    declared: &'a [DeclaredColumn],
 }
 
 impl CoreLoop {
@@ -58,7 +60,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, value, ttl_ms, updates, expire_at_ms, surrogate) =
+        let (disc, collection, key, value, ttl_ms, updates, expire_at_ms, surrogate, declared) =
             zerompk::from_msgpack::<(
                 &str,
                 String,
@@ -68,6 +70,7 @@ impl CoreLoop {
                 Vec<(String, UpdateValue)>,
                 Option<u64>,
                 u32,
+                Vec<DeclaredColumn>,
             )>(payload)
             .ok()?;
         // A record without the row's surrogate matches no shape; the KV pass
@@ -92,6 +95,7 @@ impl CoreLoop {
                 updates: &updates,
                 expire_at_ms,
                 surrogate: nodedb_types::Surrogate::new(surrogate),
+                declared: &declared,
             }),
         )
     }
@@ -117,6 +121,7 @@ impl CoreLoop {
             updates,
             expire_at_ms,
             surrogate,
+            declared,
         } = f;
         let existing_bytes = self
             .kv_engine
@@ -126,7 +131,7 @@ impl CoreLoop {
             existing_bytes.as_deref(),
             value,
             updates,
-            self.declared_columns_of(database_id, tenant_id, collection),
+            declared,
             &self.crs_context(),
         ) {
             Ok(b) => b,
@@ -276,6 +281,7 @@ mod tests {
         let seed = obj_bytes(&[("hp", 10)]);
         let excluded = obj_bytes(&[("hp", 1)]);
         let put_p1 = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p1".to_vec(),
             value: seed.clone(),
@@ -292,6 +298,7 @@ mod tests {
             ),
         )];
         let upsert = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p1".to_vec(),
             value: excluded.clone(),
@@ -343,6 +350,7 @@ mod tests {
         )];
         let upsert = |key: &[u8], surrogate: u32| {
             PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
                 key: key.to_vec(),
                 value: obj_bytes(&[("hp", 1)]),
@@ -384,6 +392,7 @@ mod tests {
             ),
         )];
         let upsert = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"fresh".to_vec(),
             value: excluded.clone(),
@@ -410,10 +419,13 @@ mod tests {
 
     #[test]
     fn insert_on_conflict_update_with_ttl_survives_replay_with_recorded_expiry() {
-        use crate::control::server::wal_dispatch_kv::encode::encode_kv_insert_on_conflict_update;
+        use crate::control::server::wal_dispatch_kv::encode::{
+            KvInsertOnConflictRecord, encode_kv_insert_on_conflict_update,
+        };
 
         let seed = obj_bytes(&[("hp", 10)]);
         let put_p1 = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
             key: b"s1".to_vec(),
             value: seed.clone(),
@@ -434,15 +446,16 @@ mod tests {
         // Encode a record with an explicit absolute instant directly, so the
         // test pins "replay installs the recorded instant verbatim" rather
         // than "replay recomputes now_ms + ttl_ms" (which would drift).
-        let entry = encode_kv_insert_on_conflict_update(
-            "sessions",
-            b"s1",
-            &excluded,
-            5_000,
-            &updates,
-            Some(6_000),
-            1,
-        )
+        let entry = encode_kv_insert_on_conflict_update(KvInsertOnConflictRecord {
+            collection: "sessions",
+            key: b"s1",
+            value: &excluded,
+            ttl_ms: 5_000,
+            updates: &updates,
+            expire_at_ms: Some(6_000),
+            surrogate: 1,
+            declared: &[],
+        })
         .expect("encode kv_insert_on_conflict_update with absolute expiry");
 
         let dir = tempfile::tempdir().expect("wal tempdir");
@@ -507,6 +520,7 @@ mod tests {
     /// value = EXCLUDED.value` and return the stored bytes.
     fn replay_raw_overwrite(seed: &[u8], incoming: &[u8]) -> Vec<u8> {
         let put = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "raw"),
             key: b"k".to_vec(),
             value: seed.to_vec(),
@@ -517,6 +531,7 @@ mod tests {
             provenance: None,
         });
         let upsert = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "raw"),
             key: b"k".to_vec(),
             value: incoming.to_vec(),

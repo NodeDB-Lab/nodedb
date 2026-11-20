@@ -533,6 +533,7 @@ mod tests {
                 0u64,
                 None::<u64>,
                 surrogate,
+                Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
             ))
             .expect("encode kv put"),
         }

@@ -3,12 +3,14 @@
 //! Grouped decode arm for `ReplicatedWrite` variants that produce
 //! `PhysicalPlan::Kv`. Returns `(PhysicalPlan, Option<u64>)`: TTL-bearing
 //! `Kv*` variants stamp `resolved_now_ms` so every replica installs the same
-//! `expire_at_ms`. See `entry_document::decode_arm` for the trailing-arm contract.
+//! `expire_at_ms`. Every re-typing variant carries the declared columns the
+//! proposer resolved, and decodes them as resolved. See
+//! `entry_document::decode_arm` for the trailing-arm contract.
 
 use super::super::decode_sync_engines::{decode_provenance, decode_returning};
 use super::super::types::ReplicatedWrite;
 use super::ctx::DecodeCtx;
-use super::kv::{PutFields, ReturningFields};
+use super::kv::{PutFields, ReturningFields, Target};
 use super::{kv, kv_resolved};
 use crate::bridge::envelope::PhysicalPlan;
 
@@ -25,6 +27,7 @@ pub(super) fn decode_arm(
         } => kv::truncate(database_id, collection, *restart_identity)?,
         ReplicatedWrite::KvPut {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -38,7 +41,10 @@ pub(super) fn decode_arm(
             kv::put(
                 database_id,
                 PutFields {
-                    collection,
+                    target: Target {
+                        collection,
+                        declared_columns,
+                    },
                     key,
                     value,
                     ttl_ms: *ttl_ms,
@@ -69,6 +75,7 @@ pub(super) fn decode_arm(
         )?,
         ReplicatedWrite::KvInsert {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -80,11 +87,16 @@ pub(super) fn decode_arm(
             resolved_now_ms = *rn;
             kv::insert(
                 database_id,
-                collection,
-                key,
-                value,
-                *ttl_ms,
-                *surrogate,
+                PutFields {
+                    target: Target {
+                        collection,
+                        declared_columns,
+                    },
+                    key,
+                    value,
+                    ttl_ms: *ttl_ms,
+                    surrogate: *surrogate,
+                },
                 ReturningFields {
                     returning: decode_returning(returning)?,
                     rls_filters,
@@ -93,6 +105,7 @@ pub(super) fn decode_arm(
         }
         ReplicatedWrite::KvInsertOnConflictUpdate {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -105,7 +118,10 @@ pub(super) fn decode_arm(
             resolved_now_ms = *rn;
             kv::insert_on_conflict_update(
                 database_id,
-                collection,
+                Target {
+                    collection,
+                    declared_columns,
+                },
                 kv::ConflictEntry {
                     key,
                     value,
@@ -121,6 +137,7 @@ pub(super) fn decode_arm(
         }
         ReplicatedWrite::KvBatchPut {
             collection,
+            declared_columns,
             entries,
             ttl_ms,
             intent,
@@ -132,7 +149,10 @@ pub(super) fn decode_arm(
             resolved_now_ms = *rn;
             kv::batch_put(
                 database_id,
-                collection,
+                Target {
+                    collection,
+                    declared_columns,
+                },
                 entries,
                 *ttl_ms,
                 intent.clone(),
@@ -157,6 +177,7 @@ pub(super) fn decode_arm(
         }
         ReplicatedWrite::KvIncr {
             collection,
+            declared_columns,
             key,
             delta,
             ttl_ms,
@@ -167,7 +188,10 @@ pub(super) fn decode_arm(
             resolved_now_ms = *rn;
             kv::incr(
                 database_id,
-                collection,
+                Target {
+                    collection,
+                    declared_columns,
+                },
                 key,
                 *delta,
                 *ttl_ms,
@@ -177,20 +201,35 @@ pub(super) fn decode_arm(
         }
         ReplicatedWrite::KvIncrFloat {
             collection,
+            declared_columns,
             key,
             delta,
             surrogate,
             shape,
-        } => kv::incr_float(database_id, collection, key, delta, *surrogate, shape)?,
+        } => kv::incr_float(
+            database_id,
+            Target {
+                collection,
+                declared_columns,
+            },
+            key,
+            delta,
+            *surrogate,
+            shape,
+        )?,
         ReplicatedWrite::KvCas {
             collection,
+            declared_columns,
             key,
             expected,
             new_value,
             surrogate,
         } => kv::cas(
             database_id,
-            collection,
+            Target {
+                collection,
+                declared_columns,
+            },
             key,
             expected,
             new_value,
@@ -198,13 +237,17 @@ pub(super) fn decode_arm(
         )?,
         ReplicatedWrite::KvGetSet {
             collection,
+            declared_columns,
             key,
             new_value,
             surrogate,
             rls_filters,
         } => kv::get_set(
             database_id,
-            collection,
+            Target {
+                collection,
+                declared_columns,
+            },
             key,
             new_value,
             *surrogate,
@@ -244,6 +287,7 @@ pub(super) fn decode_arm(
         }
         ReplicatedWrite::KvFieldSet {
             collection,
+            declared_columns,
             key,
             updates,
             surrogate,
@@ -252,7 +296,10 @@ pub(super) fn decode_arm(
             rls_filters,
         } => kv::field_set(
             database_id,
-            collection,
+            Target {
+                collection,
+                declared_columns,
+            },
             key,
             updates,
             *surrogate,
@@ -264,6 +311,7 @@ pub(super) fn decode_arm(
         )?,
         ReplicatedWrite::KvTransfer {
             collection,
+            declared_columns,
             source_key,
             dest_key,
             field,
@@ -273,7 +321,10 @@ pub(super) fn decode_arm(
         } => kv_resolved::transfer(
             database_id,
             kv_resolved::TransferFields {
-                collection,
+                target: Target {
+                    collection,
+                    declared_columns,
+                },
                 source_key,
                 dest_key,
                 field,
@@ -294,13 +345,17 @@ pub(super) fn decode_arm(
         ReplicatedWrite::KvTransferItem {
             source_collection,
             dest_collection,
+            declared_columns,
             item_key,
             dest_key,
             surrogate,
         } => kv_resolved::transfer_item(
             database_id,
             source_collection,
-            dest_collection,
+            Target {
+                collection: dest_collection,
+                declared_columns,
+            },
             item_key,
             dest_key,
             *surrogate,
@@ -353,6 +408,7 @@ mod tests {
             vshard.as_u32(),
             ReplicatedWrite::KvPut {
                 collection: "sessions".into(),
+                declared_columns: std::sync::Arc::default(),
                 key: b"k1".to_vec(),
                 value: b"v1".to_vec(),
                 ttl_ms,
@@ -400,6 +456,7 @@ mod tests {
             vshard.as_u32(),
             ReplicatedWrite::KvPut {
                 collection: "sessions".into(),
+                declared_columns: std::sync::Arc::default(),
                 key: b"k1".to_vec(),
                 value: b"v1".to_vec(),
                 ttl_ms: 0,
@@ -477,6 +534,7 @@ mod tests {
             vshard.as_u32(),
             ReplicatedWrite::KvIncr {
                 collection: "counters".into(),
+                declared_columns: std::sync::Arc::default(),
                 key: b"c1".to_vec(),
                 delta: 5,
                 ttl_ms: 60_000,
@@ -502,6 +560,7 @@ mod tests {
             vshard.as_u32(),
             ReplicatedWrite::KvIncr {
                 collection: "counters".into(),
+                declared_columns: std::sync::Arc::default(),
                 key: b"c1".to_vec(),
                 delta: 5,
                 ttl_ms: 0,
@@ -527,6 +586,7 @@ mod tests {
 
         let plan = PhysicalPlan::Kv(KvOp::Put {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             key: b"k1".to_vec(),
             value: b"v1".to_vec(),
             ttl_ms: 5_000,
@@ -550,6 +610,7 @@ mod tests {
 
         let plan_no_ttl = PhysicalPlan::Kv(KvOp::Put {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             key: b"k2".to_vec(),
             value: b"v2".to_vec(),
             ttl_ms: 0,
@@ -570,5 +631,119 @@ mod tests {
             ),
             other => panic!("expected KvPut, got {other:?}"),
         }
+    }
+
+    fn proposer_columns() -> nodedb_physical::physical_plan::KvDeclaredColumns {
+        use nodedb_physical::physical_plan::{DeclaredColumn, KvDeclaredColumns};
+        KvDeclaredColumns::resolved(vec![
+            DeclaredColumn::from_declared("value", "DECIMAL(5,2)").expect("decimal"),
+            DeclaredColumn::from_declared("n", "SMALLINT").expect("smallint"),
+        ])
+    }
+
+    /// Encode `plan` for Raft, decode it as an applier does, and return the
+    /// declared columns the decoded op carries.
+    fn columns_after_round_trip(
+        plan: &PhysicalPlan,
+    ) -> nodedb_physical::physical_plan::KvDeclaredColumns {
+        let entry = to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            plan,
+        )
+        .expect("encode must not error")
+        .expect("a replicated KV write");
+        let (_, _, decoded, _) = decode::decode_replicated_entry(&entry.to_bytes())
+            .expect("decode_replicated_entry error")
+            .expect("decode_replicated_entry returned None");
+        let PhysicalPlan::Kv(op) = decoded else {
+            panic!("expected a KV plan, got {decoded:?}");
+        };
+        let (_, columns) = op.declared_columns().expect("a re-typing KV write");
+        columns.clone()
+    }
+
+    #[test]
+    fn kv_writes_carry_the_proposer_columns_through_raft_resolved() {
+        use nodedb_physical::physical_plan::{KvCounterShape, TransferAmount};
+        use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
+
+        let carried = proposer_columns();
+        let kv = || QualifiedCollection::new(DatabaseId::DEFAULT, "kv");
+        let plans = [
+            PhysicalPlan::Kv(KvOp::Put {
+                collection: kv(),
+                declared_columns: carried.clone(),
+                key: b"k".to_vec(),
+                value: b"1.005".to_vec(),
+                ttl_ms: 0,
+                surrogate: Surrogate::new(1),
+                returning: None,
+                rls_filters: Vec::new(),
+                provenance: None,
+            }),
+            PhysicalPlan::Kv(KvOp::Incr {
+                collection: kv(),
+                declared_columns: carried.clone(),
+                key: b"n".to_vec(),
+                delta: 1,
+                ttl_ms: 0,
+                surrogate: Surrogate::new(2),
+                rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+                shape: KvCounterShape::Raw,
+            }),
+            PhysicalPlan::Kv(KvOp::Transfer {
+                collection: kv(),
+                declared_columns: carried.clone(),
+                source_key: b"a".to_vec(),
+                dest_key: b"b".to_vec(),
+                field: "value".into(),
+                amount: TransferAmount::Float(1.0),
+                debit_surrogate: Surrogate::new(3),
+                credit_surrogate: Surrogate::new(4),
+                rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            }),
+            PhysicalPlan::Kv(KvOp::TransferItem {
+                source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "src"),
+                dest_collection: kv(),
+                declared_columns: carried.clone(),
+                item_key: b"i".to_vec(),
+                dest_key: b"d".to_vec(),
+                surrogate: Surrogate::new(5),
+                source_rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+                dest_rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            }),
+        ];
+        for plan in &plans {
+            assert_eq!(
+                columns_after_round_trip(plan),
+                carried,
+                "the applier re-types under the proposer's columns: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kv_write_with_pending_columns_is_refused_before_it_is_proposed() {
+        let plan = PhysicalPlan::Kv(KvOp::Put {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::new(1),
+            returning: None,
+            rls_filters: Vec::new(),
+            provenance: None,
+        });
+        let err = to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &plan,
+        )
+        .expect_err("pending columns never reach the Raft wire");
+        assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
     }
 }

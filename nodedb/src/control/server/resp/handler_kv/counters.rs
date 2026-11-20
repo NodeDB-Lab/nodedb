@@ -103,6 +103,8 @@ async fn dispatch_incr(
     };
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         delta,
         ttl_ms: 0,
@@ -154,6 +156,8 @@ pub(in crate::control::server::resp) async fn handle_incrbyfloat(
     };
     let plan = PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key,
         delta,
         surrogate,

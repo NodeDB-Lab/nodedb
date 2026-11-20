@@ -35,8 +35,11 @@ impl CoreLoop {
                     system_time: *system_time,
                 },
             ),
+            // A supplied body was re-typed under the op's columns before
+            // dispatch, in `coerce_kv_op_bodies`.
             KvOp::Put {
                 collection,
+                declared_columns: _,
                 key,
                 value,
                 ttl_ms,
@@ -63,6 +66,7 @@ impl CoreLoop {
             }
             KvOp::Insert {
                 collection,
+                declared_columns: _,
                 key,
                 value,
                 ttl_ms,
@@ -85,6 +89,7 @@ impl CoreLoop {
             ),
             KvOp::InsertIfAbsent {
                 collection,
+                declared_columns: _,
                 key,
                 value,
                 ttl_ms,
@@ -107,6 +112,7 @@ impl CoreLoop {
             ),
             KvOp::InsertOnConflictUpdate {
                 collection,
+                declared_columns,
                 key,
                 value,
                 ttl_ms,
@@ -115,22 +121,30 @@ impl CoreLoop {
                 rls_write_check,
                 returning,
                 rls_filters,
-            } => self.execute_kv_insert_on_conflict_update(
-                task,
-                super::crud::KvInsertOnConflictUpdateParams {
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    value,
-                    ttl_ms: *ttl_ms,
-                    updates,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                    returning: returning.as_ref(),
-                    rls_filters,
-                },
-            ),
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                self.execute_kv_insert_on_conflict_update(
+                    task,
+                    super::crud::KvInsertOnConflictUpdateParams {
+                        did,
+                        tid,
+                        collection: collection.as_str(),
+                        key,
+                        value,
+                        ttl_ms: *ttl_ms,
+                        updates,
+                        surrogate: *surrogate,
+                        rls_write_check,
+                        returning: returning.as_ref(),
+                        rls_filters,
+                        declared,
+                    },
+                )
+            }
             KvOp::Delete {
                 collection,
                 keys,
@@ -202,26 +216,35 @@ impl CoreLoop {
             ),
             KvOp::BatchPut {
                 collection,
+                declared_columns,
                 entries,
                 ttl_ms,
                 intent,
                 surrogates,
                 returning,
                 rls_filters,
-            } => self.execute_kv_batch_put(
-                task,
-                super::batch_put::KvBatchPutArgs {
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    entries,
-                    ttl_ms: *ttl_ms,
-                    intent,
-                    surrogates,
-                    returning: returning.as_ref(),
-                    rls_filters,
-                },
-            ),
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                self.execute_kv_batch_put(
+                    task,
+                    super::batch_put::KvBatchPutArgs {
+                        did,
+                        tid,
+                        collection: collection.as_str(),
+                        entries,
+                        ttl_ms: *ttl_ms,
+                        intent,
+                        surrogates,
+                        returning: returning.as_ref(),
+                        rls_filters,
+                        declared,
+                    },
+                )
+            }
             KvOp::RegisterIndex {
                 collection,
                 field,
@@ -259,120 +282,16 @@ impl CoreLoop {
                     system_time: *system_time,
                 },
             ),
-            KvOp::FieldSet {
-                collection,
-                key,
-                updates,
-                surrogate,
-                if_present,
-                rls_write_check,
-                returning,
-                rls_filters,
-            } => self.execute_kv_field_set(
-                super::atomic::KvAtomicCtx {
-                    task,
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                },
-                super::field::KvFieldSetArgs {
-                    updates,
-                    if_present: *if_present,
-                    returning: returning.as_ref(),
-                    rls_filters,
-                },
-            ),
+            KvOp::FieldSet { .. } => self.dispatch_kv_field_set(task, did, tid, op),
             KvOp::GetTtl { collection, key } => {
                 self.execute_kv_get_ttl(task, did, tid, collection.as_str(), key)
             }
             KvOp::Truncate { collection, .. } => {
                 self.execute_kv_truncate(task, did, tid, collection.as_str())
             }
-            KvOp::Incr {
-                collection,
-                key,
-                delta,
-                ttl_ms,
-                surrogate,
-                rls_write_check,
-                shape,
-            } => self.execute_kv_incr(
-                super::atomic::KvAtomicCtx {
-                    task,
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                },
-                *delta,
-                *ttl_ms,
-                shape,
-            ),
-            KvOp::IncrFloat {
-                collection,
-                key,
-                delta,
-                surrogate,
-                rls_write_check,
-                shape,
-            } => self.execute_kv_incr_float(
-                super::atomic::KvAtomicCtx {
-                    task,
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                },
-                delta,
-                shape,
-            ),
-            KvOp::Cas {
-                collection,
-                key,
-                expected,
-                new_value,
-                surrogate,
-                rls_write_check,
-            } => self.execute_kv_cas(
-                super::atomic::KvAtomicCtx {
-                    task,
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                },
-                expected,
-                new_value,
-            ),
-            KvOp::GetSet {
-                collection,
-                key,
-                new_value,
-                surrogate,
-                rls_filters,
-                rls_write_check,
-            } => self.execute_kv_getset(
-                super::atomic::KvAtomicCtx {
-                    task,
-                    did,
-                    tid,
-                    collection: collection.as_str(),
-                    key,
-                    surrogate: *surrogate,
-                    rls_write_check,
-                },
-                new_value,
-                rls_filters,
-            ),
+            KvOp::Incr { .. } | KvOp::IncrFloat { .. } | KvOp::Cas { .. } | KvOp::GetSet { .. } => {
+                self.dispatch_kv_atomic(task, did, tid, op)
+            }
             KvOp::RegisterSortedIndex {
                 collection,
                 index_name,

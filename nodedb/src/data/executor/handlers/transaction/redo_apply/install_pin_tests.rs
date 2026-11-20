@@ -666,7 +666,13 @@ fn kv_put(key: &[u8], v: &str, surrogate: u32) -> RedoSubRecord {
     RedoSubRecord {
         record_type: nodedb_wal::record::RecordType::Put as u32,
         payload: crate::control::server::wal_dispatch_kv::encode::encode_kv_put(
-            PRICES, key, &value, 0, None, surrogate,
+            PRICES,
+            key,
+            &value,
+            0,
+            None,
+            surrogate,
+            &[],
         )
         .expect("encode kv put"),
     }

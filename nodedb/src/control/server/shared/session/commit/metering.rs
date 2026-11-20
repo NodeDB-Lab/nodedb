@@ -131,6 +131,7 @@ mod tests {
     /// skipped here or COMMIT will double-bill it.
     fn stageable_task() -> PhysicalTask {
         buffered_task(PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "widgets"),
             key: Vec::new(),
             value: Vec::new(),

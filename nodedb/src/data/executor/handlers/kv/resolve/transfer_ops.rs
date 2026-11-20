@@ -35,6 +35,7 @@ impl CoreLoop {
             debit_surrogate,
             credit_surrogate,
             rls_write_check,
+            declared,
         } = params;
         if self.kv_engine.is_over_budget() {
             return Err(ErrorCode::ResourcesExhausted);
@@ -52,7 +53,7 @@ impl CoreLoop {
             dest_bytes.as_deref().filter(|b| !b.is_empty()),
             field,
             amount,
-            self.declared_columns_of(did, tid, collection),
+            declared,
         )
         .map_err(|e| match e {
             TransferError::Declared(error) => ErrorCode::from(error),
@@ -143,6 +144,7 @@ impl CoreLoop {
             surrogate,
             source_rls_write_check,
             dest_rls_write_check,
+            declared,
         } = params;
         if self.kv_engine.is_over_budget() {
             return Err(ErrorCode::ResourcesExhausted);
@@ -155,11 +157,7 @@ impl CoreLoop {
         };
         // The row arriving at the destination meets the destination's
         // declared numeric columns.
-        let dest_data = fit_kv_image(
-            &item_data,
-            self.declared_columns_of(did, tid, dest_collection),
-        )?
-        .unwrap_or_else(|| item_data.clone());
+        let dest_data = fit_kv_image(&item_data, declared)?.unwrap_or_else(|| item_data.clone());
         admit_kv_row(
             source_rls_write_check,
             &item_data,
@@ -340,6 +338,7 @@ mod tests {
         seed(&mut h.core, COLLECTION, b"item", &body);
 
         let op = KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, DEST_COLLECTION),
             item_key: b"item".to_vec(),
@@ -392,6 +391,7 @@ mod tests {
     fn transfer_item_on_a_missing_row_is_not_found() {
         let h = make_core();
         let op = KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, DEST_COLLECTION),
             item_key: b"nope".to_vec(),

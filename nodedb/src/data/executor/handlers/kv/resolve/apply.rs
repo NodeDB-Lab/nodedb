@@ -412,6 +412,7 @@ mod tests {
 
     fn incr_op(key: &[u8], delta: i64) -> KvOp {
         KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             key: key.to_vec(),
             delta,

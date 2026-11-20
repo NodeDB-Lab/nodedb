@@ -65,6 +65,7 @@ async fn resp_gateway_migration_single_node_set_get() {
 
     // SET — mirrors RESP SET command going through dispatch_kv_write → gateway.
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "resp_gw_single",
@@ -139,6 +140,7 @@ async fn resp_gateway_migration_cross_node_get() {
     let ctx = test_ctx();
 
     let put_plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(
             nodedb_types::id::DatabaseId::DEFAULT,
             "resp_gw_cross",

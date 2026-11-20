@@ -308,6 +308,7 @@ mod tests {
 
     fn kv_put(surrogate: Surrogate) -> nodedb_physical::physical_plan::PhysicalPlan {
         nodedb_physical::physical_plan::PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
             key: b"k".to_vec(),
             value: Vec::new(),

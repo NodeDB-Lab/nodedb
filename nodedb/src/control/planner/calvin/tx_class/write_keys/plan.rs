@@ -524,6 +524,7 @@ mod tests {
     #[test]
     fn an_unroutable_write_is_refused() {
         let plan = PhysicalPlan::Kv(KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: qualified("a"),
             dest_collection: qualified("b"),
             item_key: b"k".to_vec(),

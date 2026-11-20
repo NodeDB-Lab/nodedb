@@ -74,6 +74,8 @@ pub async fn kv_incr(
     )?;
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         delta,
         ttl_ms,
@@ -153,6 +155,7 @@ pub async fn kv_incr_float(
     )?;
     let plan = PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         delta,
         surrogate,
@@ -247,6 +250,7 @@ pub async fn kv_cas(
     .map_err(|e| DdlError::from_error(&e))?;
     let plan = PhysicalPlan::Kv(KvOp::Cas {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         expected: expected.into_bytes(),
         new_value: new_value.into_bytes(),
@@ -305,6 +309,7 @@ pub async fn kv_getset(
     .map_err(|e| DdlError::from_error(&e))?;
     let plan = PhysicalPlan::Kv(KvOp::GetSet {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         key: key.as_bytes().to_vec(),
         new_value: new_value.into_bytes(),
         surrogate,

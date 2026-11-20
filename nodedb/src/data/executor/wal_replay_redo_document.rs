@@ -113,6 +113,7 @@
 //! `handlers::transaction::redo_apply`). With no scope open this arm is
 //! restart replay, which folds only a never-durable record.
 
+use nodedb_physical::physical_plan::DeclaredColumn;
 use nodedb_types::Surrogate;
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
@@ -475,14 +476,21 @@ impl CoreLoop {
 /// document record carries.
 fn is_kv_put_record(payload: &[u8]) -> bool {
     let discriminator = |disc: &str| disc == "kv_put" || disc == "kv_batch_put";
-    // Only the leading element decides: every KV put arity opens with its
-    // discriminator string, and a document record opens with its collection.
-    match zerompk::from_msgpack::<(String, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(
-        payload,
-    ) {
+    // The payload decodes as a whole `kv_put` tuple, else as a whole
+    // `kv_batch_put` tuple. It is a KV record when the decoded tuple's
+    // discriminator names that shape. A document record decodes as neither.
+    match zerompk::from_msgpack::<crate::data::executor::wal_replay::kv_put::KvPutTuple>(payload) {
         Ok((disc, ..)) => discriminator(&disc),
         Err(_) => matches!(
-            zerompk::from_msgpack::<(String, String, Vec<(Vec<u8>, Vec<u8>)>, u64, Option<u64>, Vec<u32>)>(payload),
+            zerompk::from_msgpack::<(
+                String,
+                String,
+                Vec<(Vec<u8>, Vec<u8>)>,
+                u64,
+                Option<u64>,
+                Vec<u32>,
+                Vec<DeclaredColumn>,
+            )>(payload),
             Ok((disc, ..)) if discriminator(&disc)
         ),
     }
@@ -584,6 +592,7 @@ mod tests {
             5_000u64,
             Some(expire_at_ms),
             1u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
         ))
         .expect("encode kv put sub-record");
         RedoSubRecord {

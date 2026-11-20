@@ -442,6 +442,7 @@ mod tests {
     #[test]
     fn kv_transfer_item_extracts_both_collections() {
         let plan = PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "from_col",

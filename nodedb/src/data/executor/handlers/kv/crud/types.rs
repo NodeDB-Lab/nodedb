@@ -23,6 +23,9 @@ pub(in crate::data::executor) struct KvInsertOnConflictUpdateParams<'a> {
     pub returning: Option<&'a nodedb_physical::physical_plan::ReturningSpec>,
     /// Compiled read policy bounding which of those rows may be shown back.
     pub rls_filters: &'a [u8],
+    /// The declared columns the plan carries. Both branches re-type under
+    /// them.
+    pub declared: &'a [nodedb_physical::physical_plan::DeclaredColumn],
 }
 
 /// Parameters for a KV `DELETE` by primary key(s).

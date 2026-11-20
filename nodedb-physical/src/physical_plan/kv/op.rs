@@ -6,6 +6,7 @@ use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate, SystemTimeScop
 
 use super::batch_intent::KvBatchIntent;
 use super::counter_shape::KvCounterShape;
+use super::declared_columns::KvDeclaredColumns;
 use super::resolved_mutation::KvResolvedMutation;
 use super::sorted_read::{SortedIndexRead, SortedIndexSpec};
 use super::transfer_amount::TransferAmount;
@@ -51,6 +52,8 @@ pub enum KvOp {
     /// If no secondary indexes, takes the zero-index fast path.
     Put {
         collection: QualifiedCollection,
+        /// The declared columns `value` re-types under, live and in replay.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         /// Binary Tuple encoded value (all value columns).
         value: Vec<u8>,
@@ -79,6 +82,8 @@ pub enum KvOp {
     /// `SET` and `UPSERT` continue to use `Put`.
     Insert {
         collection: QualifiedCollection,
+        /// See `Put::declared_columns`.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -96,6 +101,8 @@ pub enum KvOp {
     /// does not exist, silently no-op on duplicate. No error on conflict.
     InsertIfAbsent {
         collection: QualifiedCollection,
+        /// See `Put::declared_columns`.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -117,6 +124,8 @@ pub enum KvOp {
     /// and as `EXCLUDED` when the handler evaluates expressions.
     InsertOnConflictUpdate {
         collection: QualifiedCollection,
+        /// The declared columns both branches re-type the row under.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         value: Vec<u8>,
         ttl_ms: u64,
@@ -241,6 +250,8 @@ pub enum KvOp {
     /// it, with `intent` set to the statement's rule for a stored key.
     BatchPut {
         collection: QualifiedCollection,
+        /// The declared columns every entry's value re-types under.
+        declared_columns: KvDeclaredColumns,
         /// `(key, value)` pairs.
         entries: Vec<(Vec<u8>, Vec<u8>)>,
         /// Per-key TTL override in milliseconds. 0 = use collection default.
@@ -311,6 +322,8 @@ pub enum KvOp {
     /// merges field updates, maintains secondary indexes.
     FieldSet {
         collection: QualifiedCollection,
+        /// The declared columns the merged row re-types under.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         /// Field name → new value (msgpack-encoded bytes; empty = NULL).
         updates: Vec<(String, Vec<u8>)>,
@@ -349,6 +362,8 @@ pub enum KvOp {
     /// a wrap. `ttl_ms > 0` sets/resets TTL; `0` preserves it.
     Incr {
         collection: QualifiedCollection,
+        /// The declared columns the computed image re-types under.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         delta: i64,
         /// TTL in milliseconds. 0 = preserve existing TTL.
@@ -368,6 +383,8 @@ pub enum KvOp {
     /// column adds in `f64`. A NaN or infinite result is a counter fault.
     IncrFloat {
         collection: QualifiedCollection,
+        /// See `Incr::declared_columns`.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         /// The increment as the client's decimal text, checked at the
         /// protocol boundary. It is parsed once, where it is added, so no
@@ -388,6 +405,8 @@ pub enum KvOp {
     /// If key doesn't exist and `expected` is empty, creates the key (create-if-not-exists).
     Cas {
         collection: QualifiedCollection,
+        /// See `Incr::declared_columns`.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         expected: Vec<u8>,
         new_value: Vec<u8>,
@@ -404,6 +423,8 @@ pub enum KvOp {
     /// Returns the previous value (or null if key didn't exist).
     GetSet {
         collection: QualifiedCollection,
+        /// See `Incr::declared_columns`.
+        declared_columns: KvDeclaredColumns,
         key: Vec<u8>,
         new_value: Vec<u8>,
         /// Stable cross-engine identity. Never `Surrogate::ZERO`.
@@ -428,6 +449,8 @@ pub enum KvOp {
     /// then atomically writes both updated values. No TOCTOU race.
     Transfer {
         collection: QualifiedCollection,
+        /// The declared columns both written rows re-type under.
+        declared_columns: KvDeclaredColumns,
         source_key: Vec<u8>,
         dest_key: Vec<u8>,
         field: String,
@@ -453,6 +476,9 @@ pub enum KvOp {
     TransferItem {
         source_collection: QualifiedCollection,
         dest_collection: QualifiedCollection,
+        /// The declared columns of `dest_collection` the moved row re-types
+        /// under.
+        declared_columns: KvDeclaredColumns,
         item_key: Vec<u8>,
         dest_key: Vec<u8>,
         /// Moved row's identity at its destination, content-addressed on
@@ -631,6 +657,8 @@ pub enum KvOp {
     /// Data Plane scans current state. Uses the same merge as `FieldSet`.
     PredicateUpdate {
         collection: QualifiedCollection,
+        /// The declared columns each merged row re-types under.
+        declared_columns: KvDeclaredColumns,
         /// Serialized `Vec<ScanFilter>` (MessagePack). Empty matches every row.
         filters: Vec<u8>,
         /// Field assignments: `(field_name, msgpack_value_bytes)`.

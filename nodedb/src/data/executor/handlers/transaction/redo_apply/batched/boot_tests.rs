@@ -134,6 +134,7 @@ fn kv_record(lsn: u64) -> WalRecord {
             0u64,
             None::<u64>,
             1u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
         ))
         .expect("encode kv put"),
         encryption_key: None,

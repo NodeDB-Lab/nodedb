@@ -738,6 +738,7 @@ mod tests {
     #[test]
     fn kv_transfer_item_emits_two_change_events_across_collections() {
         let plan = PhysicalPlan::Kv(KvOp::TransferItem {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inventory_a"),
             dest_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inventory_b"),
             item_key: b"sword".to_vec(),

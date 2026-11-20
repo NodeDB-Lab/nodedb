@@ -88,6 +88,9 @@ pub(super) async fn transfer_item_across_shards(
     let PhysicalPlan::Kv(KvOp::TransferItem {
         source_collection,
         dest_collection,
+        // The move's put resolves the destination's columns when the class
+        // is submitted.
+        declared_columns: _,
         item_key,
         dest_key,
         surrogate,

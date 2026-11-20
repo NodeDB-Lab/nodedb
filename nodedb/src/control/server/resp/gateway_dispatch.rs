@@ -476,6 +476,7 @@ mod tests {
         });
         let session = resp_session_with_identity(regular_identity(4));
         let plan = PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 DatabaseId::DEFAULT,
                 &session.collection,

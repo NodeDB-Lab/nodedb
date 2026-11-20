@@ -57,6 +57,8 @@ mod wal_replay_columnar_truncate;
 mod wal_replay_fts;
 mod wal_replay_graph_labels;
 mod wal_replay_kv_atomic;
+#[cfg(test)]
+mod wal_replay_kv_declared_tests;
 mod wal_replay_kv_expiry;
 mod wal_replay_kv_field;
 mod wal_replay_kv_incr;

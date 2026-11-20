@@ -20,6 +20,7 @@ impl CoreLoop {
     ) -> Response {
         let KvOp::Transfer {
             collection,
+            declared_columns,
             source_key,
             dest_key,
             field,
@@ -36,6 +37,10 @@ impl CoreLoop {
                 },
             );
         };
+        let declared = match self.kv_op_columns(task, declared_columns, collection.as_str()) {
+            Ok(declared) => declared,
+            Err(refusal) => return refusal,
+        };
         self.execute_kv_transfer(
             task,
             super::transfer::TransferParams {
@@ -49,6 +54,7 @@ impl CoreLoop {
                 debit_surrogate: *debit_surrogate,
                 credit_surrogate: *credit_surrogate,
                 rls_write_check,
+                declared,
             },
         )
     }
@@ -64,6 +70,7 @@ impl CoreLoop {
         let KvOp::TransferItem {
             source_collection,
             dest_collection,
+            declared_columns,
             item_key,
             dest_key,
             surrogate,
@@ -78,6 +85,10 @@ impl CoreLoop {
                 },
             );
         };
+        let declared = match self.kv_op_columns(task, declared_columns, dest_collection.as_str()) {
+            Ok(declared) => declared,
+            Err(refusal) => return refusal,
+        };
         self.execute_kv_transfer_item(
             task,
             super::transfer::TransferItemParams {
@@ -90,6 +101,7 @@ impl CoreLoop {
                 surrogate: *surrogate,
                 source_rls_write_check,
                 dest_rls_write_check,
+                declared,
             },
         )
     }

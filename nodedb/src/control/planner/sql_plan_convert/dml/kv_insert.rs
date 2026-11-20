@@ -100,6 +100,8 @@ pub(in super::super) fn convert_kv_insert(
         }
         return Ok(vec![task(KvOp::BatchPut {
             collection: qualified_collection,
+            // Resolved from the catalog before the write is journaled.
+            declared_columns: KvDeclaredColumns::pending(),
             entries: batch,
             ttl_ms,
             intent: batch_intent,
@@ -127,6 +129,7 @@ pub(in super::super) fn convert_kv_insert(
         let op = match intent {
             KvInsertIntent::Insert => KvOp::Insert {
                 collection: qualified_collection.clone(),
+                declared_columns: KvDeclaredColumns::pending(),
                 key,
                 value,
                 ttl_ms,
@@ -139,6 +142,7 @@ pub(in super::super) fn convert_kv_insert(
             },
             KvInsertIntent::InsertIfAbsent => KvOp::InsertIfAbsent {
                 collection: qualified_collection.clone(),
+                declared_columns: KvDeclaredColumns::pending(),
                 key,
                 value,
                 ttl_ms,
@@ -153,6 +157,7 @@ pub(in super::super) fn convert_kv_insert(
             // still merges: an empty merge keeps the stored body.
             KvInsertIntent::Put if key_column.is_some() => KvOp::InsertOnConflictUpdate {
                 collection: qualified_collection.clone(),
+                declared_columns: KvDeclaredColumns::pending(),
                 key,
                 value,
                 ttl_ms,
@@ -169,6 +174,7 @@ pub(in super::super) fn convert_kv_insert(
             },
             KvInsertIntent::Put => KvOp::Put {
                 collection: qualified_collection.clone(),
+                declared_columns: KvDeclaredColumns::pending(),
                 key,
                 value,
                 ttl_ms,

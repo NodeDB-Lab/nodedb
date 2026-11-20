@@ -5,11 +5,38 @@
 //! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
 //! whole plan afterwards.
 
+use std::sync::Arc;
+
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::DatabaseId;
-use nodedb_physical::physical_plan::{KvBatchIntent, KvCounterShape, KvOp, ReturningSpec};
+use nodedb_physical::physical_plan::{
+    DeclaredColumn, KvBatchIntent, KvCounterShape, KvDeclaredColumns, KvOp, ReturningSpec,
+};
 use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{QualifiedCollection, RlsWriteCheck};
+
+/// The collection a replicated KV write lands in, and the declared columns
+/// the proposer resolved for it.
+pub(super) struct Target<'a> {
+    pub collection: &'a str,
+    pub declared_columns: &'a Arc<Vec<DeclaredColumn>>,
+}
+
+impl Target<'_> {
+    /// The stored collection name, qualified by `database_id`.
+    pub(super) fn qualified(&self, database_id: DatabaseId) -> crate::Result<QualifiedCollection> {
+        Ok(QualifiedCollection::from_stored(
+            database_id,
+            self.collection.to_owned(),
+        )?)
+    }
+
+    /// The proposer's columns, resolved. The applying replica re-types
+    /// under them and never consults its own catalog.
+    pub(super) fn columns(&self) -> KvDeclaredColumns {
+        KvDeclaredColumns::Resolved(Arc::clone(self.declared_columns))
+    }
+}
 
 /// A decoded RETURNING projection spec plus the read filters gating it — see
 /// `ReplicatedWrite::KvPut::returning`. Bundled — plain positional arguments
@@ -21,7 +48,7 @@ pub(super) struct ReturningFields<'a> {
 
 /// The row a replicated KV put writes, and the identity it is written under.
 pub(super) struct PutFields<'a> {
-    pub collection: &'a str,
+    pub target: Target<'a>,
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub ttl_ms: u64,
@@ -35,7 +62,7 @@ pub(super) fn put(
     provenance: Option<SyncProvenance>,
 ) -> crate::Result<PhysicalPlan> {
     let PutFields {
-        collection,
+        target,
         key,
         value,
         ttl_ms,
@@ -43,7 +70,8 @@ pub(super) fn put(
     } = put;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Put {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -78,16 +106,20 @@ pub(super) fn delete(
 
 pub(super) fn insert(
     database_id: DatabaseId,
-    collection: &str,
-    key: &[u8],
-    value: &[u8],
-    ttl_ms: u64,
-    surrogate: u32,
+    row: PutFields<'_>,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
+    let PutFields {
+        target,
+        key,
+        value,
+        ttl_ms,
+        surrogate,
+    } = row;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Insert {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -109,7 +141,7 @@ pub(super) struct ConflictEntry<'a> {
 
 pub(super) fn insert_on_conflict_update(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     entry: ConflictEntry<'_>,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
@@ -122,7 +154,8 @@ pub(super) fn insert_on_conflict_update(
     } = entry;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -138,7 +171,7 @@ pub(super) fn insert_on_conflict_update(
 
 pub(super) fn batch_put(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
     intent: KvBatchIntent,
@@ -146,7 +179,8 @@ pub(super) fn batch_put(
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Kv(KvOp::BatchPut {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         entries: entries.to_vec(),
         ttl_ms,
         intent,
@@ -188,7 +222,7 @@ pub(super) fn persist(
 
 pub(super) fn incr(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     key: &[u8],
     delta: i64,
     ttl_ms: u64,
@@ -197,7 +231,8 @@ pub(super) fn incr(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Incr {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         delta,
         ttl_ms,
@@ -209,7 +244,7 @@ pub(super) fn incr(
 
 pub(super) fn incr_float(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     key: &[u8],
     delta: &str,
     surrogate: u32,
@@ -217,7 +252,8 @@ pub(super) fn incr_float(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         delta: delta.to_owned(),
         surrogate,
@@ -228,7 +264,7 @@ pub(super) fn incr_float(
 
 pub(super) fn cas(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     key: &[u8],
     expected: &[u8],
     new_value: &[u8],
@@ -236,7 +272,8 @@ pub(super) fn cas(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Cas {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         expected: expected.to_vec(),
         new_value: new_value.to_vec(),
@@ -247,7 +284,7 @@ pub(super) fn cas(
 
 pub(super) fn get_set(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     key: &[u8],
     new_value: &[u8],
     surrogate: u32,
@@ -255,7 +292,8 @@ pub(super) fn get_set(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::GetSet {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         new_value: new_value.to_vec(),
         surrogate,
@@ -334,7 +372,7 @@ pub(super) fn drop_index(
 
 pub(super) fn field_set(
     database_id: DatabaseId,
-    collection: &str,
+    target: Target<'_>,
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
@@ -343,7 +381,8 @@ pub(super) fn field_set(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::FieldSet {
-        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
+        collection: target.qualified(database_id)?,
+        declared_columns: target.columns(),
         key: key.to_vec(),
         updates: updates.to_vec(),
         surrogate,
@@ -522,6 +561,7 @@ mod tests {
         };
         let put = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            declared_columns: KvDeclaredColumns::none(),
             key: b"k1".to_vec(),
             value: b"v1".to_vec(),
             ttl_ms: 0,
@@ -568,6 +608,7 @@ mod tests {
         };
         let plan = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            declared_columns: KvDeclaredColumns::none(),
             key: b"k1".to_vec(),
             value: b"v1".to_vec(),
             ttl_ms: 0,
@@ -619,6 +660,7 @@ mod tests {
         };
         let plan = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
+            declared_columns: KvDeclaredColumns::none(),
             key: b"a1".to_vec(),
             value: b"v1".to_vec(),
             ttl_ms: 0,

@@ -104,6 +104,7 @@ fn a_local_kv_put_stamps_its_record_ordinal_live_and_on_replay() {
     let mut live = core();
     let ordinal = carried(&live.core);
     let mut plan = PhysicalPlan::Kv(KvOp::Put {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
         key: b"k".to_vec(),
         value: b"v".to_vec(),

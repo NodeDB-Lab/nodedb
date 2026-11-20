@@ -49,6 +49,7 @@ fn batch_kv(ctx: &mut TestCtx, collection: &str, count: usize) -> String {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 collection,
@@ -86,6 +87,7 @@ fn hash_join_completeness_past_50k_cap() {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "right_small",
@@ -158,6 +160,7 @@ fn sort_merge_join_completeness_past_50k_cap() {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "smj_right",
@@ -220,6 +223,7 @@ fn nested_loop_join_completeness_past_50k_cap() {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "nlj_right",

@@ -31,6 +31,7 @@ fn batch_put_entries(ctx: &mut TestCtx, collection: &str, count: usize) {
         &mut ctx.tx,
         &mut ctx.rx,
         PhysicalPlan::Kv(KvOp::BatchPut {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             entries,
             ttl_ms: 0,

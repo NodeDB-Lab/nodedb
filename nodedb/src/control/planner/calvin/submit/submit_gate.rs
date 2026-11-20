@@ -79,6 +79,7 @@ mod tests {
             database_id: DATABASE,
             vshard_id: nodedb_types::CollectionKey::from_bare(DATABASE, "cache").vshard(),
             plan: PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: QualifiedCollection::new(DATABASE, "cache"),
                 key: b"k".to_vec(),
                 value: b"v".to_vec(),

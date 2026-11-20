@@ -54,7 +54,7 @@ impl CoreLoop {
         }
         // A staged row body holds its declared numeric columns' values, as an
         // autocommit write does.
-        let coerced = match self.coerce_kv_op_bodies(task.request.database_id.as_u64(), tid, op) {
+        let coerced = match self.coerce_kv_op_bodies(op) {
             Ok(coerced) => coerced,
             Err(e) => return self.response_error(task, e),
         };
@@ -95,6 +95,7 @@ impl CoreLoop {
             }
             KvOp::InsertOnConflictUpdate {
                 collection,
+                declared_columns,
                 key,
                 value,
                 updates,
@@ -103,6 +104,11 @@ impl CoreLoop {
                 rls_write_check,
                 ..
             } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
                 let ctx = self.kv_stage_ctx(task, tid, txn_id, collection.as_str(), key, *surrogate);
                 self.stage_kv_insert_on_conflict_update(
                     &ctx,
@@ -110,7 +116,7 @@ impl CoreLoop {
                     value,
                     updates,
                     *ttl_ms,
-                    rls_write_check,
+                    (rls_write_check, declared),
                 )
             }
             KvOp::Delete {
@@ -131,27 +137,36 @@ impl CoreLoop {
             // The match reads at the plan's scope: the block's snapshot.
             KvOp::PredicateUpdate {
                 collection,
+                declared_columns,
                 filters,
                 updates,
                 rls_write_check,
                 returning: _,
                 rls_filters: _,
                 system_time,
-            } => match write_match_cut(system_time, "a KV predicate UPDATE") {
-                Ok(system_as_of) => {
-                    self.stage_kv_predicate_update(StageKvPredicateUpdateParams {
-                        task,
-                        tid,
-                        txn_id,
-                        collection: collection.as_str(),
-                        filter_bytes: filters,
-                        updates,
-                        rls_write_check,
-                        system_as_of,
-                    })
+            } => {
+                let declared = match self.kv_op_columns(task, declared_columns, collection.as_str())
+                {
+                    Ok(declared) => declared,
+                    Err(refusal) => return refusal,
+                };
+                match write_match_cut(system_time, "a KV predicate UPDATE") {
+                    Ok(system_as_of) => {
+                        self.stage_kv_predicate_update(StageKvPredicateUpdateParams {
+                            task,
+                            tid,
+                            txn_id,
+                            collection: collection.as_str(),
+                            filter_bytes: filters,
+                            updates,
+                            rls_write_check,
+                            system_as_of,
+                            declared,
+                        })
+                    }
+                    Err(e) => self.response_error(task, e),
                 }
-                Err(e) => self.response_error(task, e),
-            },
+            }
             KvOp::PredicateDelete {
                 collection,
                 filters,

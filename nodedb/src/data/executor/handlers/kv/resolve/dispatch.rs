@@ -34,9 +34,20 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, "kv resolve write");
 
+        // Every image the resolve computes re-types under the declared
+        // columns the wrapped op carries. An op that re-types nothing has none.
+        let declared = match inner.declared_columns() {
+            Some((collection, columns)) => match columns.columns(collection.as_str()) {
+                Ok(declared) => declared,
+                Err(pending) => return self.response_error(task, crate::Error::from(pending)),
+            },
+            None => &[],
+        };
+
         let outcome = match inner {
             KvOp::InsertOnConflictUpdate {
                 collection,
+                declared_columns: _,
                 key,
                 value,
                 ttl_ms,
@@ -58,6 +69,7 @@ impl CoreLoop {
                     rls_write_check,
                     returning: returning.as_ref(),
                     rls_filters,
+                    declared,
                 },
                 task,
             ),
@@ -109,6 +121,7 @@ impl CoreLoop {
             }),
             KvOp::FieldSet {
                 collection,
+                declared_columns: _,
                 key,
                 updates,
                 surrogate,
@@ -125,6 +138,7 @@ impl CoreLoop {
                     key,
                     surrogate: *surrogate,
                     rls_write_check,
+                    declared,
                 },
                 KvFieldSetArgs {
                     updates,
@@ -135,6 +149,7 @@ impl CoreLoop {
             ),
             KvOp::Incr {
                 collection,
+                declared_columns: _,
                 key,
                 delta,
                 ttl_ms,
@@ -150,6 +165,7 @@ impl CoreLoop {
                     key,
                     surrogate: *surrogate,
                     rls_write_check,
+                    declared,
                 },
                 *delta,
                 *ttl_ms,
@@ -157,6 +173,7 @@ impl CoreLoop {
             ),
             KvOp::IncrFloat {
                 collection,
+                declared_columns: _,
                 key,
                 delta,
                 surrogate,
@@ -171,12 +188,14 @@ impl CoreLoop {
                     key,
                     surrogate: *surrogate,
                     rls_write_check,
+                    declared,
                 },
                 delta,
                 shape,
             ),
             KvOp::Cas {
                 collection,
+                declared_columns: _,
                 key,
                 expected,
                 new_value,
@@ -191,12 +210,14 @@ impl CoreLoop {
                     key,
                     surrogate: *surrogate,
                     rls_write_check,
+                    declared,
                 },
                 expected,
                 new_value,
             ),
             KvOp::GetSet {
                 collection,
+                declared_columns: _,
                 key,
                 new_value,
                 surrogate,
@@ -211,12 +232,14 @@ impl CoreLoop {
                     key,
                     surrogate: *surrogate,
                     rls_write_check,
+                    declared,
                 },
                 new_value,
                 rls_filters,
             ),
             KvOp::Transfer {
                 collection,
+                declared_columns: _,
                 source_key,
                 dest_key,
                 field,
@@ -235,10 +258,12 @@ impl CoreLoop {
                 debit_surrogate: *debit_surrogate,
                 credit_surrogate: *credit_surrogate,
                 rls_write_check,
+                declared,
             }),
             KvOp::TransferItem {
                 source_collection,
                 dest_collection,
+                declared_columns: _,
                 item_key,
                 dest_key,
                 surrogate,
@@ -254,11 +279,13 @@ impl CoreLoop {
                 surrogate: *surrogate,
                 source_rls_write_check,
                 dest_rls_write_check,
+                declared,
             }),
             // A resolve reads no transaction overlay: only a current-state
             // predicate resolves here. A block's predicate write stages.
             KvOp::PredicateUpdate {
                 collection,
+                declared_columns: _,
                 filters,
                 updates,
                 rls_write_check,
@@ -277,6 +304,7 @@ impl CoreLoop {
                         rls_filters,
                     },
                     updates,
+                    declared,
                 )
             }),
             KvOp::PredicateDelete {
@@ -299,6 +327,7 @@ impl CoreLoop {
             }),
             KvOp::InsertIfAbsent {
                 collection,
+                declared_columns: _,
                 key,
                 value,
                 ttl_ms,
@@ -317,10 +346,12 @@ impl CoreLoop {
                     surrogate: *surrogate,
                     returning: returning.as_ref(),
                     rls_filters,
+                    declared,
                 },
             ),
             KvOp::BatchPut {
                 collection,
+                declared_columns: _,
                 entries,
                 ttl_ms,
                 intent,
@@ -339,6 +370,7 @@ impl CoreLoop {
                     surrogates,
                     returning: returning.as_ref(),
                     rls_filters,
+                    declared,
                 },
             ),
             // Every other op is unwrapped by `resolver_for_plan` already.
@@ -511,6 +543,7 @@ mod tests {
 
     fn incr_op(key: &[u8], delta: i64) -> KvOp {
         KvOp::Incr {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             key: key.to_vec(),
             delta,

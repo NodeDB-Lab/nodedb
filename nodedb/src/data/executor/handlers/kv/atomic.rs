@@ -2,7 +2,7 @@
 
 //! KV atomic operation handlers: Incr, IncrFloat, Cas, GetSet.
 
-use nodedb_physical::physical_plan::KvCounterShape;
+use nodedb_physical::physical_plan::{DeclaredColumn, KvCounterShape};
 use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape};
 use tracing::debug;
 
@@ -27,6 +27,9 @@ pub(in crate::data::executor) struct KvAtomicCtx<'a> {
     /// handler reading this field decides the image it is about to persist
     /// against it.
     pub(in crate::data::executor) rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The declared columns the plan carries. The computed image re-types
+    /// under them, as its WAL record and replay do.
+    pub(in crate::data::executor) declared: &'a [DeclaredColumn],
 }
 
 /// The `ErrorCode` an atomic that computed or stored no value answers with.
@@ -80,6 +83,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         debug!(core = self.core_id, %collection, delta, "kv incr");
 
@@ -96,18 +100,9 @@ impl CoreLoop {
         // the declared column rule and the write policy are handed in and
         // applied to the computed bytes rather than to a duplicate of the
         // increment arithmetic out here.
-        let declared = self.declared_columns_of(did, tid, collection).to_vec();
         let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(
-                image,
-                &declared,
-                rls_write_check,
-                key,
-                tid,
-                collection,
-                &crs,
-            )
+            fit_and_admit_kv_image(image, declared, rls_write_check, key, tid, collection, &crs)
         };
         match self.kv_engine.incr(
             crate::engine::kv::AtomicKeyCtx {
@@ -164,6 +159,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         debug!(core = self.core_id, %collection, %delta, "kv incr_float");
 
@@ -176,18 +172,9 @@ impl CoreLoop {
             .map(|ms| ms as u64)
             .unwrap_or_else(current_ms);
         // Same engine-internal compute-and-persist as `Incr` — see there.
-        let declared = self.declared_columns_of(did, tid, collection).to_vec();
         let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(
-                image,
-                &declared,
-                rls_write_check,
-                key,
-                tid,
-                collection,
-                &crs,
-            )
+            fit_and_admit_kv_image(image, declared, rls_write_check, key, tid, collection, &crs)
         };
         match self.kv_engine.incr_float(
             crate::engine::kv::AtomicKeyCtx {
@@ -242,6 +229,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         debug!(core = self.core_id, %collection, "kv cas");
 
@@ -256,18 +244,9 @@ impl CoreLoop {
         // A swap into a typed row stores the row with one column replaced, not
         // `new_value` itself, so the declared rule and the policy apply to the
         // image the engine computes — see `Incr`.
-        let declared = self.declared_columns_of(did, tid, collection).to_vec();
         let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(
-                image,
-                &declared,
-                rls_write_check,
-                key,
-                tid,
-                collection,
-                &crs,
-            )
+            fit_and_admit_kv_image(image, declared, rls_write_check, key, tid, collection, &crs)
         };
         let result = match self.kv_engine.cas(
             crate::engine::kv::AtomicKeyCtx {
@@ -334,6 +313,7 @@ impl CoreLoop {
             key,
             surrogate,
             rls_write_check,
+            declared,
         } = ctx;
         debug!(core = self.core_id, %collection, "kv getset");
 
@@ -348,18 +328,9 @@ impl CoreLoop {
         // A write into a typed row stores the row with one column replaced, so
         // the declared rule and the policy apply to the image the engine
         // computes — see `Incr`.
-        let declared = self.declared_columns_of(did, tid, collection).to_vec();
         let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(
-                image,
-                &declared,
-                rls_write_check,
-                key,
-                tid,
-                collection,
-                &crs,
-            )
+            fit_and_admit_kv_image(image, declared, rls_write_check, key, tid, collection, &crs)
         };
         let crate::engine::kv::GetSetResult { old, written } = match self.kv_engine.getset(
             crate::engine::kv::AtomicKeyCtx {
@@ -432,7 +403,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
+    use nodedb_physical::physical_plan::{DeclaredColumn, KvCounterShape, KvOp};
     use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate, Value};
 
     use super::KvAtomicCtx;
@@ -550,6 +521,16 @@ mod tests {
         key: &'a [u8],
         check: &'a RlsWriteCheck,
     ) -> KvAtomicCtx<'a> {
+        ctx_declared(task, key, check, &[])
+    }
+
+    /// [`ctx`] for a plan that carries `declared`.
+    fn ctx_declared<'a>(
+        task: &'a ExecutionTask,
+        key: &'a [u8],
+        check: &'a RlsWriteCheck,
+        declared: &'a [DeclaredColumn],
+    ) -> KvAtomicCtx<'a> {
         KvAtomicCtx {
             task,
             did: did(),
@@ -558,6 +539,7 @@ mod tests {
             key,
             surrogate: Surrogate::new(1),
             rls_write_check: check,
+            declared,
         }
     }
 
@@ -646,24 +628,14 @@ mod tests {
         assert_eq!(stored(&h.core, b"hits"), b"42".to_vec());
     }
 
-    /// Register `declared` as the declared numeric columns of the collection.
-    fn declare(core: &mut CoreLoop, declared: &[(&str, &str)]) {
-        let mut config = crate::engine::document::store::CollectionConfig::new(COLLECTION);
-        config.declared_columns = declared
+    /// The declared numeric columns a plan carries for `declared`.
+    fn declare(declared: &[(&str, &str)]) -> Vec<DeclaredColumn> {
+        declared
             .iter()
             .map(|(name, declared)| {
-                nodedb_physical::physical_plan::DeclaredColumn::from_declared(name, declared)
-                    .expect("numeric declaration")
+                DeclaredColumn::from_declared(name, declared).expect("numeric declaration")
             })
-            .collect();
-        core.doc_configs.insert(
-            (
-                DatabaseId::DEFAULT,
-                TenantId::new(TID),
-                COLLECTION.to_string(),
-            ),
-            config,
-        );
+            .collect()
     }
 
     fn is_out_of_range(resp: &crate::bridge::envelope::Response) -> bool {
@@ -681,13 +653,16 @@ mod tests {
             ("n", Value::Integer(32767)),
         ]);
         seed(&mut h.core, b"player", &row);
-        declare(&mut h.core, &[("n", "SMALLINT")]);
+        let cols = declare(&[("n", "SMALLINT")]);
 
         let t = task();
         let check = RlsWriteCheck::already_decided_elsewhere();
-        let resp = h
-            .core
-            .execute_kv_incr(ctx(&t, b"player", &check), 1, 0, &KvCounterShape::Raw);
+        let resp = h.core.execute_kv_incr(
+            ctx_declared(&t, b"player", &check, &cols),
+            1,
+            0,
+            &KvCounterShape::Raw,
+        );
         assert!(is_out_of_range(&resp), "{:?}", resp.error_code);
         assert!(
             h.events.try_recv().is_none(),
@@ -695,9 +670,12 @@ mod tests {
         );
         assert_eq!(stored(&h.core, b"player"), row);
 
-        let resp = h
-            .core
-            .execute_kv_incr(ctx(&t, b"player", &check), -1, 0, &KvCounterShape::Raw);
+        let resp = h.core.execute_kv_incr(
+            ctx_declared(&t, b"player", &check, &cols),
+            -1,
+            0,
+            &KvCounterShape::Raw,
+        );
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert_eq!(
             columns(&stored(&h.core, b"player")).get("n"),
@@ -708,21 +686,25 @@ mod tests {
     #[test]
     fn incr_float_meets_a_declared_decimal() {
         let mut h = make_core();
-        declare(&mut h.core, &[("value", "DECIMAL(5,2)")]);
+        let cols = declare(&[("value", "DECIMAL(5,2)")]);
         let t = task();
         let check = RlsWriteCheck::already_decided_elsewhere();
 
         seed(&mut h.core, b"price", b"999.99");
-        let resp =
-            h.core
-                .execute_kv_incr_float(ctx(&t, b"price", &check), "1", &KvCounterShape::Raw);
+        let resp = h.core.execute_kv_incr_float(
+            ctx_declared(&t, b"price", &check, &cols),
+            "1",
+            &KvCounterShape::Raw,
+        );
         assert!(is_out_of_range(&resp), "{:?}", resp.error_code);
         assert_eq!(stored(&h.core, b"price"), b"999.99".to_vec());
 
         seed(&mut h.core, b"fee", b"1.50");
-        let resp =
-            h.core
-                .execute_kv_incr_float(ctx(&t, b"fee", &check), "0.005", &KvCounterShape::Raw);
+        let resp = h.core.execute_kv_incr_float(
+            ctx_declared(&t, b"fee", &check, &cols),
+            "0.005",
+            &KvCounterShape::Raw,
+        );
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert_eq!(
             stored(&h.core, b"fee"),
@@ -738,20 +720,20 @@ mod tests {
     #[test]
     fn cas_and_getset_past_a_declared_smallint_are_refused() {
         let mut h = make_core();
-        declare(&mut h.core, &[("value", "SMALLINT")]);
+        let cols = declare(&[("value", "SMALLINT")]);
         seed(&mut h.core, b"slot", b"5");
         let t = task();
         let check = RlsWriteCheck::already_decided_elsewhere();
 
         let resp = h
             .core
-            .execute_kv_cas(ctx(&t, b"slot", &check), b"5", b"40000");
+            .execute_kv_cas(ctx_declared(&t, b"slot", &check, &cols), b"5", b"40000");
         assert!(is_out_of_range(&resp), "{:?}", resp.error_code);
         assert_eq!(stored(&h.core, b"slot"), b"5".to_vec());
 
-        let resp = h
-            .core
-            .execute_kv_getset(ctx(&t, b"slot", &check), b"40000", &[]);
+        let resp =
+            h.core
+                .execute_kv_getset(ctx_declared(&t, b"slot", &check, &cols), b"40000", &[]);
         assert!(is_out_of_range(&resp), "{:?}", resp.error_code);
         assert_eq!(stored(&h.core, b"slot"), b"5".to_vec());
         assert!(
@@ -761,7 +743,7 @@ mod tests {
 
         let resp = h
             .core
-            .execute_kv_getset(ctx(&t, b"slot", &check), b"7", &[]);
+            .execute_kv_getset(ctx_declared(&t, b"slot", &check, &cols), b"7", &[]);
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert_eq!(stored(&h.core, b"slot"), b"7".to_vec());
     }

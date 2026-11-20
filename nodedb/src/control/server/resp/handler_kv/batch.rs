@@ -108,6 +108,8 @@ pub(in crate::control::server::resp) async fn handle_mset(
 
     let plan = PhysicalPlan::Kv(KvOp::BatchPut {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
+        // Resolved from the catalog before the write is journaled.
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::pending(),
         entries,
         ttl_ms: 0,
         intent: nodedb_physical::physical_plan::KvBatchIntent::Put,

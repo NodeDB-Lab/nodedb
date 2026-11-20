@@ -27,7 +27,7 @@ pub(crate) async fn reissue_plan_durably(
     tenant_id: TenantId,
     target: DatabaseTarget,
     collection: &str,
-    plan: PhysicalPlan,
+    mut plan: PhysicalPlan,
 ) -> crate::Result<()> {
     let database_id = target.dest;
     let vshard = RecordHomes::of(HomedRecord::Row(nodedb_types::CollectionKey::from_bare(
@@ -36,6 +36,11 @@ pub(crate) async fn reissue_plan_durably(
     )))
     .owner();
 
+    // A KV write's declared columns resolve here, in place, before the entry
+    // exists.
+    crate::control::planner::kv_declared_columns::resolve_kv_declared_columns(
+        state, tenant_id, &mut plan,
+    )?;
     // The entry logs resolved rows: a timeseries ingest resolves here, before
     // its entry exists.
     let resolved = crate::control::write_resolve::resolve_for_log(

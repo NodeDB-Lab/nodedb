@@ -24,6 +24,7 @@ fn batch(intent: KvBatchIntent, entries: &[(&[u8], &[u8])]) -> PhysicalPlan {
         .map(|(key, _)| nodedb_test_support::kv_rows::kv_row_surrogate(key))
         .collect();
     PhysicalPlan::Kv(KvOp::BatchPut {
+        declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
         collection: collection(),
         entries,
         ttl_ms: 0,

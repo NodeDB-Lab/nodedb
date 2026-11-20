@@ -265,6 +265,7 @@ fn one_savepoint_reverts_value_and_graph_overlays_together() {
         &mut tx,
         &mut rx,
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "c",

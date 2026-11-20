@@ -7,6 +7,7 @@
 //! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
 //! whole plan afterwards.
 
+use super::kv::Target;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::KvOp;
@@ -15,7 +16,7 @@ use nodedb_types::{QualifiedCollection, RlsWriteCheck};
 /// Fields of the `KvTransfer` wire variant, bundled so [`transfer`] stays
 /// under the `too_many_arguments` clippy threshold.
 pub(super) struct TransferFields<'a> {
-    pub(super) collection: &'a str,
+    pub(super) target: Target<'a>,
     pub(super) source_key: &'a [u8],
     pub(super) dest_key: &'a [u8],
     pub(super) field: &'a str,
@@ -28,7 +29,8 @@ pub(super) fn transfer(database_id: DatabaseId, f: TransferFields) -> crate::Res
     let debit_surrogate = nodedb_types::Surrogate::new(f.debit_surrogate);
     let credit_surrogate = nodedb_types::Surrogate::new(f.credit_surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Transfer {
-        collection: QualifiedCollection::from_stored(database_id, f.collection.to_owned())?,
+        collection: f.target.qualified(database_id)?,
+        declared_columns: f.target.columns(),
         source_key: f.source_key.to_vec(),
         dest_key: f.dest_key.to_vec(),
         field: f.field.to_owned(),
@@ -138,21 +140,24 @@ pub(super) fn resolved_write(
     }))
 }
 
+/// `dest` names the destination and the columns the moved item re-types
+/// under.
 pub(super) fn transfer_item(
     database_id: DatabaseId,
     source_collection: &str,
-    dest_collection: &str,
+    dest: Target<'_>,
     item_key: &[u8],
     dest_key: &[u8],
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::TransferItem {
+        declared_columns: dest.columns(),
         source_collection: QualifiedCollection::from_stored(
             database_id,
             source_collection.to_owned(),
         )?,
-        dest_collection: QualifiedCollection::from_stored(database_id, dest_collection.to_owned())?,
+        dest_collection: dest.qualified(database_id)?,
         item_key: item_key.to_vec(),
         dest_key: dest_key.to_vec(),
         surrogate,

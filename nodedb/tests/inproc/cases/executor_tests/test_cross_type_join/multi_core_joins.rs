@@ -50,6 +50,7 @@ fn multi_core_broadcast_inner_join() {
             &mut core1.tx,
             &mut core1.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",
@@ -213,6 +214,7 @@ fn multi_core_broadcast_left_join() {
             &mut core1.tx,
             &mut core1.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",
@@ -373,6 +375,7 @@ fn multi_core_broadcast_merge_simulation() {
             &mut core0.tx,
             &mut core0.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",
@@ -394,6 +397,7 @@ fn multi_core_broadcast_merge_simulation() {
             &mut core1.tx,
             &mut core1.rx,
             PhysicalPlan::Kv(KvOp::Put {
+                declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "prefs",

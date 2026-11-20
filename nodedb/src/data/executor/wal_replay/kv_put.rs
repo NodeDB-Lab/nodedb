@@ -38,6 +38,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_note::KeyRepr;
 use crate::data::executor::handlers::kv::declared_body::coerce_kv_body;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use nodedb_physical::physical_plan::DeclaredColumn;
 use nodedb_types::Surrogate;
 
 /// Inputs shared by both arms, bundled so each stays under the
@@ -69,7 +70,15 @@ impl CoreLoop {
             record_lsn,
         } = *rec;
 
-        let (collection, key, value, ttl_ms, expire_at_ms, surrogate) = decode_kv_put(payload)?;
+        let KvPutFields {
+            collection,
+            key,
+            value,
+            ttl_ms,
+            expire_at_ms,
+            surrogate,
+            declared: record_declared,
+        } = decode_kv_put(payload)?;
 
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
@@ -77,11 +86,10 @@ impl CoreLoop {
         if self.claim_for_validation() {
             return Some(0);
         }
-        // The record holds the body the write supplied. The live apply
-        // re-typed its declared numeric columns, so replay does too. A
-        // pinned record re-types under its pin.
-        let declared = match self.install_declared_columns_of(database_id, tenant_id, &collection) {
-            Ok(declared) => declared,
+        // The record holds the body the write supplied, and the columns the
+        // live write re-typed it under. A pinned redo re-types under its pin.
+        let declared = match self.pinned_declared_columns_of(database_id, tenant_id, &collection) {
+            Ok(pinned) => pinned.unwrap_or(record_declared.as_slice()),
             Err(e) => {
                 self.replay_record_unapplied("kv", "put_config_pin", record_lsn, &e.to_string());
                 return Some(0);
@@ -214,7 +222,14 @@ impl CoreLoop {
             record_lsn,
         } = *rec;
 
-        let (collection, entries, ttl_ms, expire_at_ms, surrogates) = decode_kv_batch_put(payload)?;
+        let KvBatchPutFields {
+            collection,
+            entries,
+            ttl_ms,
+            expire_at_ms,
+            surrogates,
+            declared,
+        } = decode_kv_batch_put(payload)?;
 
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
@@ -237,13 +252,12 @@ impl CoreLoop {
             return Some(0);
         }
 
-        // Each entry holds the body the write supplied. The live apply
-        // re-typed its declared numeric columns, so replay does too. Only a
-        // standalone write appends this record, so no pin applies.
+        // Each entry holds the body the write supplied. Replay re-types it
+        // under the columns the live write used, which the record carries.
+        // Only a standalone write appends this record, so no pin applies.
         let mut entries = entries;
         for (_, value) in entries.iter_mut() {
-            let declared = self.declared_columns_of(database_id, tenant_id, &collection);
-            let coerced = match coerce_kv_body(value, declared) {
+            let coerced = match coerce_kv_body(value, &declared) {
                 Ok(Cow::Owned(bytes)) => Some(bytes),
                 Ok(Cow::Borrowed(_)) => None,
                 Err(e) => {
@@ -307,39 +321,63 @@ fn decode_kv_rewrite(payload: &[u8]) -> Option<KvRewriteFields> {
 }
 
 /// One `kv_put` record's fields.
-type KvPutFields = (String, Vec<u8>, Vec<u8>, u64, Option<u64>, Surrogate);
+pub(in crate::data::executor) struct KvPutFields {
+    pub collection: String,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub ttl_ms: u64,
+    pub expire_at_ms: Option<u64>,
+    pub surrogate: Surrogate,
+    /// The columns the live write re-typed `value` under.
+    pub declared: Vec<DeclaredColumn>,
+}
 
-fn decode_kv_put(payload: &[u8]) -> Option<KvPutFields> {
-    // ("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate)
-    if let Ok((disc, collection, key, value, ttl_ms, expire_at_ms, surrogate)) =
-        zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32)>(payload)
+/// The wire tuple of a `kv_put` record.
+pub(in crate::data::executor) type KvPutTuple = (
+    String,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    u64,
+    Option<u64>,
+    u32,
+    Vec<DeclaredColumn>,
+);
+
+pub(in crate::data::executor) fn decode_kv_put(payload: &[u8]) -> Option<KvPutFields> {
+    // ("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate, declared)
+    if let Ok((disc, collection, key, value, ttl_ms, expire_at_ms, surrogate, declared)) =
+        zerompk::from_msgpack::<KvPutTuple>(payload)
         && disc == "kv_put"
         && surrogate != 0
     {
-        return Some((
+        return Some(KvPutFields {
             collection,
             key,
             value,
             ttl_ms,
             expire_at_ms,
-            Surrogate::new(surrogate),
-        ));
+            surrogate: Surrogate::new(surrogate),
+            declared,
+        });
     }
     None
 }
 
 /// One `kv_batch_put` record's fields.
-type KvBatchPutFields = (
-    String,
-    Vec<(Vec<u8>, Vec<u8>)>,
-    u64,
-    Option<u64>,
-    Vec<Surrogate>,
-);
+struct KvBatchPutFields {
+    collection: String,
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    ttl_ms: u64,
+    expire_at_ms: Option<u64>,
+    surrogates: Vec<Surrogate>,
+    /// The columns the live write re-typed every value under.
+    declared: Vec<DeclaredColumn>,
+}
 
 fn decode_kv_batch_put(payload: &[u8]) -> Option<KvBatchPutFields> {
-    // ("kv_batch_put", collection, entries, ttl_ms, expire_at_ms, surrogates)
-    if let Ok((disc, collection, entries, ttl_ms, expire_at_ms, surrogates)) =
+    // ("kv_batch_put", collection, entries, ttl_ms, expire_at_ms, surrogates, declared)
+    if let Ok((disc, collection, entries, ttl_ms, expire_at_ms, surrogates, declared)) =
         zerompk::from_msgpack::<(
             &str,
             String,
@@ -347,12 +385,20 @@ fn decode_kv_batch_put(payload: &[u8]) -> Option<KvBatchPutFields> {
             u64,
             Option<u64>,
             Vec<u32>,
+            Vec<DeclaredColumn>,
         )>(payload)
         && disc == "kv_batch_put"
         && !surrogates.contains(&0)
     {
         let surrogates = surrogates.into_iter().map(Surrogate::new).collect();
-        return Some((collection, entries, ttl_ms, expire_at_ms, surrogates));
+        return Some(KvBatchPutFields {
+            collection,
+            entries,
+            ttl_ms,
+            expire_at_ms,
+            surrogates,
+            declared,
+        });
     }
     None
 }
@@ -392,9 +438,17 @@ mod tests {
 
     #[test]
     fn current_kv_put_shape_round_trips_the_real_surrogate() {
-        let payload = encode_kv_put("users", b"k1", b"v1", 0, None, 4242).expect("encode");
-        let (collection, key, value, ttl_ms, expire_at_ms, surrogate) =
-            decode_kv_put(&payload).expect("current shape decodes");
+        let payload = encode_kv_put("users", b"k1", b"v1", 0, None, 4242, &[]).expect("encode");
+        let KvPutFields {
+            collection,
+            key,
+            value,
+            ttl_ms,
+            expire_at_ms,
+            surrogate,
+            declared,
+        } = decode_kv_put(&payload).expect("current shape decodes");
+        assert!(declared.is_empty());
         assert_eq!(collection, "users");
         assert_eq!(key, b"k1");
         assert_eq!(value, b"v1");
@@ -410,10 +464,22 @@ mod tests {
 
     #[test]
     fn current_kv_put_shape_round_trips_the_absolute_expiry() {
-        let payload = encode_kv_put("users", b"k1", b"v1", 5_000, Some(1_700_000_000_000), 7)
-            .expect("encode");
-        let (_, _, _, ttl_ms, expire_at_ms, surrogate) =
-            decode_kv_put(&payload).expect("current shape decodes");
+        let payload = encode_kv_put(
+            "users",
+            b"k1",
+            b"v1",
+            5_000,
+            Some(1_700_000_000_000),
+            7,
+            &[],
+        )
+        .expect("encode");
+        let KvPutFields {
+            ttl_ms,
+            expire_at_ms,
+            surrogate,
+            ..
+        } = decode_kv_put(&payload).expect("current shape decodes");
         assert_eq!(ttl_ms, 5_000);
         assert_eq!(expire_at_ms, Some(1_700_000_000_000));
         assert_eq!(surrogate, Surrogate::new(7));
@@ -444,8 +510,8 @@ mod tests {
             (b"k1".to_vec(), b"v1".to_vec()),
             (b"k2".to_vec(), b"v2".to_vec()),
         ];
-        let put = encode_kv_put("users", b"k1", b"v1", 0, None, 0).expect("encode");
-        let batch = encode_kv_batch_put("users", &entries, 0, None, &[3, 0]).expect("encode");
+        let put = encode_kv_put("users", b"k1", b"v1", 0, None, 0, &[]).expect("encode");
+        let batch = encode_kv_batch_put("users", &entries, 0, None, &[3, 0], &[]).expect("encode");
         assert!(decode_kv_put(&put).is_none());
         assert!(decode_kv_batch_put(&batch).is_none());
         assert_eq!(kv_put_family_discriminator(&put), Some("kv_put"));
@@ -458,9 +524,16 @@ mod tests {
             (b"k1".to_vec(), b"v1".to_vec()),
             (b"k2".to_vec(), b"v2".to_vec()),
         ];
-        let payload = encode_kv_batch_put("users", &entries, 0, None, &[11, 12]).expect("encode");
-        let (collection, decoded, ttl_ms, expire_at_ms, surrogates) =
-            decode_kv_batch_put(&payload).expect("current shape decodes");
+        let payload =
+            encode_kv_batch_put("users", &entries, 0, None, &[11, 12], &[]).expect("encode");
+        let KvBatchPutFields {
+            collection,
+            entries: decoded,
+            ttl_ms,
+            expire_at_ms,
+            surrogates,
+            ..
+        } = decode_kv_batch_put(&payload).expect("current shape decodes");
         assert_eq!(collection, "users");
         assert_eq!(decoded, entries);
         assert_eq!(ttl_ms, 0);
@@ -546,7 +619,8 @@ mod tests {
         /// zero as unconditionally visible.
         #[test]
         fn replayed_row_carries_the_recorded_surrogate() {
-            let payload = encode_kv_put("users", b"alice", b"body", 0, None, 4242).expect("encode");
+            let payload =
+                encode_kv_put("users", b"alice", b"body", 0, None, 4242, &[]).expect("encode");
             let (_dir, records) = wal_records(&[payload]);
 
             let mut h = make_core();
@@ -570,7 +644,8 @@ mod tests {
                 (b"k1".to_vec(), b"v1".to_vec()),
                 (b"k2".to_vec(), b"v2".to_vec()),
             ];
-            let payload = encode_kv_batch_put("carts", &entries, 0, None, &[7, 8]).expect("encode");
+            let payload =
+                encode_kv_batch_put("carts", &entries, 0, None, &[7, 8], &[]).expect("encode");
             let (_dir, records) = wal_records(&[payload]);
 
             let mut h = make_core();
@@ -595,7 +670,7 @@ mod tests {
         /// the row was bound under. A rewrite of an absent row writes nothing.
         #[test]
         fn replayed_rewrite_keeps_the_rows_identity() {
-            let put = encode_kv_put("users", b"alice", b"old", 0, None, 77).expect("encode");
+            let put = encode_kv_put("users", b"alice", b"old", 0, None, 77, &[]).expect("encode");
             let rewrite = encode_kv_rewrite("users", b"alice", b"new", 0, 0).expect("encode");
             let orphan = encode_kv_rewrite("users", b"bob", b"new", 0, 0).expect("encode");
             let (_dir, records) = wal_records(&[put, rewrite, orphan]);
@@ -624,7 +699,8 @@ mod tests {
         /// identical state — the whole point of a crash-safe recovery pass.
         #[test]
         fn replaying_the_same_records_twice_is_a_no_op() {
-            let payload = encode_kv_put("users", b"alice", b"body", 0, None, 9).expect("encode");
+            let payload =
+                encode_kv_put("users", b"alice", b"body", 0, None, 9, &[]).expect("encode");
             let (_dir, records) = wal_records(&[payload]);
 
             let mut h = make_core();

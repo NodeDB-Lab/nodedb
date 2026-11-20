@@ -91,7 +91,7 @@ impl RedoKvOp {
     }
 }
 
-type KvPut = (String, String, Vec<u8>, Vec<u8>, u64, Option<u64>, u32);
+type KvPut = crate::data::executor::wal_replay::kv_put::KvPutTuple;
 type KvDelete = (String, String, Vec<Vec<u8>>);
 
 /// The KV point writes in `ops`, in record order. A `kv_truncate` carries no
@@ -210,6 +210,7 @@ mod tests {
             0u64,
             None::<u64>,
             9u32,
+            Vec::<nodedb_physical::physical_plan::DeclaredColumn>::new(),
         ))
         .expect("encode kv put");
         let kv_delete = zerompk::to_msgpack_vec(&("kv_delete", "kvs", vec![b"k".to_vec()]))

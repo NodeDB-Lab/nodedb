@@ -7,11 +7,11 @@ use crate::wal::manager::WalAppender;
 use nodedb_physical::physical_plan::KvOp;
 
 use super::encode::{
-    KvIncrRecord, KvRegisterSortedIndexFields, KvTransferFields, encode_kv_batch_put,
-    encode_kv_cas, encode_kv_delete, encode_kv_drop_index, encode_kv_drop_sorted_index,
-    encode_kv_expire, encode_kv_field_set, encode_kv_getset, encode_kv_incr, encode_kv_incr_float,
-    encode_kv_insert_on_conflict_update, encode_kv_persist, encode_kv_put,
-    encode_kv_register_index, encode_kv_register_sorted_index, encode_kv_transfer,
+    KvIncrRecord, KvInsertOnConflictRecord, KvRegisterSortedIndexFields, KvTransferFields,
+    encode_kv_batch_put, encode_kv_cas, encode_kv_delete, encode_kv_drop_index,
+    encode_kv_drop_sorted_index, encode_kv_expire, encode_kv_field_set, encode_kv_getset,
+    encode_kv_incr, encode_kv_incr_float, encode_kv_insert_on_conflict_update, encode_kv_persist,
+    encode_kv_put, encode_kv_register_index, encode_kv_register_sorted_index, encode_kv_transfer,
     encode_kv_transfer_item, encode_kv_truncate,
 };
 
@@ -90,6 +90,7 @@ pub fn wal_append_kv_op(
     let lsn: Option<crate::types::Lsn> = match op {
         KvOp::Put {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -98,6 +99,7 @@ pub fn wal_append_kv_op(
             ..
         } => {
             check_kv_row(collection.as_str(), key, value)?;
+            let declared = declared_columns.columns(collection.as_str())?;
             if let Some(prov) = provenance {
                 append_sync_mark(wal, prov)?;
             }
@@ -110,6 +112,7 @@ pub fn wal_append_kv_op(
                 *ttl_ms,
                 expire_at_ms,
                 surrogate.as_u32(),
+                declared,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
@@ -127,6 +130,7 @@ pub fn wal_append_kv_op(
         // A refused insert writes nothing: its outcome cancels this record.
         KvOp::Insert {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -143,11 +147,13 @@ pub fn wal_append_kv_op(
                 *ttl_ms,
                 expire_at_ms,
                 surrogate.as_u32(),
+                declared_columns.columns(collection.as_str())?,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::InsertOnConflictUpdate {
             collection,
+            declared_columns,
             key,
             value,
             ttl_ms,
@@ -161,15 +167,16 @@ pub fn wal_append_kv_op(
         } => {
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
-            let entry = encode_kv_insert_on_conflict_update(
-                collection.as_str(),
+            let entry = encode_kv_insert_on_conflict_update(KvInsertOnConflictRecord {
+                collection: collection.as_str(),
                 key,
                 value,
-                *ttl_ms,
+                ttl_ms: *ttl_ms,
                 updates,
                 expire_at_ms,
-                surrogate.as_u32(),
-            )?;
+                surrogate: surrogate.as_u32(),
+                declared: declared_columns.columns(collection.as_str())?,
+            })?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Delete {
@@ -186,6 +193,7 @@ pub fn wal_append_kv_op(
         }
         KvOp::BatchPut {
             collection,
+            declared_columns,
             entries,
             ttl_ms,
             surrogates,
@@ -194,11 +202,18 @@ pub fn wal_append_kv_op(
             for (key, value) in entries {
                 check_kv_row(collection.as_str(), key, value)?;
             }
+            let declared = declared_columns.columns(collection.as_str())?;
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
             let raw: Vec<u32> = surrogates.iter().map(|s| s.as_u32()).collect();
-            let entry =
-                encode_kv_batch_put(collection.as_str(), entries, *ttl_ms, expire_at_ms, &raw)?;
+            let entry = encode_kv_batch_put(
+                collection.as_str(),
+                entries,
+                *ttl_ms,
+                expire_at_ms,
+                &raw,
+                declared,
+            )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Expire {
@@ -237,6 +252,7 @@ pub fn wal_append_kv_op(
         }
         KvOp::FieldSet {
             collection,
+            declared_columns,
             key,
             updates,
             surrogate,
@@ -249,11 +265,13 @@ pub fn wal_append_kv_op(
                 updates,
                 surrogate.as_u32(),
                 *if_present,
+                declared_columns.columns(collection.as_str())?,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Incr {
             collection,
+            declared_columns,
             key,
             delta,
             ttl_ms,
@@ -261,6 +279,7 @@ pub fn wal_append_kv_op(
             shape,
             ..
         } => {
+            let declared = declared_columns.columns(collection.as_str())?;
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
             let entry = encode_kv_incr(KvIncrRecord {
@@ -271,23 +290,32 @@ pub fn wal_append_kv_op(
                 surrogate: surrogate.as_u32(),
                 shape,
                 expire_at_ms,
+                declared,
             })?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::IncrFloat {
             collection,
+            declared_columns,
             key,
             delta,
             surrogate,
             shape,
             ..
         } => {
-            let entry =
-                encode_kv_incr_float(collection.as_str(), key, delta, surrogate.as_u32(), shape)?;
+            let entry = encode_kv_incr_float(
+                collection.as_str(),
+                key,
+                delta,
+                surrogate.as_u32(),
+                shape,
+                declared_columns.columns(collection.as_str())?,
+            )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Cas {
             collection,
+            declared_columns,
             key,
             expected,
             new_value,
@@ -300,17 +328,25 @@ pub fn wal_append_kv_op(
                 expected,
                 new_value,
                 surrogate.as_u32(),
+                declared_columns.columns(collection.as_str())?,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::GetSet {
             collection,
+            declared_columns,
             key,
             new_value,
             surrogate,
             ..
         } => {
-            let entry = encode_kv_getset(collection.as_str(), key, new_value, surrogate.as_u32())?;
+            let entry = encode_kv_getset(
+                collection.as_str(),
+                key,
+                new_value,
+                surrogate.as_u32(),
+                declared_columns.columns(collection.as_str())?,
+            )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::RegisterSortedIndex {
@@ -356,6 +392,7 @@ pub fn wal_append_kv_op(
         }
         KvOp::Transfer {
             collection,
+            declared_columns,
             source_key,
             dest_key,
             field,
@@ -372,12 +409,14 @@ pub fn wal_append_kv_op(
                 amount: *amount,
                 debit_surrogate: debit_surrogate.as_u32(),
                 credit_surrogate: credit_surrogate.as_u32(),
+                declared: declared_columns.columns(collection.as_str())?,
             })?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::TransferItem {
             source_collection,
             dest_collection,
+            declared_columns,
             item_key,
             dest_key,
             surrogate,
@@ -389,6 +428,7 @@ pub fn wal_append_kv_op(
                 item_key,
                 dest_key,
                 surrogate.as_u32(),
+                declared_columns.columns(dest_collection.as_str())?,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }

@@ -32,7 +32,7 @@ pub(crate) async fn dispatch_trusted_internal_sync_response(
         vshard_id,
     };
     // A trusted internal write carries no caller roles.
-    let payload = sync_write(state, owner, &plan, event_source, Vec::new()).await?;
+    let payload = sync_write(state, owner, plan, event_source, Vec::new()).await?;
     Ok(ok_response(state, payload))
 }
 
@@ -49,7 +49,7 @@ pub(crate) async fn dispatch_sync_payload(
         database_id: task.database_id,
         vshard_id: task.vshard_id,
     };
-    sync_write(state, owner, &task.plan, EventSource::CrdtSync, user_roles).await
+    sync_write(state, owner, task.plan, EventSource::CrdtSync, user_roles).await
 }
 
 /// Refuse an unadmitted CRDT apply, then propose `plan` carrying
@@ -57,11 +57,11 @@ pub(crate) async fn dispatch_sync_payload(
 async fn sync_write(
     state: &SharedState,
     owner: RecordOwner,
-    plan: &PhysicalPlan,
+    plan: PhysicalPlan,
     event_source: EventSource,
     user_roles: Vec<String>,
 ) -> crate::Result<Vec<u8>> {
-    reject_unadmitted_crdt_apply(plan)?;
+    reject_unadmitted_crdt_apply(&plan)?;
     propose_sync_plan(
         state,
         owner,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The proposer's cache of config pins, so a commit derives no document
-//! config from the catalog while the catalog is unchanged.
+//! config from the catalog while the catalog is unchanged. It also holds the
+//! declared columns each KV write resolves, so a write reads no catalog row.
 //!
 //! A document config pin derives from collection rows alone: the collection's
 //! own row, and the materialized-sum bindings other rows declare with it as
@@ -17,14 +18,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use nodedb_crs::CustomCrsSet;
-use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RegisteredIndex};
-use nodedb_types::{CollectionKey, DatabaseId};
+use nodedb_physical::physical_plan::{
+    ConfigPin, ConfigPinKey, CrsPin, DeclaredColumn, KvDeclaredColumns, RegisteredIndex,
+};
+use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection, TenantId};
 
 use crate::bootstrap::constraint_reconcile::CollectionSource;
 use crate::control::security::catalog::{StoredCollection, StoredIndexRecord, SystemCatalog};
-use crate::control::server::shared::ddl::neutral::collection::doc_config_wire_from_stored;
 use crate::control::server::shared::ddl::neutral::collection::register::{
     derive_auto_indexes, extend_with_catalog_indexes,
+};
+use crate::control::server::shared::ddl::neutral::collection::{
+    declared_columns, doc_config_wire_from_stored,
 };
 
 /// The pins the cache holds.
@@ -36,6 +41,9 @@ struct Cached {
     configs: HashMap<ConfigPinKey, Option<Arc<ConfigPin>>>,
     /// The CRS set the pin was derived from, and the pin.
     crs: Option<(Arc<CustomCrsSet>, Arc<CrsPin>)>,
+    /// The declared columns a KV write re-types under, at `generation`, by
+    /// database and tenant, then by qualified collection name.
+    kv_declared: HashMap<(DatabaseId, TenantId), HashMap<String, KvDeclaredColumns>>,
 }
 
 /// Config pins of committed catalog state, shared by every session.
@@ -69,14 +77,58 @@ impl ConfigPinCache {
         }
         let pin = derive_config_pin(catalog, key)?.map(Arc::new);
         let mut cached = self.cached.write().unwrap_or_else(|p| p.into_inner());
-        if cached.generation < generation {
-            cached.configs.clear();
-            cached.generation = generation;
-        }
+        cached.advance_to(generation);
         if cached.generation == generation {
             cached.configs.insert(key.clone(), pin.clone());
         }
         Ok(pin)
+    }
+
+    /// The declared columns a KV write of `tenant_id` to `collection`
+    /// re-types under, as `catalog` commits it. The database is the one
+    /// `collection` names. Empty when no active collection holds the name
+    /// or it declares none. A hit allocates nothing.
+    pub fn kv_declared_columns(
+        &self,
+        catalog: &SystemCatalog,
+        tenant_id: TenantId,
+        collection: &QualifiedCollection,
+    ) -> crate::Result<KvDeclaredColumns> {
+        let database_id = QualifiedCollection::database_of_stored(collection.as_str())?;
+        let scope = (database_id, tenant_id);
+        // Read before the derive, as in `config_pin`.
+        let generation = catalog.relations_generation();
+        let hit = {
+            let cached = self.cached.read().unwrap_or_else(|p| p.into_inner());
+            (cached.generation == generation)
+                .then(|| {
+                    cached
+                        .kv_declared
+                        .get(&scope)
+                        .and_then(|named| named.get(collection.as_str()))
+                        .cloned()
+                })
+                .flatten()
+        };
+        if let Some(columns) = hit {
+            return Ok(columns);
+        }
+        let columns = KvDeclaredColumns::resolved(derive_declared_columns(
+            catalog,
+            database_id,
+            tenant_id,
+            collection.as_str(),
+        )?);
+        let mut cached = self.cached.write().unwrap_or_else(|p| p.into_inner());
+        cached.advance_to(generation);
+        if cached.generation == generation {
+            cached
+                .kv_declared
+                .entry(scope)
+                .or_default()
+                .insert(collection.as_str().to_owned(), columns.clone());
+        }
+        Ok(columns)
     }
 
     /// The pin of the catalog's user-defined CRS set.
@@ -95,6 +147,49 @@ impl ConfigPinCache {
         cached.crs = Some((set, Arc::clone(&pin)));
         Ok(pin)
     }
+}
+
+impl Cached {
+    /// Drop every entry derived below `generation`, and hold `generation`.
+    fn advance_to(&mut self, generation: u64) {
+        if self.generation < generation {
+            self.configs.clear();
+            self.kv_declared.clear();
+            self.generation = generation;
+        }
+    }
+}
+
+/// The declared columns of the collection `qualified` names in
+/// `database_id`, derived from the committed catalog. Empty when no active
+/// collection holds the name. A name not qualified for `database_id` is a
+/// typed error, never an empty set.
+fn derive_declared_columns(
+    catalog: &SystemCatalog,
+    database_id: DatabaseId,
+    tenant_id: TenantId,
+    qualified: &str,
+) -> crate::Result<Vec<DeclaredColumn>> {
+    let name = CollectionKey::from_qualified_str(database_id, qualified)?;
+    let coll = catalog.get_committed_collection(database_id, tenant_id.as_u64(), name.name())?;
+    Ok(coll
+        .filter(|coll| coll.is_active)
+        .map_or_else(Vec::new, |coll| declared_columns(&coll)))
+}
+
+/// The active committed collection `key` names, if any.
+fn active_collection(
+    catalog: &SystemCatalog,
+    key: &ConfigPinKey,
+) -> crate::Result<Option<StoredCollection>> {
+    // A name that is not qualified for its database names no collection
+    // there.
+    let Ok(name) = CollectionKey::from_qualified_str(key.database_id, &key.collection) else {
+        return Ok(None);
+    };
+    let coll =
+        catalog.get_committed_collection(key.database_id, key.tenant_id.as_u64(), name.name())?;
+    Ok(coll.filter(|coll| coll.is_active))
 }
 
 /// The pin of `set`: its MessagePack bytes and their XXH3-64 digest. The
@@ -116,19 +211,9 @@ fn derive_config_pin(
     catalog: &SystemCatalog,
     key: &ConfigPinKey,
 ) -> crate::Result<Option<ConfigPin>> {
-    // A name that is not qualified for its database names no collection
-    // there, so no config holds it.
-    let Ok(name) = CollectionKey::from_qualified_str(key.database_id, &key.collection) else {
+    let Some(coll) = active_collection(catalog, key)? else {
         return Ok(None);
     };
-    let Some(coll) =
-        catalog.get_committed_collection(key.database_id, key.tenant_id.as_u64(), name.name())?
-    else {
-        return Ok(None);
-    };
-    if !coll.is_active {
-        return Ok(None);
-    }
     let wire = doc_config_wire_from_stored(
         &Committed(catalog),
         key.tenant_id,
@@ -306,6 +391,72 @@ mod tests {
                 .config_pin(&catalog, &key("gone"))
                 .expect("lookup")
                 .is_none()
+        );
+    }
+
+    /// A KV collection's declared columns come from its typed schema, the
+    /// key column left out. A DDL that changes the schema gives fresh
+    /// columns. A missing collection declares none.
+    #[test]
+    fn kv_declared_columns_follow_the_committed_schema() {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+
+        let catalog = SystemCatalog::open_in_memory().expect("catalog");
+        let cache = ConfigPinCache::new();
+        let schema = |value: ColumnType| {
+            StrictSchema::new(vec![
+                ColumnDef::required("id", ColumnType::String).with_primary_key(),
+                ColumnDef::nullable("v", value),
+            ])
+            .expect("schema")
+        };
+        let mut coll = StoredCollection::stamped_for_test(1, "counters", "owner");
+        coll.collection_type = nodedb_types::CollectionType::kv(schema(ColumnType::String));
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &coll)
+            .expect("put");
+        let columns = |name: &str| {
+            cache
+                .kv_declared_columns(
+                    &catalog,
+                    TenantId::new(1),
+                    &QualifiedCollection::new(DatabaseId::DEFAULT, name),
+                )
+                .expect("lookup")
+        };
+        assert!(
+            columns("counters")
+                .columns("counters")
+                .expect("resolved")
+                .is_empty()
+        );
+
+        coll.collection_type = nodedb_types::CollectionType::kv(schema(ColumnType::Int64));
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &coll)
+            .expect("put");
+        let resolved = columns("counters");
+        let declared = resolved.columns("counters").expect("resolved");
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].name, "v");
+
+        assert!(
+            columns("ghost")
+                .columns("ghost")
+                .expect("resolved")
+                .is_empty()
+        );
+
+        // The lookup takes its database from the collection name. The same
+        // name in another database is another collection, with no columns.
+        let other = QualifiedCollection::new(DatabaseId::new(5), "counters");
+        assert!(
+            cache
+                .kv_declared_columns(&catalog, TenantId::new(1), &other)
+                .expect("lookup")
+                .columns(other.as_str())
+                .expect("resolved")
+                .is_empty()
         );
     }
 

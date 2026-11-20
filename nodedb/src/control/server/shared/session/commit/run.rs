@@ -286,6 +286,7 @@ mod tests {
             database_id: DatabaseId::DEFAULT,
             plan: crate::bridge::envelope::PhysicalPlan::Kv(
                 nodedb_physical::physical_plan::KvOp::Put {
+                    declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
                     collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                     key: b"k".to_vec(),
                     value: b"v".to_vec(),

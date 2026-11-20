@@ -214,6 +214,7 @@ mod tests {
 
     fn seed_put(collection: &str, key: &[u8], doc: serde_json::Value) -> PhysicalPlan {
         PhysicalPlan::Kv(KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             key: key.to_vec(),
             value: nodedb_types::json_to_msgpack(&doc).expect("encode seed doc"),

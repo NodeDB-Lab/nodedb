@@ -1036,6 +1036,7 @@ mod tests {
     /// A KV put of `key` with surrogate `surrogate`.
     fn kv_put_plan(key: &[u8], surrogate: u32) -> crate::bridge::envelope::PhysicalPlan {
         crate::bridge::envelope::PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::Put {
+            declared_columns: nodedb_physical::physical_plan::KvDeclaredColumns::none(),
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: key.to_vec(),
             value: b"v1".to_vec(),
