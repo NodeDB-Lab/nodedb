@@ -110,6 +110,13 @@ impl NodeDbPgHandler {
             CopyIntent::RestoreTenant { tenant_id, .. } => *tenant_id,
         };
         if !identity.is_superuser {
+            // A tenant is backed up or restored by its own tenant only.
+            if TenantId::new(tenant_id) != identity.tenant_id {
+                return Err(sqlstate(
+                    ss::INSUFFICIENT_PRIVILEGE,
+                    "permission denied: backup and restore of another tenant require superuser",
+                ));
+            }
             let emitter = ArcAuditEmitter(Arc::clone(&self.state.audit));
             let allowed = self.state.permissions.check_tenant(
                 identity,
