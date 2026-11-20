@@ -160,7 +160,7 @@ pub fn rotate_auth_key(
 /// LIST AUTH KEYS [FOR AUTH USER '<id>']
 pub fn list_auth_keys(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let user_filter = parts
@@ -169,11 +169,15 @@ pub fn list_auth_keys(
         .and_then(|i| parts.get(i + 1))
         .map(|s| s.trim_matches('\''));
 
-    let keys = if let Some(uid) = user_filter {
+    let mut keys = if let Some(uid) = user_filter {
         state.auth_api_keys.list_for_user(uid)
     } else {
         state.auth_api_keys.list_all()
     };
+    // A caller without the superuser flag lists keys of its own tenant only.
+    if !identity.is_superuser {
+        keys.retain(|k| k.tenant_id == identity.tenant_id.as_u64());
+    }
 
     let columns = vec![
         "key_id".to_string(),
