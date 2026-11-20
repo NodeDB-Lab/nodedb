@@ -15,7 +15,9 @@ use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::super::auth_support::{parse_role, require_tenant_admin, status};
+use super::super::auth_support::{
+    parse_role, require_superuser_for_role, require_tenant_admin, status,
+};
 use super::super::role_checks::visible_user_or_missing;
 use super::iso8601::parse_iso8601_to_unix;
 
@@ -77,6 +79,7 @@ pub async fn alter_user(
                 return Err(DdlError::new("42601", "expected role name after SET ROLE"));
             }
             let parsed_role: Role = parse_role(role);
+            require_superuser_for_role(identity, &parsed_role)?;
             let base = visible_user_or_missing(state, username)?;
             let tenant_id = crate::types::TenantId::new(base.tenant_id);
             let new_roles = vec![parsed_role.clone()];

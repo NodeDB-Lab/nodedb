@@ -14,7 +14,9 @@ use crate::control::state::SharedState;
 use crate::types::TenantId;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::super::auth_support::{parse_role, require_tenant_admin, status};
+use super::super::auth_support::{
+    parse_role, require_superuser_for_role, require_tenant_admin, status,
+};
 
 /// Resolve a [`TenantSelector`] to a numeric [`TenantId`]. Numeric ids pass
 /// through; names are resolved against the redb catalog.
@@ -76,6 +78,7 @@ pub async fn create_user(
     }
 
     let role = role_name.map(parse_role).unwrap_or(Role::ReadWrite);
+    require_superuser_for_role(identity, &role)?;
     let tenant_id = if let Some(selector) = tenant {
         if !identity.is_superuser {
             return Err(DdlError::new("42501", "only superuser can assign tenants"));

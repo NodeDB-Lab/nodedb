@@ -35,6 +35,21 @@ pub(super) fn require_tenant_admin(
     }
 }
 
+/// Refuse the superuser role unless the caller is superuser. Same rule as
+/// `GRANT superuser`. Returns SQLSTATE 42501.
+pub(super) fn require_superuser_for_role(
+    identity: &AuthenticatedIdentity,
+    role: &Role,
+) -> Result<(), DdlError> {
+    if matches!(role, Role::Superuser) && !identity.is_superuser {
+        return Err(DdlError::new(
+            "42501",
+            "permission denied: only superuser can assign the superuser role",
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a role name string into a `Role`.
 ///
 /// Known roles map to their enum variants; unknown names become `Role::Custom`.
