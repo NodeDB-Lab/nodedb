@@ -10,6 +10,7 @@ use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
+use crate::data::executor::handlers::transaction::redo_apply::{assigns, rewrite_keeps_field};
 use crate::data::executor::strict_format;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::UpdateValue;
@@ -61,6 +62,8 @@ impl CoreLoop {
     ) -> Result<Vec<u8>, ErrorCode> {
         let PointUpdateImage {
             config_key,
+            current_bytes,
+            updates,
             is_strict,
             bitemporal,
             sys_from,
@@ -70,19 +73,25 @@ impl CoreLoop {
         if !is_strict {
             return Ok(bytes.clone());
         }
-        let ndb_val = doc_format::decode_document_value(bytes).map_err(ErrorCode::from)?;
-        let Some(config) = self.doc_configs.get(config_key) else {
-            return Err(ErrorCode::Internal {
-                detail: "strict config missing during re-encode".into(),
-            });
-        };
-        let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
-            config.storage_mode
+        let mut ndb_val = doc_format::decode_document_value(bytes).map_err(ErrorCode::from)?;
+        // The tuple encodes under the install config's schema. A pinned
+        // write's is its proposer's, so every replica encodes the same tuple.
+        // A pin older than the stored row's layout refuses the update.
+        let Some(schema) = self
+            .write_rewrite_schema(config_key, current_bytes)
+            .map_err(ErrorCode::from)?
         else {
             return Err(ErrorCode::Internal {
                 detail: "strict config missing during re-encode".into(),
             });
         };
+        // The stored row decodes under the current schema, so a column it
+        // added after the install schema reads as null. Such a column is
+        // dropped. A field the update assigns stays, so an undeclared one
+        // still refuses at encode.
+        if let nodedb_types::Value::Object(fields) = &mut ndb_val {
+            fields.retain(|field, _| rewrite_keeps_field(schema, field, assigns(updates, field)));
+        }
         let collection = &config_key.2;
         let result = if bitemporal && schema.bitemporal {
             strict_format::value_to_binary_tuple_bitemporal(
@@ -131,6 +140,8 @@ impl CoreLoop {
         }
 
         // Decode native fields before assignments, preserving values unrelated to the update.
+        // The stored bytes are in the core's current storage mode, so they
+        // decode under the current config.
         let strict_schema = if is_strict {
             match self.doc_configs.get(config_key).map(|c| &c.storage_mode) {
                 Some(nodedb_physical::physical_plan::StorageMode::Strict { schema }) => {
@@ -175,7 +186,12 @@ impl CoreLoop {
         // Expressions evaluate against the pre-update snapshot, so later
         // assignments don't observe earlier ones — matches PostgreSQL.
         let eval_doc = doc.clone();
-        let crs = self.crs_context();
+        // The post-image is a row body: it derives under the install config
+        // and its CRS set. A pinned write's are its proposer's.
+        let install = self
+            .install_doc_config(config_key)
+            .map_err(ErrorCode::from)?;
+        let crs = self.install_crs_context();
         if let nodedb_types::Value::Object(obj) = &mut doc {
             for (field, update_val) in updates {
                 let val = match update_val {
@@ -214,7 +230,7 @@ impl CoreLoop {
             .check_unchanged(&config_key.2, &serde_json::Value::from(doc.clone()))
             .map_err(ErrorCode::from)?;
 
-        if let Some(config) = self.doc_configs.get(config_key) {
+        if let Some(config) = install {
             let assigned = crate::data::executor::handlers::write_body::assigned_names(updates);
             crate::data::executor::handlers::point::apply_put::materialize_native_write_body(
                 config,
@@ -224,8 +240,8 @@ impl CoreLoop {
             )?;
         }
         if let nodedb_types::Value::Object(fields) = &mut doc {
-            strict_format::coerce_declared_row(fields, self.declared_columns(config_key))
-                .map_err(ErrorCode::from)?;
+            let declared = install.map_or(&[][..], |config| config.declared_columns.as_slice());
+            strict_format::coerce_declared_row(fields, declared).map_err(ErrorCode::from)?;
         }
         let bytes = zerompk::to_msgpack_vec(&doc).map_err(|error| ErrorCode::Internal {
             detail: format!("post-update document cannot encode: {error}"),

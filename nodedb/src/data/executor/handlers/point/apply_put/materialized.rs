@@ -207,10 +207,34 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        // A collection with index paths indexes the body, and judges its
-        // UNIQUE claims. A body that does not decode fails the write: skipping
-        // it stores a row its indexes do not describe and whose claims
-        // no one judged.
+        // A `Row` UNIQUE claim is a verdict, so it reads the judged config's
+        // index paths: a pinned write judges by its proposer's UNIQUE
+        // indexes, as a committed redo's validate does.
+        if unique == UniqueJudge::Row
+            && let Some(config) = self.judged_doc_config(&config_key)
+            && !config.index_paths.is_empty()
+        {
+            check_unique_post_state(
+                &UniqueScope {
+                    sparse: &self.sparse,
+                    database_id,
+                    tid,
+                    collection,
+                    paths: &config.index_paths,
+                    base_visible: true,
+                    crs: &self.crs_context(),
+                },
+                &[PostImage {
+                    surrogate: storage_key.surrogate().as_u32(),
+                    doc: Some(&doc),
+                    judged: true,
+                }],
+            )?;
+        }
+        // A collection with index paths indexes the body. Index maintenance
+        // follows the current config: a core maintains the indexes it holds.
+        // A body that does not decode fails the write: skipping it stores a
+        // row its indexes do not describe.
         let indexed = match self.doc_configs.get(&config_key) {
             Some(config) if !config.index_paths.is_empty() => {
                 Some((config.index_paths.clone(), doc.clone()))
@@ -218,24 +242,6 @@ impl CoreLoop {
             _ => None,
         };
         if let Some((paths, doc)) = indexed {
-            if unique == UniqueJudge::Row {
-                check_unique_post_state(
-                    &UniqueScope {
-                        sparse: &self.sparse,
-                        database_id,
-                        tid,
-                        collection,
-                        paths: &paths,
-                        base_visible: true,
-                        crs: &self.crs_context(),
-                    },
-                    &[PostImage {
-                        surrogate: storage_key.surrogate().as_u32(),
-                        doc: Some(&doc),
-                        judged: true,
-                    }],
-                )?;
-            }
             // Keyed at the same `sys_from` as the row version, so one
             // `version_sys_from` in the undo entry reverses both. Values the
             // write drops are tombstoned, values it gains are added.

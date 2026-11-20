@@ -135,8 +135,9 @@ impl CoreLoop {
             });
 
         // Append-only and legal hold refuse the statement outright, as they
-        // refuse a point delete, before any row is removed.
-        if let Some(config) = self.doc_configs.get(&config_key) {
+        // refuse a point delete, before any row is removed. Every rule reads
+        // the judged config: a pinned write judges by its proposer's rules.
+        if let Some(config) = self.judged_doc_config(&config_key) {
             if let Err(code) = append_only::check_point_delete(collection, &config.enforcement) {
                 return self.response_error(task, code);
             }
@@ -148,8 +149,7 @@ impl CoreLoop {
             }
         }
         let retention_config = self
-            .doc_configs
-            .get(&config_key)
+            .judged_doc_config(&config_key)
             .filter(|config| config.enforcement.retention.is_some());
 
         // Gate every matched row on the collection's write policy BEFORE any
@@ -166,8 +166,7 @@ impl CoreLoop {
             nodedb_types::WriteGateDecision::AdmitAll
         );
         let period_lock = self
-            .doc_configs
-            .get(&config_key)
+            .judged_doc_config(&config_key)
             .and_then(|config| config.enforcement.period_lock.as_ref());
         if gate_policy || period_lock.is_some() || retention_config.is_some() {
             for key in &apply_ids {

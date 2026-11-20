@@ -185,6 +185,10 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         ErrorCode::SerializationConflict { detail } => {
             NodeDbError::from_wire(PublicCode::WRITE_CONFLICT, detail)
         }
+        // The client retries a stale-pin refusal as it retries a conflict.
+        ErrorCode::StalePinnedSchema { detail } => {
+            NodeDbError::from_wire(PublicCode::WRITE_CONFLICT, detail)
+        }
         ErrorCode::ActiveSqlTransaction { detail } => NodeDbError::active_sql_transaction(detail),
         ErrorCode::DependentObjectsExist { object, detail } => {
             NodeDbError::dependent_objects_exist(object, detail)

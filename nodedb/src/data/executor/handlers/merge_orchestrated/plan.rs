@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::doc_format::encode_typed_resolved_body as encode_doc_body;
+use crate::data::executor::handlers::transaction::redo_apply::fit_stored_rewrite;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind as MergeClauseKindOp,
@@ -142,6 +143,11 @@ impl CoreLoop {
             params.target_cut,
         )?;
         let identity_column = self.identity_column(database_id, tid, params.target_collection);
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            params.target_collection.to_string(),
+        );
 
         let mut updates: Vec<MergeUpdate> = Vec::new();
         let mut deletes: Vec<MergeDelete> = Vec::new();
@@ -194,7 +200,7 @@ impl CoreLoop {
                         } else {
                             None
                         };
-                        let updated = build_update_doc(
+                        let mut updated = build_update_doc(
                             params.target_collection,
                             MergeTarget {
                                 typed: &target.typed,
@@ -216,13 +222,21 @@ impl CoreLoop {
                             params.target_collection,
                             &serde_json::Value::from(updated.clone()),
                         )?;
+                        let assigned =
+                            crate::data::executor::handlers::write_body::assigned_names(upd);
+                        // The arm rewrites the stored row, so its body
+                        // encodes under the rewrite schema, as an update's
+                        // does.
+                        if let nodedb_types::Value::Object(fields) = &mut updated
+                            && let Some(schema) = self.write_rewrite_schema(&config_key, bytes)?
+                        {
+                            fit_stored_rewrite(schema, fields, &assigned);
+                        }
                         updates.push(MergeUpdate {
                             key,
                             body: encode_doc_body(&updated)?,
                             old_body: encode_doc_body(&target.typed)?,
-                            assigned: crate::data::executor::handlers::write_body::assigned_names(
-                                upd,
-                            ),
+                            assigned,
                             ordinal,
                         });
                     }

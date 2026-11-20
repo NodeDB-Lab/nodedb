@@ -83,7 +83,9 @@ impl CoreLoop {
         new_bytes: &[u8],
         user_roles: &[String],
     ) -> Result<(), ErrorCode> {
-        let Some(config) = self.doc_configs.get(config_key) else {
+        // The judged config: a pinned write judges by its proposer's rules,
+        // and decodes the stored images in the current storage mode.
+        let Some(config) = self.judged_doc_config(config_key) else {
             return Ok(());
         };
         let rules = UpdateTransitionRules::of(&config.enforcement);

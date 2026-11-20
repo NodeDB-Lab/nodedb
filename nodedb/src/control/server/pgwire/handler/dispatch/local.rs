@@ -32,6 +32,7 @@ impl NodeDbPgHandler {
                 commit_hlc: None,
                 change_position: None,
                 system_ordinal: None,
+                config_pins: None,
             },
         )
         .await

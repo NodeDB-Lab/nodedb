@@ -499,11 +499,22 @@ mod tests {
         entry.write_hlc = 42;
         entry.metadata_floor = 43;
         entry.user_roles = vec!["role".into()];
+        entry.config_pins = nodedb_physical::physical_plan::RedoPins {
+            configs: Vec::new(),
+            crs: Some(std::sync::Arc::new(
+                nodedb_physical::physical_plan::CrsPin {
+                    digest: 5,
+                    bytes: vec![0x90].into(),
+                },
+            )),
+        };
+        let pins = entry.config_pins.clone();
         let key = entry.idempotency_key;
 
         rewrite_entry(&mut entry, stamp(), 8);
 
         assert_eq!(entry.idempotency_key, key);
+        assert_eq!(entry.config_pins, pins, "the source's pins");
         assert_eq!(entry.system_ordinal, 41);
         assert_eq!(entry.write_hlc, 42);
         assert_eq!(entry.user_roles, vec!["role".to_string()]);

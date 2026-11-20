@@ -1014,4 +1014,61 @@ mod tests {
             other => panic!("expected Document(Upsert), got {other:?}"),
         }
     }
+
+    /// The config pins the proposer stamps travel with the entry's bytes,
+    /// and the entry's write still decodes.
+    #[test]
+    fn config_pins_roundtrip_with_the_entry() {
+        use std::sync::Arc;
+
+        use nodedb_physical::physical_plan::{ConfigPin, ConfigPinKey, CrsPin, RedoPins};
+
+        let plan = PhysicalPlan::Document(DocumentOp::PointPut {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+            document_id: "u1".into(),
+            value: b"alice".to_vec(),
+            surrogate: Surrogate::new(1),
+            pk_bytes: b"u1".to_vec(),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+        });
+        let mut entry = to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &plan,
+        )
+        .expect("encode must not error")
+        .expect("PointPut produces a ReplicatedEntry");
+        assert!(entry.config_pins.is_empty(), "a fresh entry carries no pin");
+        let pins = RedoPins {
+            configs: vec![Arc::new(ConfigPin {
+                key: ConfigPinKey {
+                    database_id: DatabaseId::DEFAULT,
+                    tenant_id: TenantId::new(1),
+                    collection: "users".into(),
+                },
+                digest: 11,
+                wire: vec![0x80].into(),
+            })],
+            crs: Some(Arc::new(CrsPin {
+                digest: 12,
+                bytes: vec![0x90].into(),
+            })),
+        };
+        entry.config_pins = pins.clone();
+
+        let bytes = entry.to_bytes();
+        let decoded = ReplicatedEntry::from_bytes(&bytes).expect("decode entry");
+        assert_eq!(decoded.config_pins, pins);
+        let (_, _, decoded_plan, _) = decode::decode_replicated_entry(&bytes)
+            .expect("decode_replicated_entry error")
+            .expect("decode_replicated_entry returned None");
+        assert!(matches!(
+            decoded_plan,
+            PhysicalPlan::Document(DocumentOp::PointPut { .. })
+        ));
+    }
 }

@@ -69,6 +69,7 @@ fn records(wal: &WalManager) -> Vec<WalRecord> {
 fn apply(core: &mut CoreLoop, plan: PhysicalPlan, lsn: Lsn, ordinal: i64) {
     let request = Request {
         system_ordinal: Some(ordinal),
+        config_pins: None,
         ..make_request(plan)
     };
     let response = core.execute(&ExecutionTask::with_wal_lsn(request, Some(lsn)));

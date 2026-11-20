@@ -32,8 +32,10 @@ pub(in crate::data::executor) enum ConfigPinError {
         pinned: u64,
         derived: u64,
     },
-    #[error("the pinned committed redo writes {collection} but carries no config pin of it")]
+    #[error("the pinned write writes {collection} but carries no config pin of it")]
     Unpinned { collection: String },
+    #[error("the pinned replicated write carries no CRS pin")]
+    CrsUnpinned,
     #[error("the CRS pin does not decode: {detail}")]
     CrsUndecodable { detail: String },
     #[error("the CRS pin carries digest {pinned}, but its bytes hash to {derived}")]

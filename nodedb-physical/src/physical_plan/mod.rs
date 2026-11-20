@@ -17,6 +17,7 @@ pub mod crdt;
 pub mod doc_config_canon;
 pub mod doc_config_wire;
 pub mod document;
+pub mod document_pin_needs;
 pub mod exchange;
 pub mod gathered_source;
 pub mod graph;
@@ -67,6 +68,7 @@ pub use document::{
     ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TextFieldSet,
     TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
 };
+pub use document_pin_needs::{DocumentPinNeeds, document_pin_needs};
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;
 pub use graph::{

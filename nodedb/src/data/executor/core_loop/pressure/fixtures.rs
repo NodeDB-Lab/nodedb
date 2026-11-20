@@ -94,6 +94,7 @@ pub(super) fn make_stub_request(id: u64) -> Request {
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: Admission::Exempt(ExemptReason::Read),
     }
 }

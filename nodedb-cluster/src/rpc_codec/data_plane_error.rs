@@ -187,6 +187,12 @@ pub enum DataPlaneErrorCode {
     SerializationConflict {
         detail: String,
     },
+    /// A replicated rewrite pinned at an older schema than the stored row's
+    /// layout (SQLSTATE `40001`). Final on every replica. `detail` names the
+    /// collection and both versions.
+    StalePinnedSchema {
+        detail: String,
+    },
     /// A DROP refused because other objects depend on `object` (SQLSTATE
     /// `2BP01`).
     DependentObjectsExist {

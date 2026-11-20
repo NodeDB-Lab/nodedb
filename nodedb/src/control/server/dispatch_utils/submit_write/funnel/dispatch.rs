@@ -52,6 +52,9 @@ pub(super) struct DispatchTarget {
     /// The system-time ordinal the write stamps, alike on every replica.
     /// `None` for a write that stamps from the local clock.
     pub system_ordinal: Option<i64>,
+    /// The proposer's config pins of a replicated document write. `None`
+    /// for a write that carries none.
+    pub config_pins: Option<std::sync::Arc<nodedb_physical::physical_plan::RedoPins>>,
     pub admission: Admission,
     /// The record group the write journals its write set into.
     pub journal: Option<JournalGroup>,
@@ -109,6 +112,7 @@ pub(super) async fn dispatch_to_data_plane(
         resolved_now_ms: target.resolved_now_ms,
         commit_hlc: Some(target.commit_hlc),
         system_ordinal: target.system_ordinal,
+        config_pins: target.config_pins,
         admission: target.admission,
     };
 

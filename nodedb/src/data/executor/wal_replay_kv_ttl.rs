@@ -284,6 +284,7 @@ mod tests {
             resolved_now_ms,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }

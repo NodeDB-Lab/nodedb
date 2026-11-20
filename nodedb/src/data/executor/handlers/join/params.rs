@@ -150,6 +150,7 @@ fn make_dummy_task() -> ExecutionTask {
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::Read,
         ),

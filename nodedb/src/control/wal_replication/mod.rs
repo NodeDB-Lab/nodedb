@@ -18,7 +18,8 @@ pub mod types;
 pub use decode::{decode_replicated_entry, from_replicated_entry};
 pub use encode::to_replicated_entry;
 pub(crate) use propose::{
-    propose_replicated_entry, stamp_collection_incarnations, stamp_metadata_floor,
+    propose_replicated_entry, stamp_collection_incarnations, stamp_config_pins,
+    stamp_metadata_floor,
 };
 pub use replicable_write::ReplicableWrite;
 pub(crate) use types::columnar_rows;

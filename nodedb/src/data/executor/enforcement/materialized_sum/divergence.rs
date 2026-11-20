@@ -84,7 +84,9 @@ impl CoreLoop {
             TenantId::new(check.tid),
             check.collection.to_string(),
         );
-        let Some(config) = self.doc_configs.get(&key) else {
+        // The bindings read the judged config: a pinned write folds by its
+        // proposer's bindings.
+        let Some(config) = self.judged_doc_config(&key) else {
             return false;
         };
         // A name that will not de-qualify fails the statement in the write
@@ -199,8 +201,7 @@ impl CoreLoop {
             TenantId::new(check.tid),
             check.collection.to_string(),
         );
-        self.doc_configs
-            .get(&key)
+        self.judged_doc_config(&key)
             .is_some_and(|config| !config.enforcement.materialized_sum_sources.is_empty())
     }
 }

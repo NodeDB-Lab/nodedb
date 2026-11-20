@@ -117,8 +117,11 @@ pub(crate) async fn propose_sync_write(
     // commit instant is stamped once, before the first propose, so every
     // retry and every replica dates the write alike.
     entry.write_hlc = state.hlc_clock.now().wall_ns;
-    crate::control::wal_replication::stamp_metadata_floor(state, &mut entry);
+    // The catalog reads stamp in the order `stamp_catalog_reads` fixes:
+    // incarnations, then pins, then the floor, which covers both.
     crate::control::wal_replication::stamp_collection_incarnations(state, &mut entry)?;
+    crate::control::wal_replication::stamp_config_pins(state, &mut entry)?;
+    crate::control::wal_replication::stamp_metadata_floor(state, &mut entry);
     let idempotency_key = entry.idempotency_key;
     let data = entry.encode()?;
     let vshard_id = entry.vshard_id;

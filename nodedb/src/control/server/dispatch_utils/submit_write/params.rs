@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+use nodedb_physical::physical_plan::RedoPins;
+
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::server::dispatch_utils::minted::MintedRecords;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
@@ -41,12 +43,18 @@ pub(crate) enum WalDurability {
     /// assigned, `None` for a write no entry carries. Every replica stamps
     /// the write's bitemporal versions from it, so every replica writes the
     /// same version keys.
+    ///
+    /// `config_pins` are the config pins the proposer of that entry stamped
+    /// for a document write, `None` for a write that carries none. Every
+    /// replica's core derives the write's row bodies and judges its rules
+    /// under them.
     AppendHere {
         now_override: Option<u64>,
         apply_key: u64,
         commit_hlc: Option<u64>,
         change_position: Option<crate::event::cdc::position::ReplicatedPosition>,
         system_ordinal: Option<i64>,
+        config_pins: Option<Arc<RedoPins>>,
     },
     /// The caller already recorded this write's durability elsewhere — COMMIT's
     /// single `Transaction` record, the procedural batch flush, a trigger /

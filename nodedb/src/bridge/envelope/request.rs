@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use nodedb_physical::physical_plan::PhysicalPlan;
+use nodedb_physical::physical_plan::{PhysicalPlan, RedoPins};
 
 use super::status::Priority;
 use crate::event::types::EventSource;
@@ -116,6 +116,14 @@ pub struct Request {
     /// Every replica that applies the entry stamps the same ordinal. `None`
     /// for reads, control ops, and writes that stamp from the local clock.
     pub system_ordinal: Option<i64>,
+
+    /// The proposer's config pins for a replicated document write. Every
+    /// replica derives the write's row bodies and judges its rules under
+    /// them, so every replica stores the same row and reaches the same
+    /// verdict. A core refuses a pinned write that leaves a collection it
+    /// writes or folds into unpinned. `None` for reads, control ops and
+    /// unreplicated writes. A committed redo carries its pins in its body.
+    pub config_pins: Option<Arc<RedoPins>>,
 
     /// Write-admission decision for this request.
     ///
@@ -240,6 +248,7 @@ mod tests {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: Admission::Exempt(ExemptReason::Read),
         }
     }
@@ -296,6 +305,7 @@ mod tests {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         match req.plan {

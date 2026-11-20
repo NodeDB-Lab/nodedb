@@ -43,6 +43,9 @@ pub(super) struct WalAppendOutcome {
     /// The write's record is a stream marker (see
     /// `wal_dispatch::WalAppendOutcome::stream_marker`).
     pub stream_marker: bool,
+    /// The config pins the core derives and judges the write under. `None`
+    /// for a write that carries none.
+    pub config_pins: Option<std::sync::Arc<nodedb_physical::physical_plan::RedoPins>>,
 }
 
 /// A change marker the append wrote, and its LSN.
@@ -146,13 +149,16 @@ pub(super) fn authorize_and_append(
     let mut reservation = None;
     let mut change_marker = None;
     let mut pending_changes = None;
+    let mut config_pins = None;
     let (wal_lsn, resolved_now_ms, group_origin, stream_marker) = match durability {
         WalDurability::AppendHere {
             now_override,
             apply_key,
             change_position,
+            config_pins: carried_pins,
             ..
         } => {
+            config_pins = carried_pins;
             // The marker precedes the redo in the WAL, so the fsync that makes
             // the redo durable makes the marker durable too.
             // The write's system-time ordinal is fixed here, under the guard
@@ -257,6 +263,7 @@ pub(super) fn authorize_and_append(
         change_marker,
         changes: pending_changes,
         stream_marker,
+        config_pins,
     })
 }
 

@@ -325,6 +325,7 @@ pub(crate) async fn enqueue_write(
         commit_hlc,
     });
     let system_ordinal = wal_append_outcome.system_ordinal;
+    let config_pins = wal_append_outcome.config_pins;
     let plan = wal_append_outcome.plan;
     let wal_lsn = wal_append_outcome.wal_lsn;
     // The write's change events date by its commit HLC. Recorded before the
@@ -389,6 +390,7 @@ pub(crate) async fn enqueue_write(
             resolved_now_ms,
             commit_hlc,
             system_ordinal,
+            config_pins,
             admission,
             journal,
         },

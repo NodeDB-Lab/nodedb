@@ -120,6 +120,7 @@ fn request(plan: PhysicalPlan, wal_lsn: Option<crate::types::Lsn>) -> Request {
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: Admission::Admitted,
     }
 }

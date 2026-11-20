@@ -17,6 +17,7 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::join_source_map::JoinSource;
+use crate::data::executor::handlers::transaction::redo_apply::{assigns, rewrite_keeps_field};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::UpdateValue;
@@ -99,7 +100,11 @@ impl CoreLoop {
         };
 
         let mut rows: Vec<ResolvedUpdateRow> = Vec::new();
-        let crs = self.crs_context();
+        // Each post-image is a row body: it derives under the install
+        // config and its CRS set. A pinned write's are its proposer's.
+        // `strict_schema` decodes the stored rows in the current storage mode.
+        let crs = self.install_crs_context();
+        let install = self.install_doc_config(config_key)?;
         for (key, current_bytes) in target_rows {
             // A row the statement matched but cannot decode fails the
             // statement. Skipping it leaves the row untouched under a smaller
@@ -208,7 +213,7 @@ impl CoreLoop {
             // injected fields. Then recompute generated columns if any
             // dependency changed. A column the engine cannot recompute fails
             // the statement.
-            if let Some(config) = self.doc_configs.get(config_key) {
+            if let Some(config) = install {
                 if !config.crdt_enabled && !config.type_guards.is_empty() {
                     let assigned = super::write_body::assigned_names(updates);
                     crate::data::executor::enforcement::typeguard::enforce_type_guards(
@@ -240,7 +245,7 @@ impl CoreLoop {
             // whether the assignment was a literal or computed.
             super::super::strict_format::coerce_declared_doc(
                 &mut target_doc,
-                self.declared_columns(config_key),
+                install.map_or(&[][..], |config| config.declared_columns.as_slice()),
             )?;
 
             // Every field the JSON passes above changed (an injected default, a
@@ -248,10 +253,30 @@ impl CoreLoop {
             // every other field keeps its typed value.
             reconcile_post_image(&mut post, &baseline, &target_doc);
 
+            // A strict row encodes under the install config's schema. A pin
+            // older than the stored row's layout refuses the statement. The
+            // row decoded under the current schema, so a column it added
+            // after the install schema reads as null and is dropped.
+            let rewrite = match strict_schema {
+                Some(_) => self.write_rewrite_schema(config_key, &current_bytes)?,
+                None => None,
+            };
+            if let Some(schema) = rewrite {
+                let keeps =
+                    |field: &String| rewrite_keeps_field(schema, field, assigns(updates, field));
+                if let nodedb_types::Value::Object(fields) = &mut post {
+                    fields.retain(|field, _| keeps(field));
+                }
+                if let Some(fields) = target_doc.as_object_mut() {
+                    fields.retain(|field, _| keeps(field));
+                }
+            }
+            let encode_schema = rewrite.or(strict_schema);
+
             // Re-encode the post-image (strict Binary Tuple or MessagePack).
             // An encode error carries its own typed cause, such as a field the
             // strict schema does not declare.
-            let updated_bytes = if let Some(schema) = strict_schema {
+            let updated_bytes = if let Some(schema) = encode_schema {
                 let ndb_val = &post;
                 if schema.bitemporal {
                     // The version's system time lives in a bitemporal tuple,

@@ -228,6 +228,7 @@ fn judge_task(record: &WalRecord, judged: &JudgedRedo) -> ExecutionTask {
         resolved_now_ms: u64::try_from(boundary.judged_at_ms).ok(),
         commit_hlc: (header.commit_hlc != 0).then_some(header.commit_hlc),
         system_ordinal,
+        config_pins: None,
         admission: Admission::Admitted,
     })
 }

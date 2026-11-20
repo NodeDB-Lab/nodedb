@@ -137,6 +137,8 @@ pub(crate) async fn enqueue_transaction_redo(
                 // (a KV row, a timeseries batch, an array cell) stamps the
                 // ordinal the entry's leader assigned, on every replica.
                 system_ordinal: target.system_ordinal,
+                // The redo carries its own pins in its body.
+                config_pins: None,
             },
             // Raft fixed the order.
             ordering: WriteOrdering::AlreadyOrdered,

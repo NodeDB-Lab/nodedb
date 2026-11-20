@@ -166,20 +166,18 @@ pub(in crate::data::executor) fn violation(
 }
 
 impl CoreLoop {
-    /// The collection's config when it declares a UNIQUE index.
+    /// The collection's config when it declares a UNIQUE index, as the
+    /// judged config holds it. A UNIQUE claim is a verdict, so a pinned
+    /// write judges it by its proposer's indexes, as a committed redo's
+    /// validate does. The judged config decodes stored rows in the core's
+    /// current storage mode.
     pub(in crate::data::executor) fn unique_config(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Option<&CollectionConfig> {
-        let key = (
-            DatabaseId::new(database_id),
-            TenantId::new(tid),
-            collection.to_string(),
-        );
-        self.doc_configs
-            .get(&key)
+        self.judged_doc_config_of(DatabaseId::new(database_id), TenantId::new(tid), collection)
             .filter(|config| config.index_paths.iter().any(|path| path.unique))
     }
 

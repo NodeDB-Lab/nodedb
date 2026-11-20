@@ -34,19 +34,15 @@ use crate::data::executor::enforcement::images::RowImages;
 use crate::types::{DatabaseId, TenantId};
 
 impl CoreLoop {
-    /// The BALANCED definition a collection declares, if any.
+    /// The BALANCED definition a collection declares, if any, as the judged
+    /// config holds it: a pinned write judges by its proposer's rule.
     pub(in crate::data::executor) fn balanced_def(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Option<BalancedDef> {
-        self.doc_configs
-            .get(&(
-                DatabaseId::new(database_id),
-                TenantId::new(tid),
-                collection.to_string(),
-            ))
+        self.judged_doc_config_of(DatabaseId::new(database_id), TenantId::new(tid), collection)
             .and_then(|config| config.enforcement.balanced.clone())
     }
 
@@ -171,11 +167,10 @@ impl CoreLoop {
         collection: &str,
         stored: &[u8],
     ) -> crate::Result<Option<serde_json::Value>> {
-        let Some(config) = self.doc_configs.get(&(
-            DatabaseId::new(database_id),
-            TenantId::new(tid),
-            collection.to_string(),
-        )) else {
+        // The judged config decodes in the core's current storage mode.
+        let Some(config) =
+            self.judged_doc_config_of(DatabaseId::new(database_id), TenantId::new(tid), collection)
+        else {
             return Ok(None);
         };
         self.decode_stored_document(config, stored).map(Some)

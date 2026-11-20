@@ -83,6 +83,7 @@ pub(crate) async fn dispatch_local_read(
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: Admission::Exempt(ExemptReason::Read),
     };
 

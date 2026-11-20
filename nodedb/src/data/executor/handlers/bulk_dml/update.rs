@@ -80,7 +80,9 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // Each rule reads the judged config: a pinned write judges by its
+        // proposer's rules.
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(error) = crate::data::executor::enforcement::append_only::check_point_update(
                 collection,
                 &config.enforcement,
@@ -88,7 +90,7 @@ impl CoreLoop {
         {
             return self.response_error(task, error);
         }
-        if let Some(config) = self.doc_configs.get(&config_key)
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(e) = super::super::generated::check_generated_readonly(
                 updates,
                 &config.enforcement.generated_columns,

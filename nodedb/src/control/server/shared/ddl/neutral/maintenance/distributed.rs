@@ -50,6 +50,7 @@ pub fn dispatch_maintenance_to_all_cores(
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),

@@ -9,6 +9,7 @@ use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::redo_image::{WriteSetRow, versioned_point_images};
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
+use crate::data::executor::handlers::transaction::redo_apply::same_pin_set;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::DocumentOp;
 
@@ -38,6 +39,11 @@ fn is_batchable_put(task: &ExecutionTask) -> bool {
 impl CoreLoop {
     /// Whether a put requires the canonical row-image hooks and statement boundary.
     /// Shared batches bypass these hooks, so these puts run through `poll_one`.
+    ///
+    /// A pinned put judges by its pinned config, so the hooks come from its
+    /// pin: the current config when the digests match, else the pin's wire
+    /// form. A put that carries no pin of its collection, or whose pin does
+    /// not decode, needs no hook: the batch refuses it before any write.
     fn requires_point_put_hooks(&self, task: &ExecutionTask) -> bool {
         let PhysicalPlan::Document(DocumentOp::PointPut { collection, .. }) = task.plan() else {
             return false;
@@ -47,9 +53,32 @@ impl CoreLoop {
             task.request.tenant_id,
             collection.as_str().to_string(),
         );
-        self.doc_configs.get(&key).is_some_and(|config| {
-            config.enforcement.hash_chain || config.enforcement.has_image_enforcement()
-        })
+        let current = self.doc_configs.get(&key);
+        let hooks = |enforcement: &nodedb_physical::physical_plan::EnforcementOptions| {
+            enforcement.hash_chain || enforcement.has_image_enforcement()
+        };
+        let Some(pins) = task.request.config_pins.as_deref() else {
+            return current.is_some_and(|config| hooks(&config.enforcement));
+        };
+        let Some(pin) = pins.config_named(
+            task.request.database_id,
+            task.request.tenant_id,
+            collection.as_str(),
+        ) else {
+            return false;
+        };
+        if let Some(config) = current
+            && config.digest != 0
+            && config.digest == pin.digest
+        {
+            return hooks(&config.enforcement);
+        }
+        match zerompk::from_msgpack::<nodedb_physical::physical_plan::DocConfigWire>(
+            pin.wire.as_slice(),
+        ) {
+            Ok(wire) => hooks(&wire.enforcement),
+            Err(_) => false,
+        }
     }
 
     /// Batch-coalesce consecutive PointPut tasks from the front of the task queue.
@@ -77,11 +106,21 @@ impl CoreLoop {
             return 0;
         }
 
-        // Collect consecutive non-expired PointPuts (max 64).
+        // Collect consecutive non-expired PointPuts (max 64). The batch
+        // applies under one judged view, so a put joins only when its pins
+        // are the batch's pin set.
         let mut batch: Vec<ExecutionTask> = Vec::with_capacity(64);
         while batch.len() < 64 {
             let is_put = self.task_queue.front().is_some_and(|t| {
-                is_batchable_put(t) && !t.is_expired() && !self.requires_point_put_hooks(t)
+                is_batchable_put(t)
+                    && !t.is_expired()
+                    && !self.requires_point_put_hooks(t)
+                    && batch.first().is_none_or(|first| {
+                        same_pin_set(
+                            first.request.config_pins.as_deref(),
+                            t.request.config_pins.as_deref(),
+                        )
+                    })
             });
             if !is_put {
                 break;

@@ -150,8 +150,9 @@ fn conclude_leader_change_noop(tracker: &ProposeTracker, group_id: u64, log_inde
     overwritten
 }
 
-/// The scope a decoded entry applies under. The entry's incarnations move
-/// into the scope, so the entry no longer holds them.
+/// The scope a decoded entry applies under. The entry's incarnations, roles
+/// and the config pins its write requires move into the scope, so the entry
+/// no longer holds them.
 fn entry_scope(decoded: &mut Option<ReplicatedEntry>) -> EntryScope {
     // Database scope for the entry, read from the wire. The generic decode
     // path returns no scope, so it is taken from the entry itself: a redo
@@ -178,6 +179,11 @@ fn entry_scope(decoded: &mut Option<ReplicatedEntry>) -> EntryScope {
         system_ordinal: decoded
             .as_ref()
             .and_then(ReplicatedEntry::carried_system_ordinal),
+        // The pins move into the scope. An entry that does not decode
+        // applies nothing, so it needs none.
+        config_pins: decoded
+            .as_mut()
+            .map_or(Ok(None), ReplicatedEntry::take_applied_config_pins),
     }
 }
 
@@ -492,5 +498,79 @@ mod tests {
     fn a_noop_with_no_waiter_finds_none() {
         let tracker = ProposeTracker::new();
         assert!(!conclude_leader_change_noop(&tracker, 4, 1));
+    }
+
+    fn put_entry() -> ReplicatedEntry {
+        ReplicatedEntry::new(
+            1,
+            0,
+            0,
+            ReplicatedWrite::PointPut {
+                collection: "entries".into(),
+                document_id: "e1".into(),
+                value: vec![0x80],
+                surrogate: 1,
+                resolved_sum_targets: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            },
+        )
+    }
+
+    /// A document-body entry whose pins do not cover its write is refused
+    /// with a final prevalidation refusal, which its waiter receives.
+    #[tokio::test]
+    async fn an_uncovered_document_entry_is_refused_before_dispatch() {
+        let mut decoded = Some(put_entry());
+        let scope = entry_scope(&mut decoded);
+        let Err(uncovered) = scope.config_pins else {
+            panic!("an unpinned document entry must not reach a core");
+        };
+        let tracker = ProposeTracker::new();
+        let key = decoded.as_ref().map_or(0, |entry| entry.idempotency_key);
+        let waiter = tracker.register(4, 9, key);
+        let pos = AppliedPosition {
+            group_id: 4,
+            log_index: 9,
+            applied_key: key,
+            commit_hlc: 0,
+            system_ordinal: None,
+        };
+        let outcome = super::super::write_dispatch::conclude_generic_entry(
+            &tracker,
+            pos,
+            Err(uncovered.into()),
+        );
+        assert!(
+            matches!(outcome, EntryOutcome::Applied { durable: true, .. }),
+            "every replica refuses the entry alike, so the refusal is final"
+        );
+        let answer = waiter.await.expect("the waiter is answered");
+        assert!(
+            matches!(
+                answer,
+                Err(crate::Error::DataPlane(
+                    crate::bridge::envelope::ErrorCode::RejectedPrevalidation { .. }
+                ))
+            ),
+            "{answer:?}"
+        );
+    }
+
+    /// An entry whose write requires no pin applies with none.
+    #[test]
+    fn an_entry_that_requires_no_pin_applies_with_none() {
+        let mut decoded = Some(ReplicatedEntry::new(
+            1,
+            0,
+            0,
+            ReplicatedWrite::KvPersist {
+                collection: "cache".into(),
+                key: b"k".to_vec(),
+            },
+        ));
+        assert!(matches!(entry_scope(&mut decoded).config_pins, Ok(None)));
+        assert!(matches!(entry_scope(&mut None).config_pins, Ok(None)));
     }
 }

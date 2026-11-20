@@ -40,6 +40,7 @@ pub(crate) fn make_request(vshard: u32) -> envelope::Request {
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: Admission::Exempt(ExemptReason::Read),
     }
 }
@@ -74,6 +75,7 @@ pub(crate) fn make_request_for_db(vshard: u32, db: u64, req_id: u64) -> envelope
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: Admission::Exempt(ExemptReason::Read),
     }
 }

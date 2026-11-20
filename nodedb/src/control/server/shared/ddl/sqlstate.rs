@@ -101,6 +101,11 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::SERIALIZATION_FAILURE,
             format!("serialization conflict, retry the transaction: {detail}"),
         ),
+        ErrorCode::StalePinnedSchema { detail } => (
+            "ERROR",
+            sqlstate::SERIALIZATION_FAILURE,
+            format!("the write was planned against an older schema, retry it: {detail}"),
+        ),
         ErrorCode::ResourcesExhausted => (
             "ERROR",
             sqlstate::OUT_OF_MEMORY,

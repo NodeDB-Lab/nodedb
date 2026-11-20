@@ -39,6 +39,13 @@ impl CoreLoop {
         if let Some(refusal) = self.index_pressure_refusal(task) {
             return refusal;
         }
+        // A replicated write its proposer pinned derives and judges under
+        // its pins for the whole run. A malformed pin refuses it here, before
+        // it writes anything.
+        let pinned = match self.begin_pinned_write(task) {
+            Ok(pinned) => pinned,
+            Err(refusal) => return self.response_error(task, refusal),
+        };
         let carried = task.request.system_ordinal;
         if let Some(ordinal) = carried {
             self.observe_bitemporal_ordinal(ordinal);
@@ -49,6 +56,10 @@ impl CoreLoop {
         let previous_journaled = std::mem::replace(&mut self.apply_scope.journaled, journaled);
         let previous_schemas = std::mem::take(self.apply_scope.storage_schemas.get_mut());
         let response = self.execute_plan_with_journal(task, task.plan(), permit);
+        // The run returned, refused or not, so the pinned view drops here.
+        if let Some(held) = pinned {
+            self.restore_judging(held);
+        }
         *self.apply_scope.storage_schemas.get_mut() = previous_schemas;
         self.apply_scope.journaled = previous_journaled;
         self.apply_scope.replicated_ordinal = previous;

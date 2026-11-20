@@ -157,6 +157,7 @@ pub(in crate::data::executor) mod test_support {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         ExecutionTask::new(request)

@@ -204,6 +204,7 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::BadRequest { .. }
         | ErrorCode::TransactionRollback { .. }
         | ErrorCode::SerializationConflict { .. }
+        | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }

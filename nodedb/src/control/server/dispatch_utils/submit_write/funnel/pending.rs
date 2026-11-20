@@ -94,6 +94,7 @@ fn timeseries_retry(params: &SubmitWrite) -> Option<SubmitWrite> {
         commit_hlc,
         change_position: None,
         system_ordinal: None,
+        config_pins: None,
     } = &params.durability
     else {
         return None;
@@ -125,6 +126,7 @@ fn timeseries_retry(params: &SubmitWrite) -> Option<SubmitWrite> {
             commit_hlc: *commit_hlc,
             change_position: None,
             system_ordinal: None,
+            config_pins: None,
         },
         ordering: WriteOrdering::Gate,
         change_feed,

@@ -210,43 +210,38 @@ impl CoreLoop {
                 }
                 None => crate::data::executor::enforcement::typeguard::GuardScope::Document,
             };
-            let prepared = match self.prepare_point_put(
-                &txn,
-                PointPutParams {
-                    database_id,
-                    tid,
-                    collection,
-                    storage_key,
-                    surrogate: key.surrogate,
-                    value: &key.post,
-                    index_text: true,
-                    user_roles: &task.request.user_roles,
-                    enforce: true,
-                    unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
-                    wal_lsn: task.wal_lsn(),
-                    resolved_targets: resolved_sum_targets,
-                    guards,
-                },
-            ) {
-                Ok(o) => o,
-                Err(e) => {
-                    failure = Some(e);
-                    break;
-                }
-            };
-            if let Err(error) = crate::data::executor::handlers::rls_write_gate::admit_installed_row(
-                rls_write_check,
-                prepared.installed(),
-                &key.identity,
-                &identity_column,
-                tid,
-                collection,
-                &self.crs_context(),
-            ) {
-                failure = Some(error);
-                break;
-            }
-            let mut outcome = match self.apply_prepared_point_put(&txn, prepared) {
+            let put = self
+                .prepare_point_put(
+                    &txn,
+                    PointPutParams {
+                        database_id,
+                        tid,
+                        collection,
+                        storage_key,
+                        surrogate: key.surrogate,
+                        value: &key.post,
+                        index_text: true,
+                        user_roles: &task.request.user_roles,
+                        enforce: true,
+                        unique: crate::data::executor::enforcement::unique::UniqueJudge::Unit,
+                        wal_lsn: task.wal_lsn(),
+                        resolved_targets: resolved_sum_targets,
+                        guards,
+                    },
+                )
+                .and_then(|prepared| {
+                    crate::data::executor::handlers::rls_write_gate::admit_installed_row(
+                        rls_write_check,
+                        prepared.installed(),
+                        &key.identity,
+                        &identity_column,
+                        tid,
+                        collection,
+                        &self.crs_context(),
+                    )?;
+                    self.apply_prepared_point_put(&txn, prepared)
+                });
+            let mut outcome = match put {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     failure = Some(error);

@@ -38,6 +38,12 @@
 //! - [`install_refusal_tests`]: one committed and one refused install per
 //!   engine kind.
 //! - [`install_pin_tests`]: a pinned record's rows derive under its pins.
+//! - [`plain_pin_tests`]: a plain replicated write's rows derive under its
+//!   proposer's pins.
+//! - [`plain_pin_rule_tests`]: a plain replicated write judges its rules
+//!   under its proposer's pins.
+//! - [`plain_pin_batch_tests`]: coalesced replicated puts derive under
+//!   their proposer's pins.
 //! - [`calvin_fold_tests`]: a Calvin record's fold rows journal as parts,
 //!   and restart replay applies them.
 //! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
@@ -76,6 +82,12 @@ mod judged_scope;
 #[cfg(test)]
 mod judged_tests;
 mod passes;
+#[cfg(test)]
+mod plain_pin_batch_tests;
+#[cfg(test)]
+mod plain_pin_rule_tests;
+#[cfg(test)]
+mod plain_pin_tests;
 mod replay_fold;
 mod replay_pins;
 #[cfg(test)]
@@ -100,8 +112,11 @@ mod write_keys;
 pub(in crate::data::executor) use batched::is_park_placeholder;
 pub(in crate::data::executor) use document::CommittedDocWrite;
 pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
-pub(in crate::data::executor) use fold_layout::RowLayout;
+pub(in crate::data::executor) use fold_layout::{
+    RowLayout, assigns, fit_stored_rewrite, rewrite_keeps_field,
+};
 pub(in crate::data::executor) use judged_configs::JudgedConfigs;
+pub(in crate::data::executor) use judged_scope::{check_task_pinned, same_pin_set};
 pub(in crate::data::executor) use state::{
     RedoApplyPass, RedoApplyScope, RedoApplyState, TsInstalled,
 };

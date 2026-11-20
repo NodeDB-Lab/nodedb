@@ -6,8 +6,9 @@ use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::unique::{PostImage, UniqueJudge};
 use crate::data::executor::handlers::point::apply_put::{PointPutOutcome, PointPutParams};
+use crate::data::executor::handlers::transaction::redo_apply::check_task_pinned;
 use crate::data::executor::task::ExecutionTask;
-use nodedb_physical::physical_plan::DocumentOp;
+use nodedb_physical::physical_plan::{DocumentOp, RedoPins};
 use redb::WriteTransaction;
 
 pub(super) struct BatchApplyResult {
@@ -22,11 +23,54 @@ impl CoreLoop {
         txn: &WriteTransaction,
         batch: &[ExecutionTask],
     ) -> BatchApplyResult {
+        // Every task of the batch carries one pin set (`same_pin_set`), so the
+        // batch derives and judges under one view, opened once. A view that
+        // does not open refuses every task, and nothing is stored.
+        let pins = batch
+            .first()
+            .and_then(|task| task.request.config_pins.clone());
+        let held = match pins.as_deref().map(|pins| self.begin_pinned_apply(pins)) {
+            None => None,
+            Some(Ok(held)) => Some(held),
+            Some(Err(refusal)) => {
+                let code = ErrorCode::from(refusal);
+                return BatchApplyResult {
+                    outcomes: batch
+                        .iter()
+                        .map(|task| Err(self.response_error(task, code.clone())))
+                        .collect(),
+                    apply_failed: false,
+                };
+            }
+        };
+        let applied = self.apply_batched_puts_under(txn, batch, pins.as_deref());
+        if let Some(held) = held {
+            self.restore_judging(held);
+        }
+        applied
+    }
+
+    /// [`Self::apply_batched_puts`] under the open view of `pins`. A task
+    /// that leaves a collection it writes unpinned is refused alone and
+    /// stores nothing.
+    fn apply_batched_puts_under(
+        &mut self,
+        txn: &WriteTransaction,
+        batch: &[ExecutionTask],
+        pins: Option<&RedoPins>,
+    ) -> BatchApplyResult {
         let mut results: Vec<Result<PointPutOutcome, Response>> = Vec::with_capacity(batch.len());
         let mut apply_failed = false;
         let mut accepted_documents = Vec::with_capacity(batch.len());
         let previous_schemas = std::mem::take(self.apply_scope.storage_schemas.get_mut());
         for (index, task) in batch.iter().enumerate() {
+            if let Some(pins) = pins
+                && let Err(refusal) = check_task_pinned(task, pins)
+            {
+                accepted_documents.push(None);
+                results.push(Err(self.response_error(task, refusal)));
+                continue;
+            }
             let PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
                 document_id,

@@ -204,6 +204,14 @@ pub enum ErrorCode {
     /// transaction. `detail` names the collection and the read or write that
     /// moved. SQLSTATE `40001` (serialization_failure).
     SerializationConflict { detail: String },
+    /// A replicated write rewrites a stored row whose tuple layout is newer
+    /// than the schema its proposer pinned: the proposer's catalog was
+    /// behind the data. Every replica reads the same stored layout, so every
+    /// replica refuses the entry alike, and the refusal is final there.
+    /// Nothing applied. The client retries the statement once the catalog
+    /// caught up. `detail` names the collection and both versions. SQLSTATE
+    /// `40001` (serialization_failure).
+    StalePinnedSchema { detail: String },
     /// The statement cannot run in the current transaction state, such as
     /// inside an explicit transaction block. SQLSTATE `25001`
     /// (active_sql_transaction).

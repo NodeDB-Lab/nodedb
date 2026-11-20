@@ -36,6 +36,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::RejectedAuthz { .. }
             | ErrorCode::ConflictRetry
             | ErrorCode::SerializationConflict { .. }
+            | ErrorCode::StalePinnedSchema { .. }
             | ErrorCode::CrdtFrontierMismatch { .. }
             | ErrorCode::ResourcesExhausted
             | ErrorCode::RejectedDanglingEdge { .. }
@@ -383,9 +384,11 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::RateExceeded { .. }
         | ErrorCode::TransactionRollback { .. } => true,
         // A sync hold is decided by the session that owns the stream before
-        // it reaches this classifier. Every other code is a verdict.
+        // it reaches this classifier. Every other code is a verdict. A
+        // stale-pin refusal is final on every replica: nothing applied.
         ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
+        | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::SyncRejected { .. }
         | ErrorCode::SyncNotApplied { .. }
         | ErrorCode::NotFound

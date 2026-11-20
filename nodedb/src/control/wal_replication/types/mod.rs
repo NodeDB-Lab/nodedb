@@ -21,9 +21,11 @@
 //! - [`redo_content_frames`]: the framed redo content a chunk stream carries.
 //! - [`system_span`]: the run of system-time ordinals a write stamps.
 //! - [`calvin_frozen_reply`]: the frozen `RETURNING` replies of a Calvin slice.
+//! - [`pinned_writes`]: the config pins a replicated write requires.
 
 mod aliases;
 mod calvin_frozen_reply;
+mod pinned_writes;
 mod redo_chunk_wire;
 mod redo_content_frames;
 mod replicated_entry;
@@ -40,6 +42,7 @@ pub use aliases::{
 pub use calvin_frozen_reply::{
     CalvinFrozenReply, FrozenPlanReply, FrozenRejection, FrozenSequenceEffect, PlanSequenceEffects,
 };
+pub(crate) use pinned_writes::UncoveredPins;
 pub use redo_chunk_wire::{RedoBody, RedoContent};
 pub use redo_content_frames::RedoContentView;
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};

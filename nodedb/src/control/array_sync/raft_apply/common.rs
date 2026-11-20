@@ -150,6 +150,8 @@ pub(super) async fn submit_array_write(
                 // Every replica stamps the cell versions at the ordinal the
                 // entry's leader assigned.
                 system_ordinal,
+                // An array cell has no document config.
+                config_pins: None,
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate
@@ -265,6 +267,7 @@ pub(super) fn build_array_request(
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),

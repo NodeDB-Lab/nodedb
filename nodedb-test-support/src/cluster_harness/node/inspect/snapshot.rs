@@ -81,6 +81,7 @@ impl TestClusterNode {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),
@@ -149,6 +150,7 @@ impl TestClusterNode {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),

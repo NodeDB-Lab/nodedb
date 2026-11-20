@@ -57,6 +57,76 @@ pub(crate) fn stamp_collection_incarnations(
     Ok(())
 }
 
+/// Stamp every catalog read `entry` carries, in the one order that keeps
+/// them consistent on every replica:
+///
+/// 1. The incarnations. Each names the collection the write targets.
+/// 2. The config pins. They are read at or after the incarnations, so a
+///    pin is never older than the incarnation it travels with. A drop and
+///    recreate between the two reads leaves a stale incarnation, and every
+///    replica then supersedes the write instead of applying it under an
+///    old config.
+/// 3. The metadata floor, last. The floor never moves backward, so it
+///    covers every catalog state the reads above saw.
+pub(crate) fn stamp_catalog_reads(
+    state: &SharedState,
+    entry: &mut ReplicatedEntry,
+) -> crate::Result<()> {
+    crate::control::array_catalog::cell_route::stamp_incarnation(state, entry);
+    stamp_collection_incarnations(state, entry)?;
+    stamp_config_pins(state, entry)?;
+    stamp_metadata_floor(state, entry);
+    Ok(())
+}
+
+/// Stamp the config pins `entry`'s write requires, from this node's catalog:
+/// the config of each collection it derives rows in or folds into, and the
+/// CRS set. Every replica derives the write's row bodies and judges its
+/// rules under them. A write that requires no pin takes none.
+///
+/// An entry that carries pins keeps them, so a mirror's entry keeps its
+/// source's pins.
+///
+/// A written collection or sum target with no active committed catalog row
+/// refuses the write with `CollectionNotFound`.
+pub(crate) fn stamp_config_pins(
+    state: &SharedState,
+    entry: &mut ReplicatedEntry,
+) -> crate::Result<()> {
+    stamp_config_pins_from(&state.config_pins, state.credentials.catalog(), entry)
+}
+
+/// [`stamp_config_pins`] over `catalog` through `cache`.
+fn stamp_config_pins_from(
+    cache: &crate::control::state::config_pin_cache::ConfigPinCache,
+    catalog: &crate::control::security::catalog::SystemCatalog,
+    entry: &mut ReplicatedEntry,
+) -> crate::Result<()> {
+    use super::transaction_redo::pins::{PinScope, PinnedNames, pins_from_catalog};
+
+    if entry.config_pins.pinned() {
+        return Ok(());
+    }
+    let names = entry.write.pinned_names();
+    if names.is_empty() {
+        return Ok(());
+    }
+    entry.config_pins = pins_from_catalog(
+        cache,
+        catalog,
+        PinScope {
+            database_id: crate::types::DatabaseId::new(entry.database_id),
+            tenant_id: crate::types::TenantId::new(entry.tenant_id),
+        },
+        PinnedNames {
+            written: names.required.iter().map(String::as_str),
+            required: &names.required,
+            sum_targets: &names.sum_targets,
+        },
+    )?;
+    Ok(())
+}
+
 /// Propose `entry` via `proposer` and return the Data Plane apply payload
 /// bytes.
 ///
@@ -95,9 +165,7 @@ pub(crate) async fn propose_replicated_entry(
     // The write's commit instant. Stamped once, before the first propose, so
     // every re-proposal and every replica's apply carries the same value.
     entry.write_hlc = state.hlc_clock.now().wall_ns;
-    stamp_metadata_floor(state, &mut entry);
-    crate::control::array_catalog::cell_route::stamp_incarnation(state, &mut entry);
-    stamp_collection_incarnations(state, &mut entry)?;
+    stamp_catalog_reads(state, &mut entry)?;
     let idempotency_key = entry.idempotency_key;
     let data = entry.encode()?;
     let vshard_id = entry.vshard_id;
@@ -140,4 +208,125 @@ pub(crate) async fn propose_replicated_entry(
     // that apply recorded the entry's commit stamp on the tenant's observed
     // write high-water before resolving it.
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::security::catalog::{StoredCollection, SystemCatalog};
+    use crate::control::state::config_pin_cache::ConfigPinCache;
+    use crate::control::wal_replication::{ReplicatedSumTarget, ReplicatedWrite};
+    use crate::types::DatabaseId;
+
+    fn catalog_with(names: &[&str]) -> SystemCatalog {
+        let catalog = SystemCatalog::open_in_memory().expect("catalog");
+        for name in names {
+            catalog
+                .put_collection(
+                    DatabaseId::DEFAULT,
+                    &StoredCollection::stamped_for_test(1, name, "owner"),
+                )
+                .expect("put");
+        }
+        catalog
+    }
+
+    fn put(targets: &[&str]) -> ReplicatedEntry {
+        ReplicatedEntry::new(
+            1,
+            0,
+            0,
+            ReplicatedWrite::PointPut {
+                collection: "entries".into(),
+                document_id: "e1".into(),
+                value: vec![0x80],
+                surrogate: 1,
+                resolved_sum_targets: targets
+                    .iter()
+                    .map(|target| ReplicatedSumTarget {
+                        target_collection: (*target).into(),
+                        join_value: "a1".into(),
+                        surrogate: 7,
+                    })
+                    .collect(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            },
+        )
+    }
+
+    fn pinned_names(entry: &ReplicatedEntry) -> Vec<&str> {
+        entry
+            .config_pins
+            .configs
+            .iter()
+            .map(|pin| pin.key.collection.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_document_write_pins_its_collection_and_its_sum_targets() {
+        let catalog = catalog_with(&["entries", "accounts"]);
+        let mut entry = put(&["accounts"]);
+        stamp_config_pins_from(&ConfigPinCache::new(), &catalog, &mut entry).expect("stamp");
+        assert!(entry.config_pins.pinned());
+        assert_eq!(pinned_names(&entry), vec!["accounts", "entries"]);
+        // The stamped entry covers its write on every replica.
+        assert!(entry.take_applied_config_pins().expect("covered").is_some());
+    }
+
+    #[test]
+    fn a_write_that_requires_no_pin_takes_none() {
+        let catalog = catalog_with(&["cache"]);
+        let mut entry = ReplicatedEntry::new(
+            1,
+            0,
+            0,
+            ReplicatedWrite::KvPersist {
+                collection: "cache".into(),
+                key: b"k".to_vec(),
+            },
+        );
+        stamp_config_pins_from(&ConfigPinCache::new(), &catalog, &mut entry).expect("stamp");
+        assert!(entry.config_pins.is_empty());
+    }
+
+    #[test]
+    fn a_missing_collection_is_refused() {
+        let catalog = catalog_with(&["accounts"]);
+        let mut entry = put(&["accounts"]);
+        let refused = stamp_config_pins_from(&ConfigPinCache::new(), &catalog, &mut entry)
+            .expect_err("refused");
+        assert!(
+            matches!(&refused, crate::Error::CollectionNotFound { collection, .. } if collection == "entries"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_sum_target_is_refused() {
+        let catalog = catalog_with(&["entries"]);
+        let mut entry = put(&["accounts"]);
+        let refused = stamp_config_pins_from(&ConfigPinCache::new(), &catalog, &mut entry)
+            .expect_err("refused");
+        assert!(
+            matches!(&refused, crate::Error::CollectionNotFound { collection, .. } if collection == "accounts"),
+            "{refused:?}"
+        );
+    }
+
+    /// A mirror's entry arrives pinned by its source and keeps those pins.
+    #[test]
+    fn a_pinned_entry_keeps_its_pins() {
+        let source = catalog_with(&["entries"]);
+        let mut entry = put(&[]);
+        stamp_config_pins_from(&ConfigPinCache::new(), &source, &mut entry).expect("stamp");
+        let carried = entry.config_pins.clone();
+        // This node's catalog holds no row of the collection, so a restamp
+        // refuses.
+        let empty = catalog_with(&[]);
+        stamp_config_pins_from(&ConfigPinCache::new(), &empty, &mut entry).expect("kept");
+        assert_eq!(entry.config_pins, carried);
+    }
 }

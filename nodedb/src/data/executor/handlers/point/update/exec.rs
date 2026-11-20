@@ -100,8 +100,9 @@ impl CoreLoop {
             });
         let is_strict = strict_schema.is_some();
 
-        // Reject direct updates to generated columns.
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // Reject direct updates to generated columns. Each rule reads the
+        // judged config: a pinned write judges by its proposer's rules.
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(e) = crate::data::executor::handlers::generated::check_generated_readonly(
                 updates,
                 &config.enforcement.generated_columns,
@@ -114,7 +115,7 @@ impl CoreLoop {
         // immutable. A hash-chained collection is refused here for the reason
         // its links exist: `VERIFY_HASH_CHAIN` reports a rewritten row as a
         // break, so an admitted update reads as tampering.
-        if let Some(config) = self.doc_configs.get(&config_key)
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(e) = crate::data::executor::enforcement::append_only::check_point_update(
                 collection,
                 &config.enforcement,
@@ -141,7 +142,7 @@ impl CoreLoop {
                 // and delete each check the one image they have; update has
                 // both, and skipping either admits a write put and delete
                 // both refuse.
-                if let Some(config) = self.doc_configs.get(&config_key)
+                if let Some(config) = self.judged_doc_config(&config_key)
                     && let Some(ref pl) = config.enforcement.period_lock
                     && let Err(e) = self.check_period_lock_at(
                         database_id,
@@ -171,7 +172,7 @@ impl CoreLoop {
                 // The POST-image half of the period-lock check: refuses an
                 // update that assigns the period column into a closed period,
                 // even when the pre-image lived in an open one.
-                if let Some(config) = self.doc_configs.get(&config_key)
+                if let Some(config) = self.judged_doc_config(&config_key)
                     && let Some(ref pl) = config.enforcement.period_lock
                     && let Err(e) = self.check_period_lock_at(
                         database_id,

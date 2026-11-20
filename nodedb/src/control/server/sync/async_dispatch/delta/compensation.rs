@@ -200,6 +200,8 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ConflictRetry
         | ErrorCode::SerializationConflict { .. }
+        // Refused before any write, against a catalog that catches up.
+        | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::OllpRetryRequired
         | ErrorCode::CrdtFrontierMismatch { .. }
         | ErrorCode::CollectionDraining { .. }

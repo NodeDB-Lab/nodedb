@@ -151,9 +151,11 @@ impl CoreLoop {
             && let Some(slot) =
                 self.history_slot_in_txn(txn, database_id, tid, collection, &storage_key, sys_from)?
         {
+            // The rules read the judged config: a pinned write judges by its
+            // proposer's rules.
             if enforce
                 && slot.predecessor.is_some()
-                && let Some(config) = self.doc_configs.get(&config_key)
+                && let Some(config) = self.judged_doc_config(&config_key)
             {
                 run_delete_enforcement(
                     self,
@@ -192,7 +194,7 @@ impl CoreLoop {
         // delete judges whatever is stored.
         if enforce
             && (prior.is_some() || !bitemporal)
-            && let Some(config) = self.doc_configs.get(&config_key)
+            && let Some(config) = self.judged_doc_config(&config_key)
         {
             run_delete_enforcement(
                 self,

@@ -65,6 +65,9 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::ExecutionLimitExceeded { .. }
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
+        // Decided by the entry's pins and the log-ordered stored layout, so
+        // a redelivery refuses it again. The client retries a new statement.
+        | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::SyncRejected { .. }
         | ErrorCode::NotFound
         | ErrorCode::RejectedAuthz { .. }
@@ -158,6 +161,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // Concurrency verdicts that abort the whole attempt before install.
         | ErrorCode::ConflictRetry
         | ErrorCode::SerializationConflict { .. }
+        // A rewrite refused before its first write.
+        | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::OllpRetryRequired
         // The whole transaction aborted before any read-set was validated.
         | ErrorCode::TransactionRollback { .. }

@@ -30,7 +30,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 use crate::wal::RedoSubRecord;
 
-const COLL: &str = "tickets";
+pub(super) const COLL: &str = "tickets";
 
 /// The ways a committed record's rows install.
 #[derive(Debug, Clone, Copy)]
@@ -49,7 +49,7 @@ fn lowered() -> nodedb_query::expr::SqlExpr {
     }
 }
 
-fn schemaless_wire() -> DocConfigWire {
+pub(super) fn schemaless_wire() -> DocConfigWire {
     DocConfigWire {
         bitemporal: false,
         crdt_enabled: false,
@@ -64,7 +64,7 @@ fn schemaless_wire() -> DocConfigWire {
 }
 
 /// The schemaless wire with a later `lowered` typeguard VALUE.
-fn guarded_wire() -> DocConfigWire {
+pub(super) fn guarded_wire() -> DocConfigWire {
     let mut wire = schemaless_wire();
     wire.enforcement.type_guards = vec![TypeGuardFieldDef {
         field: "lowered".into(),
@@ -78,12 +78,12 @@ fn guarded_wire() -> DocConfigWire {
 }
 
 /// A strict schema of `status`, at version 1.
-fn strict_v1() -> StrictSchema {
+pub(super) fn strict_v1() -> StrictSchema {
     StrictSchema::new(vec![ColumnDef::nullable("status", ColumnType::String)]).expect("schema")
 }
 
 /// [`strict_v1`] with `added` appended at version 2.
-fn strict_v2(added: &str) -> StrictSchema {
+pub(super) fn strict_v2(added: &str) -> StrictSchema {
     let mut column = ColumnDef::nullable(added, ColumnType::String);
     column.added_at_version = 2;
     let mut schema = strict_v1();
@@ -92,7 +92,7 @@ fn strict_v2(added: &str) -> StrictSchema {
     schema
 }
 
-fn strict_wire(schema: StrictSchema) -> DocConfigWire {
+pub(super) fn strict_wire(schema: StrictSchema) -> DocConfigWire {
     DocConfigWire {
         storage_mode: StorageMode::Strict { schema },
         ..schemaless_wire()
@@ -100,7 +100,7 @@ fn strict_wire(schema: StrictSchema) -> DocConfigWire {
 }
 
 /// The strict wire with a later GENERATED column `lowered`.
-fn generated_wire() -> DocConfigWire {
+pub(super) fn generated_wire() -> DocConfigWire {
     let mut wire = strict_wire(strict_v2("lowered"));
     wire.enforcement.generated_columns = vec![GeneratedColumnSpec {
         name: "lowered".into(),
@@ -111,7 +111,7 @@ fn generated_wire() -> DocConfigWire {
 }
 
 /// Register `wire` as the current config of `tickets`, with `digest`.
-fn register(core: &mut CoreLoop, wire: &DocConfigWire, digest: u64) {
+pub(super) fn register(core: &mut CoreLoop, wire: &DocConfigWire, digest: u64) {
     register_as(core, COLL, wire, digest);
 }
 
@@ -143,14 +143,14 @@ fn register_as(core: &mut CoreLoop, collection: &str, wire: &DocConfigWire, dige
 
 /// A core whose current config of `tickets` is `wire`, registered with its
 /// digest.
-fn core_with(wire: &DocConfigWire) -> Hold {
+pub(super) fn core_with(wire: &DocConfigWire) -> Hold {
     let mut held = hold(plain_core);
     register(&mut held.core, wire, wire.digest().expect("digest"));
     held
 }
 
 /// The pins of a record whose proposer saw `tickets` as `wire`.
-fn pinned(wire: &DocConfigWire) -> RedoPins {
+pub(super) fn pinned(wire: &DocConfigWire) -> RedoPins {
     pins(vec![pin_of(COLL, wire)])
 }
 
@@ -163,7 +163,7 @@ fn put(surrogate: u32, fields: &[(&str, &str)]) -> RedoSubRecord {
     doc_put_sub_record(COLL, &format!("t{surrogate}"), &body, surrogate)
 }
 
-fn assert_ok(response: &Response) {
+pub(super) fn assert_ok(response: &Response) {
     assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
 }
 
@@ -245,7 +245,7 @@ fn install_writing(
 }
 
 /// The stored bytes of row `surrogate`.
-fn stored(core: &CoreLoop, surrogate: u32) -> Vec<u8> {
+pub(super) fn stored(core: &CoreLoop, surrogate: u32) -> Vec<u8> {
     stored_in(core, COLL, surrogate)
 }
 
@@ -263,7 +263,7 @@ fn stored_in(core: &CoreLoop, collection: &str, surrogate: u32) -> Vec<u8> {
 }
 
 /// The stored schemaless row `surrogate`, decoded.
-fn document(core: &CoreLoop, surrogate: u32) -> Value {
+pub(super) fn document(core: &CoreLoop, surrogate: u32) -> Value {
     crate::data::executor::doc_format::decode_document_value(&stored(core, surrogate))
         .expect("decode row")
 }
@@ -282,7 +282,7 @@ fn tuple_version(core: &CoreLoop, surrogate: u32, schema: &StrictSchema) -> u32 
         .expect("tuple version")
 }
 
-fn field<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+pub(super) fn field<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     match row {
         Value::Object(fields) => fields.get(name),
         other => panic!("a row is an object, got {other:?}"),

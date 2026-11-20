@@ -70,6 +70,7 @@ fn batch_task(documents: &[(String, Vec<u8>)], surrogates: &[Surrogate]) -> Exec
         resolved_now_ms: None,
         commit_hlc: None,
         system_ordinal: None,
+        config_pins: None,
         admission: crate::bridge::envelope::Admission::Admitted,
     })
 }

@@ -3,6 +3,8 @@
 //! [`ReplicatedEntry`] — the routing envelope carried alongside a
 //! [`super::ReplicatedWrite`] on the Raft log, plus its (de)serialization.
 
+use nodedb_physical::physical_plan::RedoPins;
+
 use super::replicated_write::ReplicatedWrite;
 use super::transaction_redo_wire::ReplicatedEventSource;
 
@@ -71,6 +73,12 @@ pub struct ReplicatedEntry {
     /// the cut that holds it. Such an entry keeps its source's ordinal and
     /// key, takes no write-gate lock, and applies once its cut is ready.
     pub mirror: Option<nodedb_types::MirrorEntryStamp>,
+    /// The config pins the proposer stamped for a document write: the
+    /// config of each collection the write derives rows in or folds into,
+    /// and the CRS set. Every replica derives the write's row bodies and
+    /// judges its rules under them. Empty for a write that requires no pin.
+    /// A mirror's entry keeps its source's pins.
+    pub config_pins: RedoPins,
 }
 
 /// A user collection or array a replicated write names, and the incarnation
@@ -119,6 +127,7 @@ impl ReplicatedEntry {
             user_roles: Vec::new(),
             system_ordinal: 0,
             mirror: None,
+            config_pins: RedoPins::default(),
         }
     }
 

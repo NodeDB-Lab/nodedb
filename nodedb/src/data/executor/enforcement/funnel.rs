@@ -77,8 +77,10 @@ pub(in crate::data::executor) fn run_write_enforcement(
         ctx.collection.to_string(),
     );
     // An unregistered collection has no declared constraints, so there is
-    // nothing to enforce and nothing to report.
-    let Some(config) = core.doc_configs.get(&config_key) else {
+    // nothing to enforce and nothing to report. The bindings and the
+    // BALANCED rule read the judged config, as a committed redo's validate
+    // does: a pinned write folds and judges by its proposer's rules.
+    let Some(config) = core.judged_doc_config(&config_key) else {
         return Ok(WriteEnforcementOutcome {
             target_writes: Vec::new(),
             balanced_entries: Vec::new(),

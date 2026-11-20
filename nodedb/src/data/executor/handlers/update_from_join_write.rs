@@ -71,7 +71,9 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             target_collection.to_string(),
         );
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // Each rule reads the judged config: a pinned write judges by its
+        // proposer's rules.
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(error) = crate::data::executor::enforcement::append_only::check_point_update(
                 target_collection,
                 &config.enforcement,
@@ -81,8 +83,7 @@ impl CoreLoop {
         }
         // Judge both period images before the source transaction begins.
         if let Some(lock) = self
-            .doc_configs
-            .get(&config_key)
+            .judged_doc_config(&config_key)
             .and_then(|config| config.enforcement.period_lock.as_ref())
         {
             for row in &rows {

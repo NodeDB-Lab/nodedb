@@ -8,6 +8,9 @@ use nodedb_types::Value;
 use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::envelope::ErrorCode;
+use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::doc_config_key::DocConfigKey;
+use crate::data::executor::handlers::transaction::redo_apply::fit_stored_rewrite;
 use crate::data::executor::handlers::upsert::merge::{apply_on_conflict_updates, merge_values};
 
 /// The merged row an upsert stores, as the MessagePack body
@@ -73,6 +76,34 @@ pub(in crate::data::executor) fn merge_upsert_body(
         detail: "failed to encode merged upsert value".into(),
     })?;
     Ok(MergedUpsert { body, assigned })
+}
+
+impl CoreLoop {
+    /// Fit `merged`, an upsert's body over the stored row `stored` of
+    /// `key`, to the schema its rewrite encodes under, as an update's
+    /// rewrite does. The upsert's assigned fields stay. A schemaless row
+    /// passes unchanged. `Err` refuses an upsert whose pin is older than the
+    /// stored layout (`StalePinnedSchema`).
+    pub(in crate::data::executor) fn fit_merged_upsert(
+        &self,
+        key: &DocConfigKey,
+        stored: &[u8],
+        merged: &mut MergedUpsert,
+    ) -> Result<(), ErrorCode> {
+        let Some(schema) = self.write_rewrite_schema(key, stored)? else {
+            return Ok(());
+        };
+        let mut doc = crate::data::executor::doc_format::decode_document_value(&merged.body)
+            .map_err(ErrorCode::from)?;
+        let Value::Object(fields) = &mut doc else {
+            return Ok(());
+        };
+        fit_stored_rewrite(schema, fields, &merged.assigned);
+        merged.body = zerompk::to_msgpack_vec(&doc).map_err(|error| ErrorCode::Internal {
+            detail: format!("failed to encode merged upsert value: {error}"),
+        })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

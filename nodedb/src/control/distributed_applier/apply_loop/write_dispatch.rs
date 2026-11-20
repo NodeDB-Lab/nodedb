@@ -7,9 +7,11 @@
 //! The enqueue runs in log order when the entry starts. The outcome is
 //! collected by the returned apply, in any order.
 
+use std::sync::Arc;
+
 use tracing::debug;
 
-use nodedb_physical::physical_plan::ArrayOp;
+use nodedb_physical::physical_plan::{ArrayOp, RedoPins};
 use nodedb_raft::message::LogEntry;
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
@@ -22,6 +24,7 @@ use crate::control::server::dispatch_utils::{
     error_is_final_refusal,
 };
 use crate::control::wal_replication::from_replicated_entry;
+use crate::control::wal_replication::types::UncoveredPins;
 use crate::types::{DatabaseId, TraceId};
 
 use crate::control::server::shared::write_admission::plan_writes_user_data;
@@ -48,6 +51,11 @@ pub(super) struct EntryScope {
     /// The system-time ordinal the entry's leader assigned, which every
     /// replica stamps the write's bitemporal versions from.
     pub system_ordinal: Option<i64>,
+    /// The config pins every replica derives the write's row bodies and
+    /// judges its rules under. `None` for a write that requires no pin.
+    /// `Err` for a write whose entry does not carry a pin it requires: every
+    /// replica refuses it before any dispatch.
+    pub config_pins: Result<Option<Arc<RedoPins>>, UncoveredPins>,
 }
 
 /// Prepare a generic entry. `exclusive` marks an entry whose apply awaits its
@@ -93,8 +101,21 @@ async fn enqueue_generic_entry<'a>(
         incarnations,
         user_roles,
         system_ordinal,
+        config_pins,
     } = scope;
     let ApplyContext { state, tracker, .. } = ctx;
+    // An entry that leaves a pin its write requires uncarried is malformed.
+    // Every replica refuses it here, before it binds or writes anything.
+    let config_pins = match config_pins {
+        Ok(config_pins) => config_pins,
+        Err(uncovered) => {
+            return StartedEntry::concluded(conclude_generic_entry(
+                tracker,
+                pos,
+                Err(uncovered.into()),
+            ));
+        }
+    };
     let AppliedPosition {
         group_id,
         log_index,
@@ -259,13 +280,15 @@ async fn enqueue_generic_entry<'a>(
             // `change_position` gives the write's change events the entry's
             // log position, which every replica shares. `system_ordinal` is
             // the stamp the entry's leader assigned, which every replica's
-            // bitemporal versions take.
+            // bitemporal versions take. `config_pins` are the proposer's
+            // pins, which every replica's core derives and judges under.
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
                 apply_key: applied_key,
                 commit_hlc: pos.carried_commit_hlc(),
                 change_position: Some(pos.change_position(state, vshard_id.as_u32())),
                 system_ordinal,
+                config_pins,
             },
             // Raft committed this entry at a fixed log index; every
             // replica applies it in that order. Re-entering the

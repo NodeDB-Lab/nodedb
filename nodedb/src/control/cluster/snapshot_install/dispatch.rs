@@ -59,6 +59,7 @@ pub async fn install_on_every_core(
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
         };
         let rx = state.tracker.register(request_id);

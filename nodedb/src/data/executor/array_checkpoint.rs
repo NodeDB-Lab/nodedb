@@ -284,6 +284,7 @@ mod tests {
                     resolved_now_ms: None,
                     commit_hlc: None,
                     system_ordinal,
+                    config_pins: None,
                     admission: crate::bridge::envelope::Admission::Admitted,
                 }))
                 .expect("push request");

@@ -11,6 +11,7 @@ use nodedb_types::columnar::StrictSchema;
 use super::merge_body::{decode_stored_row, merge_upsert_body};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::doc_config_key::DocConfigKey;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// One key the page writes: its rows, the row the key held before the page,
@@ -36,6 +37,17 @@ pub(super) struct PageScope<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub strict_schema: Option<&'a StrictSchema>,
+}
+
+impl PageScope<'_> {
+    /// The config key of the page's collection.
+    fn config_key(&self) -> DocConfigKey {
+        (
+            crate::types::DatabaseId::new(self.database_id),
+            crate::types::TenantId::new(self.tid),
+            self.collection.to_string(),
+        )
+    }
 }
 
 /// The rows of a page and the clause every row merges with.
@@ -99,12 +111,15 @@ impl CoreLoop {
                     let (post, assigned) = match &committed {
                         None => (value.clone(), None),
                         Some(current) => {
-                            let merged = merge_upsert_body(
+                            let mut merged = merge_upsert_body(
                                 decode_stored_row(current, scope.strict_schema)?,
                                 value,
                                 on_conflict_updates,
                                 &self.crs_context(),
                             )?;
+                            // The merged row rewrites the stored one, so it
+                            // encodes under the rewrite schema.
+                            self.fit_merged_upsert(&scope.config_key(), current, &mut merged)?;
                             (merged.body, Some(merged.assigned))
                         }
                     };

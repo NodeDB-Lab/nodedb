@@ -193,6 +193,7 @@ pub(crate) async fn broadcast_count_to_all_cores_until(
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission,
         };
 
@@ -325,6 +326,7 @@ pub async fn broadcast_register_to_all_cores(
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
+            config_pins: None,
             admission,
         };
 

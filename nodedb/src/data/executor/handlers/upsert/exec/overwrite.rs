@@ -72,15 +72,27 @@ impl CoreLoop {
         // evaluated against the existing row, else the plain merge
         // `UPSERT INTO` uses. The fields the merge writes are the ones
         // typeguards judge.
+        let mut merged =
+            match decode_stored_row(&current_bytes, strict_schema).and_then(|existing| {
+                merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())
+            }) {
+                Ok(merged) => merged,
+                Err(e) => return self.response_error(task, e),
+            };
+        // The merged row rewrites the stored one, so it encodes under the
+        // rewrite schema, as an update does.
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
+        if let Err(e) = self.fit_merged_upsert(&config_key, &current_bytes, &mut merged) {
+            return self.response_error(task, e);
+        }
         let MergedUpsert {
             body: merged_body,
             assigned,
-        } = match decode_stored_row(&current_bytes, strict_schema).and_then(|existing| {
-            merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())
-        }) {
-            Ok(merged) => merged,
-            Err(e) => return self.response_error(task, e),
-        };
+        } = merged;
 
         let identity_column = self.identity_column(database_id, tid, collection);
 
@@ -108,7 +120,7 @@ impl CoreLoop {
         // version's ordinal and inserts the new ones there. Its in-memory
         // undo joins this list, so an abort puts the prior nodes back.
         let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        let mut outcome = match self
+        let put = self
             .prepare_point_put(
                 &txn,
                 PointPutParams {
@@ -140,7 +152,8 @@ impl CoreLoop {
                     &self.crs_context(),
                 )?;
                 self.apply_prepared_point_put(&txn, prepared)
-            }) {
+            });
+        let mut outcome = match put {
             Ok(o) => o,
             Err(e) => {
                 // Some rejections land after the row was cached;

@@ -14,6 +14,7 @@ use nodedb_types::columnar::StrictSchema;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
+use crate::data::executor::handlers::transaction::redo_apply::{assigns, rewrite_keeps_field};
 use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, TenantId};
 
@@ -94,7 +95,9 @@ impl CoreLoop {
             declared_primary_key,
             bitemporal_sys_from,
         } = p;
-        let crs = self.crs_context();
+        // Each post-image is a row body: it derives under the install
+        // config's CRS set. A pinned write's is its proposer's.
+        let crs = self.install_crs_context();
         let shape = RowShape {
             database_id,
             tid,
@@ -225,11 +228,17 @@ impl CoreLoop {
         }
         identity.check_unchanged(collection, &doc)?;
 
+        // The post-image derives under the install config: its typeguards,
+        // generated columns, declared columns and tuple schema. A pinned
+        // write's are its proposer's. `strict_schema` decodes the stored row
+        // in the current storage mode.
+        let install = self.install_doc_config(&config_key)?;
+
         // Apply typeguards to the post-image, judging the assigned and
         // injected fields. Then recompute generated columns if any
         // dependency changed. A column the engine cannot recompute fails the
         // statement.
-        if let Some(config) = self.doc_configs.get(&config_key) {
+        if let Some(config) = install {
             if !config.crdt_enabled && !config.type_guards.is_empty() {
                 let assigned = super::super::write_body::assigned_names(updates);
                 crate::data::executor::enforcement::typeguard::enforce_type_guards(
@@ -259,15 +268,27 @@ impl CoreLoop {
         // the assignment was a literal or computed.
         crate::data::executor::strict_format::coerce_declared_doc(
             &mut doc,
-            self.declared_columns(&config_key),
+            install.map_or(&[][..], |config| config.declared_columns.as_slice()),
         )?;
+        // A strict row encodes under the install config's schema. A pin
+        // older than the stored row's layout refuses the statement. The row
+        // decoded under the current schema, so a column it added after the
+        // install schema reads as null and is dropped.
+        let rewrite = match strict_schema {
+            Some(_) => self.write_rewrite_schema(&config_key, &current_bytes)?,
+            None => None,
+        };
+        if let (Some(schema), Some(fields)) = (rewrite, doc.as_object_mut()) {
+            fields.retain(|field, _| rewrite_keeps_field(schema, field, assigns(updates, field)));
+        }
+        let encode_schema = rewrite.or(strict_schema);
 
         // Re-encode — format depends on storage mode. An encode error
         // carries its own typed cause, such as a field the strict schema
         // does not declare.
         // A bitemporal strict tuple stamps the version's system time, valid
         // for all time, as the point update encodes it.
-        let updated_bytes = match (strict_schema, bitemporal_sys_from) {
+        let updated_bytes = match (encode_schema, bitemporal_sys_from) {
             (Some(schema), Some(sys_from)) if schema.bitemporal => {
                 let ndb_val: nodedb_types::Value = doc.clone().into();
                 crate::data::executor::strict_format::value_to_binary_tuple_bitemporal(
@@ -319,9 +340,9 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
+        // The judged config: a pinned write judges by its proposer's rules.
         let enforcement = self
-            .doc_configs
-            .get(&config_key)
+            .judged_doc_config(&config_key)
             .map(|config| &config.enforcement);
         let period_lock = enforcement.and_then(|enforcement| enforcement.period_lock.as_ref());
         for row in rows {

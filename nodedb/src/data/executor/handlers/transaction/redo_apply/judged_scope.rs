@@ -16,16 +16,68 @@
 //! The view lives in the apply scope, which a parked install takes out of
 //! the core whole. So it survives every yield, and a task between slices
 //! reads the core's current configs.
+//!
+//! A plain replicated write that carries its proposer's pins opens the view
+//! for its whole apply, with its rule reads on the validate view. Such a
+//! write never parks, so the view drops when its task ends.
 
-use nodedb_physical::physical_plan::{DeclaredColumn, RedoPins};
+use nodedb_physical::physical_plan::{
+    DeclaredColumn, DocumentPinNeeds, MetaOp, PhysicalPlan, RedoPins, document_pin_needs,
+};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::doc_config_key::DocConfigKey;
+use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::CollectionConfig;
 use crate::types::{DatabaseId, TenantId};
 
-use super::config_pins::ConfigPinError;
+use super::config_pins::{ConfigPinError, check_written_pinned};
 use super::judged_configs::JudgedConfigs;
+
+/// Refuse `task`, a plain replicated write pinned with `pins`, when it
+/// writes or folds into a collection `pins` hold no pin of. Only a document
+/// write requires pins. Every core refuses a malformed task alike.
+pub(in crate::data::executor) fn check_task_pinned(
+    task: &ExecutionTask,
+    pins: &RedoPins,
+) -> Result<(), ConfigPinError> {
+    let needs = if let PhysicalPlan::Document(op) = task.plan() {
+        document_pin_needs(op)
+    } else {
+        DocumentPinNeeds::default()
+    };
+    check_written_pinned(
+        pins,
+        task.request.database_id,
+        task.request.tenant_id,
+        needs.writes,
+        &needs.sum_targets,
+    )
+}
+
+/// Whether `a` and `b`, the pins of two plain writes, are one pin set: the
+/// same configs and the same CRS set, compared by key and digest. Two tasks
+/// with no pins are one set. One batch applies under one view, so only
+/// tasks of one pin set share a batch.
+pub(in crate::data::executor) fn same_pin_set(a: Option<&RedoPins>, b: Option<&RedoPins>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let same_crs = match (&a.crs, &b.crs) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.digest == b.digest,
+                (None, Some(_)) | (Some(_), None) => false,
+            };
+            same_crs
+                && a.configs.len() == b.configs.len()
+                && a.configs
+                    .iter()
+                    .zip(&b.configs)
+                    .all(|(a, b)| a.key == b.key && a.digest == b.digest)
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
 
 /// The judged view a record's apply set aside for an inner one, and puts
 /// back when it ends.
@@ -62,6 +114,61 @@ impl CoreLoop {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Open the judged view of `task`, a plain replicated write its proposer
+    /// pinned, for the whole apply. Its row bodies derive, and its rules
+    /// judge, under its pins. Returns what the view set aside, which
+    /// [`Self::restore_judging`] puts back once the apply ends.
+    ///
+    /// `None` for a task that carries no pins, and for a committed redo,
+    /// whose apply opens its own view. `Err` refuses the write before any
+    /// write: a pin it requires is missing, or a pin does not hash to its
+    /// digest or does not decode. Every core refuses such a write alike.
+    pub(in crate::data::executor) fn begin_pinned_write(
+        &mut self,
+        task: &ExecutionTask,
+    ) -> Result<Option<HeldJudging>, ConfigPinError> {
+        let Some(pins) = task.request.config_pins.as_deref() else {
+            return Ok(None);
+        };
+        if let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { .. }) = task.plan() {
+            return Ok(None);
+        }
+        check_task_pinned(task, pins)?;
+        self.begin_pinned_apply(pins).map(Some)
+    }
+
+    /// Open the judged view of a plain write pinned with `pins`, for its
+    /// whole apply: its validate and its install are one pass. Every pin's
+    /// install config is derived first, so a pin that does not decode
+    /// refuses before any write, and the core holds the view it held
+    /// before. A write with no CRS pin is refused: its proposer always pins
+    /// the CRS set.
+    pub(in crate::data::executor) fn begin_pinned_apply(
+        &mut self,
+        pins: &RedoPins,
+    ) -> Result<HeldJudging, ConfigPinError> {
+        let held = self.hold_judging();
+        let mut view = match JudgedConfigs::open(pins, &self.crs_set, self.crs_digest) {
+            Ok(Some(view)) => view,
+            Ok(None) => {
+                self.restore_judging(held);
+                return Err(ConfigPinError::CrsUnpinned);
+            }
+            Err(error) => {
+                self.restore_judging(held);
+                return Err(error);
+            }
+        };
+        view.prime_install(&self.doc_configs);
+        if let Some(error) = view.take_failure() {
+            self.restore_judging(held);
+            return Err(error);
+        }
+        self.apply_scope.judged = Some(view);
+        self.apply_scope.judging = true;
+        Ok(held)
     }
 
     /// Set the current judged view aside, so a record's apply starts with
