@@ -8,5 +8,6 @@ mod bind_identities;
 mod follow;
 mod incarnation;
 mod primary_write;
+pub(super) mod slice_pins;
 mod static_dispatch;
 mod unstaged;

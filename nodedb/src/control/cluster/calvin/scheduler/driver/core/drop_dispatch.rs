@@ -34,7 +34,8 @@ impl Scheduler {
             position: txn_id.position,
         });
         let request_id = self.next_request_id();
-        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
+        // A drop discards staged state and reads no config.
+        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
         self.dispatch_sequenced(txn_id, step, request)
     }
 }

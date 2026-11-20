@@ -144,6 +144,7 @@ impl Scheduler {
                 identities: scope.identities.clone(),
                 event_source: super::request::slice_event_source(tx_class, scope),
                 origin: scope.origin,
+                pins: (*scope.pins).clone(),
                 meta: CalvinRedoMeta {
                     epoch_system_ms: pending.txn.epoch_system_ms,
                     reply,
@@ -203,6 +204,8 @@ impl Scheduler {
         };
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
+        // The resolve encodes the redo under the slice's pins.
+        let config_pins = pending.scope.request_pins();
         // The open attempt's next part, or part 0 for a new attempt. A part
         // holds up to one entry's bytes, so a redo that fits one entry
         // arrives in part 0.
@@ -218,7 +221,8 @@ impl Scheduler {
             part,
             max_part_bytes,
         });
-        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
+        let request =
+            self.build_exempt_request(request_id, tenant_id, database_id, plan, config_pins);
         self.dispatch_sequenced(txn_id, DispatchStep::Resolve, request)
     }
 }
@@ -278,7 +282,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::{ErrorCode, Payload};
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        error_response, scheduler_with_pending, staged_response,
+        error_response, make_local_write_txn, pins_for, scheduler_with_pending, staged_response,
     };
 
     /// A resolve that returns an error under a COMMIT verdict holds the txn
@@ -328,5 +332,47 @@ mod tests {
             Some(CommitState::AwaitingRedoResolve),
             "no redo is proposed"
         );
+    }
+
+    /// The owed redo carries the slice's pins: the class's pins filtered to
+    /// what the slice writes, and the CRS pin. Its apply plan hands them to
+    /// every replica's install.
+    #[tokio::test]
+    async fn the_owed_redo_carries_the_slice_pins() {
+        let txn_id = TxnId::new(8, 0);
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
+        let mut txn = make_local_write_txn(8, 0);
+        let class_pins =
+            zerompk::to_msgpack_vec(&pins_for(&["other", "test_coll"])).expect("encode pins");
+        std::sync::Arc::make_mut(&mut txn.tx_class).set_config_pins(class_pins.into());
+        let local = super::super::super::helpers::decode_plans(txn.plans()).expect("plans");
+        let pins =
+            super::super::dispatch::slice_pins::slice_pins(&txn.tx_class, &local).expect("pins");
+        let pending = scheduler.pending.get_mut(&txn_id).expect("pending");
+        pending.scope.pins = std::sync::Arc::clone(&pins);
+
+        let owed = scheduler
+            .owed_redo(
+                txn_id,
+                nodedb_physical::physical_plan::CalvinReplySpec::Count(vec![1]),
+            )
+            .expect("owed redo");
+
+        let names: Vec<&str> = owed
+            .payload
+            .pins
+            .configs
+            .iter()
+            .map(|pin| pin.key.collection.as_str())
+            .collect();
+        assert_eq!(names, vec!["test_coll"]);
+        assert!(owed.payload.pins.pinned(), "the CRS pin rides along");
+        match owed.payload.apply_plan().expect("apply plan") {
+            PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { pins: carried, .. }) => {
+                assert_eq!(carried, *pins);
+            }
+            other => panic!("apply plan must be ApplyTransactionRedo, got {other:?}"),
+        }
     }
 }

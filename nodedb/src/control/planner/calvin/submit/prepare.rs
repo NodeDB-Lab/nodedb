@@ -2,11 +2,11 @@
 
 //! Prepare a Calvin transaction for its sequencer submit.
 //!
-//! Every submit stamps its class the same way: raise the metadata floor,
-//! stamp incarnations and UNIQUE claims, slice edge batches by home pair,
-//! and split the plans into parts when one sequencer entry cannot carry
-//! them. The plan batch decodes once here, and every stage reads the
-//! decoded plans. The class's plan bytes change only when edge slicing
+//! Every submit stamps its class the same way: stamp incarnations and
+//! UNIQUE claims, slice edge batches by home pair, stamp config pins, raise
+//! the metadata floor, and split the plans into parts when one sequencer
+//! entry cannot carry them. The plan batch decodes once here, and every
+//! stage reads the decoded plans. The class's plan bytes change only when edge slicing
 //! changes the plans, and then encode once. A class whose plans carry a full
 //! `RETURNING` list also gets its response contract here.
 
@@ -38,13 +38,16 @@ pub(crate) struct Prepared {
 ///
 /// A class already split into parts was stamped and split by its
 /// coordinator. Only its metadata floor rises here.
+///
+/// The stamps read the catalog in one order: incarnations, then config
+/// pins, then the metadata floor.
 pub(crate) fn prepare_submit(
     state: &SharedState,
     tx_class: &mut TxClass,
 ) -> crate::Result<Prepared> {
     check_carried_bytes(tx_class)?;
-    super::local::raise_metadata_floor(state, tx_class);
     if tx_class.is_multi_part() {
+        super::local::raise_metadata_floor(state, tx_class);
         return Ok(Prepared {
             stream: None,
             fold: ReplyFold::of_prepared(tx_class, &[]),
@@ -65,21 +68,28 @@ pub(crate) fn prepare_submit(
     // A batch edge op spans the homes of all its edges. Split into one batch
     // per home pair, it spans at most two, which every part can carry.
     let sliced = super::edge_slices::slice_edge_batches(tx_class, plans)?;
+    // The pins are read at or after the incarnations.
+    super::config_pins::stamp_config_pins(state, tx_class, &sliced.plans)?;
     // The contract keys each plan by its index in the plans the class
     // carries, which are the sliced plans.
     super::returning_contract::stamp_returning_contract(state, tx_class, &sliced.plans)?;
+    // The floor is stamped last. It never moves backward, so it covers every
+    // catalog state the reads above saw.
+    super::local::raise_metadata_floor(state, tx_class);
     let stream = super::parts::split_into_parts(state, tx_class, &sliced)?;
     let fold = ReplyFold::of_prepared(tx_class, &sliced.plans);
     Ok(Prepared { stream, fold })
 }
 
-/// Refuse a class whose published messages or applied key do not decode.
+/// Refuse a class whose published messages, applied key or config pins do
+/// not decode.
 ///
-/// A participant decodes both when it builds its redo, after the COMMIT
-/// verdict. A decode error there halts its vShard. Here it refuses the
+/// A participant decodes them when it stages or builds its redo. A decode
+/// error after the COMMIT verdict halts its vShard. Here it refuses the
 /// submit before the class is sequenced.
 fn check_carried_bytes(tx_class: &TxClass) -> crate::Result<()> {
     crate::wal::RedoPublish::decode_all(&tx_class.publishes)?;
+    super::config_pins::decode_config_pins(tx_class)?;
     if !tx_class.applied_key.is_empty() {
         zerompk::from_msgpack::<crate::wal::CrossShardAppliedKey>(&tx_class.applied_key).map_err(
             |e| Error::Serialization {
@@ -173,6 +183,45 @@ mod tests {
         PLAN_DECODES.with(std::cell::Cell::get)
     }
 
+    /// Write a committed catalog row of tenant 1 for each of `names`.
+    fn register(state: &SharedState, names: &[&str]) {
+        for name in names {
+            state
+                .credentials
+                .catalog()
+                .put_collection(
+                    DatabaseId::DEFAULT,
+                    &crate::control::security::catalog::StoredCollection::stamped_for_test(
+                        1, name, "owner",
+                    ),
+                )
+                .expect("put collection");
+        }
+    }
+
+    /// A truncate of `collection` that folds into `target`.
+    fn truncate_into(collection: &str, target: &str) -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+            restart_identity: false,
+            resolved_sum_targets: vec![nodedb_physical::physical_plan::ResolvedSumTarget::new(
+                target,
+                "a1",
+                Surrogate::new(1),
+            )],
+            declared_primary_key: None,
+        })
+    }
+
+    fn pinned_names(class: &TxClass) -> Vec<String> {
+        super::super::config_pins::decode_config_pins(class)
+            .expect("pins decode")
+            .configs
+            .iter()
+            .map(|pin| pin.key.collection.clone())
+            .collect()
+    }
+
     fn edge(i: usize) -> BatchEdge {
         BatchEdge {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "g"),
@@ -224,6 +273,7 @@ mod tests {
     #[tokio::test]
     async fn one_submit_decodes_its_plan_batch_once() {
         let (state, _directory) = test_state();
+        register(&state, &["before"]);
         let plans = vec![
             truncate("before"),
             PhysicalPlan::Graph(GraphOp::EdgePutBatch {
@@ -281,5 +331,107 @@ mod tests {
         let before = decodes();
         prepare_submit(&state, &mut class).expect("prepares");
         assert_eq!(decodes(), before);
+    }
+
+    /// The submit pins every written collection and every sum target the
+    /// writes fold into, and the CRS set. An edge collection with no row
+    /// takes no pin.
+    #[tokio::test]
+    async fn a_submit_pins_written_collections_sum_targets_and_the_crs_set() {
+        let (state, _directory) = test_state();
+        register(&state, &["orders", "accounts"]);
+        let mut class = edge_class(&[truncate_into("orders", "accounts")], Vec::new());
+
+        prepare_submit(&state, &mut class).expect("prepares");
+
+        assert_eq!(pinned_names(&class), vec!["accounts", "orders"]);
+        let pins = super::super::config_pins::decode_config_pins(&class).expect("pins decode");
+        assert!(pins.pinned(), "the CRS set is pinned");
+    }
+
+    /// A class that arrives pinned keeps its pins: a forwarded submit is
+    /// stamped by its coordinator.
+    #[tokio::test]
+    async fn a_pinned_class_keeps_its_pins() {
+        let (state, _directory) = test_state();
+        let mut class = edge_class(&[truncate("ghost")], Vec::new());
+        let stamped = zerompk::to_msgpack_vec(&nodedb_physical::physical_plan::RedoPins::default())
+            .expect("encode pins");
+        class.set_config_pins(stamped.clone().into());
+
+        prepare_submit(&state, &mut class).expect("prepares");
+
+        assert_eq!(class.config_pins.as_slice(), stamped.as_slice());
+    }
+
+    /// A write to a collection with no catalog row cannot be pinned, so the
+    /// submit is refused before it is sequenced.
+    #[tokio::test]
+    async fn a_write_to_a_missing_collection_is_refused() {
+        let (state, _directory) = test_state();
+        let mut class = edge_class(&[truncate("ghost")], Vec::new());
+
+        let Err(refused) = prepare_submit(&state, &mut class) else {
+            panic!("a write to a missing collection is refused");
+        };
+
+        assert!(
+            matches!(&refused, Error::CollectionNotFound { collection, .. } if collection == "ghost"),
+            "{refused:?}"
+        );
+        assert!(class.config_pins.is_empty());
+    }
+
+    /// A balance delta's task writes its target row on the target's vShard,
+    /// so the submit pins the target. A target with no row refuses it.
+    #[tokio::test]
+    async fn a_balance_delta_target_is_pinned() {
+        let (state, _directory) = test_state();
+        let delta = PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
+            document_id: "01".into(),
+            surrogate: Surrogate::new(1),
+            column: "balance".into(),
+            delta: "5".into(),
+            join_column: "id".into(),
+            join_value: "a1".into(),
+            declared_primary_key: None,
+        });
+        let mut refused = edge_class(std::slice::from_ref(&delta), Vec::new());
+        let Err(error) = prepare_submit(&state, &mut refused) else {
+            panic!("a target with no row refuses the submit");
+        };
+        assert!(
+            matches!(&error, Error::CollectionNotFound { collection, .. } if collection == "accounts"),
+            "{error:?}"
+        );
+
+        register(&state, &["accounts"]);
+        let mut class = edge_class(&[delta], Vec::new());
+        prepare_submit(&state, &mut class).expect("prepares");
+        assert_eq!(pinned_names(&class), vec!["accounts"]);
+    }
+
+    /// The metadata floor is stamped after the pins. A submit whose pin read
+    /// refuses raises no floor. A pinned submit takes the floor of the
+    /// catalog its pins saw, or a later one.
+    #[tokio::test]
+    async fn the_metadata_floor_is_stamped_after_the_pins() {
+        let (state, _directory) = test_state();
+        state
+            .applied_index_watcher(nodedb_cluster::METADATA_GROUP_ID)
+            .bump(7);
+        let mut refused = edge_class(&[truncate("late")], Vec::new());
+        assert!(prepare_submit(&state, &mut refused).is_err());
+        assert_eq!(
+            refused.metadata_floor, 0,
+            "a refused pin read stamps no floor"
+        );
+
+        register(&state, &["late"]);
+        let mut class = edge_class(&[truncate("late")], Vec::new());
+        prepare_submit(&state, &mut class).expect("prepares");
+        assert_eq!(pinned_names(&class), vec!["late"]);
+        assert_eq!(class.metadata_floor, 7);
     }
 }

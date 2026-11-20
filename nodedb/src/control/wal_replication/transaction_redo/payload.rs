@@ -73,6 +73,9 @@ pub struct CalvinSlice {
     pub identities: Vec<CarriedIdentity>,
     pub event_source: EventSource,
     pub origin: RedoOrigin,
+    /// The class's config pins the slice's writes and folds need, and the
+    /// CRS pin. Every replica's validate judges the slice under them.
+    pub pins: RedoPins,
     pub meta: CalvinRedoMeta,
 }
 
@@ -144,6 +147,7 @@ impl TransactionRedoPayload {
             identities,
             event_source,
             origin,
+            pins,
             meta,
         } = slice;
         Self {
@@ -158,8 +162,7 @@ impl TransactionRedoPayload {
             reads: Vec::new(),
             snapshot_ordinal: None,
             adds_storage: false,
-            // A Calvin slice carries no pin: its submit pins nothing.
-            pins: RedoPins::default(),
+            pins,
         }
     }
 

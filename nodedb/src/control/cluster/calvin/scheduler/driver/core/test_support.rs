@@ -14,7 +14,9 @@ use nodedb_cluster::calvin::types::{
 };
 use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine};
 use nodedb_physical::physical_plan::wire as plan_wire;
-use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{
+    ConfigPin, ConfigPinKey, CrsPin, DocumentOp, PhysicalPlan, RedoPins, pin_digest,
+};
 use nodedb_types::{KeyRepr, QualifiedCollection, TenantId};
 use tokio::sync::mpsc;
 
@@ -235,7 +237,7 @@ pub(super) fn make_local_write_txn(epoch: u64, position: u32) -> SequencedTxn {
         declared_primary_key: None,
     })];
     let plans = plan_wire::encode_batch(&batch).expect("encode one truncate plan");
-    let tx_class = TxClass::new_single_vshard(
+    let mut tx_class = TxClass::new_single_vshard(
         ReadWriteSet::new(vec![]),
         write_set,
         plans,
@@ -244,6 +246,10 @@ pub(super) fn make_local_write_txn(epoch: u64, position: u32) -> SequencedTxn {
         VersionedReadSet::default(),
     )
     .expect("valid TxClass");
+    // Every submit pins its class. A write slice of an unpinned one is
+    // refused.
+    let pins = zerompk::to_msgpack_vec(&pins_for(&["test_coll"])).expect("encode pins");
+    tx_class.set_config_pins(pins.into());
     SequencedTxn {
         epoch,
         position,
@@ -252,6 +258,35 @@ pub(super) fn make_local_write_txn(epoch: u64, position: u32) -> SequencedTxn {
         epoch_vshard_txn_count: 1,
         lock_owner: None,
         local_plans: None,
+    }
+}
+
+/// Pins of tenant 1 for the default-database `collections`, with a CRS pin.
+/// The configs are opaque bytes: no fixture here starts a Data Plane.
+pub(super) fn pins_for(collections: &[&str]) -> RedoPins {
+    let config = |name: &str| {
+        let wire = name.as_bytes().to_vec();
+        Arc::new(ConfigPin {
+            key: ConfigPinKey {
+                database_id: DatabaseId::DEFAULT,
+                tenant_id: TenantId::new(1),
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, name)
+                    .as_str()
+                    .to_owned(),
+            },
+            digest: pin_digest(&wire),
+            wire: wire.into(),
+        })
+    };
+    let mut configs: Vec<Arc<ConfigPin>> = collections.iter().copied().map(config).collect();
+    configs.sort_by(|a, b| a.key.cmp(&b.key));
+    let crs = vec![0x90u8];
+    RedoPins {
+        configs,
+        crs: Some(Arc::new(CrsPin {
+            digest: pin_digest(&crs),
+            bytes: crs.into(),
+        })),
     }
 }
 

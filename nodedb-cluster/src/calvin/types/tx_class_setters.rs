@@ -2,6 +2,8 @@
 
 //! Field setters of [`TxClass`], and the order check of its `body_plans`.
 
+use nodedb_types::WireBytes;
+
 use crate::error::CalvinError;
 
 use super::incarnation::CalvinIncarnation;
@@ -51,6 +53,11 @@ impl TxClass {
     /// Set the encoded messages the transaction's trigger bodies published.
     pub fn set_publishes(&mut self, publishes: Vec<u8>) {
         self.publishes = publishes;
+    }
+
+    /// Set the encoded config pins the submitter read for the transaction.
+    pub fn set_config_pins(&mut self, config_pins: WireBytes) {
+        self.config_pins = config_pins;
     }
 
     /// Set the encoded dedup key of the cross-shard request the transaction
@@ -106,6 +113,19 @@ mod tests {
         tx.set_body_plans(vec![4, 1, 4, 0]);
         assert_eq!(tx.body_plans, vec![0, 1, 4]);
         assert!(tx.restore_derived().is_ok());
+    }
+
+    /// The config pins survive the codec as one msgpack `bin` value.
+    #[test]
+    fn config_pins_survive_the_class_round_trip() {
+        let mut tx = class();
+        assert!(tx.config_pins.is_empty(), "a new class is unpinned");
+        tx.set_config_pins(WireBytes::from(vec![0x82, 0xc4, 0x01, 0xff]));
+        let bytes = zerompk::to_msgpack_vec(&tx).expect("encode class");
+        let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode class");
+        decoded.restore_derived().expect("restore derived");
+        assert_eq!(decoded.config_pins.as_slice(), &[0x82, 0xc4, 0x01, 0xff]);
+        assert_eq!(decoded, tx);
     }
 
     #[test]

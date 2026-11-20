@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use nodedb_array::types::ArrayId;
 use nodedb_types::QualifiedCollection;
 
-use super::{GraphOp, MetaOp, PhysicalPlan, PinnedWrite, SpatialOp, VectorOp};
+use super::{GraphOp, MetaOp, PhysicalPlan, PinnedWrite, SpatialOp, VectorOp, document_pin_needs};
 
 /// The written collections of `plans`, sorted and deduplicated.
 pub fn written_collections(plans: &[PhysicalPlan]) -> Vec<String> {
@@ -57,29 +57,30 @@ fn collect_plan(plan: &PhysicalPlan, out: &mut BTreeSet<String>) {
     }
 }
 
-/// What `plan` writes, as its pins see it.
-fn pinned_write(plan: &PhysicalPlan) -> PinnedWrite {
-    if let PhysicalPlan::Document(_) | PhysicalPlan::Meta(MetaOp::RestoreRedo(_)) = plan {
-        PinnedWrite::DocumentRows
-    } else if let PhysicalPlan::Kv(_) = plan {
-        PinnedWrite::KvRows
-    } else {
-        PinnedWrite::Other
-    }
-}
-
 /// The written collections of `plans` whose writes require a config pin,
-/// sorted and deduplicated. A RESTORE batch's arrays have no config, so
-/// they are not named.
+/// sorted and deduplicated.
+///
+/// A document write requires what [`document_pin_needs`] names, the rule a
+/// core's install check reads. A balance delta names its target there. A
+/// RESTORE batch requires its collections. Its arrays have no config. A KV
+/// write requires its collection.
 pub fn pin_required_collections(plans: &[PhysicalPlan]) -> Vec<String> {
     let mut collections: BTreeSet<String> = BTreeSet::new();
     for plan in plans {
-        if !pinned_write(plan).requires_pin() {
-            continue;
-        }
-        if let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan {
+        if let PhysicalPlan::Document(op) = plan {
+            collections.extend(
+                document_pin_needs(op)
+                    .writes
+                    .into_iter()
+                    .filter(|(write, _)| write.requires_pin())
+                    .map(|(_, name)| name.to_owned()),
+            );
+        } else if let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan {
             collections.extend(batch.collections.iter().cloned());
-        } else if let Some(collection) = plan.collection() {
+        } else if let PhysicalPlan::Kv(op) = plan
+            && PinnedWrite::KvRows.requires_pin()
+            && let Some(collection) = op.collection()
+        {
             collections.insert(collection.to_string());
         }
     }
@@ -150,6 +151,37 @@ mod tests {
         assert_eq!(
             written_collections(&[delete.clone(), delete]),
             vec!["places".to_string()]
+        );
+    }
+
+    /// A balance delta folds into its target row, so its target requires a
+    /// pin, as a core's install check reads it. A graph edge requires none.
+    #[test]
+    fn a_balance_delta_requires_its_target_pin() {
+        let delta = PhysicalPlan::Document(crate::physical_plan::DocumentOp::ApplyBalanceDelta {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
+            document_id: "01".into(),
+            surrogate: nodedb_types::Surrogate::new(1),
+            column: "balance".into(),
+            delta: "5".into(),
+            join_column: "id".into(),
+            join_value: "a1".into(),
+            declared_primary_key: None,
+        });
+        let edge = PhysicalPlan::Graph(GraphOp::EdgePut {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "social"),
+            src_id: "alice".into(),
+            label: "follows".into(),
+            dst_id: "bob".into(),
+            properties: Vec::new(),
+            src_surrogate: nodedb_types::Surrogate::new(1),
+            dst_surrogate: nodedb_types::Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
+        });
+        assert_eq!(
+            pin_required_collections(&[delta, edge]),
+            vec!["accounts".to_string()]
         );
     }
 }

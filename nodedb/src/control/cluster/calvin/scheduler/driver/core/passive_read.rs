@@ -105,7 +105,8 @@ impl Scheduler {
             keys_to_read,
         });
         let request_id = self.next_request_id();
-        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
+        // A passive read writes nothing, so it carries no pins.
+        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
         // A passive-only vShard votes on its read, so it checks the
         // collections the txn names as a stage does.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);

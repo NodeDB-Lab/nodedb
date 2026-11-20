@@ -80,11 +80,20 @@ impl Scheduler {
         else {
             return;
         };
+        // A write slice of an unpinned class is malformed on every replica.
+        let pins = match super::slice_pins::slice_pins(&txn.tx_class, &plans) {
+            Ok(pins) => pins,
+            Err(e) => {
+                self.reject_plan(txn, txn_id, lock_owner, &e);
+                return;
+            }
+        };
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
         let raises_write_mark = plans_raise_write_mark(&plans, has_primary_write);
         let has_returning = plans_have_returning(&plans);
         let mut scope = super::super::super::types::SliceScope::of_plans(&plans);
         scope.identities = identities;
+        scope.pins = pins;
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
             epoch,
             position,
@@ -100,7 +109,10 @@ impl Scheduler {
 
         // A stage writes no WAL record, so no committed LSN rides on it.
         let database_id = txn.tx_class.database_id;
-        let mut request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
+        // The stage carries the slice's pins.
+        let config_pins = scope.request_pins();
+        let mut request =
+            self.build_exempt_request(request_id, tenant_id, database_id, plan, config_pins);
         // The stage judges a role-guarded transition against the writer's roles.
         request.user_roles = txn.tx_class.user_roles.clone();
 

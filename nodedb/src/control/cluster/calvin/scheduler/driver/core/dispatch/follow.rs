@@ -66,8 +66,8 @@ impl Scheduler {
     /// The scope of `txn`'s slice on this vShard, from the txn's own plans.
     /// A follower completes a COMMIT with no entry only when this scope
     /// writes nothing, so it never comes from a leader's step in progress.
-    /// Plans that do not decode or route make the leader vote abort, so they
-    /// hold no write here.
+    /// Plans that do not decode or route, or a write slice of an unpinned
+    /// class, make the leader vote abort, so they hold no write here.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn local_slice_scope(
         &self,
         txn: &SequencedTxn,
@@ -81,8 +81,15 @@ impl Scheduler {
                 txn_id.position,
             )
         });
-        match local {
-            Ok(local) => SliceScope::of_plans(&local),
+        // A write slice whose pins the leader refuses holds no write here.
+        let scoped = local.and_then(|local| {
+            let pins = super::slice_pins::slice_pins(&txn.tx_class, &local)?;
+            let mut scope = SliceScope::of_plans(&local);
+            scope.pins = pins;
+            Ok(scope)
+        });
+        match scoped {
+            Ok(scope) => scope,
             Err(error) => {
                 tracing::debug!(
                     vshard_id = self.vshard_id,

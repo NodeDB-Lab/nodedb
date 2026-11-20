@@ -121,9 +121,22 @@ pub(super) struct SliceScope {
     /// its verdict arrives, beside lower txns that have not applied. A
     /// TRUNCATE's resolve then misses their rows, so it waits for its turn.
     pub resolve_at_turn: bool,
+    /// The class's config pins this slice's writes and folds need, and the
+    /// CRS pin. The stage, the resolve and the redo carry them.
+    pub pins: std::sync::Arc<nodedb_physical::physical_plan::RedoPins>,
 }
 
 impl SliceScope {
+    /// The pins a stage or resolve request of this slice carries. `None`
+    /// for a slice of an unpinned class, which stages no write.
+    pub(super) fn request_pins(
+        &self,
+    ) -> Option<std::sync::Arc<nodedb_physical::physical_plan::RedoPins>> {
+        self.pins
+            .pinned()
+            .then(|| std::sync::Arc::clone(&self.pins))
+    }
+
     /// The scope of the local plans `plans`.
     pub(super) fn of_plans(plans: &[nodedb_physical::physical_plan::PhysicalPlan]) -> Self {
         Self {
@@ -147,6 +160,8 @@ impl SliceScope {
             origin: redo_origin(plans),
             body_only: false,
             resolve_at_turn: plans.iter().any(reads_whole_collection_at_resolve),
+            // The dispatch fills them from the class.
+            pins: Default::default(),
         }
     }
 }

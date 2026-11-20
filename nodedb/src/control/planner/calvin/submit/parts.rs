@@ -69,7 +69,8 @@ pub(crate) fn split_into_parts(
             })?;
     }
     let limits = SequencerConfig::default();
-    if tx_class.plans.len() <= limits.max_plans_bytes_per_txn
+    // One entry carries the plans beside the config pins.
+    if tx_class.plans.len() + tx_class.config_pins.len() <= limits.max_plans_bytes_per_txn
         && tx_class.participating_vshards().len() <= limits.max_participating_vshards_per_txn
     {
         return Ok(None);

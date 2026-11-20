@@ -6,10 +6,11 @@
 //! The per-entry caps bound one sequencer log entry, never a transaction:
 //!
 //! - A single-entry transaction carries its plans in `plans`. They fit one
-//!   entry: at most `max_plans_bytes` bytes, for at most
-//!   `max_participating_vshards` participants.
-//! - A multi-part transaction's header carries no plans. Its manifest names
-//!   how many parts target each participant.
+//!   entry with its config pins: at most `max_plans_bytes` bytes, for at
+//!   most `max_participating_vshards` participants.
+//! - A multi-part transaction's header carries no plans. Its config pins
+//!   fit one entry. Its manifest names how many parts target each
+//!   participant.
 //! - Each streamed part fits one entry the same way, counting its targets.
 //!   [`PartCursor`] checks the parts in order against the manifest. No cap
 //!   bounds the whole transaction.
@@ -32,9 +33,11 @@ pub(crate) fn check_entry_shape(
     limits: EntryLimits,
 ) -> Result<(), SequencerError> {
     let Some(manifest) = &tx_class.multi_part else {
-        if tx_class.plans.len() > limits.max_plans_bytes {
+        // The header carries its plans and its config pins in one entry.
+        let bytes = tx_class.plans.len() + tx_class.config_pins.len();
+        if bytes > limits.max_plans_bytes {
             return Err(SequencerError::TxnTooLarge {
-                bytes: tx_class.plans.len(),
+                bytes,
                 limit: limits.max_plans_bytes,
             });
         }
@@ -49,6 +52,13 @@ pub(crate) fn check_entry_shape(
     };
     if !tx_class.plans.is_empty() {
         return Err(malformed("the header carries plans beside its parts"));
+    }
+    // The parts carry no pins. The header carries them all in one entry.
+    if tx_class.config_pins.len() > limits.max_plans_bytes {
+        return Err(SequencerError::TxnTooLarge {
+            bytes: tx_class.config_pins.len(),
+            limit: limits.max_plans_bytes,
+        });
     }
     check_manifest(tx_class, manifest)
 }
@@ -374,6 +384,35 @@ mod tests {
         };
         assert!(matches!(
             check_entry_shape(&class, wide),
+            Err(SequencerError::TxnTooLarge { bytes: 5, .. })
+        ));
+    }
+
+    /// The header's config pins count against the entry's byte cap, both
+    /// beside single-entry plans and on a multi-part header.
+    #[test]
+    fn config_pins_count_against_the_entry_byte_cap() {
+        let (mut class, low, high) = two_vshard_class();
+        let wide = EntryLimits {
+            max_participating_vshards: 8,
+            ..LIMITS
+        };
+        class.plans = vec![0; 2];
+        class.set_config_pins(vec![0u8; 2].into());
+        check_entry_shape(&class, wide).expect("plans and pins fit one entry");
+        class.set_config_pins(vec![0u8; 3].into());
+        assert!(matches!(
+            check_entry_shape(&class, wide),
+            Err(SequencerError::TxnTooLarge { bytes: 5, .. })
+        ));
+
+        class.plans = Vec::new();
+        class.multi_part = Some(manifest(2, 2, &[(low, 1), (high, 1)]));
+        class.set_config_pins(vec![0u8; 4].into());
+        check_entry_shape(&class, LIMITS).expect("a header's pins fit one entry");
+        class.set_config_pins(vec![0u8; 5].into());
+        assert!(matches!(
+            check_entry_shape(&class, LIMITS),
             Err(SequencerError::TxnTooLarge { bytes: 5, .. })
         ));
     }

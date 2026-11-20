@@ -46,16 +46,20 @@ impl Scheduler {
     ///
     /// Calvin has already globally ordered the transaction, so the request is
     /// admitted `Exempt(AlreadyOrdered)` — it bypasses admission control. Only
-    /// `request_id`, `tenant_id`, `database_id` and `plan` vary between call
-    /// sites; everything else (vshard, deadline, and the fixed metadata
-    /// constants) is derived from `&self` or constant. No scheduler request
-    /// writes a WAL record, so none carries a WAL LSN.
+    /// `request_id`, `tenant_id`, `database_id`, `plan` and `config_pins`
+    /// vary between call sites. Everything else (vshard, deadline, and the
+    /// constant metadata) is derived from `&self` or constant. No
+    /// scheduler request writes a WAL record, so none carries a WAL LSN.
+    ///
+    /// `config_pins` are the slice's pins for a stage or a resolve. A passive
+    /// read or a drop carries `None`.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn build_exempt_request(
         &self,
         request_id: RequestId,
         tenant_id: TenantId,
         database_id: DatabaseId,
         plan: PhysicalPlan,
+        config_pins: Option<std::sync::Arc<nodedb_physical::physical_plan::RedoPins>>,
     ) -> Request {
         Request {
             request_id,
@@ -77,7 +81,7 @@ impl Scheduler {
             resolved_now_ms: None,
             commit_hlc: None,
             system_ordinal: None,
-            config_pins: None,
+            config_pins,
             admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
         }
     }

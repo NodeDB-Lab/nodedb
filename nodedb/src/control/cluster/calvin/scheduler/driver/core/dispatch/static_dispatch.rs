@@ -39,6 +39,8 @@ struct LocalSlice {
     body_only: bool,
     /// The identities the local plans carry, bound in this node's catalog.
     identities: Vec<crate::control::surrogate::CarriedIdentity>,
+    /// The class's pins the local plans need, and the CRS pin.
+    pins: std::sync::Arc<nodedb_physical::physical_plan::RedoPins>,
 }
 
 impl Scheduler {
@@ -193,6 +195,16 @@ impl Scheduler {
             return;
         }
 
+        // Every replica filters the class's pins to the slice alike. A write
+        // slice of an unpinned class is malformed.
+        let pins = match super::slice_pins::slice_pins(&txn.tx_class, &local) {
+            Ok(pins) => pins,
+            Err(e) => {
+                self.reject_plan(txn, txn_id, lock_owner, &e);
+                return;
+            }
+        };
+
         // Write participant (`local` non-empty) or validate-only read
         // participant (`local` empty, a read homes here): both STAGE through the
         // identical static path so each casts a real commit/abort Vote through
@@ -210,6 +222,7 @@ impl Scheduler {
                 body_plans: local_body_plans,
                 body_only,
                 identities,
+                pins,
             },
             has_non_derived_write,
         );
@@ -274,6 +287,7 @@ impl Scheduler {
             body_plans,
             body_only,
             identities,
+            pins,
         } = slice;
         // The apply-slot identity (used in the CalvinExecuteStatic task and
         // error logs) is exactly `txn_id`; deriving it here keeps the two in
@@ -287,6 +301,7 @@ impl Scheduler {
         let mut scope = super::super::super::types::SliceScope::of_plans(&plans);
         scope.body_only = body_only;
         scope.identities = identities;
+        scope.pins = pins;
         let database_id = txn.tx_class.database_id;
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
             epoch,
@@ -305,7 +320,10 @@ impl Scheduler {
         });
 
         // A stage writes no WAL record, so no committed LSN rides on it.
-        let mut request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
+        // The stage carries the slice's pins.
+        let config_pins = scope.request_pins();
+        let mut request =
+            self.build_exempt_request(request_id, tenant_id, database_id, plan, config_pins);
         // The stage tags the rows it stages by the slice's source.
         request.event_source = super::super::request::slice_event_source(&txn.tx_class, &scope);
         // The stage judges a role-guarded transition against the writer's roles.
@@ -347,6 +365,99 @@ impl Scheduler {
             self.dispatch_sequenced(txn_id, DispatchStep::StageStatic, request)
         {
             self.fail_dispatch_step(txn_id, DispatchStep::StageStatic, error);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nodedb_cluster::calvin::{AbortReason, CalvinCompletionRegistry, SequencerEntry};
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
+        CapturingProposer, lead_data_group,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        build_test_scheduler_with_data_side, make_local_write_txn, test_coll_vshard,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
+
+    /// The static stage request carries the slice's pins: the pin of the
+    /// collection it writes, and the CRS pin. The pending scope holds the
+    /// same pins for the resolve and the redo.
+    #[tokio::test]
+    async fn the_stage_request_carries_the_slice_pins() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let txn_id = TxnId::new(5, 0);
+
+        scheduler.dispatch_txn(make_local_write_txn(5, 0), txn_id, txn_id);
+
+        let mut stage = None;
+        while let Ok(request) = data_side.request_rx.try_pop() {
+            if matches!(
+                request.inner.plan,
+                PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic { .. })
+            ) {
+                stage = Some(request.inner);
+            }
+        }
+        let stage = stage.expect("the stage reaches the Data Plane");
+        let pins = stage.config_pins.expect("the stage carries pins");
+        let names: Vec<&str> = pins
+            .configs
+            .iter()
+            .map(|pin| pin.key.collection.as_str())
+            .collect();
+        assert_eq!(names, vec!["test_coll"]);
+        assert!(pins.pinned());
+        assert_eq!(
+            scheduler
+                .pending
+                .get(&txn_id)
+                .map(|pending| Arc::clone(&pending.scope.pins)),
+            Some(pins)
+        );
+    }
+
+    /// A write slice of a class that carries no pins is malformed. The
+    /// leader rejects its plans and votes abort, and nothing stages.
+    #[tokio::test]
+    async fn a_write_slice_of_an_unpinned_class_is_rejected() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        lead_data_group(&mut scheduler);
+        let txn_id = TxnId::new(6, 0);
+        let mut txn = make_local_write_txn(6, 0);
+        Arc::make_mut(&mut txn.tx_class).set_config_pins(nodedb_types::WireBytes::default());
+
+        scheduler.dispatch_txn(txn, txn_id, txn_id);
+
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingVerdict)
+        );
+        assert!(proposer.accepted().contains(&SequencerEntry::AbortVote {
+            epoch: 6,
+            position: 0,
+            vshard: test_coll_vshard(),
+            reason: AbortReason::PlanRejected,
+            refusal: None,
+        }));
+        while let Ok(request) = data_side.request_rx.try_pop() {
+            assert!(
+                !matches!(
+                    request.inner.plan,
+                    PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic { .. })
+                ),
+                "an unpinned write slice never stages"
+            );
         }
     }
 }

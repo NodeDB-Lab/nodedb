@@ -5,8 +5,8 @@
 //! Provides [`TxClass`] — the core transaction representation submitted to
 //! the sequencer — over the [`ReadWriteSet`] key sets.
 
-use nodedb_types::TenantId;
 use nodedb_types::id::{DatabaseId, VShardId};
+use nodedb_types::{TenantId, WireBytes};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CalvinError;
@@ -130,6 +130,10 @@ pub struct TxClass {
     /// participant that evaluates the response reads the same inputs from it.
     /// `None` for a transaction with no `RETURNING`.
     pub returning: Option<super::returning_contract::ReturningContract>,
+    /// Opaque msgpack-encoded `RedoPins` the submitter read from its catalog,
+    /// decoded by the `nodedb` crate. Every participant's redo carries its
+    /// slice of them. Empty for an unpinned class.
+    pub config_pins: WireBytes,
     /// Cached participating-vshard set. Re-derived on decode; not serialized.
     #[serde(skip)]
     #[msgpack(ignore)]
@@ -287,6 +291,7 @@ impl TxClass {
             restore_id: 0,
             user_roles: Vec::new(),
             returning: None,
+            config_pins: WireBytes::default(),
             participating_vshards: Vec::new(),
             write_vshards: Vec::new(),
         }
