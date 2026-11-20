@@ -417,7 +417,8 @@ mod tests {
     }
 
     /// A row keyed by backfill and the same row keyed by write maintenance
-    /// must get one sort key, for every value kind.
+    /// must get one sort key, for every value kind. A NULL sort column gets
+    /// no key on either path.
     #[test]
     fn backfill_and_write_path_build_identical_keys_for_every_value_kind() {
         use super::super::manager::SortedIndexManager;
@@ -451,7 +452,11 @@ mod tests {
 
         let mut backfilled = SortedIndexManager::new();
         let indexed = backfilled.register(0, 1, unwindowed(), rows.clone().into_iter());
-        assert_eq!(indexed as usize, kinds.len(), "every value kind is indexed");
+        assert_eq!(
+            indexed as usize,
+            kinds.len() - 1,
+            "every non-NULL value kind is indexed"
+        );
 
         let mut written = SortedIndexManager::new();
         written.register(0, 1, unwindowed(), std::iter::empty());
@@ -460,9 +465,9 @@ mod tests {
             written.on_put(table, pk, doc.as_ref());
         }
 
-        for (pk, _) in &rows {
+        for ((pk, _), kind) in rows.iter().zip(&kinds) {
             let backfill_key = backfilled.score(0, 1, "lb", pk);
-            assert!(backfill_key.is_some());
+            assert_eq!(backfill_key.is_some(), !kind.is_null(), "key for {kind}");
             assert_eq!(backfill_key, written.score(0, 1, "lb", pk));
         }
     }
