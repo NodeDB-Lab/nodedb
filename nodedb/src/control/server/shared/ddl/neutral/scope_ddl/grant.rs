@@ -197,10 +197,12 @@ pub async fn renew_scope(
 /// SHOW SCOPE GRANTS [EXPIRING WITHIN <duration>]
 pub fn show_scope_grants(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let grants = if let Some(within_idx) = parts.iter().position(|p| p.to_uppercase() == "WITHIN") {
+    let mut grants = if let Some(within_idx) =
+        parts.iter().position(|p| p.to_uppercase() == "WITHIN")
+    {
         let dur_str = parts.get(within_idx + 1).unwrap_or(&"7d");
         let secs =
             crate::control::server::shared::ddl::neutral::auth_user::parse_duration_public(dur_str)
@@ -209,6 +211,14 @@ pub fn show_scope_grants(
     } else {
         state.scope_grants.list(None)
     };
+    grants.retain(|g| {
+        super::super::tenant_visibility::grantee_visible(
+            state,
+            identity,
+            &g.grantee_type,
+            &g.grantee_id,
+        )
+    });
 
     let columns = vec![
         "scope".to_string(),

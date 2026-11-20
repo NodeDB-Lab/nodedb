@@ -196,6 +196,13 @@ pub fn revoke_delegation(
     let delegate_id = parts.get(3).map(|s| s.trim_matches('\'')).unwrap_or("");
     let delegator_id = parts.get(5).map(|s| s.trim_matches('\'')).unwrap_or("");
 
+    use super::tenant_visibility::auth_user_visible;
+    if !auth_user_visible(state, identity, delegator_id)
+        || !auth_user_visible(state, identity, delegate_id)
+    {
+        return Err(err("42704", "delegation not found"));
+    }
+
     state
         .impersonation
         .revoke_delegation(delegator_id, delegate_id);
@@ -213,10 +220,15 @@ pub fn revoke_delegation(
 /// SHOW DELEGATIONS
 pub fn show_delegations(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     _parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let delegations = state.impersonation.list_delegations();
+    use super::tenant_visibility::auth_user_visible;
+    let mut delegations = state.impersonation.list_delegations();
+    delegations.retain(|d| {
+        auth_user_visible(state, identity, &d.delegator_user_id)
+            && auth_user_visible(state, identity, &d.delegate_user_id)
+    });
 
     let columns = vec![
         "delegator".to_string(),
