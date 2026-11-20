@@ -140,6 +140,41 @@ pub(super) fn visible_user_or_missing(
         .ok_or_else(|| DdlError::new("42704", format!("user '{username}' not found")))
 }
 
+/// [`visible_user`], limited to the caller's tenant. A superuser sees every
+/// tenant. A user of another tenant reads as missing, so the caller learns
+/// nothing about it.
+pub(super) fn visible_user_in(
+    state: &SharedState,
+    identity: &crate::control::security::identity::AuthenticatedIdentity,
+    username: &str,
+) -> Option<crate::control::security::catalog::StoredUser> {
+    visible_user(state, username)
+        .filter(|u| identity.is_superuser || u.tenant_id == identity.tenant_id.as_u64())
+}
+
+/// [`visible_user_in`], or the 42704 refusal a statement naming a missing
+/// user reports.
+pub(super) fn visible_user_in_or_missing(
+    state: &SharedState,
+    identity: &crate::control::security::identity::AuthenticatedIdentity,
+    username: &str,
+) -> Result<crate::control::security::catalog::StoredUser, DdlError> {
+    visible_user_in(state, identity, username)
+        .ok_or_else(|| DdlError::new("42704", format!("user '{username}' not found")))
+}
+
+/// True when custom role `name` is visible to the statement and belongs to
+/// the caller's tenant. A superuser sees every tenant.
+pub(super) fn role_in_caller_tenant(
+    state: &SharedState,
+    identity: &crate::control::security::identity::AuthenticatedIdentity,
+    name: &str,
+) -> bool {
+    visible_roles(state)
+        .get(name)
+        .is_some_and(|r| identity.is_superuser || r.tenant_id == identity.tenant_id)
+}
+
 /// Every custom role the running statement sees, keyed by name: the
 /// committed ones overlaid with those its transaction buffered.
 pub(super) fn visible_roles(

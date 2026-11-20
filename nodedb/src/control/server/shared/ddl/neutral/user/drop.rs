@@ -72,7 +72,7 @@ async fn drop_user_inner(
 
     // The user as this statement sees it: created earlier in the
     // transaction counts, dropped earlier in it does not.
-    let visible = super::super::role_checks::visible_user(state, username);
+    let visible = super::super::role_checks::visible_user_in(state, identity, username);
 
     // Look up user's tenant before dropping (for ownership reassignment).
     let user_tenant = visible

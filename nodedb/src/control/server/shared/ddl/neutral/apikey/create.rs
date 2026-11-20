@@ -54,7 +54,7 @@ pub async fn create_api_key(
 
     // Look up the target user as this statement sees it: a user created
     // earlier in the transaction counts, one dropped in it does not.
-    let target_user = super::super::role_checks::visible_user(state, target_username)
+    let target_user = super::super::role_checks::visible_user_in(state, identity, target_username)
         .ok_or_else(|| err("42704", format!("user '{target_username}' not found")))?;
 
     // Parse optional EXPIRES.
