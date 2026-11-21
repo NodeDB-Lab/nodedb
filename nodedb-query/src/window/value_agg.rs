@@ -72,14 +72,15 @@ fn apply_v_running_aggregate(
             None => Value::Null,
         };
 
+        if let Some(want_max) = extremum_dir
+            && !val.is_null()
+            && value_replaces(&val, running_extreme.as_ref(), want_max)
+        {
+            running_extreme = Some(val.clone());
+        }
         if is_window_number(&val) {
             running_sum.add_value(&val);
             running_count += 1;
-            if let Some(want_max) = extremum_dir
-                && value_replaces(&val, running_extreme.as_ref(), want_max)
-            {
-                running_extreme = Some(val);
-            }
         } else if spec.func_name == "count" && (spec.args.is_empty() || !val.is_null()) {
             // `COUNT(*)` counts every row; `COUNT(expr)` counts rows whose
             // argument is non-NULL, including non-numeric values.
@@ -207,7 +208,7 @@ fn aggregate_v_slice(
         "min" | "max" => {
             let want_max = spec.func_name == "max";
             let mut best: Option<&Value> = None;
-            for candidate in frame_values.iter().filter(|v| is_window_number(v)) {
+            for candidate in frame_values.iter().filter(|v| !v.is_null()) {
                 if value_replaces(candidate, best, want_max) {
                     best = Some(candidate);
                 }
@@ -775,6 +776,57 @@ mod tests {
                 Value::Integer(9_007_199_254_740_993),
                 Value::Integer(9_007_199_254_740_993),
                 Value::Integer(9_007_199_254_740_995),
+            ]
+        );
+    }
+
+    #[test]
+    fn window_min_max_over_text_return_the_text() {
+        let cols = ci(&["v", "k"]);
+        let keyed = || {
+            vec![
+                vec![Value::String("pear".into()), Value::Integer(1)],
+                vec![Value::Null, Value::Integer(2)],
+                vec![Value::String("apple".into()), Value::Integer(3)],
+            ]
+        };
+        let order = vec![(col("k"), true)];
+        let whole_frame = frame(
+            "rows",
+            FrameBound::UnboundedPreceding,
+            FrameBound::UnboundedFollowing,
+        );
+
+        let mut rows = keyed();
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_frame.clone(), order.clone()),
+        );
+        assert_eq!(rows[0][2], Value::String("pear".into()));
+
+        let mut rows = keyed();
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", whole_frame, order.clone()),
+        );
+        assert_eq!(rows[0][2], Value::String("apple".into()));
+
+        // Default frame: running extreme per row, NULL skipped.
+        let mut rows = keyed();
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", WindowFrame::default(), order),
+        );
+        let mins: Vec<Value> = rows.iter().map(|r| r[2].clone()).collect();
+        assert_eq!(
+            mins,
+            vec![
+                Value::String("pear".into()),
+                Value::String("pear".into()),
+                Value::String("apple".into()),
             ]
         );
     }
