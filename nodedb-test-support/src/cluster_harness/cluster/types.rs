@@ -55,6 +55,10 @@ pub(crate) struct ClusterSpawnConfig {
         Option<nodedb::control::wal_replication::transaction_redo::chunks::RedoChunkLimits>,
     /// The `[tuning.network]` every Control Plane runs. `None` keeps the default.
     pub(crate) network_tuning: Option<nodedb_types::config::tuning::NetworkTuning>,
+    /// The `[auth.jwt]` provider registry every node verifies bearer tokens
+    /// with. `None` leaves every presented bearer token unverifiable.
+    pub(crate) jwks_registry:
+        Option<std::sync::Arc<nodedb::control::security::jwks::registry::JwksRegistry>>,
 }
 
 impl ClusterSpawnConfig {

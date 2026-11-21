@@ -27,6 +27,12 @@ impl SharedState {
         credentials: Arc<CredentialStore>,
         is_cluster: bool,
     ) -> crate::Result<Arc<Self>> {
+        // The catalog derives per-user CRDT signing keys from the WAL's
+        // signing root, as the production bootstrap installs it. A WAL with
+        // no encryption has no root, and signing stays unavailable.
+        credentials
+            .catalog()
+            .configure_crdt_signing_root(wal.crdt_signing_root()?)?;
         let wal_for_assigner = Arc::clone(&wal);
         let mut state = Self::new_inner(dispatcher, wal)?;
         if let Some(s) = Arc::get_mut(&mut state) {

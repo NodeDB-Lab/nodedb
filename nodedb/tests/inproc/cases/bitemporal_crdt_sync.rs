@@ -12,7 +12,7 @@
 
 use loro::LoroValue;
 
-use nodedb::engine::crdt::tenant_state::TenantCrdtEngine;
+use nodedb::engine::crdt::tenant_state::{ApplyTarget, TenantCrdtEngine, ValidatedApplyOutcome};
 use nodedb::types::TenantId;
 use nodedb_crdt::CrdtAuthContext;
 use nodedb_crdt::constraint::ConstraintSet;
@@ -23,12 +23,96 @@ use nodedb_crdt::validator::bitemporal::VALID_UNTIL_OPEN;
 const USERS: &str = "users";
 
 fn tenant() -> TenantCrdtEngine {
+    tenant_with_bitemporal(true)
+}
+
+/// A tenant with a strict UNIQUE email constraint on `USERS`, marked
+/// bitemporal or not.
+fn tenant_with_bitemporal(bitemporal: bool) -> TenantCrdtEngine {
     let mut cs = ConstraintSet::new();
     cs.add_unique("users_email_unique", USERS, "email");
     let mut eng = TenantCrdtEngine::new(TenantId::new(1), 1, cs).unwrap();
-    eng.mark_bitemporal(USERS);
+    eng.set_bitemporal(USERS, bitemporal);
     eng.set_collection_policy_typed(USERS, CollectionPolicy::strict());
     eng
+}
+
+/// A peer's Loro delta that writes one `USERS` row. The delta sets
+/// `_ts_valid_until` itself, as a client does.
+fn row_delta(peer: u64, row_id: &str, email: &str, valid_until: i64) -> Vec<u8> {
+    let state = nodedb_crdt::state::CrdtState::new(peer).unwrap();
+    state
+        .upsert(
+            USERS,
+            row_id,
+            &[
+                ("email", LoroValue::String(email.into())),
+                ("_ts_valid_until", LoroValue::I64(valid_until)),
+            ],
+        )
+        .unwrap();
+    state.export_snapshot().unwrap()
+}
+
+/// Apply `delta` for `row_id` through the validated sync apply path.
+fn sync_apply(eng: &mut TenantCrdtEngine, peer: u64, row_id: &str, delta: &[u8]) -> bool {
+    let outcome = eng.apply_committed_delta_validated(
+        USERS,
+        delta,
+        ApplyTarget::Document {
+            document_id: row_id,
+            surrogate: nodedb_test_support::kv_rows::kv_row_surrogate(row_id.as_bytes()),
+        },
+        peer,
+        &nodedb_crs::CrsContext::builtin_only(),
+    );
+    match outcome {
+        ValidatedApplyOutcome::Clean { .. } => true,
+        ValidatedApplyOutcome::Rejected(_) => false,
+        other => panic!("{row_id}: expected a clean or rejected apply, got {other:?}"),
+    }
+}
+
+/// On the sync apply path, a row whose `_ts_valid_until` is closed does not
+/// block a live row with the same UNIQUE value in a bitemporal collection.
+#[test]
+fn sync_apply_scopes_unique_to_live_rows_when_bitemporal() {
+    let mut eng = tenant_with_bitemporal(true);
+    let closed = row_delta(11, "u1", "dup@example.com", 1_000);
+    assert!(sync_apply(&mut eng, 11, "u1", &closed));
+
+    let live = row_delta(12, "u2", "dup@example.com", VALID_UNTIL_OPEN);
+    assert!(
+        sync_apply(&mut eng, 12, "u2", &live),
+        "a closed row must not block a live row in a bitemporal collection"
+    );
+}
+
+/// Without the bitemporal mark, the same closed-then-live pair collides.
+#[test]
+fn sync_apply_counts_closed_rows_when_not_bitemporal() {
+    let mut eng = tenant_with_bitemporal(false);
+    let closed = row_delta(11, "u1", "dup@example.com", 1_000);
+    assert!(sync_apply(&mut eng, 11, "u1", &closed));
+
+    let live = row_delta(12, "u2", "dup@example.com", VALID_UNTIL_OPEN);
+    assert!(
+        !sync_apply(&mut eng, 12, "u2", &live),
+        "a non-bitemporal collection counts every row for UNIQUE"
+    );
+}
+
+/// Clearing the mark restores the full UNIQUE scope.
+#[test]
+fn clearing_the_bitemporal_mark_restores_full_unique_scope() {
+    let mut eng = tenant_with_bitemporal(true);
+    eng.set_bitemporal(USERS, false);
+    assert!(!eng.is_bitemporal(USERS));
+    let closed = row_delta(11, "u1", "dup@example.com", 1_000);
+    assert!(sync_apply(&mut eng, 11, "u1", &closed));
+
+    let live = row_delta(12, "u2", "dup@example.com", VALID_UNTIL_OPEN);
+    assert!(!sync_apply(&mut eng, 12, "u2", &live));
 }
 
 fn change(

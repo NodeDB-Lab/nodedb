@@ -218,7 +218,7 @@ impl TenantCrdtEngine {
         if !admission.preverified
             && self
                 .validator
-                .verify_delta_auth(collection, &admission.auth, delta)
+                .verify_delta_auth(&admission.auth, delta)
                 .is_err()
         {
             return ValidatedApplyOutcome::Malformed;
@@ -410,6 +410,33 @@ mod tests {
         }
         assert!(engine.row_exists(STORED, "u1"));
         assert!(engine.read_row(STORED, "u1").is_some());
+    }
+
+    /// A collection that requires signed deltas refuses an unsigned one, and
+    /// nothing applies.
+    #[test]
+    fn required_signing_refuses_an_unsigned_delta() {
+        let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
+        let delta = row_delta(5, "u1", "a@x", "A");
+
+        let outcome = engine.apply_committed_delta_authenticated(
+            "users",
+            &delta,
+            ApplyTarget::Collection,
+            5,
+            DeltaSigningAdmission {
+                auth: nodedb_crdt::CrdtAuthContext::default(),
+                required: true,
+                preverified: false,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+
+        assert!(
+            matches!(outcome, ValidatedApplyOutcome::Malformed),
+            "expected Malformed, got {outcome:?}"
+        );
+        assert!(!engine.row_exists("users", "u1"));
     }
 
     /// A delta that names the qualified form writes another root. A client

@@ -99,6 +99,7 @@ impl TenantCrdtEngine {
         self.apply_candidates.remove(collection);
         self.validator.policies_mut().remove(collection);
         self.validator.clear_collection_constraints(collection);
+        self.validator.set_bitemporal(collection, false);
         self.constraint_versions.remove(collection);
         let dlq_dropped = self
             .validator

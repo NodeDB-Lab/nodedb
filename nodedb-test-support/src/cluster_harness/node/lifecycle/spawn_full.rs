@@ -227,6 +227,7 @@ impl TestClusterNode {
             // Fixed test KEK so backup tests produce encrypted envelopes.
             state.backup_kek = Some(Arc::new([0x42u8; 32]));
             state.backup_storage = config.backup_storage.clone().map(Arc::new);
+            state.jwks_registry = config.jwks_registry.clone();
             // Webhook sinks in tests listen on loopback. The `[egress]` policy
             // admits `http://localhost` there, as an operator allow-lists a
             // private sink.

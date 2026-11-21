@@ -36,20 +36,11 @@ fn first_violation_err(
 }
 
 impl Validator {
-    /// Verify signing policy and replay sequence before candidate import.
-    pub fn verify_delta_auth(
-        &self,
-        collection: &str,
-        auth: &CrdtAuthContext,
-        delta_bytes: &[u8],
-    ) -> Result<()> {
+    /// Verify a signed delta's signature and replay sequence before candidate
+    /// import. An unsigned delta passes. The caller enforces whether the
+    /// collection requires a signature.
+    pub fn verify_delta_auth(&self, auth: &CrdtAuthContext, delta_bytes: &[u8]) -> Result<()> {
         let is_signed = auth.delta_signature != [0u8; 32];
-        if self.delta_signing_required(collection) && !is_signed {
-            return Err(CrdtError::InvalidSignature {
-                user_id: auth.user_id,
-                detail: format!("collection `{collection}` requires signed deltas"),
-            });
-        }
         if !is_signed {
             return Ok(());
         }
@@ -150,7 +141,7 @@ impl Validator {
             }
         }
 
-        self.verify_delta_auth(&change.collection, &auth, &delta_bytes)?;
+        self.verify_delta_auth(&auth, &delta_bytes)?;
 
         let hlc_timestamp = nodedb_types::wall_now_ns() / nodedb_types::NANOS_PER_MS as u64;
 
@@ -466,25 +457,6 @@ mod signing_tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             fields: vec![("value".into(), LoroValue::I64(1))],
         }
-    }
-
-    #[test]
-    fn required_signing_rejects_unsigned_delta() {
-        let state = CrdtState::new(1).unwrap();
-        let mut validator = Validator::new(ConstraintSet::new(), 8);
-        validator.require_delta_signing("secure_docs");
-
-        let error = validator
-            .validate_or_reject(
-                &state,
-                2,
-                CrdtAuthContext::default(),
-                &change(),
-                b"delta".to_vec(),
-                &nodedb_crs::CrsContext::builtin_only(),
-            )
-            .unwrap_err();
-        assert!(matches!(error, CrdtError::InvalidSignature { .. }));
     }
 
     #[test]

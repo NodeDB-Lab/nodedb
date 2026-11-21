@@ -51,6 +51,16 @@ pub(in crate::data::executor) struct RegisterDocumentCollectionParams<'a> {
     pub digest: u64,
 }
 
+/// The CRDT engine state a register replaced, for a refused register to put
+/// back.
+struct RegisterUndo {
+    /// `Some` when the register set a policy. Holds the policy it replaced.
+    replaced_policy: Option<Option<nodedb_crdt::policy::CollectionPolicy>>,
+    /// `Some` when the register set the bitemporal mark. Holds the mark it
+    /// replaced.
+    replaced_bitemporal: Option<bool>,
+}
+
 impl CoreLoop {
     /// Register a document collection's secondary index configuration.
     ///
@@ -209,6 +219,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         let last_value_cache = timeseries.map(|schema| schema.last_value_cache);
+        let crdt_bitemporal = crdt_enabled && bitemporal;
         let previous_config = self.doc_configs.insert(config_key.clone(), config);
 
         // `SET LAST_VALUE_CACHE` travels on the registration: turning it on
@@ -223,22 +234,43 @@ impl CoreLoop {
                 error = %e,
                 "last-value cache did not build on register"
             );
-            self.undo_register(config_key, previous_config, replaced_policy);
+            self.undo_register(
+                config_key,
+                previous_config,
+                RegisterUndo {
+                    replaced_policy,
+                    replaced_bitemporal: None,
+                },
+            );
             return self.response_error(task, ErrorCode::from(e));
         }
 
         // The tenant's CRDT engine derives the collection's Loro peer id from
-        // its incarnation. An engine created later binds it from
-        // `doc_configs` (`get_crdt_engine`).
+        // its incarnation. A bitemporal CRDT collection scopes UNIQUE to live
+        // rows. Register runs on live DDL apply and on boot replay, so every
+        // replica sets the same mark. An engine created later reads both
+        // from `doc_configs` (`get_crdt_engine`).
         if self
             .crdt_engines
             .contains_key(&(task.request.database_id, crate::types::TenantId::new(tid)))
         {
+            let mut replaced_bitemporal = None;
             let bound = self
                 .get_crdt_engine(task.request.database_id, crate::types::TenantId::new(tid))
-                .and_then(|engine| engine.bind_incarnation(collection, incarnation));
+                .and_then(|engine| {
+                    replaced_bitemporal = Some(engine.is_bitemporal(collection));
+                    engine.set_bitemporal(collection, crdt_bitemporal);
+                    engine.bind_incarnation(collection, incarnation)
+                });
             if let Err(e) = bound {
-                self.undo_register(config_key, previous_config, replaced_policy);
+                self.undo_register(
+                    config_key,
+                    previous_config,
+                    RegisterUndo {
+                        replaced_policy,
+                        replaced_bitemporal,
+                    },
+                );
                 return self.response_error(task, ErrorCode::from(e));
             }
         }
@@ -247,19 +279,27 @@ impl CoreLoop {
     }
 
     /// Put back what a refused register replaced. A `None` config removes the
-    /// config the register installed. `replaced_policy` is `Some` when the
-    /// register set a policy, and holds the policy it replaced, if any.
+    /// config the register installed.
     fn undo_register(
         &mut self,
         key: (crate::types::DatabaseId, crate::types::TenantId, String),
         previous_config: Option<crate::engine::document::store::CollectionConfig>,
-        replaced_policy: Option<Option<nodedb_crdt::policy::CollectionPolicy>>,
+        undo: RegisterUndo,
     ) {
+        let RegisterUndo {
+            replaced_policy,
+            replaced_bitemporal,
+        } = undo;
         // The register reached the engine to set the policy, so it exists.
         if let Some(previous) = replaced_policy
             && let Some(engine) = self.crdt_engines.get_mut(&(key.0, key.1))
         {
             engine.restore_collection_policy(&key.2, previous);
+        }
+        if let Some(previous) = replaced_bitemporal
+            && let Some(engine) = self.crdt_engines.get_mut(&(key.0, key.1))
+        {
+            engine.set_bitemporal(&key.2, previous);
         }
         match previous_config {
             Some(config) => {
@@ -435,6 +475,87 @@ mod tests {
         );
 
         assert_eq!(registered_policy(&core), None);
+    }
+
+    /// Register a CRDT document collection named `COLLECTION` with the given
+    /// bitemporal flag.
+    fn register_crdt(core: &mut CoreLoop, bitemporal: bool) -> Status {
+        let task = make_default_task();
+        core.execute_register_document_collection(
+            &task,
+            RegisterDocumentCollectionParams {
+                tid: TID,
+                collection: COLLECTION,
+                indexes: &[],
+                crdt_enabled: true,
+                storage_mode: &StorageMode::Schemaless,
+                enforcement: &EnforcementOptions::default(),
+                bitemporal,
+                conflict_policy: None,
+                timeseries: None,
+                vector_primary: None,
+                vector_fields: &[],
+                declared_columns: &[],
+                declared_key: None,
+                text_fields: &nodedb_physical::physical_plan::TextFieldSet::default(),
+                incarnation: nodedb_types::Hlc::new(1, 0),
+                digest: 0,
+            },
+        )
+        .status
+    }
+
+    fn engine_marks_bitemporal(core: &mut CoreLoop) -> bool {
+        core.get_crdt_engine(DatabaseId::DEFAULT, TenantId::new(TID))
+            .expect("crdt engine")
+            .is_bitemporal(COLLECTION)
+    }
+
+    /// A register sets the mark on an engine that exists. A re-register with
+    /// `false` clears it, and an undo puts the replaced mark back.
+    #[test]
+    fn register_sets_and_clears_the_bitemporal_mark_on_a_present_engine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        assert!(!engine_marks_bitemporal(&mut core));
+
+        assert_eq!(register_crdt(&mut core, true), Status::Ok);
+        assert!(engine_marks_bitemporal(&mut core));
+        let bitemporal_config = core.doc_configs.get(&key()).cloned();
+
+        assert_eq!(register_crdt(&mut core, false), Status::Ok);
+        assert!(!engine_marks_bitemporal(&mut core));
+
+        core.undo_register(
+            key(),
+            bitemporal_config,
+            RegisterUndo {
+                replaced_policy: None,
+                replaced_bitemporal: Some(true),
+            },
+        );
+        assert!(engine_marks_bitemporal(&mut core));
+    }
+
+    /// An engine created after the register reads the mark from
+    /// `doc_configs`. A re-register with `false` clears it there too.
+    #[test]
+    fn an_engine_created_after_register_reads_the_bitemporal_mark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        assert_eq!(register_crdt(&mut core, true), Status::Ok);
+        assert!(
+            !core
+                .crdt_engines
+                .contains_key(&(DatabaseId::DEFAULT, TenantId::new(TID))),
+            "the register made no engine"
+        );
+        assert!(engine_marks_bitemporal(&mut core));
+
+        core.crdt_engines
+            .remove(&(DatabaseId::DEFAULT, TenantId::new(TID)));
+        assert_eq!(register_crdt(&mut core, false), Status::Ok);
+        assert!(!engine_marks_bitemporal(&mut core));
     }
 
     /// A first register refused by its cache build installs no config.

@@ -162,23 +162,18 @@ impl TenantCrdtEngine {
             .collect()
     }
 
-    /// Register a collection as bitemporal on this tenant's validator.
+    /// Set whether `collection` is bitemporal on this tenant's validator.
+    /// `collection` is the stored name. `false` clears the mark.
     ///
     /// Bitemporal collections get (a) UNIQUE constraints scoped to live
     /// rows only and (b) receiver-stamped `_ts_system` on apply.
-    pub fn mark_bitemporal(&mut self, collection: impl Into<String>) {
-        self.validator.mark_bitemporal(collection);
+    pub fn set_bitemporal(&mut self, collection: &str, bitemporal: bool) {
+        self.validator.set_bitemporal(collection, bitemporal);
     }
 
     /// Is the named collection bitemporal?
     pub fn is_bitemporal(&self, collection: &str) -> bool {
         self.validator.is_bitemporal(collection)
-    }
-
-    /// Require signed, replay-protected peer deltas for this tenant's
-    /// collection. The caller must also install a tenant signing verifier.
-    pub fn require_delta_signing(&mut self, collection: impl Into<String>) {
-        self.validator.require_delta_signing(collection);
     }
 
     /// Install the tenant's registered user/device signing keys.

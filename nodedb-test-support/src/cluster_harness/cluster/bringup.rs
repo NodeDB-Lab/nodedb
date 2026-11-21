@@ -31,6 +31,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: Some(network),
+            jwks_registry: None,
         })
         .await
     }
@@ -61,6 +62,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry: None,
         };
         Self::spawn_three_with_config(config).await
     }
@@ -87,6 +89,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry: None,
         })
         .await
     }
@@ -112,6 +115,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry: None,
         })
         .await
     }
@@ -137,6 +141,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::from([(node_id, timeseries_tuning)]),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry: None,
         })
         .await
     }
@@ -164,6 +169,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry: None,
         })
         .await
     }
@@ -173,6 +179,18 @@ impl TestCluster {
     /// 1 core per node.
     pub async fn spawn_three_with_pitr(
         pitr: crate::cluster_harness::pitr::PitrStorage,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_three_with_pitr_and_jwks(pitr, None).await
+    }
+
+    /// [`Self::spawn_three_with_pitr`] whose nodes verify bearer tokens with
+    /// `jwks_registry`. A sync session that authenticates with a token gets a
+    /// delta signing key, because every node's WAL is encrypted.
+    pub async fn spawn_three_with_pitr_and_jwks(
+        pitr: crate::cluster_harness::pitr::PitrStorage,
+        jwks_registry: Option<
+            std::sync::Arc<nodedb::control::security::jwks::registry::JwksRegistry>,
+        >,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::spawn_three_with_config(ClusterSpawnConfig {
             tuning: super::types::fast_cluster_tuning(),
@@ -188,6 +206,7 @@ impl TestCluster {
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
             network_tuning: None,
+            jwks_registry,
         })
         .await
     }
@@ -213,6 +232,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
             network_tuning: None,
+            jwks_registry: None,
             redo_chunk_limits: Some(
                 nodedb::control::wal_replication::transaction_redo::chunks::RedoChunkLimits {
                     max_entry_bytes,

@@ -189,6 +189,7 @@ mod sync_delta_reject_unique_violation;
 mod sync_failover;
 mod sync_peer_id_collision;
 mod sync_retryable_delta_refusal;
+mod sync_signed_deltas;
 mod timeseries_calvin_read_your_writes;
 mod timeseries_conflicting_types_replicas;
 mod timeseries_resolved_replicas;

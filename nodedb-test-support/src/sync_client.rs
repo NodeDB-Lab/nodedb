@@ -50,15 +50,36 @@ pub struct SyncTestClient {
     producer_id: u64,
     epoch: u64,
     next_seq: u64,
+    /// The per-user delta signing key the handshake issued. All zeros when
+    /// the server issued none.
+    delta_signing_key: [u8; 32],
     /// The `creation_hlc` of every collection the server announced.
     incarnations: HashMap<String, Hlc>,
+}
+
+/// The signature fields of one pushed delta.
+struct DeltaSignature {
+    device_id: u64,
+    signature: [u8; 32],
 }
 
 impl SyncTestClient {
     /// Connect to `addr` and perform the Trust-mode handshake as a non-Lite
     /// client: no `lite_id`, so the server assigns no durable producer id.
     pub async fn connect(addr: SocketAddr) -> Result<Self, String> {
-        Self::connect_with_lite_id(addr, String::new(), 0).await
+        Self::connect_with_lite_id(addr, String::new(), String::new(), 0).await
+    }
+
+    /// Connect as a Lite client that authenticates with the bearer token
+    /// `jwt`. Only a token-authenticated session on a node with an encrypted
+    /// WAL receives a delta signing key. A Trust-mode session never does.
+    pub async fn connect_as_lite_with_token(
+        addr: SocketAddr,
+        jwt: &str,
+        lite_id: &str,
+        epoch: u64,
+    ) -> Result<Self, String> {
+        Self::connect_with_lite_id(addr, jwt.to_string(), lite_id.to_string(), epoch).await
     }
 
     /// Connect as a Lite client with a durable identity.
@@ -72,7 +93,7 @@ impl SyncTestClient {
         lite_id: &str,
         epoch: u64,
     ) -> Result<Self, String> {
-        Self::connect_with_lite_id(addr, lite_id.to_string(), epoch).await
+        Self::connect_with_lite_id(addr, String::new(), lite_id.to_string(), epoch).await
     }
 
     /// The durable producer id the server assigned to this connection, or `0`
@@ -83,6 +104,7 @@ impl SyncTestClient {
 
     async fn connect_with_lite_id(
         addr: SocketAddr,
+        jwt_token: String,
         lite_id: String,
         epoch: u64,
     ) -> Result<Self, String> {
@@ -92,7 +114,7 @@ impl SyncTestClient {
             .map_err(|e| format!("connect_async({url}) failed: {e}"))?;
 
         let handshake = HandshakeMsg {
-            jwt_token: String::new(),
+            jwt_token,
             vector_clock: HashMap::new(),
             subscribed_shapes: Vec::new(),
             client_version: "test".to_string(),
@@ -123,8 +145,63 @@ impl SyncTestClient {
             producer_id: ack.producer_id,
             epoch: ack.accepted_epoch,
             next_seq: 1,
+            delta_signing_key: ack.delta_signing_key,
             incarnations: HashMap::new(),
         })
+    }
+
+    /// The per-user delta signing key the handshake issued. All zeros when
+    /// the server issued none.
+    pub fn delta_signing_key(&self) -> [u8; 32] {
+        self.delta_signing_key
+    }
+
+    /// Push one delta signed with the handshake's signing key, on the next
+    /// stream sequence number. `user_id` is the session principal's user id,
+    /// which the signature binds. The delta signs as this connection's
+    /// producer, so the client connects as Lite.
+    pub async fn push_signed_delta(
+        &mut self,
+        user_id: u64,
+        collection: &str,
+        document_id: &str,
+        peer_id: u64,
+        mutation_id: u64,
+        delta: Vec<u8>,
+    ) -> Result<DeltaOutcome, String> {
+        if self.delta_signing_key == [0; 32] {
+            return Err("the handshake issued no delta signing key".to_string());
+        }
+        if self.producer_id == 0 {
+            return Err("a signed delta needs a producer id: connect as Lite".to_string());
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let mut signer = nodedb_crdt::DeltaSigner::new();
+        signer.register_key(user_id, self.delta_signing_key);
+        let signature = signer
+            .sign_sync_delta(
+                user_id,
+                self.producer_id,
+                self.epoch,
+                seq,
+                collection,
+                document_id,
+                &delta,
+            )
+            .map_err(|e| format!("failed to sign delta for {collection}/{document_id}: {e}"))?;
+        let signature = DeltaSignature {
+            device_id: self.producer_id,
+            signature,
+        };
+        self.send_delta(
+            collection,
+            document_id,
+            (peer_id, mutation_id, seq),
+            delta,
+            signature,
+        )
+        .await
     }
 
     /// Push one delta for `(collection, document_id)` on the next stream
@@ -161,6 +238,31 @@ impl SyncTestClient {
         seq: u64,
         delta: Vec<u8>,
     ) -> Result<DeltaOutcome, String> {
+        let unsigned = DeltaSignature {
+            device_id: 0,
+            signature: [0; 32],
+        };
+        self.send_delta(
+            collection,
+            document_id,
+            (peer_id, mutation_id, seq),
+            delta,
+            unsigned,
+        )
+        .await
+    }
+
+    /// Send one delta with `signature` and wait for its ack or reject.
+    /// `ids` is `(peer_id, mutation_id, seq)`.
+    async fn send_delta(
+        &mut self,
+        collection: &str,
+        document_id: &str,
+        ids: (u64, u64, u64),
+        delta: Vec<u8>,
+        signature: DeltaSignature,
+    ) -> Result<DeltaOutcome, String> {
+        let (peer_id, mutation_id, seq) = ids;
         let collection_incarnation = self.incarnation(collection).await?;
         let push = DeltaPushMsg {
             collection: collection.to_string(),
@@ -173,8 +275,8 @@ impl SyncTestClient {
             producer_id: self.producer_id,
             epoch: self.epoch,
             seq,
-            device_id: 0,
-            delta_signature: [0; 32],
+            device_id: signature.device_id,
+            delta_signature: signature.signature,
             collection_incarnation,
         };
         let frame = SyncFrame::try_encode(SyncMessageType::DeltaPush, &push)
