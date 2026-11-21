@@ -4,10 +4,10 @@
 //! slices.
 //!
 //! The install fence is armed before the validate, over every collection
-//! the record writes, every materialized-sum source and target, the node
-//! labels of the task's tenant, and the vShard the record's events carry.
-//! A stream marker names no op, so whether the content holds label ops is
-//! unknown before the validate, and the labels are always fenced. The
+//! the record writes, every materialized-sum source and target, the graph
+//! state of the task's tenant, and the vShard the record's events carry.
+//! A stream marker names no op, so whether the content holds graph ops is
+//! unknown before the validate, and the graph is always fenced. The
 //! content header names the content's sum targets, and they join the fence
 //! in the slice that walks the header (see `stream_job`). So no write lands
 //! on what the record reads or writes between the validate's verdict and
@@ -118,7 +118,7 @@ impl CoreLoop {
 
     /// Arm the install fence over what the record of `task` writes: the
     /// stored `collections`, the sources and targets of `sum_targets`, the
-    /// node labels of its tenant, and the vShard its events carry. `false`
+    /// graph state of its tenant, and the vShard its events carry. `false`
     /// when a name is no stored collection name: nothing is armed.
     fn arm_stream_fence(
         &mut self,
@@ -128,7 +128,7 @@ impl CoreLoop {
     ) -> bool {
         let db = task.request.database_id;
         let mut keys = BTreeSet::new();
-        keys.insert(FenceKey::GraphLabels {
+        keys.insert(FenceKey::Graph {
             db,
             tenant: task.request.tenant_id,
         });

@@ -109,15 +109,7 @@ impl CoreLoop {
         let Some(fence) = self.install_fence.as_mut() else {
             return 0;
         };
-        if !fence.waiting.iter().any(ExecutionTask::is_expired) {
-            return 0;
-        }
-        let (expired, live): (VecDeque<ExecutionTask>, VecDeque<ExecutionTask>) = fence
-            .take_waiters()
-            .into_iter()
-            .partition(ExecutionTask::is_expired);
-        fence.waiting = live;
-        fence.recompute_blocked();
+        let expired = fence.take_expired();
         let answered = expired.len();
         for task in expired {
             self.run_task(task);
@@ -252,15 +244,30 @@ mod tests {
     }
 
     #[test]
-    fn a_later_write_waits_behind_a_waiting_task_and_release_keeps_arrival_order() {
+    fn a_write_of_an_untouched_collection_runs_past_a_waiting_read() {
         let (mut core, _tx, mut rx, _dir) = make_core();
         core.arm_install_fence(keys(&["a"]));
         queue(&mut core, 1, get("a"));
         queue(&mut core, 2, put("b"));
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![2]);
+        assert_eq!(core.fence_waiter_count(), 1);
+
+        core.release_install_fence();
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![1]);
+    }
+
+    #[test]
+    fn a_later_write_waits_behind_a_waiting_write_and_release_keeps_arrival_order() {
+        let (mut core, _tx, mut rx, _dir) = make_core();
+        core.arm_install_fence(keys(&["a"]));
+        queue(&mut core, 1, put("a"));
+        queue(&mut core, 2, put("b"));
         queue(&mut core, 3, get("b"));
         core.tick();
-        // The write of the fenced database waits, and the read of `b` waits
-        // behind it.
+        // The write of `b` waits behind the waiting write of its vShard, and
+        // the read of `b` waits behind the write of `b`.
         assert!(answered(&mut rx).is_empty());
         assert_eq!(core.fence_waiter_count(), 3);
 

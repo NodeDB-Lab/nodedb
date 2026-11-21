@@ -137,6 +137,6 @@ fn track_bytes(track: &CollectionTrack) -> usize {
 fn key_name_len(key: &FenceKey) -> usize {
     match key {
         FenceKey::Collection { name, .. } => name.len(),
-        FenceKey::GraphLabels { .. } | FenceKey::VShard(_) => 0,
+        FenceKey::Graph { .. } | FenceKey::VShard(_) => 0,
     }
 }

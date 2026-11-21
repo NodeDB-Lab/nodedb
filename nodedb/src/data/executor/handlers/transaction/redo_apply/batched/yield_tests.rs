@@ -48,9 +48,9 @@ const OTHER_DB: DatabaseId = DatabaseId::new(7);
 const OTHER: &str = "other";
 const OTHER_SURROGATE: u32 = 77;
 /// The vShard the foreign writes' events carry. The install's carry 0.
-const OTHER_VSHARD: VShardId = VShardId::new(1);
+pub(super) const OTHER_VSHARD: VShardId = VShardId::new(1);
 
-const INSTALL: u64 = 1;
+pub(super) const INSTALL: u64 = 1;
 const READ_B: u64 = 2;
 const READ_A: u64 = 3;
 const FOREIGN: u64 = 4;
@@ -66,8 +66,8 @@ type Ends = (Producer<BridgeRequest>, Consumer<BridgeResponse>);
 
 /// A core driven through its request ring, with its WAL and the answers
 /// it sent.
-struct Ring {
-    core: CoreLoop,
+pub(super) struct Ring {
+    pub(super) core: CoreLoop,
     wal: StreamWal,
     requests: Producer<BridgeRequest>,
     responses: Consumer<BridgeResponse>,
@@ -76,7 +76,9 @@ struct Ring {
 }
 
 impl Ring {
-    fn open(setup: impl FnOnce(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>)) -> Self {
+    pub(super) fn open(
+        setup: impl FnOnce(&std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>),
+    ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, ends) = setup(dir.path());
         let (requests, responses) = *ends.downcast::<Ends>().expect("ring ends");
@@ -93,7 +95,7 @@ impl Ring {
     }
 
     /// Queue `request`, journalled into `group` when it names one.
-    fn push(&mut self, request: Request, group: Option<JournalGroup>) {
+    pub(super) fn push(&mut self, request: Request, group: Option<JournalGroup>) {
         self.requests
             .try_push(BridgeRequest {
                 inner: request,
@@ -107,7 +109,7 @@ impl Ring {
     }
 
     /// One tick, and every answer it sent.
-    fn tick(&mut self) {
+    pub(super) fn tick(&mut self) {
         self.core.tick();
         while let Ok(response) = self.responses.try_pop() {
             let id = response.inner.request_id.as_u64();
@@ -118,12 +120,12 @@ impl Ring {
         }
     }
 
-    fn answer(&self, id: u64) -> Option<&Response> {
+    pub(super) fn answer(&self, id: u64) -> Option<&Response> {
         self.answers.get(&id)
     }
 
     /// Tick until request `id` answered.
-    fn tick_until_answered(&mut self, id: u64) -> &Response {
+    pub(super) fn tick_until_answered(&mut self, id: u64) -> &Response {
         for _ in 0..MAX_TICKS {
             if self.answers.contains_key(&id) {
                 break;
@@ -181,7 +183,7 @@ impl Ring {
     }
 
     /// Queue the install of `ROWS` filler rows as request [`INSTALL`].
-    fn push_fill_install(&mut self) {
+    pub(super) fn push_fill_install(&mut self) {
         self.push_install_of(fill(FILL_FROM, ROWS));
     }
 
@@ -227,7 +229,7 @@ struct MarkerSpec {
 /// A request of `plan`. A waiter behind the fence answers that it expired
 /// once its deadline passes, so the deadline outlasts any install a loaded
 /// test machine runs.
-fn request(id: u64, plan: PhysicalPlan) -> Request {
+pub(super) fn request(id: u64, plan: PhysicalPlan) -> Request {
     let mut request = make_default_task().request;
     request.request_id = RequestId::new(id);
     request.tenant_id = TenantId::new(TID);
@@ -1278,7 +1280,7 @@ fn a_validate_refusal_after_parked_slices_answers_once_and_leaves_no_cursor() {
 
 /// Tick until request `id` answers, asserting each tick that every request
 /// of `waiting` stays unanswered until then.
-fn tick_until_answered_while_waiting(ring: &mut Ring, id: u64, waiting: &[u64]) {
+pub(super) fn tick_until_answered_while_waiting(ring: &mut Ring, id: u64, waiting: &[u64]) {
     for _ in 0..MAX_TICKS {
         if ring.answer(id).is_some() {
             return;

@@ -8,7 +8,7 @@ use crate::diag::context;
 
 /// Report a collection name the install fence keys by that does not parse
 /// as a stored collection name. `site` names the detecting site and what it
-/// does instead. Called from the fence footprint of a read and from the
+/// does instead. Called from the fence footprint of a task and from the
 /// fence keys of a stream install.
 pub fn stored_collection_name_malformed(
     site: &'static str,
