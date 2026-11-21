@@ -7,7 +7,7 @@
 //! the shared core both the materialized path and every per-batch lazy
 //! streaming caller (pgwire, native, http) call directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nodedb_types::Value;
 use nodedb_types::columnar::schema::is_reserved_bitemporal_column;
@@ -108,8 +108,9 @@ pub fn shape_decoded_rows(
         _ => {
             // Star / derived columns come from rows with no catalog type, so
             // they stay TEXT — typing them would regress `SELECT *` on
-            // schemaless collections.
-            let columns = derive_columns(&rows);
+            // schemaless collections. The star's declared columns only order
+            // them.
+            let columns = order_by_declared(derive_columns(&rows), projection);
             let column_types = ShapedRows::text_types(columns.len());
             Ok(ShapedRows::from_rows(columns, column_types, rows))
         }
@@ -234,6 +235,29 @@ fn derive_columns(rows: &[ShapedRow]) -> Vec<String> {
         }
     }
     cols
+}
+
+/// Order a star's row-derived `columns` by the schema's declared columns.
+///
+/// Rows are name-keyed maps, so a row-derived list comes out in name order,
+/// while the extended query protocol announces the declared order. A column
+/// the schema declares moves to its declared position. A column it does not
+/// declare keeps its derived position after them, so a schemaless field
+/// still appears and a declared column no row carries still does not. A
+/// schema that is not a star, or declares no column, leaves the list as is.
+pub(in crate::control::server::response_shape) fn order_by_declared(
+    mut columns: Vec<String>,
+    schema: Option<&OutputSchema>,
+) -> Vec<String> {
+    let Some(schema) = schema.filter(|s| s.is_star && !s.columns.is_empty()) else {
+        return columns;
+    };
+    let mut rank: HashMap<&str, usize> = HashMap::with_capacity(schema.columns.len());
+    for (i, col) in schema.columns.iter().enumerate() {
+        rank.entry(col.lookup_key.as_str()).or_insert(i);
+    }
+    columns.sort_by_key(|name| rank.get(name.as_str()).copied().unwrap_or(usize::MAX));
+    columns
 }
 
 /// A result set with no columns and no rows.
@@ -588,6 +612,77 @@ mod tests {
         ];
 
         assert_eq!(derive_columns(&rows), vec!["id", "name"]);
+    }
+
+    /// A star schema the planner expanded from a strict collection's catalog.
+    fn star_projection(declared: &[&str]) -> OutputSchema {
+        OutputSchema {
+            is_star: true,
+            ..named_projection(&declared.iter().map(|c| (*c, *c)).collect::<Vec<_>>())
+        }
+    }
+
+    /// `SELECT *` on a strict `(id, name, n)` lists the declared order, as
+    /// the extended query protocol announces it. Row keys iterate in name
+    /// order (`id`, `n`, `name`), so the derived list alone swaps the two.
+    #[test]
+    fn star_lists_declared_columns_in_declared_order() {
+        let schema = star_projection(&["id", "name", "n"]);
+        let decoded = one_row(&[("id", text("1")), ("name", text("a")), ("n", text("10"))]);
+
+        let shaped = shape_decoded_rows(
+            decoded,
+            RowContext::Flat,
+            Some(&schema),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
+        assert_eq!(shaped.columns, vec!["id", "name", "n"]);
+    }
+
+    /// A field no declared column names follows the declared ones. A declared
+    /// column no row carries stays out, as it did before.
+    #[test]
+    fn star_appends_undeclared_row_keys_and_skips_absent_declared_columns() {
+        let schema = star_projection(&["id", "name", "absent", "n"]);
+        let decoded = one_row(&[
+            ("id", text("1")),
+            ("n", text("10")),
+            ("extra", text("x")),
+            ("name", text("a")),
+        ]);
+
+        let shaped = shape_decoded_rows(
+            decoded,
+            RowContext::Flat,
+            Some(&schema),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
+        assert_eq!(shaped.columns, vec!["id", "name", "n", "extra"]);
+    }
+
+    /// A star with no declared column (schemaless, join) keeps the derived
+    /// order.
+    #[test]
+    fn star_without_declared_columns_keeps_the_derived_order() {
+        let schema = star_projection(&[]);
+        let decoded = one_row(&[("id", text("1")), ("name", text("a")), ("n", text("10"))]);
+
+        let shaped = shape_decoded_rows(
+            decoded,
+            RowContext::Flat,
+            Some(&schema),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
+        assert_eq!(shaped.columns, vec!["id", "n", "name"]);
     }
 
     // ── Control-Plane computed columns ──────────────────────────────────
