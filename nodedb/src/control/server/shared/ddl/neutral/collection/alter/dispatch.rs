@@ -24,6 +24,16 @@ pub async fn dispatch_alter_collection(
     name: &str,
     operation: &AlterCollectionOp,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    // One check for every operation: the router runs none, and each
+    // sub-handler below assumes the caller may change this collection.
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        name,
+        "alter collections",
+    )?;
+
     match operation {
         AlterCollectionOp::AddColumn {
             column_name,
