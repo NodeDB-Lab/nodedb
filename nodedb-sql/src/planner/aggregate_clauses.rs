@@ -5,7 +5,7 @@
 
 use sqlparser::ast;
 
-use crate::error::Result;
+use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
 use crate::planner::agg_bind::{BindName, bind_aggregate_calls};
 use crate::planner::group_by::{convert_group_by_with_projection, group_by_output_aliases};
@@ -46,6 +46,7 @@ pub fn plan_aggregate_clauses(
     scope: &TableScope,
     functions: &FunctionRegistry,
 ) -> Result<AggregateClauses> {
+    refuse_star_without_group_by(select)?;
     let (group_by, grouping_sets) = match expand_group_by(&select.group_by, scope)? {
         Some(expansion) => (expansion.canonical_keys, Some(expansion.grouping_sets)),
         None => (
@@ -126,4 +127,23 @@ fn sort_names_new_aggregate(
         )?;
     }
     Ok(extended.len() > aggregates.len())
+}
+
+/// Refuse a star in an aggregate query with no GROUP BY. Every column the
+/// star reads is ungrouped, as PostgreSQL rules with `42803`.
+fn refuse_star_without_group_by(select: &ast::Select) -> Result<()> {
+    let ungrouped = matches!(
+        &select.group_by,
+        ast::GroupByExpr::Expressions(exprs, _) if exprs.is_empty()
+    );
+    let star = select.projection.iter().any(|item| {
+        matches!(
+            item,
+            ast::SelectItem::Wildcard(_) | ast::SelectItem::QualifiedWildcard(..)
+        )
+    });
+    if ungrouped && star {
+        return Err(SqlError::UngroupedColumn { column: "*".into() });
+    }
+    Ok(())
 }
