@@ -118,12 +118,53 @@ pub(super) fn convert_unary(
     let converted = convert_expr_depth(inner, depth, scope)?;
     let converted = match op {
         UnaryOp::Neg => interval_operand_as_bigint(inner, converted),
-        UnaryOp::Not => converted,
+        UnaryOp::Not => {
+            if let Some(type_name) = numeric_type_name(&converted, scope) {
+                return Err(SqlError::DatatypeMismatch {
+                    detail: format!("argument of NOT must be type boolean, not type {type_name}"),
+                });
+            }
+            converted
+        }
     };
     Ok(SqlExpr::UnaryOp {
         op,
         expr: Box::new(converted),
     })
+}
+
+/// The SQL type name of `expr` when it is a number at plan time: a numeric
+/// literal, a numeric cast, a declared numeric column, or a negation or
+/// arithmetic over one. `None` when the type is boolean, NULL, or not known
+/// before execution.
+fn numeric_type_name(expr: &SqlExpr, scope: &ColumnScope<'_>) -> Option<&'static str> {
+    if let Some(width) = int_width_of(expr, scope) {
+        return Some(width.type_name());
+    }
+    match expr {
+        SqlExpr::Literal(SqlValue::Float(_)) => Some("double precision"),
+        SqlExpr::Literal(SqlValue::Decimal(_)) => Some("numeric"),
+        SqlExpr::Cast { to_type, .. } => match nodedb_query::CastType::from_type_name(to_type)? {
+            nodedb_query::CastType::Float => Some("double precision"),
+            nodedb_query::CastType::Decimal(_) => Some("numeric"),
+            _ => None,
+        },
+        SqlExpr::Column { table, name } => {
+            match scope.declared_column(table.as_deref(), name)?.data_type {
+                SqlDataType::Float64 => Some("double precision"),
+                SqlDataType::Decimal(_) => Some("numeric"),
+                _ => None,
+            }
+        }
+        SqlExpr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr,
+        } => numeric_type_name(expr, scope),
+        SqlExpr::BinaryOp { left, op, right } if is_arithmetic(*op) => {
+            numeric_type_name(left, scope).or_else(|| numeric_type_name(right, scope))
+        }
+        _ => None,
+    }
 }
 
 /// `left = ANY(right)` — desugar into InList over array elements.
@@ -204,6 +245,63 @@ mod tests {
             }
             other => panic!("expected BinaryOp, got {other:?}"),
         }
+    }
+
+    fn convert_select(sql: &str) -> crate::error::Result<SqlExpr> {
+        let raw = crate::resolver::expr::convert::entry::tests::first_select_expr(sql);
+        crate::resolver::expr::convert::entry::convert_expr(
+            &raw,
+            &crate::resolver::ColumnScope::Unchecked,
+        )
+    }
+
+    #[test]
+    fn not_refuses_a_numeric_operand() {
+        for (sql, type_name) in [
+            ("SELECT NOT 5", "integer"),
+            ("SELECT NOT -5", "integer"),
+            ("SELECT NOT 5000000000", "bigint"),
+            ("SELECT NOT 1.5", "numeric"),
+            ("SELECT NOT (1 + 2)", "integer"),
+        ] {
+            match convert_select(sql) {
+                Err(crate::error::SqlError::DatatypeMismatch { detail }) => assert_eq!(
+                    detail,
+                    format!("argument of NOT must be type boolean, not type {type_name}"),
+                    "{sql}"
+                ),
+                other => panic!("{sql}: expected a datatype mismatch, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn not_keeps_boolean_null_and_unknown_operands() {
+        for sql in [
+            "SELECT NOT true",
+            "SELECT NOT false",
+            "SELECT NOT NULL",
+            "SELECT NOT (x = 1)",
+            "SELECT NOT x",
+        ] {
+            assert!(
+                matches!(
+                    convert_select(sql),
+                    Ok(SqlExpr::UnaryOp {
+                        op: UnaryOp::Not,
+                        ..
+                    })
+                ),
+                "{sql}"
+            );
+        }
+        assert!(matches!(
+            convert_select("SELECT -x"),
+            Ok(SqlExpr::UnaryOp {
+                op: UnaryOp::Neg,
+                ..
+            })
+        ));
     }
 
     // ── JSON operator lowering tests ───────────────────────────────────────

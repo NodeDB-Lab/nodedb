@@ -221,6 +221,15 @@ mod tests {
     }
 
     #[test]
+    fn not_never_negates_a_number() {
+        let doc = serde_json::json!({"x": 5, "b": true, "z": null});
+        assert_eq!(eval("NOT x", doc.clone()), Value::Bool(false));
+        assert_eq!(eval("NOT b", doc.clone()), Value::Bool(false));
+        assert_eq!(eval("NOT z", doc.clone()), Value::Null);
+        assert_eq!(eval("-x", doc), Value::Integer(-5));
+    }
+
+    #[test]
     fn columns_inside_predicates_are_dependencies() {
         let (_, deps) =
             parse_generated_expr("a LIKE b AND c IN (d, 1) AND e BETWEEN f AND g").expect("parses");

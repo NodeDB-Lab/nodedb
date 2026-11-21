@@ -23,6 +23,7 @@ use nodedb_types::Value;
 ///   `e < lo OR e > hi`.
 /// - `e LIKE p` calls `like(e, p)`, or `ilike` when case-insensitive.
 ///   `NOT LIKE` negates the call.
+/// - `NOT e` is [`QExpr::logical_not`]: NULL stays NULL.
 /// - An array of literals is one array literal. An array with any other
 ///   element calls `make_array`, which builds the array per row.
 ///
@@ -113,11 +114,7 @@ fn convert<E: From<SqlError>>(
             let inner = convert(expr, source_refs, qualified, resolve)?;
             match op {
                 UnaryOp::Neg => Ok(QExpr::Negate(Box::new(inner))),
-                UnaryOp::Not => Ok(QExpr::BinaryOp {
-                    left: Box::new(inner),
-                    op: QBinaryOp::Eq,
-                    right: Box::new(QExpr::Literal(nodedb_types::Value::Bool(false))),
-                }),
+                UnaryOp::Not => Ok(QExpr::logical_not(inner)),
             }
         }
 
@@ -344,5 +341,34 @@ pub fn sql_value_to_value(v: &SqlValue) -> Result<Value, SqlError> {
         SqlValue::Timestamptz(ts) => Ok(Value::DateTime(*ts)),
         SqlValue::Geometry(g) => Ok(Value::Geometry(g.clone())),
         SqlValue::Duration(d) => Ok(Value::Duration(*d)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn not_of(operand: SqlValue) -> Value {
+        let expr = SExpr::UnaryOp {
+            op: UnaryOp::Not,
+            expr: Box::new(SExpr::Literal(operand)),
+        };
+        let lowered = match convert_sql_expr(&expr) {
+            Ok(lowered) => lowered,
+            Err(e) => panic!("NOT lowers: {e}"),
+        };
+        let doc = Value::Object(Default::default());
+        match lowered.eval(&doc, &nodedb_crs::CrsContext::builtin_only()) {
+            Ok(v) => v,
+            Err(e) => panic!("NOT evaluates: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn not_keeps_null_and_never_negates_a_number() {
+        assert_eq!(not_of(SqlValue::Null), Value::Null);
+        assert_eq!(not_of(SqlValue::Bool(true)), Value::Bool(false));
+        assert_eq!(not_of(SqlValue::Bool(false)), Value::Bool(true));
+        assert_eq!(not_of(SqlValue::Int(5)), Value::Bool(false));
     }
 }

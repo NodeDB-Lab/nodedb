@@ -108,8 +108,15 @@ fn convert_expr_inner(expr: &SqlExpr, qualify: bool) -> crate::bridge::expr_eval
         // `*` is the whole row: `to_jsonb(*)` reads the row document.
         SqlExpr::Wildcard => BExpr::Column(nodedb_query::expr::WHOLE_ROW_COLUMN.into()),
 
-        // NOT e / -e → evaluator's Negate (handles both bool and numeric).
-        SqlExpr::UnaryOp { expr, .. } => BExpr::Negate(Box::new(convert_expr_inner(expr, qualify))),
+        // `-e` negates a number. `NOT e` is the shared boolean-only lowering.
+        SqlExpr::UnaryOp {
+            op: nodedb_sql::types::UnaryOp::Neg,
+            expr,
+        } => BExpr::Negate(Box::new(convert_expr_inner(expr, qualify))),
+        SqlExpr::UnaryOp {
+            op: nodedb_sql::types::UnaryOp::Not,
+            expr,
+        } => BExpr::logical_not(convert_expr_inner(expr, qualify)),
 
         // `e IS NULL` / `e IS NOT NULL` — direct passthrough.
         SqlExpr::IsNull { expr, negated } => BExpr::IsNull {
@@ -353,5 +360,38 @@ mod tests {
         assert_eq!(eval(like(true, false, "Al%")), Value::Bool(false));
         assert_eq!(eval(like(false, true, "al%")), Value::Bool(true));
         assert_eq!(eval(like(false, false, "al%")), Value::Bool(false));
+    }
+
+    #[test]
+    fn not_is_boolean_only_and_minus_still_negates() {
+        use nodedb_sql::types::UnaryOp::{Neg, Not};
+        let unary = |op, operand: SqlExpr| SqlExpr::UnaryOp {
+            op,
+            expr: Box::new(operand),
+        };
+        let lit = SqlExpr::Literal;
+        let eval = |e: SqlExpr| {
+            sql_expr_to_bridge_expr(&e)
+                .eval(&row(), &nodedb_crs::CrsContext::builtin_only())
+                .expect("eval")
+        };
+        assert_eq!(
+            eval(unary(Not, lit(SqlValue::Bool(true)))),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval(unary(Not, lit(SqlValue::Bool(false)))),
+            Value::Bool(true)
+        );
+        assert_eq!(eval(unary(Not, lit(SqlValue::Null))), Value::Null);
+        // A number the planner cannot type statically never comes back negated.
+        assert_eq!(eval(unary(Not, col("n"))), Value::Bool(false));
+        assert_eq!(eval(unary(Neg, col("n"))), Value::Integer(-7));
+        let n_is_one = SqlExpr::BinaryOp {
+            left: Box::new(col("n")),
+            op: nodedb_sql::types::BinaryOp::Eq,
+            right: Box::new(lit(SqlValue::Int(1))),
+        };
+        assert_eq!(eval(unary(Not, n_is_one)), Value::Bool(true));
     }
 }

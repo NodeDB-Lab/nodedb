@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Unary-minus evaluation on a `Value` operand.
+//! Unary-minus evaluation on a `Value` operand, and the `NOT` lowering.
 
 use nodedb_types::Value;
 
@@ -8,6 +8,22 @@ use crate::value_ops::value_to_f64;
 
 use super::eval::EvalError;
 use super::out_of_range::OutOfRange;
+use super::types::{CastType, SqlExpr};
+
+impl SqlExpr {
+    /// `NOT operand`: [`SqlExpr::Negate`] over `operand` cast to boolean.
+    ///
+    /// The cast keeps `NOT` a boolean operator. A boolean negates to its
+    /// complement and NULL stays NULL. A number casts to its truth value, so
+    /// `NOT` never answers a negated number. Every producer of `NOT` builds
+    /// it here. The planner refuses a statically numeric operand before this.
+    pub fn logical_not(operand: SqlExpr) -> SqlExpr {
+        SqlExpr::Negate(Box::new(SqlExpr::Cast {
+            expr: Box::new(operand),
+            to_type: CastType::Bool,
+        }))
+    }
+}
 
 /// `-v`. A boolean negates to its complement. An integer negates exactly,
 /// and `-i64::MIN` is [`OutOfRange::Bigint`]. A decimal negates exactly. A
@@ -76,5 +92,25 @@ mod tests {
         );
         assert_eq!(eval_negate(Value::Bool(true)), Ok(Value::Bool(false)));
         assert_eq!(eval_negate(Value::Null), Ok(Value::Null));
+    }
+
+    fn not_of(value: Value) -> Value {
+        let doc = Value::Object(Default::default());
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        match SqlExpr::logical_not(SqlExpr::Literal(value)).eval(&doc, &crs) {
+            Ok(v) => v,
+            Err(e) => panic!("NOT evaluates: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_not_is_boolean_only() {
+        assert_eq!(not_of(Value::Bool(true)), Value::Bool(false));
+        assert_eq!(not_of(Value::Bool(false)), Value::Bool(true));
+        assert_eq!(not_of(Value::Null), Value::Null);
+        // A number never comes back negated.
+        assert_eq!(not_of(Value::Integer(5)), Value::Bool(false));
+        assert_eq!(not_of(Value::Integer(0)), Value::Bool(true));
+        assert_eq!(not_of(Value::Float(1.5)), Value::Bool(false));
     }
 }

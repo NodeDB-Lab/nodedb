@@ -75,7 +75,8 @@ pub(crate) fn map_plan_error(
         },
         // A vector element that is not a number is the wrong kind for the
         // column: `42804`, the code the strict encoder gives the same element.
-        nodedb_sql::SqlError::VectorElementNotNumeric { .. } => crate::Error::DatatypeMismatch {
+        nodedb_sql::SqlError::VectorElementNotNumeric { .. }
+        | nodedb_sql::SqlError::DatatypeMismatch { .. } => crate::Error::DatatypeMismatch {
             detail: error.to_string(),
         },
         nodedb_sql::SqlError::InvalidLimitValue { clause, value } => {
@@ -195,6 +196,17 @@ mod tests {
                 max_depth: 100,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn an_operand_type_mismatch_is_datatype_mismatch() {
+        let error = nodedb_sql::SqlError::DatatypeMismatch {
+            detail: "argument of NOT must be type boolean, not type integer".into(),
+        };
+        assert!(matches!(
+            map_plan_error(error, TenantId::new(1)),
+            crate::Error::DatatypeMismatch { .. }
         ));
     }
 }
