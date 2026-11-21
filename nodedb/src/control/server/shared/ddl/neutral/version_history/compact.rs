@@ -37,6 +37,13 @@ pub async fn compact_history(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (collection, doc_id, checkpoint_name) = parse_compact(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "compact history",
+    )?;
     let tenant_id = identity.tenant_id;
 
     // Resolve checkpoint to version vector + timestamp.

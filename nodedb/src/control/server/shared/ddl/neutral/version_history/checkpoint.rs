@@ -35,6 +35,13 @@ pub async fn create_checkpoint(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (checkpoint_name, collection, doc_id) = parse_checkpoint_sql(sql, "CREATE CHECKPOINT")?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "create checkpoints",
+    )?;
     let tenant_id = identity.tenant_id;
 
     // Dispatch to Data Plane to get current version vector.
@@ -115,6 +122,13 @@ pub async fn drop_checkpoint(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (checkpoint_name, collection, doc_id) = parse_checkpoint_sql(sql, "DROP CHECKPOINT")?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "drop checkpoints",
+    )?;
     let tenant_id = identity.tenant_id;
 
     // Existence is checked here, on the leader. The replicated delete carries
