@@ -53,6 +53,25 @@ pub async fn drop_materialized_view(
         (parse_ident_token(parts[3])?, false)
     };
 
+    // The view's recorded owner may drop it. Anyone else must own the
+    // same-named collection or hold an admin role.
+    let owns_view = state
+        .credentials
+        .catalog()
+        .get_materialized_view(database_id.as_u64(), tenant_id.as_u64(), &name)
+        .ok()
+        .flatten()
+        .is_some_and(|view| view.owner == identity.username);
+    if !owns_view {
+        crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+            state,
+            identity,
+            database_id,
+            &name,
+            "drop materialized views",
+        )?;
+    }
+
     // Streaming MVs live in the Event-Plane registry (`mv_registry`), not the
     // periodic MV catalog. Handle them first: delete the catalog record and
     // unregister from the live registry. Falls through to the periodic path

@@ -49,6 +49,16 @@ pub async fn create_materialized_view(
         return create_streaming_mv(state, identity, database_id, &name, &query_sql).await;
     }
 
+    // The periodic path reads the source collection, so the caller must own it
+    // or hold an admin role. The streaming path above checks tenant admin.
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &source,
+        "create materialized views",
+    )?;
+
     // Validate source collection exists.
     {
         let catalog = state.credentials.catalog();
