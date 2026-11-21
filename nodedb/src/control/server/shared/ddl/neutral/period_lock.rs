@@ -50,6 +50,14 @@ pub async fn add_period_lock(
             .ok_or_else(|| err("42601", "missing collection name"))?,
     )?;
 
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &name,
+        "change period locks",
+    )?;
+
     // Find the period column: "ON <col>"
     let on_idx = parts
         .iter()
@@ -135,6 +143,14 @@ pub async fn drop_period_lock(
         parts
             .get(2)
             .ok_or_else(|| err("42601", "missing collection name"))?,
+    )?;
+
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &name,
+        "change period locks",
     )?;
 
     let catalog = state.credentials.catalog();
