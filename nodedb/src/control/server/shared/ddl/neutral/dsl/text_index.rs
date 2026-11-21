@@ -103,6 +103,12 @@ async fn create_text_index(
     stmt: IndexStatement,
     command: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "search indexes",
+    )?;
     // The header resolves the collection and fields by the SQL identifier rule.
     let collection = stmt.header.collection.clone();
     let tenant_id = identity.tenant_id;

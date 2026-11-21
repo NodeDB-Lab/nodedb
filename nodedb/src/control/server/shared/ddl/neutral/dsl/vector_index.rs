@@ -103,6 +103,12 @@ pub async fn create_vector_index(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "vector indexes",
+    )?;
     let stmt = parse_index_statement(sql, LEADING, &HEADER, OPTIONS, CONTEXT)?;
     let params = validate(&stmt.options)?;
 
