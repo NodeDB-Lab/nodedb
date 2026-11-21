@@ -96,3 +96,23 @@ fn distinct_identity_follows_canonical_value_equality() {
     );
     assert_ne!(identity(Value::String("5".into())), five);
 }
+
+#[test]
+fn string_agg_expression_evaluating_to_null_contributes_no_part() {
+    let value = Value::Object(std::collections::HashMap::from([
+        ("name".to_owned(), Value::Null),
+        ("other".to_owned(), Value::String("x".to_owned())),
+    ]));
+    let doc = zerompk::to_msgpack_vec(&value).unwrap();
+    let crs = CrsContext::builtin_only();
+    let null_expr = SqlExpr::Column("name".to_owned());
+    let text_expr = SqlExpr::Column("other".to_owned());
+    assert_eq!(
+        extract_str(&doc, "name", Some(&null_expr), &crs).unwrap(),
+        None
+    );
+    assert_eq!(
+        extract_str(&doc, "other", Some(&text_expr), &crs).unwrap(),
+        Some("x".to_owned())
+    );
+}
