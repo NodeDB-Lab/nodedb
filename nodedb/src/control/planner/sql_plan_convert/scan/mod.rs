@@ -5,6 +5,8 @@
 //! Split by concern so each file stays under the project's hard size limit.
 
 mod core;
+#[cfg(test)]
+mod core_window_tests;
 mod join;
 mod join_cost;
 mod recursive;
@@ -14,6 +16,7 @@ mod spatial;
 mod text_score_bound;
 mod text_search;
 mod timeseries;
+mod windowed;
 
 pub(in crate::control::planner::sql_plan_convert) use core::{
     DocumentIndexLookupArgs, convert_document_index_lookup, convert_point_get, convert_scan,

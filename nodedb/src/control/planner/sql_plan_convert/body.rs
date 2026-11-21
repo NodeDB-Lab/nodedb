@@ -187,7 +187,7 @@ fn branch_columns<'a>(
 /// Wrap a sharded relation in `Exchange{Gather}` so its gather runs exactly
 /// once over the full union. The enclosing node is coordinator-local, so the
 /// top-level `convert()` wrap loop does not gather it.
-fn gather_if_sharded(plan: PhysicalPlan) -> PhysicalPlan {
+pub(super) fn gather_if_sharded(plan: PhysicalPlan) -> PhysicalPlan {
     if !plan.is_sharded_source() {
         return plan;
     }
