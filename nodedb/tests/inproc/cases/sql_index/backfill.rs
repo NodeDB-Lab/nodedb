@@ -149,7 +149,19 @@ async fn create_unique_index_rejects_existing_duplicates() {
     // duplicates must fail at the backfill phase — detecting the
     // violation before the Ready flip so the catalog never advertises
     // an index that doesn't actually enforce uniqueness.
-    server
-        .expect_error("CREATE UNIQUE INDEX ON bf_unique(code)", "unique")
-        .await;
+    let refused = server
+        .client
+        .simple_query("CREATE UNIQUE INDEX ON bf_unique(code)")
+        .await
+        .expect_err("a UNIQUE backfill over duplicates is refused");
+    let db_error = refused.as_db_error().expect("a server error");
+    assert_eq!(
+        db_error.code(),
+        &tokio_postgres::error::SqlState::UNIQUE_VIOLATION,
+        "a duplicate found by the backfill is 23505: {db_error:?}"
+    );
+    assert!(
+        db_error.message().to_lowercase().contains("unique"),
+        "the refusal names the unique constraint: {db_error:?}"
+    );
 }

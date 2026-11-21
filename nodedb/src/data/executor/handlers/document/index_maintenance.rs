@@ -124,14 +124,14 @@ impl CoreLoop {
                         if let Some(prev) = seen.get(&stored)
                             && prev != doc_id
                         {
-                            return Err(crate::Error::DataPlane(
-                                crate::bridge::envelope::ErrorCode::Internal {
-                                    detail: format!(
-                                        "unique index backfill: duplicate value '{stored}' on \
+                            return Err(crate::Error::RejectedConstraint {
+                                collection: collection.to_string(),
+                                constraint: "unique".to_string(),
+                                detail: format!(
+                                    "unique index backfill: duplicate value '{stored}' on \
                                      '{path}' (existing '{prev}', new '{doc_id}')"
-                                    ),
-                                },
-                            ));
+                                ),
+                            });
                         }
                         seen.insert(stored, *doc_id);
                     }
