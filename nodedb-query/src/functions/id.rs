@@ -25,13 +25,14 @@ pub(super) fn try_eval(name: &str, args: &[Value]) -> Option<Value> {
         "id_type" => args
             .first()
             .and_then(|v| v.as_str())
-            .map_or(Value::String("custom".into()), |s| {
+            .map_or(Value::Null, |s| {
                 Value::String(nodedb_types::id_gen::detect_id_type(s).as_str().to_string())
             }),
         "uuid_version" => args
             .first()
             .and_then(|v| v.as_str())
-            .map_or(Value::Integer(0), |s| {
+            .filter(|s| nodedb_types::id_gen::is_uuid(s))
+            .map_or(Value::Null, |s| {
                 Value::Integer(nodedb_types::id_gen::uuid_version(s) as i64)
             }),
         "ulid_timestamp" => args
@@ -42,4 +43,49 @@ pub(super) fn try_eval(name: &str, args: &[Value]) -> Option<Value> {
         _ => return None,
     };
     Some(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn eval(name: &str, arg: Value) -> Value {
+        try_eval(name, &[arg]).expect("known function")
+    }
+
+    #[test]
+    fn id_type_of_null_is_null() {
+        assert_eq!(eval("id_type", Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn id_type_of_text_still_answers() {
+        assert_eq!(
+            eval("id_type", Value::String(UUID.into())),
+            Value::String("uuid".into())
+        );
+        assert_eq!(
+            eval("id_type", Value::String(String::new())),
+            Value::String("custom".into())
+        );
+    }
+
+    #[test]
+    fn uuid_version_of_null_or_non_uuid_is_null() {
+        assert_eq!(eval("uuid_version", Value::Null), Value::Null);
+        assert_eq!(
+            eval("uuid_version", Value::String("not-a-uuid".into())),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn uuid_version_of_a_uuid_answers_its_version() {
+        assert_eq!(
+            eval("uuid_version", Value::String(UUID.into())),
+            Value::Integer(4)
+        );
+    }
 }
