@@ -151,6 +151,8 @@ GRAPH PATH FROM 'a' TO 'z' MAX_DEPTH 6 EDGE WHERE "kind" IN ('road', 'rail') AND
 - Terms: `=`, `<>`, `!=`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`, joined by `AND`, `OR`, `NOT`.
 - Each comparison names one property and one literal: `NULL`, `TRUE`, `FALSE`, a quoted string, an integer or a finite float.
 - A missing property matches `IS NULL` and `NOT IN`. It never matches `>`, `>=`, `<`, `<=` or `IN`.
+- `= NULL` and `<> NULL` compare against the `NULL` literal, not a missing-property test: the comparison is always unknown, so it never matches, whether the property is missing, holds `NULL`, or holds a value. Use `IS NULL` / `IS NOT NULL` for the missing-or-null test.
+- `IN` never matches a property that holds `NULL`. `NOT IN` never matches a property that holds `NULL`, and never matches once its list holds a `NULL` element, regardless of the property's value.
 - An edge without properties evaluates as an empty object.
 - The predicate runs on the core that stores the edge, before the edge counts against the visit cap.
 

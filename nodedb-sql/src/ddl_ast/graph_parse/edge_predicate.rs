@@ -187,6 +187,12 @@ fn comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<Metadata
         (Err(e), Err(_)) => return Err(e),
     };
     Ok(match op {
+        // `field = NULL` and `field <> NULL` compare against a NULL
+        // literal. SQL three-valued logic reads that comparison as always
+        // unknown, so it never admits, whether the property is missing,
+        // holds NULL, or holds a value. `IS NULL` / `IS NOT NULL` convert
+        // through a separate branch above and keep their own behavior.
+        BinaryOperator::Eq | BinaryOperator::NotEq if value.is_null() => never_admits(),
         BinaryOperator::Eq => MetadataFilter::Eq { field, value },
         BinaryOperator::NotEq => MetadataFilter::Ne { field, value },
         BinaryOperator::Gt => MetadataFilter::Gt { field, value },
@@ -199,6 +205,12 @@ fn comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<Metadata
             )));
         }
     })
+}
+
+/// A filter that never admits: the same `Or` of no children a bare `FALSE`
+/// term converts to.
+fn never_admits() -> MetadataFilter {
+    MetadataFilter::Or(Vec::new())
 }
 
 /// The operator that keeps `literal OP field` true as `field OP' literal`.
@@ -359,6 +371,30 @@ mod tests {
                     value: Value::Null,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn eq_and_ne_against_a_null_literal_never_admit() {
+        assert_eq!(traverse("w = NULL"), vec![MetadataFilter::Or(Vec::new())]);
+        assert_eq!(traverse("NULL = w"), vec![MetadataFilter::Or(Vec::new())]);
+        assert_eq!(traverse("w <> NULL"), vec![MetadataFilter::Or(Vec::new())]);
+        assert_eq!(traverse("NULL <> w"), vec![MetadataFilter::Or(Vec::new())]);
+        // `IS NULL` / `IS NOT NULL` convert through their own branch and
+        // keep the missing-or-null-matches / present-and-not-null rules.
+        assert_eq!(
+            traverse("w IS NULL"),
+            vec![MetadataFilter::Eq {
+                field: "w".into(),
+                value: Value::Null,
+            }]
+        );
+        assert_eq!(
+            traverse("w IS NOT NULL"),
+            vec![MetadataFilter::Ne {
+                field: "w".into(),
+                value: Value::Null,
+            }]
         );
     }
 

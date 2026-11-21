@@ -12,6 +12,9 @@
 //! - `Gt`/`Gte`/`Lt`/`Lte` are false when the field is missing or null, the
 //!   value is null, or the pair has no order.
 //! - `In` on a missing field is false. `NotIn` on a missing field is true.
+//! - `In` and `NotIn` never admit a present `Null` value. `NotIn` never
+//!   admits once its list holds a `Null`: SQL three-valued logic reads a
+//!   comparison against `Null` as unknown, never true.
 //! - `And([])` is true. `Or([])` is false.
 //!
 //! Coercion, one rule for equality and order:
@@ -81,12 +84,20 @@ where
         MetadataFilter::Lte { field, value } => {
             ordered(lookup(field)?.as_deref(), value, |o| o != Ordering::Greater)
         }
-        MetadataFilter::In { field, values } => {
-            lookup(field)?.is_some_and(|found| values.iter().any(|v| filter_eq(&found, v)))
-        }
-        MetadataFilter::NotIn { field, values } => {
-            lookup(field)?.is_none_or(|found| !values.iter().any(|v| filter_eq(&found, v)))
-        }
+        // A present NULL value never matches `IN`, and a NULL in the list
+        // never lets `IN` match through it: SQL three-valued logic reads
+        // every comparison against NULL as unknown, never true. A missing
+        // field stays false (`is_some_and` on `None`), unchanged.
+        MetadataFilter::In { field, values } => lookup(field)?.is_some_and(|found| {
+            !found.is_null() && values.iter().any(|v| !v.is_null() && filter_eq(&found, v))
+        }),
+        // A present NULL value never matches `NOT IN`, and a NULL anywhere
+        // in the list makes every comparison against that list unknown, so
+        // `NOT IN` never admits once the list holds one. A missing field
+        // stays true (`is_none_or` on `None`), unchanged.
+        MetadataFilter::NotIn { field, values } => lookup(field)?.is_none_or(|found| {
+            !found.is_null() && !values.iter().any(|v| v.is_null() || filter_eq(&found, v))
+        }),
         MetadataFilter::And(children) => {
             for child in children {
                 if !try_matches_metadata_filter_with(lookup, child)? {
@@ -406,6 +417,62 @@ mod tests {
             &MetadataFilter::NotIn {
                 field: "k".into(),
                 values,
+            }
+        ));
+    }
+
+    #[test]
+    fn in_and_not_in_never_admit_through_a_null() {
+        // A present NULL value never matches `IN`, list or no NULL in it.
+        let present_null = json!({"w": null});
+        assert!(!matches_metadata_filter(
+            &present_null,
+            &MetadataFilter::In {
+                field: "w".into(),
+                values: vec![Value::Integer(1), Value::Null],
+            }
+        ));
+        assert!(!matches_metadata_filter(
+            &present_null,
+            &MetadataFilter::In {
+                field: "w".into(),
+                values: vec![Value::Integer(1)],
+            }
+        ));
+        // A present NULL value never matches `NOT IN` either.
+        assert!(!matches_metadata_filter(
+            &present_null,
+            &MetadataFilter::NotIn {
+                field: "w".into(),
+                values: vec![Value::Integer(1)],
+            }
+        ));
+        // A NULL anywhere in the list makes `NOT IN` unknown for a present
+        // non-NULL value that matches nothing else in the list.
+        let present_five = json!({"w": 5});
+        assert!(!matches_metadata_filter(
+            &present_five,
+            &MetadataFilter::NotIn {
+                field: "w".into(),
+                values: vec![Value::Integer(1), Value::Null],
+            }
+        ));
+        // With no NULL in the list, a present non-NULL, non-matching value
+        // still admits `NOT IN`.
+        assert!(matches_metadata_filter(
+            &present_five,
+            &MetadataFilter::NotIn {
+                field: "w".into(),
+                values: vec![Value::Integer(1)],
+            }
+        ));
+        // A present value that matches a non-NULL list member still admits
+        // `IN`, NULL elsewhere in the list notwithstanding.
+        assert!(matches_metadata_filter(
+            &present_five,
+            &MetadataFilter::In {
+                field: "w".into(),
+                values: vec![Value::Integer(5), Value::Null],
             }
         ));
     }
