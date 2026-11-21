@@ -47,6 +47,12 @@ pub async fn set_permission_tree(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "change permission trees",
+    )?;
     // Extract collection name: between "ALTER COLLECTION " and " SET PERMISSION_TREE".
     let start = "ALTER COLLECTION ".len();
     let end = find_ascii_case_insensitive(sql, " SET PERMISSION_TREE")
@@ -161,6 +167,12 @@ pub async fn drop_permission_tree(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "change permission trees",
+    )?;
     let start = "ALTER COLLECTION ".len();
     let end = find_ascii_case_insensitive(sql, " DROP PERMISSION_TREE")
         .ok_or_else(|| err("42601", "expected DROP PERMISSION_TREE"))?;

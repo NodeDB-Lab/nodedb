@@ -54,6 +54,12 @@ pub async fn create_sequence(
     database_id: DatabaseId,
     req: &CreateSequenceRequest<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "create sequences",
+    )?;
     let tenant_id = identity.tenant_id.as_u64();
     let db = database_id.as_u64();
 
@@ -152,6 +158,12 @@ pub async fn alter_sequence(
     action: &str,
     with_value: Option<&str>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "alter sequences",
+    )?;
     let tenant_id = identity.tenant_id.as_u64();
     let db = database_id.as_u64();
 
@@ -259,6 +271,12 @@ pub async fn drop_sequence(
     name: &str,
     if_exists: bool,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "drop sequences",
+    )?;
     let tenant_id = identity.tenant_id.as_u64();
     let db = database_id.as_u64();
 

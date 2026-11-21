@@ -33,6 +33,12 @@ pub async fn rate_check(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        DatabaseId::DEFAULT,
+        "use rate gates",
+    )?;
     let args = super::kv_atomic::parse_function_args(sql, "RATE_CHECK")?;
     if args.len() < 4 {
         return Err(ddl_err(
@@ -148,6 +154,12 @@ pub async fn rate_remaining(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        DatabaseId::DEFAULT,
+        "use rate gates",
+    )?;
     let args = super::kv_atomic::parse_function_args(sql, "RATE_REMAINING")?;
     if args.len() < 4 {
         return Err(ddl_err(
@@ -208,6 +220,12 @@ pub async fn rate_reset(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        DatabaseId::DEFAULT,
+        "use rate gates",
+    )?;
     let args = super::kv_atomic::parse_function_args(sql, "RATE_RESET")?;
     if args.len() < 2 {
         return Err(ddl_err(
