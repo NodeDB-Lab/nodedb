@@ -144,6 +144,9 @@ pub(super) fn register_as(
         },
     );
     assert_ok(&response);
+    // These tests judge pins against rows whose index entries the registered
+    // paths wrote, so the core maintains the paths the config names.
+    core.maintain_registered_paths_for_test();
 }
 
 /// A core whose current config of `tickets` is `wire`, registered with its

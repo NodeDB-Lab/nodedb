@@ -464,7 +464,9 @@ mod tests {
             nodedb_types::DatabaseId::DEFAULT,
             crate::types::TenantId::new(TENANT),
             COLLECTION,
-            true,
+            crate::data::executor::handlers::clear_versioned_sparse::CollectionClear::KeepDefinition(
+                crate::data::executor::handlers::clear_versioned_sparse::MaintainedSetFate::Keep,
+            ),
             false,
             true,
         )

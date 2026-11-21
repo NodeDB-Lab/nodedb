@@ -205,6 +205,8 @@ mod tests {
             unique: false,
             case_insensitive: false,
             predicate: None,
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+            fence: nodedb_physical::physical_plan::DocIndexFence::default(),
         }
     }
 

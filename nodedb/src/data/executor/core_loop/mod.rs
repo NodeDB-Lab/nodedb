@@ -36,6 +36,7 @@ pub(in crate::data::executor) mod install_fence;
 #[cfg(test)]
 mod installed_event_tests;
 pub(crate) mod journal_context;
+pub(in crate::data::executor) mod maintained_indexes;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
 #[cfg(test)]

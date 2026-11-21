@@ -24,8 +24,8 @@ pub struct IndexPath {
     pub unique: bool,
     /// COLLATE NOCASE — values lowercased before put/lookup.
     pub case_insensitive: bool,
-    /// Build state — `Building` indexes get dual-writes but aren't picked
-    /// by the planner.
+    /// Build state. The planner skips a `Building` index. Writes maintain
+    /// the paths a core's maintained set holds, whatever this state names.
     pub state: RegisteredIndexState,
     /// Parsed partial-index predicate. `None` means a full index.
     /// Evaluated against every candidate document before insert /

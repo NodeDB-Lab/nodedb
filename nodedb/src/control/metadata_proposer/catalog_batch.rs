@@ -5,7 +5,7 @@
 use nodedb_cluster::{METADATA_GROUP_ID, MetadataEntry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
-use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::data_log_targets::DataLogTargets;
 use crate::control::lease::DrainHolds;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::shared::session::ddl_buffer;
@@ -78,15 +78,16 @@ pub async fn propose_catalog_batch_async(
 
     // The guards drop before the authorization barrier below, as on the
     // single-entry path.
-    let Some((log_index, entries, constraint_targets)) =
+    let Some((log_index, entries, data_log_targets)) =
         propose_replicated(shared, handle.as_ref(), plan).await?
     else {
         return Ok(CatalogBatch::empty());
     };
     // A changed constraint set is live on the collection's data log before
     // the batch returns, so the first CRDT apply after it is not fenced. The
-    // batch is committed, so a failed install never fails it.
-    crate::control::constraint_install::install_constraints(shared, &constraint_targets).await;
+    // batch is committed, so a failed constraint install or document index
+    // step never fails it.
+    data_log_targets.install(shared).await;
     if entries.iter().any(CatalogEntry::bears_authorization) {
         crate::control::security::auth_lease::authorization_barrier(
             shared,
@@ -106,9 +107,9 @@ pub async fn propose_catalog_batch_async(
     })
 }
 
-/// A replicated batch: its log index, its stamped entries, and the
-/// collections whose constraint version it changed.
-type ReplicatedBatch = (u64, Vec<CatalogEntry>, Vec<ConstraintTarget>);
+/// A replicated batch: its log index, its stamped entries, and the data-log
+/// steps it owes its collections.
+type ReplicatedBatch = (u64, Vec<CatalogEntry>, DataLogTargets);
 
 /// Plan, drain, stamp, and propose a batch under the preparation lock and
 /// lease, and wait until this node applied it. Returns the
@@ -169,15 +170,14 @@ async fn propose_replicated(
     proposed
 }
 
-/// Plan, drain, and stamp a batch, and name the collections whose constraint
-/// version the stamped batch changes. The caller holds the DDL preparation
-/// lock and lease, and owns every drain recorded in `drains`. `None` is a plan
-/// with no entries.
+/// Plan, drain, and stamp a batch, and name the data-log steps the stamped
+/// batch owes. The caller holds the DDL preparation lock and lease, and owns
+/// every drain recorded in `drains`. `None` is a plan with no entries.
 async fn plan_drain_and_stamp(
     shared: &SharedState,
     plan: impl FnOnce(&SystemCatalog) -> crate::Result<Vec<CatalogEntry>>,
     drains: &mut DrainHolds<'_>,
-) -> Result<Option<(Vec<CatalogEntry>, Vec<ConstraintTarget>)>, Error> {
+) -> Result<Option<(Vec<CatalogEntry>, DataLogTargets)>, Error> {
     let catalog = shared.credentials.catalog();
     let entries = plan(catalog)?;
     if entries.is_empty() {
@@ -187,7 +187,7 @@ async fn plan_drain_and_stamp(
     drain_batch(shared, &entries, drains).await?;
     let stamped =
         catalog_entry::descriptor_stamp::stamp_batch(entries, &shared.hlc_clock, catalog)?;
-    let targets = constraint_targets(catalog, &stamped)?;
+    let targets = DataLogTargets::of(catalog, &stamped)?;
     Ok(Some((stamped, targets)))
 }
 

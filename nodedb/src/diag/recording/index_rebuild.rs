@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Capture site for a full-text or CSR rebuild that did not install.
+//! Capture sites for a full-text or CSR rebuild that did not install, and
+//! for index steps a committed DDL still owes.
 
 use faultbox::{Capture, EventKind, error_chain_of};
 
@@ -33,6 +34,34 @@ pub fn index_rebuild_not_installed(
     let _ = Capture::new(
         EventKind::Error,
         "index rebuild did not install; the live index stays in place",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .emit();
+}
+
+/// Where a document index step a committed descriptor owes belongs.
+pub struct DocIndexStepTarget<'a> {
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+}
+
+/// Report a document index build or retire that a committed collection
+/// descriptor owes and that did not reach the collection's data log.
+/// Called only from the post-commit install, which leaves the step to the
+/// reconcile loop.
+pub fn doc_index_step_deferred(err: &crate::Error, target: &DocIndexStepTarget<'_>) {
+    let class = error_class(err);
+    let ctx = context::DocIndexStepDeferred {
+        database_id: target.database_id,
+        tenant_id: target.tenant_id,
+        collection: target.collection,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "document index step of a committed descriptor did not reach its data log",
     )
     .error_chain(error_chain_of(err))
     .domain(&ctx)

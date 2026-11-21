@@ -8,7 +8,7 @@ use std::time::Instant;
 use nodedb_cluster::{METADATA_GROUP_ID, MetadataEntry, encode_entry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
-use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::data_log_targets::DataLogTargets;
 use crate::control::lease::DrainHolds;
 use crate::control::propose_outcome::ProposeOutcome;
 use crate::control::state::SharedState;
@@ -37,14 +37,20 @@ use crate::control::server::shared::session::StatementDeadline;
 /// An entry that changes a collection's CRDT constraint version installs the
 /// new set through the collection's data Raft log before it returns. The
 /// entry is committed by then, so a failed install never fails it.
+///
+/// An entry that changes a document collection's index shape, or brings a
+/// `Ready` index under a new name, proposes the index builds and retires on
+/// the collection's data log before it returns. The entry is committed by
+/// then, so a failed step never fails it. The reconcile loop delivers it.
 pub async fn propose_catalog_entry_async(
     shared: &SharedState,
     entry: &CatalogEntry,
 ) -> Result<ProposeOutcome, Error> {
-    let (outcome, constraint_targets) = propose_and_apply_locally(shared, entry).await?;
+    let (outcome, data_log_targets) = propose_and_apply_locally(shared, entry).await?;
     // A changed constraint set is live on the collection's data log before
-    // the DDL returns, so the first CRDT apply after it is not fenced.
-    crate::control::constraint_install::install_constraints(shared, &constraint_targets).await;
+    // the DDL returns, so the first CRDT apply after it is not fenced. The
+    // document index steps the descriptor owes are proposed too.
+    data_log_targets.install(shared).await;
     if let ProposeOutcome::Replicated { log_index } = outcome
         && entry.bears_authorization()
     {
@@ -64,12 +70,12 @@ pub async fn propose_catalog_entry_async(
 }
 
 /// Propose `entry` and wait until this node applied it. The preparation lock
-/// and lease are released before it returns. Also returns the collections
-/// whose constraint version the entry changed.
+/// and lease are released before it returns. Also returns the data-log steps
+/// the entry owes its collections.
 async fn propose_and_apply_locally(
     shared: &SharedState,
     entry: &CatalogEntry,
-) -> Result<(ProposeOutcome, Vec<ConstraintTarget>), Error> {
+) -> Result<(ProposeOutcome, DataLogTargets), Error> {
     // A collection descriptor past a size limit is refused before it is
     // buffered or proposed.
     crate::control::catalog_entry::collection_limits::check_collection_limits(entry)?;
@@ -85,9 +91,9 @@ async fn propose_and_apply_locally(
     // replicates DDL, and COMMIT re-runs the mode choice for the whole batch.
     // Entries also stay unstamped until then, so repeated mutations of one
     // descriptor receive distinct versions in commit order.
-    // A buffered entry installs its constraints when its COMMIT finalizes.
+    // A buffered entry runs its data-log steps when its COMMIT finalizes.
     if crate::control::server::shared::session::ddl_buffer::try_buffer(entry.clone()) {
-        return Ok((ProposeOutcome::Buffered, Vec::new()));
+        return Ok((ProposeOutcome::Buffered, DataLogTargets::default()));
     }
 
     let handle = shared.metadata_raft_handle()?;
@@ -168,8 +174,7 @@ async fn drain_prior_version(
     .await
 }
 
-/// Stamp `entry`, and name the collections whose constraint version the
-/// stamped entry changes.
+/// Stamp `entry`, and name the data-log steps the stamped entry owes.
 ///
 /// Freezes the descriptor_version / constraint_version / modification_hlc
 /// HERE, at propose time, so the value is computed exactly once from this
@@ -180,11 +185,11 @@ async fn drain_prior_version(
 fn stamp(
     shared: &SharedState,
     entry: &CatalogEntry,
-) -> Result<(CatalogEntry, Vec<ConstraintTarget>), Error> {
+) -> Result<(CatalogEntry, DataLogTargets), Error> {
     let catalog = shared.credentials.catalog();
     let stamped =
         catalog_entry::descriptor_stamp::stamp(entry.clone(), &shared.hlc_clock, catalog)?;
-    let targets = constraint_targets(catalog, std::slice::from_ref(&stamped))?;
+    let targets = DataLogTargets::of(catalog, std::slice::from_ref(&stamped))?;
     Ok((stamped, targets))
 }
 

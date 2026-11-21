@@ -78,7 +78,9 @@ pub(in crate::diag) use data_plane::{
 };
 pub(in crate::diag) use event_image::{StrictRowImageUnrendered, TimeseriesRowImageUndecodable};
 pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, RedoEntryMalformed};
-pub(in crate::diag) use index_rebuild::{IndexRebuildNotInstalled, TextIndexStepOwed};
+pub(in crate::diag) use index_rebuild::{
+    DocIndexStepDeferred, IndexRebuildNotInstalled, TextIndexStepOwed,
+};
 pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
 pub(in crate::diag) use install_fence::StoredCollectionNameMalformed;

@@ -362,6 +362,7 @@ mod tests {
             ),
             config,
         );
+        core.maintain_registered_paths_for_test();
         core.vector_params.insert(
             (
                 nodedb_types::DatabaseId::new(DB),

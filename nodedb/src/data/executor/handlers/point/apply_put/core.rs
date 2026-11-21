@@ -419,6 +419,7 @@ mod tests {
             (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
             crate::engine::document::store::CollectionConfig::new(COLL).with_index("city"),
         );
+        core.maintain_registered_paths_for_test();
         let first = put_committed(&mut core, br#"{"city":"oslo"}"#);
         let second = put_committed(&mut core, br#"{"city":"rome"}"#);
         assert!(second > first, "each write stamps a later version");

@@ -155,13 +155,15 @@ impl TestClusterNode {
         response.status == Status::Ok
     }
 
-    /// Drive ONE constraint-reconcile pass on this node (no-op unless this node
-    /// is the metadata leader). Uses a fresh delivered-map so every changed
-    /// collection is re-proposed, letting a test install constraints on demand
-    /// instead of waiting on the background reconcile timer. Returns the number
-    /// of proposals accepted.
+    /// Drive ONE reconcile pass on this node (no-op unless this node is the
+    /// metadata leader). Uses fresh delivered state so every collection is
+    /// re-proposed, letting a test install constraints and document index
+    /// steps on demand instead of waiting on the background reconcile timer.
+    /// Returns the number of constraint sets accepted.
     pub async fn run_constraint_reconcile_once(&self) -> usize {
-        let mut delivered = std::collections::HashMap::new();
-        nodedb::bootstrap::constraint_reconcile::reconcile_once(&self.shared, &mut delivered).await
+        let mut delivered = nodedb::bootstrap::constraint_reconcile::ReconcileDelivered::default();
+        nodedb::bootstrap::constraint_reconcile::reconcile_once(&self.shared, &mut delivered)
+            .await
+            .constraints
     }
 }

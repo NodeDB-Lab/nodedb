@@ -38,6 +38,7 @@ pub(super) fn unique_core(
         (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
         config,
     );
+    core.maintain_registered_paths_for_test();
     (core, Box::new(req), Box::new(resp))
 }
 

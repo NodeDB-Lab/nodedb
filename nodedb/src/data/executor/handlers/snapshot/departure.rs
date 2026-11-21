@@ -24,6 +24,7 @@ use nodedb_physical::physical_plan::DepartedCollection;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::clear_versioned_sparse::{CollectionClear, MaintainedSetFate};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantDataSnapshot, TenantId};
 
@@ -104,7 +105,7 @@ impl CoreLoop {
                 database_id,
                 TenantId::new(target.tenant_id),
                 &target.collection,
-                true,
+                CollectionClear::KeepDefinition(MaintainedSetFate::Keep),
                 reclaim_l1_files,
                 false,
             )?;

@@ -61,12 +61,12 @@ pub use crdt::{CrdtOp, CrdtWriteVerb, decode_fields_body, encode_fields_body};
 pub use doc_config_canon::CanonError;
 pub use doc_config_wire::{DocConfigWire, DocConfigWireError};
 pub use document::{
-    BalancedDef, DeclaredColumn, DocumentOp, DocumentPageSource, DocumentResolveOutcome,
-    DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
-    MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
-    RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TextFieldSet,
-    TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
+    BalancedDef, DeclaredColumn, DocIndexFence, DocIndexOwner, DocumentOp, DocumentPageSource,
+    DocumentResolveOutcome, DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec,
+    IndexProbe, MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource,
+    RedoSumTargets, RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns,
+    ReturningItem, ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey,
+    TOP_LEVEL_BUILD_PATH, TextFieldSet, TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
 };
 pub use document_pin_needs::{DocumentPinNeeds, document_pin_needs};
 pub use exchange::{ExchangeMode, ExchangeOp};

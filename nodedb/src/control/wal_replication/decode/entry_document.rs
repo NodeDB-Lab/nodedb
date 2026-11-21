@@ -326,6 +326,8 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             unique,
             case_insensitive,
             predicate,
+            owner,
+            fence,
         } => document_index::index_build(
             database_id,
             document_index::IndexBuildFields {
@@ -335,11 +337,16 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 unique: *unique,
                 case_insensitive: *case_insensitive,
                 predicate: predicate.as_deref(),
+                owner,
+                fence: *fence,
             },
         ),
-        ReplicatedWrite::DocIndexRetire { collection, field } => {
-            document_index::index_retire(database_id, collection, field)
-        }
+        ReplicatedWrite::DocIndexRetire {
+            collection,
+            field,
+            owner,
+            fence,
+        } => document_index::index_retire(database_id, collection, field, owner, *fence),
         _ => Err(crate::Error::Internal {
             detail: "entry_document::decode_arm called with a non-Document ReplicatedWrite \
                 variant (dispatch bug in decode/entry.rs's grouped Document match arm)"

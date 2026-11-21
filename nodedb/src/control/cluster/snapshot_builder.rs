@@ -183,6 +183,13 @@ impl DataPlaneSnapshotBuilder {
                 merged.storage_conversions.push((k, v));
             }
         }
+        // A maintained index set homes on its collection's vShard, as the
+        // collection's index rows do.
+        for (k, v) in snap.maintained_indexes {
+            if in_group_db_tenant_scoped(&k) {
+                merged.maintained_indexes.push((k, v));
+            }
+        }
         // kv_tables / flushed_ts_segments / columnar_engines: db-scoped keys.
         for (k, v) in snap.kv_tables {
             if in_group_db_scoped(&k) {

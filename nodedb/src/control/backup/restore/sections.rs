@@ -101,6 +101,9 @@ pub(in crate::control::backup) fn append_snapshot(
         ts_series_catalogs,
         // The restore re-issues the rows as new writes in the row's mode.
         storage_conversions: _,
+        // The destination builds every index its restored catalog declares,
+        // and the re-issued rows maintain them.
+        maintained_indexes: _,
         columnar_engines,
         vector_params,
         index_configs,

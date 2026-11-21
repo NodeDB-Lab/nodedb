@@ -35,6 +35,7 @@ use tracing::info;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::clear_versioned_sparse::CollectionClear;
 use crate::data::executor::handlers::reclaim;
 use crate::data::executor::handlers::reclaim_retry::retry_reclaim;
 use crate::data::executor::task::ExecutionTask;
@@ -91,7 +92,7 @@ impl CoreLoop {
             task.request.database_id,
             TenantId::new(tenant_id),
             collection,
-            false,
+            CollectionClear::Drop,
             reclaim_l1_files,
             true,
         ) {
@@ -163,12 +164,14 @@ impl CoreLoop {
     /// counts; callers that don't need them (snapshot clear-then-install)
     /// can discard the result.
     ///
-    /// When `preserve_collection_metadata` is true the collection's schema and
-    /// derived metadata (`CollectionConfig`, bitemporal chain hashes, aggregate
-    /// cache) are kept — used by clear-then-install, where the row data is
-    /// cleared and reinstalled from the snapshot but the collection definition
-    /// (which the data snapshot does not carry) must remain so the reinstalled
-    /// rows stay readable. A full DROP passes false to remove everything.
+    /// [`CollectionClear::KeepDefinition`] keeps the collection's schema and
+    /// derived metadata (`CollectionConfig`, bitemporal chain hashes,
+    /// aggregate cache). Clear-then-install takes it: the row data is
+    /// cleared and reinstalled from the snapshot, but the collection
+    /// definition (which the data snapshot does not carry) remains so the
+    /// reinstalled rows stay readable. Its maintained-set fate says
+    /// whether the maintained index set goes with the rows, in their
+    /// transaction. [`CollectionClear::Drop`] removes everything.
     ///
     /// Idempotent: missing in-memory state is a no-op; missing files are a
     /// no-op. Metrics emission and audit/response building are the caller's
@@ -194,10 +197,11 @@ impl CoreLoop {
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-        preserve_collection_metadata: bool,
+        clear: CollectionClear,
         reclaim_l1_files: bool,
         clear_edges: bool,
     ) -> crate::Result<ClearCollectionStats> {
+        let preserve_collection_metadata = clear.keeps_definition();
         let db = database_id;
         let tid = tenant_id;
         let db_raw = database_id.as_u64();
@@ -210,15 +214,8 @@ impl CoreLoop {
         // re-CREATE reuses the same key prefix, so surviving versions would
         // resurrect the dropped collection's history (and yield a corrupt
         // current row).
-        let (docs_removed, idxs_removed) = retry_reclaim(
-            "sparse.delete_all_versioned_for_collection",
-            tid_raw,
-            collection,
-            || {
-                self.sparse
-                    .delete_all_versioned_for_collection(db_raw, tid_raw, collection)
-            },
-        )?;
+        let (docs_removed, idxs_removed) =
+            self.clear_versioned_sparse(db_raw, tid_raw, collection, clear.maintained_set())?;
 
         // Inverted index: postings + doc_lengths + stats + segments.
         let inv_removed = retry_reclaim("inverted.purge_collection", tid_raw, collection, || {
@@ -541,8 +538,15 @@ mod tests {
             registry.record_failure(key, "crc").expect_err("quarantine");
         }
 
-        core.clear_collection_all_engines(database, tenant, "dropped", false, true, true)
-            .expect("clear");
+        core.clear_collection_all_engines(
+            database,
+            tenant,
+            "dropped",
+            CollectionClear::Drop,
+            true,
+            true,
+        )
+        .expect("clear");
 
         assert!(!registry.is_quarantined(&segment("dropped")));
         assert!(registry.is_quarantined(&segment("kept")));
@@ -576,8 +580,15 @@ mod tests {
             },
         );
 
-        core.clear_collection_all_engines(database, tenant, "products", false, true, true)
-            .expect("full collection clear");
+        core.clear_collection_all_engines(
+            database,
+            tenant,
+            "products",
+            CollectionClear::Drop,
+            true,
+            true,
+        )
+        .expect("full collection clear");
 
         assert_eq!(core.aggregate_cache.len(), 1);
         assert!(

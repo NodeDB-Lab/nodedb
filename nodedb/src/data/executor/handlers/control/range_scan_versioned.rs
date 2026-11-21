@@ -316,12 +316,14 @@ impl CoreLoop {
         }
     }
 
-    /// The rows a range scan reads when `field` carries a plain secondary
-    /// index: every row whose current version holds a value in
-    /// `[lower, upper)`, from the versioned range lookup. `None` when the
-    /// index cannot narrow the scan: no index on `field`, an array,
-    /// case-folded or partial index (whose entries are not the field's plain
-    /// string form for every row), or a bound that is not UTF-8.
+    /// The rows a range scan reads when this core maintains a plain
+    /// secondary index on `field`: every row whose current version holds a
+    /// value in `[lower, upper)`, from the versioned range lookup. `None`
+    /// when the index cannot narrow the scan: no maintained index on
+    /// `field`, an array, case-folded or partial index (whose entries are
+    /// not the field's plain string form for every row), or a bound that is
+    /// not UTF-8. A maintained path holds the entries of every row, whatever
+    /// build state the registered config names.
     fn range_index_candidates(
         &self,
         config_key: &(crate::types::DatabaseId, crate::types::TenantId, String),
@@ -329,8 +331,14 @@ impl CoreLoop {
         lower: Option<&[u8]>,
         upper: Option<&[u8]>,
     ) -> Option<crate::Result<Vec<nodedb_types::StorageKey>>> {
-        let config = self.doc_configs.get(config_key)?;
-        if !has_plain_ready_index(&config.index_paths, field) {
+        // A top-level path of a set in top-level mode is maintained too.
+        let maintained = self.maintained_indexes.path(
+            config_key.0.as_u64(),
+            config_key.1.as_u64(),
+            &config_key.2,
+            field,
+        )?;
+        if !has_plain_ready_index(std::slice::from_ref(&*maintained), field) {
             return None;
         }
         let lower = match lower {

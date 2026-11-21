@@ -456,21 +456,26 @@ impl CoreLoop {
         base()
     }
 
-    /// Look up the declared `is_array` / `case_insensitive` modifiers for an
-    /// index path, so the overlay merge folds a staged body's field values
+    /// Look up the maintained `is_array` / `case_insensitive` modifiers for
+    /// an index path, so the overlay merge folds a staged body's field values
     /// using the exact same extraction/fold the index write path applied.
-    /// Defaults to `(false, false)` when the collection has no registered
-    /// config or no matching index path — the merge still runs (comparing
-    /// unfolded scalar values), it just cannot special-case an array field
-    /// or a case-insensitive collation it doesn't know about.
+    /// The write path follows the maintained set, so the flags come from it.
+    /// Defaults to `(false, false)` when this core maintains no such path —
+    /// the merge still runs (comparing unfolded scalar values), it just
+    /// cannot special-case an array field or a case-insensitive collation it
+    /// doesn't know about.
     pub(in crate::data::executor) fn index_path_flags(
         &self,
         config_key: &(DatabaseId, TenantId, String),
         path: &str,
     ) -> (bool, bool) {
-        self.doc_configs
-            .get(config_key)
-            .and_then(|config| config.index_paths.iter().find(|ip| ip.path == path))
+        self.maintained_indexes
+            .path(
+                config_key.0.as_u64(),
+                config_key.1.as_u64(),
+                &config_key.2,
+                path,
+            )
             .map_or((false, false), |ip| (ip.is_array, ip.case_insensitive))
     }
 

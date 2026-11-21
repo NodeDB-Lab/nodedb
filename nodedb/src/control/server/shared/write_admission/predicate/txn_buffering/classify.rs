@@ -2435,6 +2435,8 @@ mod tests {
             PhysicalPlan::Document(DocumentOp::DropIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "f".into(),
+                owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+                fence: nodedb_physical::physical_plan::DocIndexFence::default(),
             }),
             PhysicalPlan::Document(DocumentOp::BackfillIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -2443,6 +2445,8 @@ mod tests {
                 unique: false,
                 case_insensitive: false,
                 predicate: None,
+                owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+                fence: nodedb_physical::physical_plan::DocIndexFence::default(),
             }),
             PhysicalPlan::Vector(VectorOp::SetParams {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

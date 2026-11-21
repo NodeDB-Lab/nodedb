@@ -11,6 +11,7 @@
 //! the restored rows' full-text postings. `index_images` installs the vector
 //! history, sparse vector indexes and spatial R-trees.
 
+mod collection_records;
 mod edges;
 mod engines;
 mod index_images;

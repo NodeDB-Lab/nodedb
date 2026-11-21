@@ -240,6 +240,8 @@ pub(super) fn wal_append_document_op(
             unique,
             case_insensitive,
             predicate,
+            owner,
+            fence,
         } => {
             let record = crate::wal::DocumentIndexBuildRecord {
                 collection: collection.as_str().to_owned(),
@@ -248,6 +250,8 @@ pub(super) fn wal_append_document_op(
                 unique: *unique,
                 case_insensitive: *case_insensitive,
                 predicate: predicate.clone(),
+                owner: owner.clone(),
+                fence: *fence,
             };
             Some(wal.append_document_index_build(
                 tenant_id,
@@ -256,10 +260,17 @@ pub(super) fn wal_append_document_op(
                 &record.to_bytes()?,
             )?)
         }
-        DocumentOp::DropIndex { collection, field } => {
+        DocumentOp::DropIndex {
+            collection,
+            field,
+            owner,
+            fence,
+        } => {
             let record = crate::wal::DocumentIndexRetireRecord {
                 collection: collection.as_str().to_owned(),
                 field: field.clone(),
+                owner: owner.clone(),
+                fence: *fence,
             };
             Some(wal.append_document_index_retire(
                 tenant_id,
@@ -379,6 +390,11 @@ mod tests {
             unique: true,
             case_insensitive: false,
             predicate: Some("active = true".to_string()),
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Named("by_email".into()),
+            fence: nodedb_physical::physical_plan::DocIndexFence {
+                incarnation: nodedb_types::Hlc::new(5, 0),
+                descriptor_version: 3,
+            },
         });
         let outcome = super::super::wal_append_if_write(
             &wal,
@@ -396,6 +412,11 @@ mod tests {
         assert_eq!(decoded.path, "$.email");
         assert!(decoded.unique);
         assert_eq!(decoded.predicate.as_deref(), Some("active = true"));
+        assert_eq!(
+            decoded.owner,
+            nodedb_physical::physical_plan::DocIndexOwner::Named("by_email".into())
+        );
+        assert_eq!(decoded.fence.descriptor_version, 3);
     }
 
     #[test]
@@ -405,6 +426,8 @@ mod tests {
         let plan = PhysicalPlan::Document(DocumentOp::DropIndex {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
             field: "$.email".to_string(),
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+            fence: nodedb_physical::physical_plan::DocIndexFence::default(),
         });
         let outcome = super::super::wal_append_if_write(
             &wal,
@@ -420,6 +443,10 @@ mod tests {
             crate::wal::DocumentIndexRetireRecord::from_bytes(&record.payload).expect("decode");
         assert_eq!(decoded.collection, "users");
         assert_eq!(decoded.field, "$.email");
+        assert_eq!(
+            decoded.owner,
+            nodedb_physical::physical_plan::DocIndexOwner::Declared
+        );
     }
 
     #[test]

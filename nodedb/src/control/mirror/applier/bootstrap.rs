@@ -332,6 +332,18 @@ impl Session<'_> {
         )
         .await
         .map_err(failed)?;
+        // Before any row: each collection maintains the document indexes it
+        // declares, so every re-issued row writes their entries. The catalog
+        // image installs no index step of its own.
+        for coll in collections.iter().filter(|coll| coll.tenant_id == tenant) {
+            crate::control::doc_index_install::build_doc_indexes_of(
+                self.state,
+                coll,
+                crate::event::EventSource::RaftFollower,
+            )
+            .await
+            .map_err(failed)?;
+        }
         let stats = reissue_mirror_capture(self.state, tenant, database, snap)
             .await
             .map_err(failed)?;

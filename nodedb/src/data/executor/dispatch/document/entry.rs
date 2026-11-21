@@ -234,9 +234,19 @@ impl CoreLoop {
 
             DocumentOp::Register { .. } => self.dispatch_register(task, tid, op),
 
-            DocumentOp::DropIndex { collection, field } => {
-                self.execute_drop_document_index(task, tid, collection.as_str(), field)
-            }
+            DocumentOp::DropIndex {
+                collection,
+                field,
+                owner,
+                fence,
+            } => self.execute_drop_document_index(
+                task,
+                tid,
+                collection.as_str(),
+                field,
+                owner,
+                *fence,
+            ),
 
             DocumentOp::Merge { .. } => self.dispatch_merge(task, tid, op, false),
 
@@ -263,6 +273,8 @@ impl CoreLoop {
                 unique,
                 case_insensitive,
                 predicate,
+                owner,
+                fence,
             } => self.execute_backfill_index(
                 task,
                 document::index_maintenance::BackfillIndexParams {
@@ -271,8 +283,11 @@ impl CoreLoop {
                     path,
                     is_array: *is_array,
                     unique: *unique,
+                    judge_unique: true,
                     case_insensitive: *case_insensitive,
                     predicate: predicate.as_deref(),
+                    owner,
+                    fence: *fence,
                 },
             ),
 

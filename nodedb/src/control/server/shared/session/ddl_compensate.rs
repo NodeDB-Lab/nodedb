@@ -16,7 +16,7 @@ use nodedb_cluster::{MetadataEntry, PendingDdlObject};
 use crate::control::catalog_entry::incarnation::RowKey;
 use crate::control::catalog_entry::incarnation::target::{carried_target, delete_key, written_row};
 use crate::control::catalog_entry::{self, CatalogEntry};
-use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::data_log_targets::DataLogTargets;
 use crate::control::metadata_proposer::MetadataRaftHandle;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::state::SharedState;
@@ -41,11 +41,12 @@ pub(super) async fn compensate_finalized(
             .await?;
     let reversed = propose_reversals(state, handle.as_ref(), lease.token(), objects).await;
     lease.release().await;
-    let (log_index, constraint_targets) = reversed?;
+    let (log_index, data_log_targets) = reversed?;
     // A restored constraint set is live on the collection's data log before
-    // the compensation returns. The reversal is committed, so a failed
-    // install never fails it.
-    crate::control::constraint_install::install_constraints(state, &constraint_targets).await;
+    // the compensation returns. The restored descriptor's document index
+    // steps run too. The reversal is committed, so a failed constraint
+    // install or index step never fails it.
+    data_log_targets.install(state).await;
     // The compensation restores prior authorization state, which binds every
     // node like any other authorization change.
     if super::ddl_authorization::objects_bear_authorization(objects)? {
@@ -56,18 +57,18 @@ pub(super) async fn compensate_finalized(
 
 /// Plan, stamp, and propose the reversal batch under the preparation lease
 /// `token`, then check that every reversal applied. Returns the batch's log
-/// index and the collections whose constraint version it changed.
+/// index and the data-log steps it owes its collections.
 async fn propose_reversals(
     state: &SharedState,
     handle: &dyn MetadataRaftHandle,
     token: u64,
     objects: &[PendingDdlObject],
-) -> crate::Result<(u64, Vec<ConstraintTarget>)> {
+) -> crate::Result<(u64, DataLogTargets)> {
     let catalog = state.credentials.catalog();
     let reversals = plan_reversals(objects, catalog)?;
     let stamped =
         catalog_entry::descriptor_stamp::stamp_batch(reversals, &state.hlc_clock, catalog)?;
-    let targets = constraint_targets(catalog, &stamped)?;
+    let targets = DataLogTargets::of(catalog, &stamped)?;
     let mut entries = Vec::with_capacity(stamped.len());
     for entry in &stamped {
         entries.push(MetadataEntry::CatalogDdl {

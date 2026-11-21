@@ -15,7 +15,6 @@ pub(in crate::data::executor) struct SecondaryIndexInputs<'a> {
     pub old_doc: Option<&'a serde_json::Value>,
     pub new_doc: &'a serde_json::Value,
     pub doc_id: &'a StorageKey,
-    pub index_paths: &'a [crate::engine::document::store::IndexPath],
     /// The system-time ordinal of the row version this write appends. Every
     /// index entry the write adds or tombstones carries it.
     pub sys_from: i64,
@@ -136,7 +135,10 @@ impl CoreLoop {
 
     /// Apply the secondary-index SET diff within an already-open write txn.
     ///
-    /// Every entry lands in the versioned index at `sys_from`, the ordinal of
+    /// The diff covers the paths this core maintains for the collection,
+    /// never the registered config's paths. In top-level mode those include
+    /// each top-level key of either document. Every entry lands in the
+    /// versioned index at `sys_from`, the ordinal of
     /// the row version the caller appends, inside the caller's
     /// `WriteTransaction`. There is no own-transaction variant: every caller
     /// already holds the row's write txn, and a nested `begin_write`
@@ -166,12 +168,17 @@ impl CoreLoop {
             old_doc,
             new_doc,
             doc_id,
-            index_paths,
             sys_from,
         } = inputs;
         let crs = self.crs_context();
         let mut written = Vec::new();
-        for index_path in index_paths {
+        // In top-level mode the paths include each top-level key of either
+        // version, so a key the new version drops tombstones its old value.
+        let docs = [new_doc, old_doc.unwrap_or(new_doc)];
+        let index_paths =
+            self.maintained_indexes
+                .paths_for_docs(database_id, tid, collection, &docs);
+        for index_path in &index_paths {
             let new_vals = index_values_for(new_doc, index_path, &crs);
             let old_vals = old_doc
                 .map(|d| index_values_for(d, index_path, &crs))
@@ -226,19 +233,24 @@ impl CoreLoop {
     }
 
     /// Expand a document into the `(field, value)` tuples it contributes across
-    /// a set of index paths, via the same [`index_values_for`] extraction the
-    /// forward write path uses. Used to recompute the secondary-index tuples a
-    /// pre-delete document would have contributed, when the delete cascade
-    /// itself (a prefix scan) does not return them.
+    /// the paths this core maintains for `collection`, via the same
+    /// [`index_values_for`] extraction the forward write path uses. A delete
+    /// recomputes with it the tuples the pre-delete document contributed,
+    /// when the delete cascade itself (a prefix scan) does not return them.
     pub(in crate::data::executor) fn index_tuples_for_doc(
         &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
         doc: &serde_json::Value,
-        index_paths: &[crate::engine::document::store::IndexPath],
     ) -> Vec<(String, String)> {
         let crs = self.crs_context();
         let mut out = Vec::new();
-        for index_path in index_paths {
-            for v in index_values_for(doc, index_path, &crs) {
+        for index_path in
+            self.maintained_indexes
+                .paths_for_docs(database_id, tid, collection, &[doc])
+        {
+            for v in index_values_for(doc, &index_path, &crs) {
                 out.push((index_path.path.clone(), v));
             }
         }
@@ -274,4 +286,88 @@ fn index_values_for(
         .into_iter()
         .map(|v| maybe_lowercase(&v, index_path.case_insensitive))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
+    use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate, TenantId};
+
+    use super::super::CoreLoop;
+    use super::super::tests::{make_core_with_dir, make_request};
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::task::ExecutionTask;
+    use crate::engine::document::store::CollectionConfig;
+    use crate::engine::sparse::btree::MaintainedIndexSet;
+
+    const COLLECTION: &str = "top_level_rows";
+
+    fn put(core: &mut CoreLoop, value: serde_json::Value) {
+        let response = core.execute(&ExecutionTask::new(make_request(PhysicalPlan::Document(
+            DocumentOp::PointPut {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
+                document_id: "r1".into(),
+                value: nodedb_types::json_to_msgpack(&value).expect("encode"),
+                surrogate: Surrogate::new(1),
+                pk_bytes: b"r1".to_vec(),
+                returning: None,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+                rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            },
+        ))));
+        assert_eq!(response.status, Status::Ok, "{response:?}");
+    }
+
+    fn rows(core: &CoreLoop, path: &str, value: &str) -> usize {
+        core.sparse
+            .versioned_index_lookup_as_of(0, 1, COLLECTION, path, value, None)
+            .expect("lookup")
+            .len()
+    }
+
+    /// Every field of the collection's stored index keys.
+    fn fields(core: &CoreLoop) -> std::collections::BTreeSet<String> {
+        let prefix = format!("0:1:{COLLECTION}:");
+        core.sparse
+            .scan_versioned_indexes_for_tenant(0, 1)
+            .expect("scan")
+            .into_iter()
+            .filter_map(|(key, _)| {
+                key.strip_prefix(prefix.as_str())
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(field, _)| field.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn top_level_mode_indexes_each_scalar_key_and_tombstones_a_dropped_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _requests, _responses) = make_core_with_dir(dir.path());
+        core.seed_doc_configs(&[(
+            (DatabaseId::DEFAULT, TenantId::new(1), COLLECTION.into()),
+            CollectionConfig::new(COLLECTION),
+        )]);
+        let mut set = MaintainedIndexSet::empty(0, 1, COLLECTION);
+        set.top_level = true;
+        core.maintained_indexes.install(&set).expect("install");
+
+        put(
+            &mut core,
+            serde_json::json!({"city": "oslo", "n": 3, "tags": ["a"], "nested": {"x": 1}}),
+        );
+        assert_eq!(rows(&core, "$.city", "oslo"), 1);
+        assert_eq!(rows(&core, "$.n", "3"), 1);
+        assert_eq!(
+            fields(&core),
+            ["$.city", "$.n"].map(String::from).into(),
+            "one entry per scalar top-level key"
+        );
+
+        put(&mut core, serde_json::json!({"n": 4}));
+        assert_eq!(rows(&core, "$.city", "oslo"), 0, "a dropped key tombstones");
+        assert_eq!(rows(&core, "$.n", "3"), 0);
+        assert_eq!(rows(&core, "$.n", "4"), 1);
+    }
 }

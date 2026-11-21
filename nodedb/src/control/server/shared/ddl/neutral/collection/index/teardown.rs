@@ -137,10 +137,17 @@ async fn secondary(
         )
         .await;
     }
+    // The entries are keyed by the extraction path, which drops an array
+    // path's `[]` suffix.
+    let field = field.strip_suffix("[]").unwrap_or(&field).to_string();
     let plan = crate::bridge::envelope::PhysicalPlan::Document(
         nodedb_physical::physical_plan::DocumentOp::DropIndex {
             collection: nodedb_types::QualifiedCollection::new(database_id, &record.collection),
             field,
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Named(record.name.clone()),
+            // `dispatch` stamps the fence of the committed descriptor that
+            // dropped the index, at once or at COMMIT.
+            fence: nodedb_physical::physical_plan::DocIndexFence::default(),
         },
     );
     teardown_now_or_at_commit(state, tenant_id, database_id, &record.collection, plan).await
@@ -193,13 +200,33 @@ async fn teardown_now_or_at_commit(
 /// Propose one teardown plan to every replica of the collection's vShard.
 /// Each replica purges the entries at the plan's log position and appends
 /// its WAL record, so a re-created index on any node starts from none.
+///
+/// A document index retire carries the fence of the committed descriptor
+/// that dropped the index. That descriptor is committed here, so its fence
+/// is above every descriptor that still held the index, and a build derived
+/// from one of those changes nothing after this retire.
 pub(crate) async fn dispatch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     collection: &str,
-    plan: crate::bridge::envelope::PhysicalPlan,
+    mut plan: crate::bridge::envelope::PhysicalPlan,
 ) -> Result<(), DdlError> {
+    if let crate::bridge::envelope::PhysicalPlan::Document(
+        nodedb_physical::physical_plan::DocumentOp::DropIndex { fence, .. },
+    ) = &mut plan
+    {
+        let committed = state
+            .credentials
+            .catalog()
+            .get_committed_collection(database_id, tenant_id.as_u64(), collection)
+            .map_err(|e| DdlError::from_error(&e))?;
+        let Some(committed) = committed else {
+            // The collection is gone. Its purge clears every core's set.
+            return Ok(());
+        };
+        *fence = crate::control::doc_index_install::doc_index_fence(&committed);
+    }
     super::engine_step::propose_index_step(
         state,
         tenant_id,

@@ -142,6 +142,7 @@ fn register(core: &mut CoreLoop) {
         key(LEDGER),
         CollectionConfig::new(LEDGER).with_bitemporal(true),
     );
+    core.maintain_registered_paths_for_test();
     core.vector_params.insert(
         key(&format!("{ORDERS}:emb")),
         crate::engine::vector::hnsw::HnswParams::default(),

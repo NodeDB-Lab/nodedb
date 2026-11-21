@@ -545,6 +545,7 @@ mod tests {
             (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
             config,
         );
+        core.maintain_registered_paths_for_test();
         let key = StorageKey::for_surrogate(SURROGATE);
         core.sparse
             .put(DB, TID, COLL, &key, &[0xc1], core.bitemporal_ordinal())

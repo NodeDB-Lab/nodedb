@@ -401,6 +401,8 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             unique,
             case_insensitive,
             predicate,
+            owner,
+            fence,
         } => ReplicatedWrite::DocIndexBuild {
             collection: collection.as_str().to_owned(),
             path: path.clone(),
@@ -408,10 +410,19 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             unique: *unique,
             case_insensitive: *case_insensitive,
             predicate: predicate.clone(),
+            owner: owner.clone(),
+            fence: *fence,
         },
-        DocumentOp::DropIndex { collection, field } => ReplicatedWrite::DocIndexRetire {
+        DocumentOp::DropIndex {
+            collection,
+            field,
+            owner,
+            fence,
+        } => ReplicatedWrite::DocIndexRetire {
             collection: collection.as_str().to_owned(),
             field: field.clone(),
+            owner: owner.clone(),
+            fence: *fence,
         },
 
         // Not a write — reads / scans / collection config / system ops.

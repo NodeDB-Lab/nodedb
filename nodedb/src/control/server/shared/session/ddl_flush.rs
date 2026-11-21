@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nodedb_cluster::{MetadataEntry, PendingDdlObject, encode_entry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
-use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::data_log_targets::DataLogTargets;
 use crate::control::lease::DrainHolds;
 use crate::control::metadata_proposer::{DdlPrepareLease, MetadataRaftHandle};
 use crate::control::security::catalog::SystemCatalog;
@@ -114,9 +114,9 @@ pub(super) struct PendingDdlHandle<'a> {
     /// releases it. A handle dropped unfinalized releases it from `Drop`.
     lease: DdlPrepareLease<'a>,
     objects: Vec<PendingDdlObject>,
-    /// The collections whose constraint version the reserved DDL changes.
-    /// [`finalize_pending`] installs their constraints once it applied.
-    constraint_targets: Vec<ConstraintTarget>,
+    /// The data-log steps the reserved DDL owes its collections.
+    /// [`finalize_pending`] runs them once it applied.
+    data_log_targets: DataLogTargets,
 }
 
 impl PendingDdlHandle<'_> {
@@ -216,7 +216,7 @@ async fn propose_pending_buffered<'a>(
         Ok(Reserved {
             log_index,
             objects,
-            constraint_targets,
+            data_log_targets,
         }) => {
             drains.keep();
             Ok(PendingDdlHandle {
@@ -224,7 +224,7 @@ async fn propose_pending_buffered<'a>(
                 log_index,
                 lease,
                 objects,
-                constraint_targets,
+                data_log_targets,
             })
         }
         Err(error) => {
@@ -239,13 +239,13 @@ async fn propose_pending_buffered<'a>(
 struct Reserved {
     log_index: u64,
     objects: Vec<PendingDdlObject>,
-    /// The collections whose constraint version the reserved DDL changes.
-    constraint_targets: Vec<ConstraintTarget>,
+    /// The data-log steps the reserved DDL owes its collections.
+    data_log_targets: DataLogTargets,
 }
 
 /// Drain, stamp, and reserve `buffered` under the preparation lease `token`.
 /// Returns the reservation's log index, its reserved objects, and the
-/// collections whose constraint version it changes. Every drain it starts is
+/// data-log steps it owes its collections. Every drain it starts is
 /// recorded in `drains`, for the caller to keep or end.
 async fn reserve_buffered(
     state: &SharedState,
@@ -299,7 +299,7 @@ async fn reserve_buffered(
     let stamped = catalog_entry::descriptor_stamp::stamp_batch(entries, &state.hlc_clock, catalog)?;
     // Read against the committed rows, which the reservation leaves unchanged
     // until the finalize applies.
-    let constraint_targets = constraint_targets(catalog, &stamped)?;
+    let data_log_targets = DataLogTargets::of(catalog, &stamped)?;
 
     // Durable before the batch reserves anything, so a failed record refuses the COMMIT.
     crate::control::metadata_proposer::audit_intent::record_ddl_intents(
@@ -348,7 +348,7 @@ async fn reserve_buffered(
     Ok(Reserved {
         log_index,
         objects,
-        constraint_targets,
+        data_log_targets,
     })
 }
 
@@ -372,7 +372,7 @@ pub(super) async fn finalize_pending(
         log_index,
         lease,
         objects,
-        constraint_targets,
+        data_log_targets,
     } = handle;
     tracing::debug!(token, log_index, "finalizing pending DDL");
     let finalized = finalize_reserved(state, token, &objects).await;
@@ -386,8 +386,10 @@ pub(super) async fn finalize_pending(
     let (log_index, bears_authorization) = finalized?;
     // A changed constraint set is live on the collection's data log before
     // COMMIT returns, so the first CRDT apply after it is not fenced. The
-    // finalize is committed, so a failed install never fails COMMIT.
-    crate::control::constraint_install::install_constraints(state, &constraint_targets).await;
+    // document index steps run before any buffered DML dispatches. The
+    // finalize is committed, so a failed constraint install or index step
+    // never fails COMMIT.
+    data_log_targets.install(state).await;
     if bears_authorization {
         super::ddl_authorization::barrier_at(state, log_index).await?;
     }

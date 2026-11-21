@@ -80,6 +80,7 @@ fn register(core: &mut CoreLoop, schema: StrictSchema) {
             .with_index("status")
             .with_index("obsolete"),
     );
+    core.maintain_registered_paths_for_test();
 }
 #[test]
 fn old_strict_image_after_add_keeps_raw_bytes_and_default_equality_index() {

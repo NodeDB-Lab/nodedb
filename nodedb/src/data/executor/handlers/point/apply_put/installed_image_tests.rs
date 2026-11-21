@@ -202,6 +202,7 @@ fn older_installed_image_only_adds_history_and_preserves_current_row_and_indexes
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
     core.doc_configs
         .insert(key(), CollectionConfig::new(COLL).with_index("n"));
+    core.maintain_registered_paths_for_test();
     let newer = schemaless(2, 20);
     let txn = core.sparse.begin_write().unwrap();
     core.apply_installed_document(&txn, row(1), &newer).unwrap();

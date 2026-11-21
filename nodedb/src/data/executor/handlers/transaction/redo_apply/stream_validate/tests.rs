@@ -760,6 +760,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) fn fold_core(
         ),
         target,
     );
+    core.maintain_registered_paths_for_test();
     let mut source = CollectionConfig::new(CHARGES);
     source.enforcement.materialized_sum_sources = vec![MaterializedSumBinding {
         target_collection: BALANCES.to_string(),

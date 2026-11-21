@@ -93,6 +93,7 @@ mod cross_engine_three_way_fts_vector_doc;
 mod ddl_audit_protocols;
 mod define_field_event_scope_authorization;
 mod dml_resolve_pass;
+mod doc_index_declared_fields;
 mod document_bitemporal_dml;
 mod document_bitemporal_store;
 mod drop_user_reassigns_owned_objects;

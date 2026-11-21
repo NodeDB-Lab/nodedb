@@ -127,6 +127,7 @@ fn resolved_unique_handover_uses_the_complete_installed_statement() {
         ..IndexPath::new("code")
     });
     core.doc_configs.insert(config_key(collection), config);
+    core.maintain_registered_paths_for_test();
     seed(
         &mut core,
         &[
@@ -181,6 +182,7 @@ fn resolved_late_refusal_restores_source_target_history_indexes_and_publication(
         config_key(TARGET),
         CollectionConfig::new(TARGET).with_index("balance"),
     );
+    core.maintain_registered_paths_for_test();
     core.sparse
         .put(
             0,

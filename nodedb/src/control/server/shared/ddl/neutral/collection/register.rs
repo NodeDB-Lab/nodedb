@@ -106,8 +106,11 @@ pub async fn dispatch_register_for_sum_sources(
 }
 
 /// Per-field auto-derived indexes (schemaless default: each declared field
-/// becomes a non-unique `$.field` index). Always `Ready` — these exist
-/// from the moment the collection is created.
+/// becomes a non-unique `$.field` index). Always `Ready` in the config. A
+/// core maintains a strict collection's path only from the `DocIndexBuild`
+/// its declared field proposes on the collection's data log. A schemaless
+/// collection maintains every top-level key from one top-level build. See
+/// [`crate::control::doc_index_install`].
 ///
 /// `pub(crate)` so the boot-time `doc_configs` seed loader
 /// ([`crate::bootstrap::data_plane::load_doc_config_registry`]) can derive

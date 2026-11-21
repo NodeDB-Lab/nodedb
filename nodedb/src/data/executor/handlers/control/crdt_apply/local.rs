@@ -442,6 +442,7 @@ pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
             (DatabaseId::DEFAULT, TenantId::new(1), "docs".to_string()),
             config,
         );
+        core.maintain_registered_paths_for_test();
         let key = StorageKey::for_surrogate(document_surrogate("one"));
         let db = task.request.database_id.as_u64();
         let tid = task.request.tenant_id.as_u64();

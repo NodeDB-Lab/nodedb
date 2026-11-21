@@ -101,6 +101,18 @@ pub(crate) async fn before_recon_submit(node_id: u64) {
     wait(FailScope::Node(node_id), "recon::before_submit").await;
 }
 
+/// The reconcile gate of node `node_id`, `reconcile::before_doc_index_delivery`:
+/// a reconcile pass read the catalog and parks before it proposes one
+/// collection's document index steps. A test changes the collection, then
+/// releases the gate, so the pass delivers steps from the older descriptor.
+pub(crate) async fn before_doc_index_delivery(node_id: u64) {
+    wait(
+        FailScope::Node(node_id),
+        "reconcile::before_doc_index_delivery",
+    )
+    .await;
+}
+
 /// The statement routing gate of node `node_id`, `stmt::before_route`: a
 /// pgwire statement planned and parks before the gateway forward and the
 /// Calvin classification.

@@ -312,6 +312,7 @@ mod tests {
             ),
             config,
         );
+        core.maintain_registered_paths_for_test();
         for (surrogate, kind) in [(1, "x"), (2, "y"), (3, "x")] {
             let body = doc_format::encode_to_msgpack(&serde_json::json!({ "kind": kind }));
             core.sparse

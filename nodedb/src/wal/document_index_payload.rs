@@ -32,6 +32,10 @@ pub(crate) struct DocumentIndexBuildRecord {
     /// Raw SQL text of a partial index's `WHERE` body. `None` for a full
     /// index.
     pub predicate: Option<String>,
+    /// The index or declared field the build adds to the path.
+    pub owner: nodedb_physical::physical_plan::DocIndexOwner,
+    /// The descriptor the build derives from.
+    pub fence: nodedb_physical::physical_plan::DocIndexFence,
 }
 
 /// Payload of a `DocumentIndexRetire` record: every field of
@@ -49,6 +53,10 @@ pub(crate) struct DocumentIndexBuildRecord {
 pub(crate) struct DocumentIndexRetireRecord {
     pub collection: String,
     pub field: String,
+    /// The index or declared field the retire removes from the path.
+    pub owner: nodedb_physical::physical_plan::DocIndexOwner,
+    /// The descriptor the retire derives from.
+    pub fence: nodedb_physical::physical_plan::DocIndexFence,
 }
 
 impl DocumentIndexBuildRecord {
@@ -96,6 +104,11 @@ mod tests {
             unique: true,
             case_insensitive: true,
             predicate: Some("active = true".into()),
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Named("by_email".into()),
+            fence: nodedb_physical::physical_plan::DocIndexFence {
+                incarnation: nodedb_types::Hlc::new(5, 0),
+                descriptor_version: 3,
+            },
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(
@@ -109,6 +122,11 @@ mod tests {
         let record = DocumentIndexRetireRecord {
             collection: "users".into(),
             field: "$.email".into(),
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+            fence: nodedb_physical::physical_plan::DocIndexFence {
+                incarnation: nodedb_types::Hlc::new(5, 0),
+                descriptor_version: 4,
+            },
         };
         let bytes = record.to_bytes().expect("encode");
         assert_eq!(

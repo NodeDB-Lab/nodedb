@@ -344,6 +344,7 @@ mod tests {
             ),
             config.clone(),
         );
+        core.maintain_registered_paths_for_test();
         let old = serde_json::json!({"note": "old"});
         {
             let mut engine = DocumentEngine::new(&core.sparse, database_id, TID);
@@ -415,6 +416,7 @@ mod tests {
                 .with_index("note")
                 .with_bitemporal(true),
         );
+        core.maintain_registered_paths_for_test();
         let row = StorageKey::for_surrogate(Surrogate(1));
         let old = serde_json::json!({"k": "a", "note": "old"});
         core.sparse

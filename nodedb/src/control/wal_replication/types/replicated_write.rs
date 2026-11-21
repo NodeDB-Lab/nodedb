@@ -1110,12 +1110,16 @@ pub enum ReplicatedWrite {
         unique: bool,
         case_insensitive: bool,
         predicate: Option<String>,
+        owner: nodedb_physical::physical_plan::DocIndexOwner,
+        fence: nodedb_physical::physical_plan::DocIndexFence,
     },
-    /// Remove every entry of a document secondary index field at this log
+    /// Remove one owner of a document secondary index field at this log
     /// position. Carries every field of `DocumentOp::DropIndex`.
     DocIndexRetire {
         collection: String,
         field: String,
+        owner: nodedb_physical::physical_plan::DocIndexOwner,
+        fence: nodedb_physical::physical_plan::DocIndexFence,
     },
 }
 
@@ -1340,10 +1344,14 @@ mod tests {
                 unique: true,
                 case_insensitive: true,
                 predicate: Some("active = true".into()),
+                owner: nodedb_physical::physical_plan::DocIndexOwner::Named("by_email".into()),
+                fence: nodedb_physical::physical_plan::DocIndexFence::default(),
             },
             ReplicatedWrite::DocIndexRetire {
                 collection: "users".into(),
                 field: "$.email".into(),
+                owner: nodedb_physical::physical_plan::DocIndexOwner::Declared,
+                fence: nodedb_physical::physical_plan::DocIndexFence::default(),
             },
         ];
 

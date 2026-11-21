@@ -161,6 +161,52 @@ impl SparseEngine {
         Ok(keys.len())
     }
 
+    /// Every field of `coll` that holds an entry and starts with
+    /// `field_prefix`, in key order, read inside a caller-owned write
+    /// transaction. Each field costs one seek past its entries, so the walk
+    /// never reads every entry.
+    pub fn versioned_index_fields_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        field_prefix: &str,
+    ) -> crate::Result<Vec<String>> {
+        let coll_prefix = format!("{database_id}:{tenant}:{coll}:");
+        let lo = format!("{coll_prefix}{field_prefix}");
+        let t = txn
+            .open_table(INDEXES_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        let mut fields = Vec::new();
+        let mut start = lo.clone();
+        loop {
+            let next = {
+                let mut range = t
+                    .range(start.as_str()..)
+                    .map_err(|e| redb_err("range", e))?;
+                match range.next() {
+                    Some(entry) => {
+                        let (key, _) = entry.map_err(|e| redb_err("entry", e))?;
+                        let key = key.value();
+                        key.strip_prefix(lo.as_str())
+                            .map(|_| &key[coll_prefix.len()..])
+                            .and_then(|rest| rest.split_once(':'))
+                            .map(|(field, _)| field.to_string())
+                    }
+                    None => None,
+                }
+            };
+            let Some(field) = next else {
+                break;
+            };
+            // `:` = 0x3A, next byte `;` = 0x3B skips every entry of `field`.
+            start = format!("{coll_prefix}{field};");
+            fields.push(field);
+        }
+        Ok(fields)
+    }
+
     /// The doc ids whose row version visible at `sys_cutoff` (`None` =
     /// current) holds `value` under `field`, in doc-id order. The match is
     /// exact: an entry for `"a:b"` never answers a lookup of `"a"`. Every

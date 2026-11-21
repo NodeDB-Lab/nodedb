@@ -23,7 +23,7 @@ use super::super::super::super::result::DdlError;
 /// Propose `plan` on the vShard of `collection` and wait until this node
 /// applied it. A refusal keeps its SQLSTATE and code, so a UNIQUE duplicate
 /// is `23505`. `context` names the step in every error message.
-pub(super) async fn propose_index_step(
+pub(crate) async fn propose_index_step(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
@@ -31,6 +31,43 @@ pub(super) async fn propose_index_step(
     plan: PhysicalPlan,
     context: &str,
 ) -> Result<Vec<u8>, DdlError> {
+    propose_index_step_as(
+        state,
+        IndexStepTarget {
+            tenant_id,
+            database_id,
+            collection,
+            event_source: crate::event::EventSource::User,
+        },
+        plan,
+        context,
+    )
+    .await
+}
+
+/// Where one index step goes, and the source its write carries.
+pub(crate) struct IndexStepTarget<'a> {
+    pub tenant_id: TenantId,
+    pub database_id: DatabaseId,
+    pub collection: &'a str,
+    /// A mirror's bootstrap passes its follower source, which the mirror's
+    /// write gate admits.
+    pub event_source: crate::event::EventSource,
+}
+
+/// [`propose_index_step`] with the write's event source named.
+pub(crate) async fn propose_index_step_as(
+    state: &SharedState,
+    target: IndexStepTarget<'_>,
+    plan: PhysicalPlan,
+    context: &str,
+) -> Result<Vec<u8>, DdlError> {
+    let IndexStepTarget {
+        tenant_id,
+        database_id,
+        collection,
+        event_source,
+    } = target;
     dispatch_durable_autocommit_write(
         state,
         AutocommitWrite {
@@ -39,7 +76,7 @@ pub(super) async fn propose_index_step(
             vshard_id: nodedb_types::CollectionKey::from_bare(database_id, collection).vshard(),
             plan,
             trace_id: TraceId::ZERO,
-            event_source: crate::event::EventSource::User,
+            event_source,
             txn_id: None,
             // Index maintenance is a system write.
             user_roles: Vec::new(),

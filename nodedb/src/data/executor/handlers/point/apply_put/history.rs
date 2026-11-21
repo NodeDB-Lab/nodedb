@@ -9,7 +9,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::history_install::{HistoryIndex, HistorySlot};
 use crate::engine::document::store::StorageKey;
 use crate::engine::sparse::btree_versioned::VersionedPut;
-use crate::types::{DatabaseId, TenantId};
 
 use super::types::PointPutOutcome;
 
@@ -59,16 +58,12 @@ impl CoreLoop {
                 body: &installed.stored,
             },
         )?;
-        // An indexed collection's body must decode, as on the current path.
-        let config_key = (
-            DatabaseId::new(database_id),
-            TenantId::new(tid),
-            collection.to_string(),
-        );
-        let doc = match self.doc_configs.get(&config_key) {
-            Some(config) if !config.index_paths.is_empty() => Some(read_projection),
-            _ => None,
-        };
+        // A collection with maintained index paths indexes the version, as
+        // on the current path.
+        let doc = self
+            .maintained_indexes
+            .maintains_any(database_id, tid, collection)
+            .then_some(read_projection);
         let index = self.write_history_index_in_txn(
             txn,
             HistoryIndex {

@@ -61,13 +61,13 @@ pub(crate) async fn build_secondary_index(
         return mark_ready(state, build).await;
     }
 
-    // Every node registered the Building index when it applied the Building
-    // catalog entry: that apply awaits the Register on every core. The build
-    // proposal carries this node's metadata floor, so each replica applies
-    // the build only after that Register, and a write after the scan
-    // maintains the index. Every replica of the collection's vShard builds
-    // from the rows it holds at the build's log position. A UNIQUE duplicate
-    // refuses the build on every replica with `23505`.
+    // The build proposal carries this node's metadata floor, so each replica
+    // applies it only after the Building catalog entry. Every replica of the
+    // collection's vShard builds from the rows it holds at the build's log
+    // position, and adds the index to the paths it maintains in the same
+    // transaction. Every write after the build maintains it. A UNIQUE
+    // duplicate refuses the build on every replica with `23505`, and no
+    // replica maintains the index.
     let backfill_plan = crate::bridge::envelope::PhysicalPlan::Document(
         nodedb_physical::physical_plan::DocumentOp::BackfillIndex {
             collection: nodedb_types::QualifiedCollection::new(database_id, collection),
@@ -76,6 +76,10 @@ pub(crate) async fn build_secondary_index(
             unique: *unique,
             case_insensitive: *case_insensitive,
             predicate: predicate.clone(),
+            owner: nodedb_physical::physical_plan::DocIndexOwner::Named(index_name.clone()),
+            // The `Building` descriptor the build derives from. A retire of
+            // the same name committed before it carries a lower fence.
+            fence: crate::control::doc_index_install::doc_index_fence(&coll),
         },
     );
     super::engine_step::propose_index_step(

@@ -48,6 +48,13 @@ pub struct TenantDataSnapshot {
     /// A backup leaves it out: its rows restore as new writes.
     pub storage_conversions: Vec<(String, Vec<u8>)>,
 
+    /// The maintained document index set of each collection that keeps one:
+    /// `[("{db}:{tid}:{collection}", encoded_set), ...]`. It names the index
+    /// paths whose entries the snapshot's `indexes_versioned` holds, so an
+    /// installed core maintains exactly those. A backup leaves it out: its
+    /// rows restore as new writes under the destination's own builds.
+    pub maintained_indexes: Vec<(String, Vec<u8>)>,
+
     /// Plain-columnar (and spatial) engine state per collection.
     ///
     /// Each entry is `(collection_key, msgpack_bytes)` where:

@@ -310,6 +310,10 @@ pub struct CoreLoop {
     /// `DocConfigRef` borrows the collection name.
     pub(in crate::data::executor) doc_configs: DocConfigs,
 
+    /// The document index paths this core maintains, per collection. Index
+    /// maintenance and index reads follow it, never `doc_configs`.
+    pub(in crate::data::executor) maintained_indexes: super::maintained_indexes::MaintainedIndexes,
+
     /// Chain heads and in-flight chain links of every HASH_CHAIN collection.
     pub(in crate::data::executor) chain: super::hash_chain_state::HashChainState,
 

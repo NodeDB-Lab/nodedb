@@ -4,6 +4,7 @@ use nodedb_types::{
     QualifiedCollection, RlsWriteCheck, Surrogate, SurrogateBitmap, SystemTimeScope,
 };
 
+use super::index_owner::{DocIndexFence, DocIndexOwner};
 use super::index_probe::IndexProbe;
 use super::merge_types::MergeClauseOp;
 use super::ollp_edge::OllpPredictedEdge;
@@ -365,10 +366,14 @@ pub enum DocumentOp {
         system_time: nodedb_types::SystemTimeScope,
     },
 
-    /// Drop all secondary index entries for a field.
+    /// Remove one owner from a secondary index field. The field's entries
+    /// go when no owner is left.
     DropIndex {
         collection: QualifiedCollection,
         field: String,
+        owner: DocIndexOwner,
+        /// The descriptor the retire derives from.
+        fence: DocIndexFence,
     },
 
     /// Backfill a secondary index from existing rows (CREATE INDEX on a
@@ -386,6 +391,10 @@ pub enum DocumentOp {
         /// false are skipped — not indexed, not UNIQUE-checked.
         #[serde(default)]
         predicate: Option<String>,
+        /// The index or declared field the build adds to the path.
+        owner: DocIndexOwner,
+        /// The descriptor the build derives from.
+        fence: DocIndexFence,
     },
 
     /// Truncate: delete ALL documents in a collection.

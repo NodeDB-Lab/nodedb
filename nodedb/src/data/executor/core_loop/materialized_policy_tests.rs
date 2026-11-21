@@ -53,6 +53,7 @@ fn configure(core: &mut CoreLoop, unique: bool, generated: bool) -> StrictSchema
         (DatabaseId::DEFAULT, TenantId::new(1), COLLECTION.into()),
         config,
     )]);
+    core.maintain_registered_paths_for_test();
     schema
 }
 
@@ -464,6 +465,7 @@ fn single_source_overwrite_allows_final_unique_handover_between_sum_targets() {
                 CollectionConfig::new(COLLECTION),
             ),
         ]);
+        core.maintain_registered_paths_for_test();
         for (surrogate, id, balance) in [(51, "a", "1"), (52, "b", "0")] {
             let response = execute(
                 &mut core,

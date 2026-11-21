@@ -133,6 +133,7 @@ impl CoreLoop {
             %value,
             "document index lookup"
         );
+        self.require_maintained_index(task.request.database_id.as_u64(), tid, collection, path)?;
 
         let doc_engine = crate::engine::document::store::DocumentEngine::new(
             &self.sparse,

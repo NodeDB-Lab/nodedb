@@ -40,19 +40,44 @@ impl SparseEngine {
     ) -> crate::Result<(usize, usize)> {
         let lo = coll_prefix(database_id, tenant, coll);
         let hi = coll_prefix_end(database_id, tenant, coll);
-        self.delete_all_versioned_in_range(&lo, &hi)
-    }
-
-    /// Range-delete every row of both versioned tables within `[lo, hi)`.
-    /// Keys are collected first (redb's range iterator borrows the table
-    /// immutably) then removed under a single write transaction so the
-    /// document and index purges commit atomically.
-    fn delete_all_versioned_in_range(&self, lo: &str, hi: &str) -> crate::Result<(usize, usize)> {
         let txn = self
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn versioned drop", e))?;
+        self.delete_all_versioned_in_range(txn, &lo, &hi)
+    }
 
+    /// [`Self::delete_all_versioned_for_collection`] that also removes the
+    /// collection's maintained index set in the same transaction, so no
+    /// commit keeps a maintained path whose entries left. A dropped
+    /// collection takes this, and so does a snapshot install's clear, whose
+    /// snapshot carries the set that replaces it.
+    pub fn drop_all_versioned_for_collection(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+    ) -> crate::Result<(usize, usize)> {
+        let lo = coll_prefix(database_id, tenant, coll);
+        let hi = coll_prefix_end(database_id, tenant, coll);
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn versioned drop", e))?;
+        self.remove_maintained_indexes_in_txn(&txn, database_id, tenant, coll)?;
+        self.delete_all_versioned_in_range(txn, &lo, &hi)
+    }
+
+    /// Range-delete every row of both versioned tables within `[lo, hi)`.
+    /// Keys are collected first (redb's range iterator borrows the table
+    /// immutably) then removed under `txn`, which this call commits, so the
+    /// document and index purges commit atomically.
+    fn delete_all_versioned_in_range(
+        &self,
+        txn: redb::WriteTransaction,
+        lo: &str,
+        hi: &str,
+    ) -> crate::Result<(usize, usize)> {
         let docs_removed;
         let idx_removed;
         let mut delta = StorageDelta::default();

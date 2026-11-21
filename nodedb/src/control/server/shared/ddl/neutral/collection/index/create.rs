@@ -186,13 +186,13 @@ pub async fn create_index(
         )?;
     }
 
-    // Two-phase Building→Ready pipeline. Phase 1: stamp `Building` and
-    // commit — readers skip the index (planner filters to Ready), writers
-    // dual-write (extraction iterates every registered path regardless of
-    // state). Phase 2: backfill existing rows, fail on UNIQUE violations,
-    // then commit a second PutCollection flipping to `Ready`. The planner
-    // only rewrites queries to IndexLookup once Phase 2 commits, so the
-    // index is never observable in a half-built state.
+    // Building→Ready pipeline. The `Building` entry commits first, and
+    // readers skip the index (the planner filters to Ready). The build then
+    // backfills existing rows on every replica, fails on UNIQUE violations,
+    // and makes each replica maintain the index from its log position on. A
+    // second PutCollection flips it to `Ready`. A replica that serves a read
+    // through the index before it applied the build refuses the read as
+    // retryable, so the index is never observable in a half-built state.
     coll.indexes.push(StoredIndex {
         name: index_name.clone(),
         field: canonical_field.clone(),

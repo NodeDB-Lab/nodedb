@@ -76,6 +76,11 @@ impl CoreLoop {
         // rebuilt from the rows cannot detect rows removed from the end.
         let chain_hashes = sparse.load_chain_heads()?;
 
+        // The index paths every write maintains, as the last build or purge
+        // this core committed left them.
+        let maintained_indexes =
+            super::maintained_indexes::MaintainedIndexes::load(sparse.load_maintained_indexes()?)?;
+
         let array_root = crate::data::executor::snapshot::layout::array_root(data_dir, core_id);
         let array_engine = ArrayEngine::new(ArrayEngineConfig::new(array_root)).map_err(|e| {
             crate::Error::Internal {
@@ -150,6 +155,7 @@ impl CoreLoop {
             spatial_doc_map: std::collections::HashMap::new(),
             vector_doc_map: std::collections::HashMap::new(),
             doc_configs: hashbrown::HashMap::new(),
+            maintained_indexes,
             chain: super::hash_chain_state::HashChainState::new(chain_hashes),
             query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
             graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),

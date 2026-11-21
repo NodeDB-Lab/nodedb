@@ -7,6 +7,9 @@
 //! core refuses at cutover, or one whose build fails, leaves the live index
 //! in place with every write it took. Nothing but this report and a log
 //! line shows that the requested rebuild never happened.
+//!
+//! A document index step a committed descriptor owes reports here too when
+//! its proposal fails after the commit.
 
 use faultbox::DomainContext;
 use faultbox::serde_json::{Value, json};
@@ -51,6 +54,46 @@ impl DomainContext for IndexRebuildNotInstalled<'_> {
                                 collection was dropped or rebuilt again, and needs no action. \
                                 Any other cause is a storage or snapshot error: check the \
                                 core's log for the same collection",
+        })
+    }
+}
+
+/// A document index build or retire that a committed collection descriptor
+/// owes, and that did not reach the collection's data log.
+pub(in crate::diag) struct DocIndexStepDeferred<'a> {
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for DocIndexStepDeferred<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.doc_index_step_deferred"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The error class names the cause. The collection is the
+        // occurrence, so one unreachable group leader files one report.
+        format!("cause={}", self.error_class)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "database_id": self.database_id,
+            "tenant_id": self.tenant_id,
+            "collection": self.collection,
+            "error_class": self.error_class,
+            "why_reported": "the DDL committed a collection descriptor that owes document \
+                             index builds or retires, and the proposal on the collection's \
+                             data Raft log failed. Until a step applies, an index read \
+                             through its path is refused as retryable on every replica that \
+                             lacks it",
+            "operator_action": "check that the collection's data group has a reachable \
+                                leader. The reconcile loop on the metadata leader delivers \
+                                every owed step. A report that keeps counting means that \
+                                delivery fails too",
         })
     }
 }

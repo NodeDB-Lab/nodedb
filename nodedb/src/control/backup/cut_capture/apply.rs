@@ -158,6 +158,15 @@ pub(crate) fn keep_group_records(
         }
     }
     snap.storage_conversions = kept_conversions;
+    // A maintained index set names the index rows of its own group, as a
+    // conversion record names its rows.
+    let mut kept_maintained = Vec::with_capacity(snap.maintained_indexes.len());
+    for entry in std::mem::take(&mut snap.maintained_indexes) {
+        if owned(&entry.0)? {
+            kept_maintained.push(entry);
+        }
+    }
+    snap.maintained_indexes = kept_maintained;
     zerompk::to_msgpack_vec(&snap).map_err(|e| Error::Serialization {
         format: "msgpack".into(),
         detail: format!("cut capture: encode the tenant {tenant_id} snapshot: {e}"),

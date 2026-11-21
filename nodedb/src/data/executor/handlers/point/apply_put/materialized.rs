@@ -112,16 +112,26 @@ impl CoreLoop {
             .get_in_txn(txn, database_id, tid, collection, &storage_key)?;
         // Pre-write document for the secondary-index SET diff, routed
         // through the storage-mode-aware helper so a strict row's Binary
-        // Tuple decodes too. `None` means "no prior row" or "no index
-        // paths". A prior row that exists but fails to decode fails the
-        // write instead, or its old index entries stay live forever.
-        let old_doc_for_index: Option<serde_json::Value> =
-            match (old_value.as_ref(), self.doc_configs.get(&config_key)) {
-                (Some(b), Some(config)) if !config.index_paths.is_empty() => {
-                    Some(self.decode_stored_document(config, b)?)
-                }
-                _ => None,
-            };
+        // Tuple decodes too. `None` means "no prior row" or "no maintained
+        // index path". The stored bytes decode by the current config. A
+        // prior row that exists but fails to decode fails the write
+        // instead, or its old index entries stay live forever.
+        let maintains_index = self
+            .maintained_indexes
+            .maintains_any(database_id, tid, collection);
+        let old_doc_for_index: Option<serde_json::Value> = match old_value.as_ref() {
+            Some(b) if maintains_index => Some(match self.doc_configs.get(&config_key) {
+                Some(config) => self.decode_stored_document(config, b)?,
+                // A collection this core holds no config for stores
+                // schemaless bodies.
+                None => crate::data::executor::doc_format::decode_document_or_binary_tuple(
+                    b,
+                    None,
+                    "stored row body",
+                )?,
+            }),
+            _ => None,
+        };
 
         // Runs before any store or index is touched, so a refusal leaves
         // nothing behind.
@@ -231,17 +241,10 @@ impl CoreLoop {
                 }],
             )?;
         }
-        // A collection with index paths indexes the body. Index maintenance
-        // follows the current config: a core maintains the indexes it holds.
-        // A body that does not decode fails the write: skipping it stores a
-        // row its indexes do not describe.
-        let indexed = match self.doc_configs.get(&config_key) {
-            Some(config) if !config.index_paths.is_empty() => {
-                Some((config.index_paths.clone(), doc.clone()))
-            }
-            _ => None,
-        };
-        if let Some((paths, doc)) = indexed {
+        // A collection with maintained index paths indexes the body. Index
+        // maintenance follows the maintained set, which changes only at an
+        // index build or purge in data-log order.
+        if maintains_index {
             // Keyed at the same `sys_from` as the row version, so one
             // `version_sys_from` in the undo entry reverses both. Values the
             // write drops are tombstoned, values it gains are added.
@@ -254,7 +257,6 @@ impl CoreLoop {
                     old_doc: old_doc_for_index.as_ref(),
                     new_doc: &doc,
                     doc_id: &storage_key,
-                    index_paths: &paths,
                     sys_from,
                 },
             )?;

@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::clear_versioned_sparse::{CollectionClear, MaintainedSetFate};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId};
 
@@ -257,7 +258,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                true,
+                CollectionClear::KeepDefinition(MaintainedSetFate::Keep),
                 reclaim_l1_files,
                 false,
             )?;

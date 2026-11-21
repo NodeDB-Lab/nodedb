@@ -194,6 +194,7 @@ mod tests {
             ),
             CollectionConfig::new(COLL).with_index("status"),
         );
+        core.maintain_registered_paths_for_test();
     }
 
     fn doc_bytes() -> Vec<u8> {

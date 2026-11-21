@@ -3,6 +3,7 @@
 pub(super) mod accum;
 pub mod aggregate;
 pub mod bulk_dml;
+mod clear_versioned_sparse;
 pub mod columnar_assignments;
 pub mod columnar_close_apply;
 pub mod columnar_filter;

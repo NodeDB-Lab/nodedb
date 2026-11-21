@@ -10,7 +10,7 @@ mod recording;
 
 pub use context::{DATABASE_SCOPE, IlpFlushOutcome, LostResponseWrite, TENANT_SCOPE};
 pub use recording::{
-    IndexRebuildTarget, TextIndexStepTarget, VectorBuildTarget, apply_panicked,
+    DocIndexStepTarget, IndexRebuildTarget, TextIndexStepTarget, VectorBuildTarget, apply_panicked,
     array_snapshot_buffer_poisoned, audit_flush_not_persisted, audit_prune_not_applied,
     audit_wal_append_failed, audit_wal_not_truncated, batch_insert_without_surrogates,
     calvin_apply_halted, calvin_barrier_log_store_failed, calvin_completion_timeout,
@@ -22,8 +22,8 @@ pub use recording::{
     crdt_dead_letter_not_stored, custom_crs_set_digest_unencoded, custom_crs_set_not_applied,
     cut_barrier_not_placed, data_plane_core_fail_stopped, data_plane_response_lost,
     data_plane_responses_lost, ddl_cleanup_not_completed, descriptor_drain_not_ended,
-    descriptor_lease_not_renewed, descriptor_lease_release_dropped, entry_kind,
-    fts_index_update_failed, held_entry_debt_not_recorded, history_charge_stale,
+    descriptor_lease_not_renewed, descriptor_lease_release_dropped, doc_index_step_deferred,
+    entry_kind, fts_index_update_failed, held_entry_debt_not_recorded, history_charge_stale,
     history_compaction_not_applied, ilp_invalid_utf8_drop, ilp_killed_session_lines_refused,
     ilp_line_read_drop, index_rebuild_not_installed, kv_reap_entry_unusable, metadata_apply_wedged,
     mirror_link_stopped, mirror_status_unread, ordinal_reservation_leaked,

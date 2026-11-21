@@ -117,11 +117,16 @@ impl CoreLoop {
             }
             return Ok(());
         };
-        if config.index_paths.is_empty() {
+        // The entries follow the paths this core maintains. The stored body
+        // decodes by the current config.
+        if !self
+            .maintained_indexes
+            .maintains_any(p.database_id, p.tid, p.collection)
+        {
             return Ok(());
         }
         let doc = self.decode_stored_document(config, p.current_body)?;
-        for (field, value) in self.index_tuples_for_doc(&doc, &config.index_paths) {
+        for (field, value) in self.index_tuples_for_doc(p.database_id, p.tid, p.collection, &doc) {
             self.sparse.versioned_index_tombstone_in_txn(
                 txn,
                 VersionedIndexEntry {

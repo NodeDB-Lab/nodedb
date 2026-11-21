@@ -200,6 +200,7 @@ fn merge_delete_releases_a_unique_value_for_an_insert_in_the_same_statement() {
     config.bitemporal = true;
     config.index_paths.push(unique);
     core.doc_configs.insert(config_key("merge_rows"), config);
+    core.maintain_registered_paths_for_test();
     seed(
         &mut core,
         "merge_rows",
@@ -274,6 +275,7 @@ fn merge_late_delete_refusal_restores_insert_sum_history_indexes_and_chain_head(
         config_key(TARGET),
         CollectionConfig::new(TARGET).with_index("balance"),
     );
+    core.maintain_registered_paths_for_test();
     core.sparse
         .put(
             0,

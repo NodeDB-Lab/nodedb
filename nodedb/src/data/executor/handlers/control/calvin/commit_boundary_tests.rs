@@ -56,6 +56,7 @@ fn declare(core: &mut CoreLoop, config: CollectionConfig) {
         (DatabaseId::DEFAULT, TenantId::new(TID), config.name.clone()),
         config,
     );
+    core.maintain_registered_paths_for_test();
 }
 
 /// `accounts` declares a UNIQUE index on `balance`, and `ledger` a BALANCED

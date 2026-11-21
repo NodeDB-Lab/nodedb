@@ -198,6 +198,7 @@ pub fn split_by_core(
         flushed_ts_segments,
         ts_series_catalogs,
         storage_conversions,
+        maintained_indexes,
         columnar_engines,
         vector_params,
         index_configs,
@@ -290,6 +291,14 @@ pub fn split_by_core(
         storage_conversions,
         db_tenant_scoped,
         |t| &mut t.storage_conversions,
+    )?;
+    // A maintained index set goes to the core its collection's index rows
+    // go to.
+    s.keyed(
+        "maintained_indexes",
+        maintained_indexes,
+        db_tenant_scoped,
+        |t| &mut t.maintained_indexes,
     )?;
     s.keyed("kv_tables", kv_tables, db_scoped, |t| &mut t.kv_tables)?;
     s.keyed("columnar_engines", columnar_engines, db_scoped, |t| {

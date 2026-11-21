@@ -68,6 +68,7 @@ fn configure_and_seed(core: &mut CoreLoop) {
         (DatabaseId::DEFAULT, TenantId::new(1), TARGET.into()),
         target,
     );
+    core.maintain_registered_paths_for_test();
     core.sparse
         .put(
             0,

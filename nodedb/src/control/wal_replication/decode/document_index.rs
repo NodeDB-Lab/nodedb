@@ -8,7 +8,7 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::DatabaseId;
-use nodedb_physical::physical_plan::DocumentOp;
+use nodedb_physical::physical_plan::{DocIndexFence, DocIndexOwner, DocumentOp};
 use nodedb_types::QualifiedCollection;
 
 /// The fields of a `DocIndexBuild` record.
@@ -19,6 +19,8 @@ pub(super) struct IndexBuildFields<'a> {
     pub unique: bool,
     pub case_insensitive: bool,
     pub predicate: Option<&'a str>,
+    pub owner: &'a DocIndexOwner,
+    pub fence: DocIndexFence,
 }
 
 /// Rebuild a `BackfillIndex` plan. The replica scans the rows it holds at
@@ -34,6 +36,8 @@ pub(super) fn index_build(
         unique,
         case_insensitive,
         predicate,
+        owner,
+        fence,
     } = fields;
     Ok(PhysicalPlan::Document(DocumentOp::BackfillIndex {
         collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
@@ -42,18 +46,24 @@ pub(super) fn index_build(
         unique,
         case_insensitive,
         predicate: predicate.map(str::to_owned),
+        owner: owner.clone(),
+        fence,
     }))
 }
 
-/// Rebuild a `DropIndex` plan. The replica removes every entry of `field`.
+/// Rebuild a `DropIndex` plan. The replica removes `owner` from `field`.
 pub(super) fn index_retire(
     database_id: DatabaseId,
     collection: &str,
     field: &str,
+    owner: &DocIndexOwner,
+    fence: DocIndexFence,
 ) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Document(DocumentOp::DropIndex {
         collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         field: field.to_owned(),
+        owner: owner.clone(),
+        fence,
     }))
 }
 
@@ -78,6 +88,14 @@ mod tests {
         .expect("index plan must produce a ReplicatedEntry")
     }
 
+    /// The fence every test plan carries.
+    fn fence() -> DocIndexFence {
+        DocIndexFence {
+            incarnation: nodedb_types::Hlc::new(7, 1),
+            descriptor_version: 9,
+        }
+    }
+
     fn decode_plan(entry: &ReplicatedEntry) -> PhysicalPlan {
         let (_, _, plan, _) = decode::decode_replicated_entry(&entry.to_bytes())
             .expect("decode_replicated_entry error")
@@ -96,6 +114,8 @@ mod tests {
             unique: true,
             case_insensitive: true,
             predicate: Some("active = true".into()),
+            owner: DocIndexOwner::Named("by_tags".into()),
+            fence: fence(),
         });
         let entry = encode(&plan);
         assert!(
@@ -111,13 +131,17 @@ mod tests {
                 unique,
                 case_insensitive,
                 predicate,
+                owner,
+                fence: decoded,
             }) => {
+                assert_eq!(decoded, fence());
                 assert_eq!(collection.as_str(), "users");
                 assert_eq!(path, "$.tags");
                 assert!(is_array);
                 assert!(unique);
                 assert!(case_insensitive);
                 assert_eq!(predicate.as_deref(), Some("active = true"));
+                assert_eq!(owner, DocIndexOwner::Named("by_tags".into()));
             }
             other => panic!("expected Document(BackfillIndex), got {other:?}"),
         }
@@ -133,6 +157,8 @@ mod tests {
             unique: false,
             case_insensitive: false,
             predicate: None,
+            owner: DocIndexOwner::Declared,
+            fence: fence(),
         });
         match decode_plan(&encode(&plan)) {
             PhysicalPlan::Document(DocumentOp::BackfillIndex {
@@ -156,6 +182,8 @@ mod tests {
         let plan = PhysicalPlan::Document(DocumentOp::DropIndex {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
             field: "$.email".into(),
+            owner: DocIndexOwner::Named("by_email".into()),
+            fence: fence(),
         });
         let entry = encode(&plan);
         assert!(
@@ -164,9 +192,16 @@ mod tests {
             entry.write
         );
         match decode_plan(&entry) {
-            PhysicalPlan::Document(DocumentOp::DropIndex { collection, field }) => {
+            PhysicalPlan::Document(DocumentOp::DropIndex {
+                collection,
+                field,
+                owner,
+                fence: decoded,
+            }) => {
+                assert_eq!(decoded, fence());
                 assert_eq!(collection.as_str(), "users");
                 assert_eq!(field, "$.email");
+                assert_eq!(owner, DocIndexOwner::Named("by_email".into()));
             }
             other => panic!("expected Document(DropIndex), got {other:?}"),
         }

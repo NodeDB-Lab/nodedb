@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A document secondary index is built and purged on every replica through
+//! A document secondary index is built and retired on every replica through
 //! the collection's data group.
 //!
-//! 1. A 3-node cluster holds a schemaless collection with rows before any
-//!    index exists.
-//! 2. `CREATE INDEX` builds the index. Every node's own index entries find
-//!    every row.
-//! 3. `DROP INDEX` purges the index. No node keeps an entry of it.
+//! 1. A 3-node cluster holds a schemaless collection with rows. The
+//!    collection maintains every top-level key, so the `email` entries find
+//!    every row on every node from each row's first write.
+//! 2. `CREATE INDEX` on `email` adds an explicit owner of the same entries.
+//! 3. `DROP INDEX` retires the explicit owner. The top-level shape keeps the
+//!    entries on every node.
 //! 4. The rows take new values, and the same index is created again as a
 //!    partial index. Every node's entries hold exactly the new values of the
 //!    rows the predicate admits, and no node serves a value of the first
 //!    index.
+//! 5. `DROP INDEX` of the partial index leaves the full top-level entries,
+//!    written again on every node.
 //!
 //! Each read inspects one node's own cores and never leaves that node. File
 //! name contains "cluster" so nextest applies the cluster test group.
@@ -153,17 +156,20 @@ async fn create_and_drop_index_reach_every_replica() {
         .await;
     }
 
-    // The rows exist before the index, so only the build indexes them.
+    // Every insert wrote its top-level `email` entry, so every row is held.
+    let first: BTreeSet<String> = ROWS.iter().map(|(_, email, _)| email.to_string()).collect();
+    every_node_serves(&cluster, &first, "after the inserts").await;
+
     exec(
         &cluster,
         &format!("CREATE INDEX {INDEX} ON {COLLECTION}(email)"),
     )
     .await;
-    let first: BTreeSet<String> = ROWS.iter().map(|(_, email, _)| email.to_string()).collect();
     every_node_serves(&cluster, &first, "after CREATE INDEX").await;
 
+    // The top-level shape still keeps the path, so its entries stay.
     exec(&cluster, &format!("DROP INDEX {INDEX}")).await;
-    every_node_serves(&cluster, &BTreeSet::new(), "after DROP INDEX").await;
+    every_node_serves(&cluster, &first, "after DROP INDEX").await;
 
     for (id, _, _) in ROWS {
         exec(
@@ -189,6 +195,12 @@ async fn create_and_drop_index_reach_every_replica() {
         .map(|(id, _, _)| second_email(id))
         .collect();
     every_node_serves(&cluster, &second, "after the second CREATE INDEX").await;
+
+    // The partial owner leaves, and the full top-level entries are written
+    // again in their own shape.
+    exec(&cluster, &format!("DROP INDEX {INDEX}")).await;
+    let all_second: BTreeSet<String> = ROWS.iter().map(|(id, _, _)| second_email(id)).collect();
+    every_node_serves(&cluster, &all_second, "after the second DROP INDEX").await;
 
     cluster.shutdown().await;
 }

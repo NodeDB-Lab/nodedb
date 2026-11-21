@@ -670,6 +670,7 @@ fn strict_unique_core(dir: &std::path::Path, default: bool) -> CoreLoop {
         (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_owned()),
         config,
     )]);
+    core.maintain_registered_paths_for_test();
     core
 }
 
@@ -774,6 +775,7 @@ fn target_unique_claims_use_the_complete_source_statement() {
         });
         core.doc_configs
             .insert(sum_config_key(SUM_TARGET), target.clone());
+        core.maintain_registered_paths_for_test();
         {
             let mut engine = DocumentEngine::new(&core.sparse, 0, TID);
             engine.register_collection(target);

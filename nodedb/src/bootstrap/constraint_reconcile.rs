@@ -20,12 +20,20 @@
 //! every surviving replica without the original proposer being alive.
 //! Delivery is idempotent — the per-collection version fence makes
 //! re-proposing the same set a no-op on every replica.
+//!
+//! The same pass delivers the document index steps each active document
+//! collection owes: the top-level build of a schemaless collection, each
+//! declared path of a strict one, and each `Ready` explicit index. A DDL
+//! proposes them after its commit, and this pass covers a step that
+//! proposal lost. A replica that already holds a step's owner with the same
+//! spec reads no row for it. A collection is delivered again only when its
+//! incarnation or descriptor version moves.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodedb_types::{DatabaseId, TenantId};
+use nodedb_types::{DatabaseId, Hlc, TenantId};
 use tracing::{debug, warn};
 
 use crate::control::security::catalog::{
@@ -37,9 +45,38 @@ use crate::control::state::SharedState;
 /// databases is two collections.
 pub type DeliveredKey = (DatabaseId, TenantId, String);
 
-/// Maximum number of constraint deliveries proposed in a single reconcile
-/// pass. Remaining changed collections are delivered on subsequent ticks so a
-/// large catalog churn cannot monopolize the loop or the Raft proposer.
+/// What one leader's reconcile loop delivered, kept across its passes and
+/// never in `SharedState`. A new leader starts empty and delivers
+/// everything once.
+#[derive(Debug, Default)]
+pub struct ReconcileDelivered {
+    /// The highest `constraint_version` Raft accepted per collection.
+    pub constraints: HashMap<DeliveredKey, u64>,
+    /// The `(incarnation, descriptor_version)` whose document index steps
+    /// Raft accepted per collection.
+    pub doc_indexes: HashMap<DeliveredKey, (Hlc, u64)>,
+}
+
+/// The proposals one reconcile pass had Raft accept.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcilePass {
+    /// Constraint sets delivered, one per collection.
+    pub constraints: usize,
+    /// Document index steps delivered.
+    pub doc_index_steps: usize,
+}
+
+impl ReconcilePass {
+    /// Every proposal of the pass, as the per-pass cap counts them.
+    pub fn total(&self) -> usize {
+        self.constraints + self.doc_index_steps
+    }
+}
+
+/// Maximum number of proposals, constraint sets and document index steps
+/// together, in a single reconcile pass. Remaining collections are delivered
+/// on subsequent ticks so a large catalog churn cannot monopolize the loop or
+/// the Raft proposer.
 const MAX_RECONCILE_PROPOSALS_PER_PASS: usize = 64;
 
 /// Spawn the singleton constraint reconcile loop.
@@ -59,12 +96,10 @@ pub fn spawn_constraint_reconcile(shared: Arc<SharedState>, interval_ms: u64) {
         crate::control::shutdown::ShutdownPhase::DrainingControlPlane,
         move |mut shutdown| async move {
             let shared = task_shared;
-            // Task-local delivered-version map, persisted across ticks (NOT in
-            // SharedState): records the highest `constraint_version` already
-            // accepted by Raft for each `(database, tenant, collection)`.
-            // Skipping equal or older versions keeps steady-state ticks
+            // Task-local delivered state, persisted across ticks. Skipping
+            // what Raft already accepted keeps steady-state ticks
             // proposal-free.
-            let mut delivered: HashMap<DeliveredKey, u64> = HashMap::new();
+            let mut delivered = ReconcileDelivered::default();
             let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
             loop {
                 tokio::select! {
@@ -83,22 +118,26 @@ pub fn spawn_constraint_reconcile(shared: Arc<SharedState>, interval_ms: u64) {
 /// Run one reconcile pass: if this node is the metadata leader, re-derive every
 /// collection's constraint set from the catalog and propose a `ConstraintChange`
 /// for each collection whose `constraint_version` exceeds what `delivered`
-/// records. `delivered` is updated in place on each accepted proposal. Returns
-/// the number of proposals accepted this pass. A no-op (returns 0) when this
-/// node is not the one elected to reconcile or the catalog is absent. A
-/// delivery that fails is retried on the next pass.
+/// records. Then propose the document index steps of each active document
+/// collection whose `(incarnation, descriptor_version)` `delivered` does not
+/// hold. `delivered` is updated in place on each accepted delivery. Returns
+/// the proposals accepted this pass: one per constraint set, and one per
+/// document index step. A no-op (returns zero counts) when this node is not
+/// the one elected to reconcile or the catalog is absent. A delivery that
+/// fails is retried on the next pass.
 ///
-/// Exposed (crate-public) so tests can drive constraint installation
-/// deterministically instead of waiting on the background timer.
+/// Exposed (crate-public) so tests can drive delivery deterministically
+/// instead of waiting on the background timer.
 pub async fn reconcile_once(
     shared: &Arc<SharedState>,
-    delivered: &mut HashMap<DeliveredKey, u64>,
-) -> usize {
+    delivered: &mut ReconcileDelivered,
+) -> ReconcilePass {
+    let mut pass = ReconcilePass::default();
     // Only one node reconciles — every replica installing would duplicate
     // proposals onto the data log for no gain. That node is the metadata
     // leader; a one-node cluster leads its own metadata group.
     if !shared.is_singleton_worker() {
-        return 0;
+        return pass;
     }
     let catalog = shared.credentials.catalog().clone();
     // Read every owned database's collections off the reactor.
@@ -106,16 +145,15 @@ pub async fn reconcile_once(
         Ok(Ok(rows)) => rows,
         Ok(Err(e)) => {
             warn!(error = %e, "constraint reconcile: catalog read failed");
-            return 0;
+            return pass;
         }
         Err(e) => {
             warn!(error = %e, "constraint reconcile: catalog read task panicked");
-            return 0;
+            return pass;
         }
     };
-    let mut proposed = 0usize;
     for (database_id, stored) in loaded {
-        if proposed >= MAX_RECONCILE_PROPOSALS_PER_PASS {
+        if pass.total() >= MAX_RECONCILE_PROPOSALS_PER_PASS {
             break;
         }
         // The source's delivery reaches a mirror through the log. Delivery
@@ -128,35 +166,93 @@ pub async fn reconcile_once(
             TenantId::new(stored.tenant_id),
             stored.name.clone(),
         );
-        // Already delivered this version (or newer) — fence skip.
-        if delivered
-            .get(&key)
-            .is_some_and(|&v| v >= stored.constraint_version)
-        {
-            continue;
+        pass.constraints +=
+            deliver_constraints_if_due(shared, database_id, &stored, &key, delivered).await;
+        if pass.total() >= MAX_RECONCILE_PROPOSALS_PER_PASS {
+            break;
         }
+        pass.doc_index_steps += deliver_doc_indexes_if_due(shared, &stored, key, delivered).await;
+    }
+    pass
+}
 
-        // The delivery routes to the leader of the collection's data group,
-        // which need not be this node.
-        match crate::control::constraint_install::deliver_constraints(shared, database_id, &stored)
-            .await
-        {
-            Ok(()) => {
-                // Record only on commit. A transient / NotLeader error
-                // leaves the map untouched so the next tick retries.
-                delivered.insert(key, stored.constraint_version);
-                proposed += 1;
-            }
-            Err(e) => {
-                debug!(
-                    collection = %stored.name,
-                    error = %e,
-                    "constraint reconcile: propose failed; will retry next tick"
-                );
-            }
+/// Propose `stored`'s constraint set unless `delivered` holds its version
+/// or a newer one. Returns how many proposals Raft accepted.
+async fn deliver_constraints_if_due(
+    shared: &Arc<SharedState>,
+    database_id: DatabaseId,
+    stored: &StoredCollection,
+    key: &DeliveredKey,
+    delivered: &mut ReconcileDelivered,
+) -> usize {
+    // Already delivered this version (or newer) — fence skip.
+    if delivered
+        .constraints
+        .get(key)
+        .is_some_and(|&v| v >= stored.constraint_version)
+    {
+        return 0;
+    }
+    // The delivery routes to the leader of the collection's data group,
+    // which need not be this node.
+    match crate::control::constraint_install::deliver_constraints(shared, database_id, stored).await
+    {
+        Ok(()) => {
+            // Record only on commit. A transient / NotLeader error leaves
+            // the map untouched so the next tick retries.
+            delivered
+                .constraints
+                .insert(key.clone(), stored.constraint_version);
+            1
+        }
+        Err(e) => {
+            debug!(
+                collection = %stored.name,
+                error = %e,
+                "constraint reconcile: propose failed; will retry next tick"
+            );
+            0
         }
     }
-    proposed
+}
+
+/// Propose the document index steps of an active document collection
+/// unless `delivered` holds its `(incarnation, descriptor_version)`.
+/// Returns how many steps Raft accepted.
+async fn deliver_doc_indexes_if_due(
+    shared: &Arc<SharedState>,
+    stored: &StoredCollection,
+    key: DeliveredKey,
+    delivered: &mut ReconcileDelivered,
+) -> usize {
+    if !stored.is_active || !stored.collection_type.is_document() {
+        return 0;
+    }
+    let version = (stored.incarnation, stored.descriptor_version);
+    if delivered.doc_indexes.get(&key) == Some(&version) {
+        return 0;
+    }
+    // The steps carry `stored`'s fence. A DDL that commits after this read
+    // stamps a higher fence, so a step of this pass that reaches a core
+    // after that DDL's steps changes nothing there.
+    #[cfg(feature = "failpoints")]
+    crate::control::fail_gate::before_doc_index_delivery(shared.node_id).await;
+    match crate::control::doc_index_install::deliver_doc_indexes(shared, stored).await {
+        Ok(steps) => {
+            // Record only once every step applied. An error leaves the map
+            // untouched so the next tick retries.
+            delivered.doc_indexes.insert(key, version);
+            steps
+        }
+        Err(e) => {
+            debug!(
+                collection = %stored.name,
+                error = %e,
+                "document index reconcile: propose failed; will retry next tick"
+            );
+            0
+        }
+    }
 }
 
 /// Load every collection across every database the node owns, tagged with its

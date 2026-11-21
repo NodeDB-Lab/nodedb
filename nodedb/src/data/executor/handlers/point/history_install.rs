@@ -186,12 +186,17 @@ impl CoreLoop {
         let Some(config) = self.doc_configs.get(&config_key) else {
             return Ok(writes);
         };
-        if config.index_paths.is_empty() {
+        // The entries follow the paths this core maintains. The stored
+        // bodies decode by the current config.
+        if !self
+            .maintained_indexes
+            .maintains_any(h.database_id, h.tid, h.collection)
+        {
             return Ok(writes);
         }
         let tuples_of = |doc: Option<&serde_json::Value>| -> HashSet<(String, String)> {
             doc.map(|d| {
-                self.index_tuples_for_doc(d, &config.index_paths)
+                self.index_tuples_for_doc(h.database_id, h.tid, h.collection, d)
                     .into_iter()
                     .collect()
             })
@@ -297,6 +302,7 @@ mod tests {
             (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
             config,
         );
+        core.maintain_registered_paths_for_test();
     }
 
     fn stamp(sys_from: i64) -> BitemporalStamp {

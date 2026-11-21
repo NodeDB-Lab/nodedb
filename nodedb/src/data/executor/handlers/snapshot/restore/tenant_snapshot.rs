@@ -34,50 +34,10 @@ impl CoreLoop {
         // the group, whatever collection homes them, and no other edge.
         let group_install = !group_vshards.is_empty();
 
-        // Clear-then-install: drop stale state for the listed collections before
-        // installing, so keys deleted before the snapshot index and dropped
-        // collections do not linger on a lagging follower. Empty list = no-op.
-        for target in collections_to_clear {
-            // Preserve the collection definition: clear-then-install replaces row
-            // data from the snapshot, but the snapshot does not carry the schema,
-            // so the reinstalled rows must land in the still-defined collection.
-            // Fail closed: a clear error aborts the restore. Rows that survive
-            // a clear stay as un-owned data on this follower.
-            if let Err(e) = self.clear_collection_all_engines(
-                nodedb_types::DatabaseId::new(target.database_id),
-                crate::types::TenantId::new(target.tenant_id),
-                &target.collection,
-                true,
-                target.reclaim_l1_files,
-                !group_install,
-            ) {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!(
-                            "clear-then-install purge failed for '{}': {e}",
-                            target.collection
-                        ),
-                    },
-                );
-            }
-            // The cleared rows' conversion record goes with them. The snapshot
-            // carries the record of the rows that replace them.
-            if let Err(e) = self.sparse.delete_storage_conversion(
-                target.database_id,
-                target.tenant_id,
-                &target.collection,
-            ) {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!(
-                            "clear-then-install conversion record of '{}' failed: {e}",
-                            target.collection
-                        ),
-                    },
-                );
-            }
+        // Clear-then-install: drop stale state for the listed collections
+        // before installing. Empty list = no-op.
+        if let Err(code) = self.clear_install_targets(collections_to_clear, group_install) {
+            return self.response_error(task, code);
         }
 
         let snap: crate::types::TenantDataSnapshot = match zerompk::from_msgpack(snapshot_bytes) {
@@ -91,15 +51,8 @@ impl CoreLoop {
                 );
             }
         };
-        for (key, bytes) in &snap.storage_conversions {
-            if let Err(e) = self.sparse.put_storage_conversion_raw(key, bytes) {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("restore: conversion record of {key} failed: {e}"),
-                    },
-                );
-            }
+        if let Err(code) = self.install_collection_records(&snap) {
+            return self.response_error(task, code);
         }
 
         // Arrays: the group's vShards take the snapshot's cell versions.
