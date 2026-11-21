@@ -7,7 +7,9 @@
 //! pins, and no core installs them. Boot then settles, judges, and replays
 //! them as restart does.
 
-use nodedb_physical::physical_plan::RedoPins;
+use nodedb_physical::physical_plan::{
+    CalvinInstall, CalvinReplySpec, MetaOp, PhysicalPlan, RedoOrigin, RedoPins,
+};
 use nodedb_types::{StorageKey, Surrogate, Value};
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -15,7 +17,7 @@ use crate::wal::{BootVerdictOutcome, RedoSubRecord};
 
 use super::super::install_pin_tests::{field, guarded_wire, register_as, schemaless_wire};
 use super::super::judged_tests::{codes_pins, config_key, drop_current_unique, pin_of, pins, wire};
-use super::super::stream_validate::tests::TID;
+use super::super::stream_validate::tests::{TID, record};
 use super::super::test_commit::doc_put_sub_record;
 use super::super::unique_handover_tests::{COLL, put, unique_core};
 use super::tests::{
@@ -163,6 +165,71 @@ fn a_pinned_record_that_passed_at_boot_stores_the_pinned_row() {
     assert_eq!(field(&row, "lowered"), None);
 
     let unpinned = booted_row(&RedoPins::default());
+    assert_eq!(
+        field(&unpinned, "lowered"),
+        Some(&Value::String("open".into()))
+    );
+}
+
+/// The committed redo of a Calvin slice of `ops` under `pins`, as the
+/// data-group apply dispatches it. Its record carries the slice's stamp,
+/// and its plan carries the Calvin install.
+fn calvin_pinned(ops: Vec<RedoSubRecord>, pins: &RedoPins) -> PhysicalPlan {
+    let mut slice = record(ops);
+    slice.calvin_stamp = Some(crate::wal::CalvinStamp {
+        epoch: 1,
+        position: 0,
+        vshard_id: 0,
+        mirror_database: None,
+    });
+    PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+        redo: slice.to_bytes().expect("encode redo"),
+        collections: vec![COLL.to_string()],
+        sum_targets: Vec::new(),
+        origin: RedoOrigin::Commit,
+        calvin: Some(CalvinInstall {
+            epoch: 1,
+            position: 0,
+            epoch_system_ms: 1,
+            reply: CalvinReplySpec::Frozen,
+            user_write: true,
+            mirror: false,
+        }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
+        pins: pins.clone(),
+    })
+}
+
+/// Boot replays a Calvin slice of row 1 under `pins` on a core with the
+/// later typeguard, and returns the stored row. The slice's stage vote
+/// validated it, so boot reaches no verdict on it.
+fn booted_calvin_row(pins: &RedoPins) -> Value {
+    let node = node();
+    let lsn = append(
+        &node,
+        &calvin_pinned(vec![put_status(1, "A", "OPEN")], pins),
+    );
+    let booted = boot_and_close_with(&node, guarded_core);
+    assert_eq!(
+        outcome_of(&booted.verdicts, lsn),
+        None,
+        "boot judges no Calvin slice"
+    );
+    row(&booted.core, 1)
+}
+
+/// A committed Calvin slice replays at boot into the row its pins derive,
+/// without a typeguard VALUE the core's config added later. With no pins
+/// the core's config derives the row, so the case bites.
+#[test]
+fn a_pinned_calvin_slice_replays_the_pinned_row_at_boot() {
+    let pinned = pins(vec![pin_of(COLL, &schemaless_wire())]);
+    let row = booted_calvin_row(&pinned);
+    assert_eq!(field(&row, "status"), Some(&Value::String("OPEN".into())));
+    assert_eq!(field(&row, "lowered"), None);
+
+    let unpinned = booted_calvin_row(&RedoPins::default());
     assert_eq!(
         field(&unpinned, "lowered"),
         Some(&Value::String("open".into()))
