@@ -45,6 +45,13 @@ pub async fn handle_set_vector_metadata(
     }
 
     let collection = parse_ident_token(parts[2])?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "change vector metadata",
+    )?;
     // Find column name after " ON " (the second ON after "METADATA ON").
     let metadata_on_pos = find_ascii_case_insensitive(sql, "METADATA ON ")
         .ok_or_else(|| err("42601", "expected METADATA ON <column>"))?;
