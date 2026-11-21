@@ -12,7 +12,7 @@
 
 use tracing::warn;
 
-use nodedb_physical::physical_plan::StorageMode;
+use nodedb_physical::physical_plan::{RegisteredIndexState, StorageMode};
 use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -21,6 +21,23 @@ use crate::data::executor::handlers::document::sort;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::data::executor::{doc_format, strict_format};
+use crate::engine::document::store::IndexPath;
+
+/// Whether `paths` holds a plain, fully built index on `field`. A `Building`
+/// path is still being backfilled, so its entries do not yet cover every row.
+fn has_plain_ready_index(paths: &[IndexPath], field: &str) -> bool {
+    paths.iter().any(|path| {
+        let built = match path.state {
+            RegisteredIndexState::Ready => true,
+            RegisteredIndexState::Building => false,
+        };
+        built
+            && path.path == field
+            && !path.is_array
+            && !path.case_insensitive
+            && path.predicate.is_none()
+    })
+}
 
 /// Decode a stored versioned body to `serde_json::Value`, strict-safely:
 /// strict bodies are Binary Tuples (need the schema), schemaless bodies are
@@ -313,13 +330,7 @@ impl CoreLoop {
         upper: Option<&[u8]>,
     ) -> Option<crate::Result<Vec<nodedb_types::StorageKey>>> {
         let config = self.doc_configs.get(config_key)?;
-        let plain_index = config.index_paths.iter().any(|path| {
-            path.path == field
-                && !path.is_array
-                && !path.case_insensitive
-                && path.predicate.is_none()
-        });
-        if !plain_index {
+        if !has_plain_ready_index(&config.index_paths, field) {
             return None;
         }
         let lower = match lower {
@@ -348,5 +359,42 @@ impl CoreLoop {
             keys.dedup();
             keys
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path_in_state(field: &str, state: RegisteredIndexState) -> IndexPath {
+        IndexPath {
+            state,
+            ..IndexPath::new(field)
+        }
+    }
+
+    #[test]
+    fn building_path_is_not_a_range_index() {
+        let paths = [path_in_state("score", RegisteredIndexState::Building)];
+        assert!(!has_plain_ready_index(&paths, "score"));
+    }
+
+    #[test]
+    fn ready_path_beside_a_building_path_is_a_range_index() {
+        let paths = [
+            path_in_state("score", RegisteredIndexState::Building),
+            path_in_state("score", RegisteredIndexState::Ready),
+        ];
+        assert!(has_plain_ready_index(&paths, "score"));
+    }
+
+    #[test]
+    fn only_the_ready_path_counts_when_the_building_path_is_listed_last() {
+        let paths = [
+            path_in_state("score", RegisteredIndexState::Ready),
+            path_in_state("score", RegisteredIndexState::Building),
+        ];
+        assert!(has_plain_ready_index(&paths, "score"));
+        assert!(!has_plain_ready_index(&paths, "other"));
     }
 }
