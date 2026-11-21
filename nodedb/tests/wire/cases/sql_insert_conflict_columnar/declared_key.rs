@@ -239,3 +239,332 @@ async fn columnar_declared_non_id_primary_key_upsert_updates_in_place() {
         rows[0]
     );
 }
+
+// ── `ON CONFLICT` target validation, exhaustive per engine ──────────────────
+//
+// `check_conflict_target` reads each column's own `is_primary_key` flag, and
+// `convert_collection_type`'s columnar arm sets that flag on a declared
+// natural key rather than on the synthetic surrogate `id` column whenever
+// one is declared. These cases pin that resolution directly, both when no
+// key is declared (the surrogate is the only candidate) and when one is.
+//
+// Timeseries is not covered here: `timeseries/create.rs` always records
+// `declared_primary_key: None`, so it can never reach the declared-key arm
+// these tests exercise, and `EngineRules::plan_upsert` refuses every
+// timeseries `UPSERT` / `ON CONFLICT DO UPDATE` outright before a target's
+// name would matter (`"UPSERT is not supported on timeseries collections
+// (append-only)"`). `ON CONFLICT (x) DO NOTHING` still passes the planner on
+// timeseries (its `if_absent` flag is accepted but unused by
+// `TimeseriesRules::plan_insert`), a pre-existing gap unrelated to the
+// declared-key resolution these tests cover.
+
+/// A refused DB error's SQLSTATE, read the way the sibling tests above read
+/// `23505`.
+async fn refused_sqlstate(server: &TestServer, sql: &str) -> String {
+    match server.client.simple_query(sql).await {
+        Ok(_) => panic!("expected the statement to be refused: {sql}"),
+        Err(e) => e
+            .as_db_error()
+            .unwrap_or_else(|| panic!("expected DbError for: {sql}"))
+            .code()
+            .code()
+            .to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_no_declared_key_on_conflict_surrogate_id_is_accepted() {
+    // No `PRIMARY KEY` at all: the synthetic surrogate `id` column is the
+    // only candidate, and naming it is accepted.
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION m_nokey (v INT) WITH (engine='columnar')")
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO m_nokey (v) VALUES (1)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO m_nokey (v) VALUES (2) ON CONFLICT (id) DO NOTHING")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO m_nokey (v) VALUES (3) ON CONFLICT (id) DO UPDATE SET v = EXCLUDED.v")
+        .await
+        .unwrap();
+
+    let rows = server.query_text("SELECT v FROM m_nokey").await.unwrap();
+    assert_eq!(rows.len(), 3, "every row mints a fresh id, got: {rows:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_no_declared_key_on_conflict_other_column_is_refused() {
+    // No `PRIMARY KEY` declared: a target naming any column other than the
+    // surrogate `id` is refused, `DO NOTHING` included.
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION m_nokey2 (v INT) WITH (engine='columnar')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO m_nokey2 (v) VALUES (1)")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO m_nokey2 (v) VALUES (2) ON CONFLICT (v) DO NOTHING",
+        )
+        .await,
+        "0A000",
+    );
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO m_nokey2 (v) VALUES (2) ON CONFLICT (v) DO UPDATE SET v = EXCLUDED.v",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_declared_non_id_primary_key_on_conflict_do_nothing_on_declared_key_is_accepted() {
+    // The `DO NOTHING` branch gained the same target check `DO UPDATE`
+    // already had: naming the real declared key is still accepted, and the
+    // conflicting row is left unchanged.
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION metrics_dn (\
+                sku TEXT PRIMARY KEY, value FLOAT\
+            ) WITH (engine='columnar')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO metrics_dn (sku, value) VALUES ('a', 1.0)")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO metrics_dn (sku, value) VALUES ('a', 999.0) ON CONFLICT (sku) DO NOTHING",
+        )
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT value FROM metrics_dn WHERE sku = 'a'")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "got: {rows:?}");
+    assert_eq!(
+        rows[0][0], "1",
+        "DO NOTHING must leave the row, got: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_declared_non_id_primary_key_on_conflict_do_nothing_other_column_is_refused() {
+    // `DO NOTHING` runs the same target check as `DO UPDATE`: a target
+    // naming the wrong column is refused, never silently deduped by the
+    // real key.
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION metrics_dn2 (\
+                sku TEXT PRIMARY KEY, value FLOAT\
+            ) WITH (engine='columnar')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO metrics_dn2 (sku, value) VALUES ('a', 1.0)")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO metrics_dn2 (sku, value) VALUES ('a', 2.0) \
+             ON CONFLICT (value) DO NOTHING",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_declared_non_id_primary_key_on_conflict_surrogate_id_is_refused() {
+    // A declared natural key is "the" primary key: the surrogate `id`
+    // column's `is_primary_key` is cleared, so naming `id` instead of the
+    // declared key is refused exactly like naming any other wrong column.
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION metrics_sid (\
+                sku TEXT PRIMARY KEY, value FLOAT\
+            ) WITH (engine='columnar')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO metrics_sid (sku, value) VALUES ('a', 1.0)")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO metrics_sid (sku, value) VALUES ('a', 2.0) \
+             ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .await,
+        "0A000",
+    );
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO metrics_sid (sku, value) VALUES ('a', 2.0) ON CONFLICT (id) DO NOTHING",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn columnar_declared_non_id_primary_key_on_conflict_on_constraint_is_refused() {
+    // `ON CONFLICT ON CONSTRAINT` is refused for every target, unchanged by
+    // this fix.
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION metrics_oc (\
+                sku TEXT PRIMARY KEY, value FLOAT\
+            ) WITH (engine='columnar')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO metrics_oc (sku, value) VALUES ('a', 1.0)")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO metrics_oc (sku, value) VALUES ('a', 2.0) \
+             ON CONFLICT ON CONSTRAINT metrics_oc_pk DO UPDATE SET value = EXCLUDED.value",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spatial_declared_non_id_primary_key_on_conflict_surrogate_id_is_refused() {
+    // Spatial shares columnar's identity arm in `convert_collection_type`;
+    // the same surrogate-vs-declared-key resolution applies.
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION places_sid (\
+                code TEXT PRIMARY KEY, geom GEOMETRY SPATIAL_INDEX, label TEXT\
+            ) WITH (engine='spatial')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO places_sid (code, geom, label) VALUES ('p1', ST_Point(0.0, 0.0), 'origin')",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO places_sid (code, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved') \
+             ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spatial_declared_non_id_primary_key_on_conflict_do_nothing_other_column_is_refused() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION places_dn (\
+                code TEXT PRIMARY KEY, geom GEOMETRY SPATIAL_INDEX, label TEXT\
+            ) WITH (engine='spatial')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO places_dn (code, geom, label) VALUES ('p1', ST_Point(0.0, 0.0), 'origin')",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        refused_sqlstate(
+            &server,
+            "INSERT INTO places_dn (code, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved') \
+             ON CONFLICT (label) DO NOTHING",
+        )
+        .await,
+        "0A000",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spatial_declared_non_id_primary_key_on_conflict_declared_key_do_nothing_is_accepted() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION places_dn2 (\
+                code TEXT PRIMARY KEY, geom GEOMETRY SPATIAL_INDEX, label TEXT\
+            ) WITH (engine='spatial')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO places_dn2 (code, geom, label) VALUES ('p1', ST_Point(0.0, 0.0), 'origin')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO places_dn2 (code, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved') \
+             ON CONFLICT (code) DO NOTHING",
+        )
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT label FROM places_dn2 WHERE code = 'p1'")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "got: {rows:?}");
+    assert_eq!(
+        rows[0][0], "origin",
+        "DO NOTHING must leave the row, got: {rows:?}"
+    );
+}

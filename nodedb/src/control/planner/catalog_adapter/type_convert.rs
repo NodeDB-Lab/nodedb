@@ -156,8 +156,40 @@ pub(crate) fn convert_collection_type(
                 }
                 columns.push(declared_column_info(name, type_str));
             }
+            // A declared natural key on a column other than the synthetic
+            // surrogate (`sku TEXT PRIMARY KEY`, `declared_primary_key =
+            // Some("sku")`) is the collection's real primary key, not `id`.
+            // Timeseries never declares one (`timeseries/create.rs` always
+            // records `None`), so this never fires for it.
+            //
+            // Design: a collection reports exactly one primary key, matching
+            // every consumer of `CollectionInfo.primary_key` and `ColumnInfo
+            // .is_primary_key` elsewhere in the planner, which read a single
+            // answer (`Option<String>` / one flagged column), not a set. The
+            // declared column is "the" key: its `is_primary_key` is set, and
+            // the synthetic surrogate's is cleared so exactly one column
+            // carries the flag, the same shape a document-schemaless
+            // collection with a declared key already has.
+            let declared_natural_key = stored
+                .declared_primary_key
+                .as_deref()
+                .filter(|declared| !declared.eq_ignore_ascii_case(pk_name));
             let pk = if profile.is_timeseries() {
                 None
+            } else if let Some(declared) = declared_natural_key {
+                if let Some(col) = columns
+                    .iter_mut()
+                    .find(|c| c.name.eq_ignore_ascii_case(declared))
+                {
+                    col.is_primary_key = true;
+                }
+                if let Some(surrogate) = columns
+                    .iter_mut()
+                    .find(|c| c.name.eq_ignore_ascii_case(pk_name))
+                {
+                    surrogate.is_primary_key = false;
+                }
+                Some(declared.to_string())
             } else {
                 Some(pk_name.into())
             };

@@ -51,7 +51,12 @@ fn plan_insert_rows(
     // `INSERT ... ON CONFLICT DO UPDATE SET` reroutes to the upsert path
     // with the assignments carried through. `DO NOTHING` stays on the
     // INSERT path with `if_absent=true`.
-    let if_absent = match classify_on_conflict(ins, &target_scope)? {
+    let if_absent = match classify_on_conflict(
+        ins,
+        &target_scope,
+        &info.columns,
+        info.primary_key.as_deref(),
+    )? {
         OnConflict::None => false,
         OnConflict::DoNothing => true,
         OnConflict::DoUpdate(updates) => {

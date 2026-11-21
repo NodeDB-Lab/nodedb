@@ -11,7 +11,9 @@ use super::super::dml_helpers::{
     coerce_and_check_rows, convert_value_rows, materialize_defaults_in_rows,
 };
 use crate::error::{Result, SqlError};
-use crate::parser::normalize::{normalize_insert_column, normalize_object_name_checked};
+use crate::parser::normalize::{
+    normalize_ident, normalize_insert_column, normalize_object_name_checked,
+};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
 use crate::resolver::expr::convert_expr;
@@ -113,7 +115,19 @@ pub(super) enum OnConflict {
     DoUpdate(Vec<(String, SqlExpr)>),
 }
 
-pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Result<OnConflict> {
+/// `columns` and `primary_key` are the collection's declared columns and its
+/// resolved primary key — the key an `ON CONFLICT` target must name. The
+/// engine decides every conflict by the primary key and evaluates no
+/// `DO UPDATE ... WHERE`, so a clause that says otherwise is refused instead
+/// of ignored. Checked for `DO NOTHING` as well as `DO UPDATE`: a target
+/// naming the wrong column is refused either way, rather than silently
+/// deciding the conflict by the real key while the statement claims another.
+pub(super) fn classify_on_conflict(
+    ins: &ast::Insert,
+    scope: &TableScope,
+    columns: &[ColumnInfo],
+    primary_key: Option<&str>,
+) -> Result<OnConflict> {
     let Some(on) = ins.on.as_ref() else {
         return Ok(OnConflict::None);
     };
@@ -121,8 +135,19 @@ pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Res
         return Ok(OnConflict::None);
     };
     match &oc.action {
-        ast::OnConflictAction::DoNothing => Ok(OnConflict::DoNothing),
+        ast::OnConflictAction::DoNothing => {
+            check_conflict_target(oc.conflict_target.as_ref(), columns, primary_key)?;
+            Ok(OnConflict::DoNothing)
+        }
         ast::OnConflictAction::DoUpdate(do_update) => {
+            if do_update.selection.is_some() {
+                return Err(SqlError::FeatureNotSupported {
+                    detail: "ON CONFLICT DO UPDATE ... WHERE is not supported: the engine \
+                             cannot leave a conflicting row unchanged on a condition"
+                        .into(),
+                });
+            }
+            check_conflict_target(oc.conflict_target.as_ref(), columns, primary_key)?;
             let mut pairs = Vec::with_capacity(do_update.assignments.len());
             for a in &do_update.assignments {
                 let name = match &a.target {
@@ -139,6 +164,49 @@ pub(super) fn classify_on_conflict(ins: &ast::Insert, scope: &TableScope) -> Res
             }
             Ok(OnConflict::DoUpdate(pairs))
         }
+    }
+}
+
+/// Refuse a conflict target that is not exactly the primary key.
+///
+/// The check reads each column's own `is_primary_key` flag rather than
+/// comparing the target name against the `primary_key` string: a
+/// columnar-family collection with a declared natural key carries the flag
+/// on that column, not on its synthetic surrogate `id` column, and reading
+/// the flag directly stays correct even if a caller's `primary_key` string
+/// ever drifted from it.
+fn check_conflict_target(
+    target: Option<&ast::ConflictTarget>,
+    columns: &[ColumnInfo],
+    primary_key: Option<&str>,
+) -> Result<()> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let names_primary_key = match (target, primary_key) {
+        (ast::ConflictTarget::Columns(cols), Some(_)) => {
+            cols.len() == 1
+                && columns
+                    .iter()
+                    .any(|c| c.is_primary_key && c.name.to_lowercase() == normalize_ident(&cols[0]))
+        }
+        // No declared primary key at all: only a timeseries collection
+        // resolves to `None` here, and `UPSERT`/`ON CONFLICT DO UPDATE`
+        // already refuses every timeseries write with its own error before
+        // this check's answer reaches a user — see `EngineRules::plan_upsert`
+        // for `EngineType::Timeseries`. Accepting any single-column target
+        // has no user-visible effect either way.
+        (ast::ConflictTarget::Columns(_), None) => true,
+        (ast::ConflictTarget::OnConstraint(_), _) => false,
+    };
+    if names_primary_key {
+        Ok(())
+    } else {
+        Err(SqlError::FeatureNotSupported {
+            detail: "ON CONFLICT target must be the primary key: the engine decides \
+                     every conflict by the primary key"
+                .into(),
+        })
     }
 }
 

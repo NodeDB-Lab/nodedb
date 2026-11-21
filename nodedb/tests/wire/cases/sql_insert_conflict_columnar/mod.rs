@@ -8,6 +8,10 @@
 //! existing row instead of refusing it. A collection with no declared
 //! primary key mints a fresh identity per row and never dedups.
 //!
+//! `declared_key` also pins `ON CONFLICT` target validation: the clause must
+//! name the collection's real primary key, which for columnar family is the
+//! declared natural key when one exists, not the synthetic surrogate `id`.
+//!
 //! Spatial extends columnar and inherits the same semantics. Timeseries is
 //! a different profile (append-only, time-keyed) and is not covered here.
 
