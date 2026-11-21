@@ -94,12 +94,12 @@ use crate::types::{ColumnInfo, SqlDataType, SqlExpr, SqlValue};
 /// reach storage under `column`: a DDL gate checks a column `DEFAULT` through
 /// it, so a default is accepted or refused exactly as the same literal in a
 /// `VALUES` clause is. The primary-key column keeps its literal as written,
-/// the same exemption every `VALUES` and `SET` path carries — see
-/// [`coerce_rows_to_declared_types`].
+/// the same exemption every `VALUES` and `SET` path carries, unless its
+/// declared type is a typed instant — see [`coerce_rows_to_declared_types`].
 ///
 /// Errors name the column and the literal.
 pub fn coerce_write_literal(column: &ColumnInfo, value: SqlValue) -> Result<SqlValue> {
-    if column.is_primary_key {
+    if column.is_primary_key && !is_instant(&column.data_type) {
         return Ok(value);
     }
     let coerced = coerce_for_column(&column.name, column, value)?;
@@ -115,23 +115,24 @@ pub fn coerce_write_literal(column: &ColumnInfo, value: SqlValue) -> Result<SqlV
 ///
 /// Columns absent from `declared_columns` (a KV collection's untyped
 /// `key`/`value` convention, a `ttl` pseudo-column) are left untouched, as is
-/// `exempt_column` — see [`coerce_rows_to_declared_types`] for why the primary
-/// key is exempt.
+/// `exempt_column` unless its declared type is a typed instant — see
+/// [`coerce_rows_to_declared_types`] for why the primary key is exempt, and
+/// why an instant-typed one is not.
 pub(super) fn coerce_row_to_declared_types(
     declared_columns: &[ColumnInfo],
     row: &mut [(String, SqlValue)],
     exempt_column: Option<&str>,
 ) -> Result<()> {
     for (name, value) in row.iter_mut() {
-        if is_exempt(exempt_column, name.as_str()) {
-            continue;
-        }
         let Some(column) = declared_columns
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(name.as_str()))
         else {
             continue;
         };
+        if is_exempt(exempt_column, column) {
+            continue;
+        }
         let taken = std::mem::replace(value, SqlValue::Null);
         *value = coerce_for_column(name.as_str(), column, taken)?;
     }
@@ -151,6 +152,21 @@ pub(super) fn coerce_row_to_declared_types(
 /// `"5"` but searched for as `"5.0"` — turning a wire-fidelity fix into
 /// unfindable rows. The key column keeps its literal exactly as written on
 /// both sides.
+///
+/// # Why an instant-typed primary key is the one exception
+///
+/// That argument is about matching literal renderings on both sides, not
+/// about leaving the value untyped. A `TIMESTAMP`/`TIMESTAMPTZ` key is
+/// exempted from this pass, like any other column, by [`is_exempt`] reading
+/// [`is_instant`] — predicate_coerce's `coerce_read_literal` does the same on
+/// the read side, so both sides still agree, now on the typed instant rather
+/// than the bare literal. Leaving it untyped here would make a bare integer
+/// literal order against nothing (`partial_cmp_coerced` has no order between
+/// an instant and an integer) and would make two different spellings of the
+/// same instant (`1583402400000` vs `'2020-03-05 10:00:00'`) fail to match
+/// each other on write vs read — the exact silent-mismatch class this module
+/// exists to prevent, just reached through the exemption instead of around
+/// it.
 pub(super) fn coerce_rows_to_declared_types(
     declared_columns: &[ColumnInfo],
     rows: &mut [Vec<(String, SqlValue)>],
@@ -175,9 +191,6 @@ pub(super) fn coerce_assignments_to_declared_types(
     exempt_column: Option<&str>,
 ) -> Result<()> {
     for (name, expr) in assignments.iter_mut() {
-        if is_exempt(exempt_column, name.as_str()) {
-            continue;
-        }
         let SqlExpr::Literal(value) = expr else {
             continue;
         };
@@ -187,16 +200,33 @@ pub(super) fn coerce_assignments_to_declared_types(
         else {
             continue;
         };
+        if is_exempt(exempt_column, column) {
+            continue;
+        }
         let taken = std::mem::replace(value, SqlValue::Null);
         *value = coerce_for_column(name.as_str(), column, taken)?;
     }
     Ok(())
 }
 
-/// Whether `column` is the exempted (primary-key) column, compared the same
-/// case-insensitive way as every other column-name lookup here.
-fn is_exempt(exempt_column: Option<&str>, column: &str) -> bool {
-    exempt_column.is_some_and(|exempt| exempt.eq_ignore_ascii_case(column))
+/// Whether `column` is the exempted primary-key column, compared the same
+/// case-insensitive way as every other column-name lookup here — unless its
+/// declared type is a typed instant, which is never exempt: see "Why an
+/// instant-typed primary key is the one exception" on
+/// [`coerce_rows_to_declared_types`].
+fn is_exempt(exempt_column: Option<&str>, column: &ColumnInfo) -> bool {
+    exempt_column.is_some_and(|exempt| exempt.eq_ignore_ascii_case(&column.name))
+        && !is_instant(&column.data_type)
+}
+
+/// Whether a declared type stores a typed instant.
+///
+/// Shared with `predicate_coerce::coerce_read_literal`, so the write side's
+/// exemption and the read side's coercion scope to the exact same set of
+/// columns: one owner for "which columns are instants" rather than two
+/// copies that could drift.
+pub(crate) fn is_instant(declared: &SqlDataType) -> bool {
+    matches!(declared, SqlDataType::Timestamp | SqlDataType::Timestamptz)
 }
 
 /// Coerce one literal written to `column`, reported under the name `name`.
@@ -859,6 +889,31 @@ mod tests {
         );
     }
 
+    /// An instant-typed primary key is the one exception to the exemption
+    /// above: it is coerced to a typed instant like any other `TIMESTAMP` /
+    /// `TIMESTAMPTZ` column, read-side primary key included — see "Why an
+    /// instant-typed primary key is the one exception" on
+    /// `coerce_rows_to_declared_types`. `is_exempt` carves this case out by
+    /// type, not by name alone, so this literal coerces to the typed instant
+    /// instead of staying the bare integer it reached the planner as.
+    #[test]
+    fn an_instant_typed_primary_key_column_is_not_exempt() {
+        let columns = [
+            column("pk_at", SqlDataType::Timestamp),
+            column("n", SqlDataType::Int64),
+        ];
+        assert_eq!(
+            coerced_with_exemption(
+                &columns,
+                "pk_at",
+                SqlValue::Int(1_583_402_400_000),
+                Some("pk_at")
+            )
+            .expect("an instant-typed pk is still coerced"),
+            SqlValue::Timestamp(early())
+        );
+    }
+
     /// `SET pk = <literal>` carries the same exemption, and a non-key
     /// assignment beside it is still coerced.
     #[test]
@@ -920,6 +975,20 @@ mod tests {
         assert_eq!(
             coerce_write_literal(&id, decimal("5.0")).expect("an exempt key is never re-typed"),
             decimal("5.0")
+        );
+    }
+
+    /// `coerce_write_literal`'s mirror of
+    /// `an_instant_typed_primary_key_column_is_not_exempt`: an instant-typed
+    /// pk is coerced here too, not kept as the bare literal.
+    #[test]
+    fn write_literal_coerces_an_instant_typed_primary_key() {
+        let mut pk_at = column("pk_at", SqlDataType::Timestamp);
+        pk_at.is_primary_key = true;
+        assert_eq!(
+            coerce_write_literal(&pk_at, SqlValue::Int(1_583_402_400_000))
+                .expect("an instant-typed pk is still coerced"),
+            SqlValue::Timestamp(early())
         );
     }
 

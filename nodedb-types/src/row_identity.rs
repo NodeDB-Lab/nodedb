@@ -213,6 +213,11 @@ pub fn extract_pk_value(body: &[u8], field: &str) -> Option<String> {
 ///
 /// Matches the `sql_value_to_string` convention of the INSERT identity
 /// path. Non-scalar values have no primary-key form and yield `None`.
+///
+/// An instant is its ISO 8601 text, as `sql_value_to_string` renders the
+/// typed instant the planner coerces an instant-typed key to. A typed write
+/// path stores that key as an instant, so a stored row's identity reads it
+/// back in this form and names the row the INSERT path keyed.
 pub fn value_to_pk_string(v: &Value) -> Option<String> {
     match v {
         // A UUID / ULID is its text, as its plain msgpack form reads.
@@ -221,6 +226,7 @@ pub fn value_to_pk_string(v: &Value) -> Option<String> {
         Value::Float(f) => Some(f.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         Value::Decimal(d) => Some(d.to_string()),
+        Value::DateTime(at) | Value::NaiveDateTime(at) => Some(at.to_iso8601()),
         _ => None,
     }
 }
@@ -298,6 +304,27 @@ mod tests {
         }
         let malformed = [0x92, 0x07, 0x81, 0xa1, b'a', 0x92, 0x63, 0x01];
         assert_eq!(extract_pk_value(&malformed, "a"), None);
+    }
+
+    /// A stored instant-typed key reads back as the ISO 8601 text the INSERT
+    /// identity path keys the row by. Without it, a strict row's instant key
+    /// has no key form: a stored row's identity falls back to its surrogate,
+    /// and a transactional predicate write on it fails.
+    #[test]
+    fn an_instant_key_is_its_iso_8601_text() {
+        let at = crate::NdbDateTime::from_micros(1_583_402_400_000_000);
+        for value in [Value::NaiveDateTime(at), Value::DateTime(at)] {
+            assert_eq!(
+                value_to_pk_string(&value).as_deref(),
+                Some("2020-03-05T10:00:00.000000Z")
+            );
+        }
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        let body = body(&[("pk_at", Value::NaiveDateTime(at))]);
+        assert_eq!(
+            RowIdentity::of_stored_row(&body, Some("pk_at"), key).as_str(),
+            "2020-03-05T10:00:00.000000Z"
+        );
     }
 
     #[test]

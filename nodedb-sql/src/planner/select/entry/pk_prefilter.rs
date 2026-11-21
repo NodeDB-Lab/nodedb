@@ -224,6 +224,25 @@ mod tests {
         assert_eq!(top_k, 2);
     }
 
+    /// The prefilter reads the plan's WHERE filters, which
+    /// `convert_where_to_filters` already coerced, so an instant-typed key
+    /// prefilters by its typed instant: the form the INSERT path keys the
+    /// row by (`sql_value_to_string` -> `to_iso8601`). A bare integer would
+    /// bind no surrogate and empty the candidate bitmap.
+    #[test]
+    fn an_instant_typed_key_prefilters_by_its_instant() {
+        let early = SqlValue::Timestamp(nodedb_types::datetime::NdbDateTime::from_micros(
+            1_583_402_400_000_000,
+        ));
+        let (keys, residual) = vector_parts(
+            "SELECT pk_at FROM timed_embeddings \
+             WHERE pk_at IN (1583402400000, '2020-03-05 10:00:00') \
+             ORDER BY vector_distance(embedding, [1.0, 0.0]) LIMIT 2",
+        );
+        assert_eq!(keys, Some(vec![early.clone(), early]));
+        assert_eq!(residual, 0);
+    }
+
     #[test]
     fn no_key_conjunct_is_no_prefilter() {
         let (keys, _) = vector_parts(

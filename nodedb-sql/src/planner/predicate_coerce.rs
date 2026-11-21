@@ -28,10 +28,17 @@
 //! reads `"5"` against `5` and `1.5` against `1`, so no read literal for
 //! those types is lost the way a bare integer against an instant is.
 //!
-//! The primary-key column is exempt, mirroring the write side: the engines
-//! derive a row's identity from the literal's own rendering on both the
-//! write and the read side, and re-typing one side would make the row
-//! unfindable by the other.
+//! An instant-typed primary key is coerced the same as any other instant
+//! column — it is not exempt. Other declared types stay exempt on the
+//! primary key, mirroring the write side: those engines derive a row's
+//! identity from the literal's own rendering on both the write and the read
+//! side, and re-typing one side would make the row unfindable by the other.
+//! That argument does not hold for an instant key: the Data Plane re-types
+//! every cell, pk included, against its declared schema unconditionally on
+//! every typed write path, and leaving the comparison literal untyped would
+//! make a bare integer order against nothing (`WHERE pk_at > 5` matching
+//! nothing) and make two spellings of the same instant fail to match each
+//! other.
 //!
 //! A column the scope does not declare (a schemaless field, a computed
 //! alias, an aggregate output) is left untouched: there is no declared type
@@ -39,24 +46,32 @@
 
 use crate::error::Result;
 use crate::resolver::columns::TableScope;
-use crate::types::{BinaryOp, ColumnInfo, SqlDataType, SqlExpr, SqlValue, UnaryOp};
+use crate::types::{BinaryOp, ColumnInfo, SqlExpr, SqlValue, UnaryOp};
 
-use super::declared_type_coerce::coerce_value;
+use super::declared_type_coerce::{coerce_value, is_instant};
 
 /// Coerce one literal compared against `column` by the read-side rule.
 ///
 /// The one rule for a literal a predicate compares against a declared
 /// column: an instant column (`TIMESTAMP` / `TIMESTAMPTZ`) types the literal
-/// through [`coerce_value`], the primary-key column and every other declared
-/// type keep the literal as written. `WHERE` clauses reach it through
-/// [`coerce_predicate_literals`]; row-level-security policy compilation calls
-/// it directly, so a policy literal and a query literal on the same column
-/// resolve to the same typed instant.
+/// through [`coerce_value`], every other declared type keeps the literal as
+/// written. `WHERE` clauses reach it through [`coerce_predicate_literals`];
+/// row-level-security policy compilation calls it directly, so a policy
+/// literal and a query literal on the same column resolve to the same typed
+/// instant.
+///
+/// An instant-typed primary key is coerced too, the same as any other
+/// instant column — see "Why an instant-typed primary key is the one
+/// exception" on `declared_type_coerce::coerce_rows_to_declared_types`.
+/// Exempting it here would leave a bare integer literal with no order
+/// against the stored instant (`WHERE pk_at > 5` matching nothing on an
+/// instant-typed declared key), the mirror image of the write side's own
+/// reason not to exempt it.
 ///
 /// Errors name the column and the literal when the literal carries no
 /// instant.
 pub fn coerce_read_literal(column: &ColumnInfo, value: SqlValue) -> Result<SqlValue> {
-    if column.is_primary_key || !is_instant(&column.data_type) {
+    if !is_instant(&column.data_type) {
         return Ok(value);
     }
     coerce_value(&column.name, value, &column.data_type)
@@ -158,29 +173,11 @@ fn coerce_literal(
     Ok(())
 }
 
-/// Whether a declared type stores a typed instant.
-fn is_instant(declared: &SqlDataType) -> bool {
-    match declared {
-        SqlDataType::Timestamp | SqlDataType::Timestamptz => true,
-        SqlDataType::Int64
-        | SqlDataType::Float64
-        | SqlDataType::String
-        | SqlDataType::Bool
-        | SqlDataType::Bytes
-        | SqlDataType::Decimal(_)
-        | SqlDataType::Uuid
-        | SqlDataType::Vector(_)
-        | SqlDataType::Geometry
-        | SqlDataType::Json
-        | SqlDataType::Unknown => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::resolver::columns::ResolvedTable;
-    use crate::types::{CollectionInfo, ColumnInfo, EngineType};
+    use crate::types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType};
     use nodedb_types::datetime::NdbDateTime;
 
     /// `2020-03-05T10:00:00Z` as epoch milliseconds.
@@ -400,7 +397,30 @@ mod tests {
     }
 
     #[test]
-    fn the_primary_key_column_is_exempt() {
+    fn a_non_instant_primary_key_column_is_exempt() {
+        // `id` is a String primary key: `is_instant` is already false for
+        // every non-instant type, so this passes before and after the fix
+        // below — kept to pin that an ordinary (non-instant) pk still skips
+        // coercion, which it always did for a different reason (`!is_instant`).
+        let expr = coerced(cmp(
+            col(None, "id"),
+            BinaryOp::Eq,
+            lit(SqlValue::String("5".into())),
+        ));
+        let SqlExpr::BinaryOp { right, .. } = &expr else {
+            panic!("shape preserved");
+        };
+        assert_eq!(literal_of(right), &SqlValue::String("5".into()));
+    }
+
+    /// An instant-typed primary key (`pk_at TIMESTAMP PRIMARY KEY`) is
+    /// coerced on equality, the same as a non-pk instant column. Before the
+    /// fix, `coerce_read_literal` exempted every primary-key column from
+    /// instant coercion unconditionally, leaving this literal a bare
+    /// `SqlValue::Int` — this assertion is the red-proof for that gap on the
+    /// `Eq` operator specifically (the operator the old test covered).
+    #[test]
+    fn an_instant_typed_primary_key_column_is_coerced_on_equality() {
         let expr = coerced(cmp(
             col(None, "pk_at"),
             BinaryOp::Eq,
@@ -409,7 +429,67 @@ mod tests {
         let SqlExpr::BinaryOp { right, .. } = &expr else {
             panic!("shape preserved");
         };
-        assert_eq!(literal_of(right), &SqlValue::Int(EARLY_MS));
+        assert_eq!(literal_of(right), &SqlValue::Timestamp(early()));
+    }
+
+    /// The bug this hunt confirmed: a range predicate against an
+    /// instant-typed primary key. Before the fix, the pk exemption applied
+    /// to every operator alike, so `pk_at > <int literal>` stayed a bare
+    /// `SqlValue::Int` — and `Value::partial_cmp_coerced` defines no order
+    /// between an instant and a bare integer (see
+    /// `nodedb-types/src/value/coerce.rs::partial_cmp_coerced_is_none_for_an_unordered_pair`),
+    /// so the predicate would silently match no row at execution, on every
+    /// engine whose stored cell is re-typed regardless of this exemption
+    /// (document-strict, columnar, timeseries, spatial).
+    #[test]
+    fn an_instant_typed_primary_key_column_is_coerced_on_every_range_operator() {
+        for op in [BinaryOp::Gt, BinaryOp::Ge, BinaryOp::Lt, BinaryOp::Le] {
+            let expr = coerced(cmp(col(None, "pk_at"), op, lit(SqlValue::Int(EARLY_MS))));
+            let SqlExpr::BinaryOp { right, .. } = &expr else {
+                panic!("shape preserved");
+            };
+            assert_eq!(
+                literal_of(right),
+                &SqlValue::Timestamp(early()),
+                "operator {op:?} must coerce the instant-typed pk's literal"
+            );
+        }
+    }
+
+    /// `BETWEEN` and `IN` against an instant-typed pk coerce every literal
+    /// too, the same red-proof shape as the existing `between_coerces_both_bounds`
+    /// / `in_list_coerces_every_literal_element` tests for a non-pk column.
+    #[test]
+    fn an_instant_typed_primary_key_column_is_coerced_in_between_and_in_list() {
+        let between = coerced(SqlExpr::Between {
+            expr: Box::new(col(None, "pk_at")),
+            low: Box::new(lit(SqlValue::Int(EARLY_MS))),
+            high: Box::new(lit(SqlValue::String("2020-03-05T11:00:00Z".into()))),
+            negated: false,
+        });
+        let SqlExpr::Between { low, high, .. } = &between else {
+            panic!("shape preserved");
+        };
+        assert_eq!(literal_of(low), &SqlValue::Timestamp(early()));
+        assert_eq!(
+            literal_of(high),
+            &SqlValue::Timestamp(NdbDateTime::from_micros((EARLY_MS + 3_600_000) * 1_000))
+        );
+
+        let in_list = coerced(SqlExpr::InList {
+            expr: Box::new(col(None, "pk_at")),
+            list: vec![
+                lit(SqlValue::Int(EARLY_MS)),
+                lit(SqlValue::String("2020-03-05 10:00:00".into())),
+            ],
+            negated: false,
+        });
+        let SqlExpr::InList { list, .. } = &in_list else {
+            panic!("shape preserved");
+        };
+        for element in list {
+            assert_eq!(literal_of(element), &SqlValue::Timestamp(early()));
+        }
     }
 
     #[test]
