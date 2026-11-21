@@ -205,6 +205,7 @@ mod tests {
             },
             partition_by: vec![],
             order_by: vec![(SqlExpr::Column("n".into()), true)],
+            order_nulls_first: Vec::new(),
             frame,
         }
     }

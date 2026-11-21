@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
-use super::helpers::null_order;
+use super::helpers::null_order_with;
 use super::spec::WindowFuncSpec;
 use super::value_eval::{WindowError, cmp_values, eval_arg_for_row};
 use crate::expr::types::SqlExpr;
@@ -54,7 +54,9 @@ pub(super) fn build_value_partitions(
         }
 
         for partition in &mut partitions {
-            partition.sort_by(|&a, &b| compare_order_keys(&keys[a], &keys[b], &spec.order_by));
+            partition.sort_by(|&a, &b| {
+                compare_order_keys(&keys[a], &keys[b], &spec.order_by, &spec.order_nulls_first)
+            });
         }
     }
 
@@ -82,16 +84,18 @@ fn compare_order_keys(
     a: &[Value],
     b: &[Value],
     order_by: &[(SqlExpr, bool)],
+    order_nulls_first: &[bool],
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     for (idx, (_, ascending)) in order_by.iter().enumerate() {
         let (Some(va), Some(vb)) = (a.get(idx), b.get(idx)) else {
             continue;
         };
-        let ord = null_order(
+        let nulls_first = order_nulls_first.get(idx).copied().unwrap_or(!*ascending);
+        let ord = null_order_with(
             matches!(va, Value::Null),
             matches!(vb, Value::Null),
-            *ascending,
+            nulls_first,
         )
         .unwrap_or_else(|| {
             let c = cmp_values(va, vb);

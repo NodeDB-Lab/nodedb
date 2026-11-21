@@ -415,6 +415,7 @@ mod tests {
             args: vec![col("v")],
             partition_by: vec![],
             order_by,
+            order_nulls_first: Vec::new(),
             frame,
         }
     }

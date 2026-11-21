@@ -36,7 +36,13 @@ pub fn evaluate_window_functions(
     crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     for spec in specs {
-        let partitions = build_partitions(rows, &spec.partition_by, &spec.order_by, crs)?;
+        let partitions = build_partitions(
+            rows,
+            &spec.partition_by,
+            &spec.order_by,
+            &spec.order_nulls_first,
+            crs,
+        )?;
 
         for partition_indices in &partitions {
             match spec.func_name.as_str() {
@@ -120,6 +126,7 @@ mod tests {
             args: vec![],
             partition_by: vec![],
             order_by: vec![(SqlExpr::Column("n".into()), true)],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         }
     }
@@ -133,6 +140,7 @@ mod tests {
             args: vec![],
             partition_by: vec![],
             order_by: vec![],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
@@ -150,6 +158,7 @@ mod tests {
             args: vec![],
             partition_by: vec![SqlExpr::Column("dept".into())],
             order_by: vec![],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
@@ -169,6 +178,7 @@ mod tests {
             args: vec![SqlExpr::Column("salary".into())],
             partition_by: vec![SqlExpr::Column("dept".into())],
             order_by: vec![(SqlExpr::Column("salary".into()), true)],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
@@ -332,6 +342,7 @@ mod tests {
             args: vec![],
             partition_by: vec![SqlExpr::Column("dept".into())],
             order_by: vec![(SqlExpr::Column("salary".into()), false)],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
@@ -356,6 +367,7 @@ mod tests {
             args: vec![],
             partition_by: vec![],
             order_by: vec![],
+            order_nulls_first: Vec::new(),
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
@@ -387,5 +399,53 @@ mod tests {
                 "{name} is listed but has no evaluator"
             );
         }
+    }
+
+    fn row_number_with_nulls(ascending: bool, nulls_first: Option<bool>) -> Vec<serde_json::Value> {
+        let mut rows = vec![
+            row("a", json!({"x": 2})),
+            row("b", json!({"x": null})),
+            row("c", json!({"x": 1})),
+        ];
+        let spec = WindowFuncSpec {
+            alias: "rn".into(),
+            func_name: "row_number".into(),
+            args: vec![],
+            partition_by: vec![],
+            order_by: vec![(SqlExpr::Column("x".into()), ascending)],
+            order_nulls_first: nulls_first.into_iter().collect(),
+            frame: WindowFrame::default(),
+        };
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
+        rows.iter().map(|r| col(r, "rn")).collect()
+    }
+
+    #[test]
+    fn window_order_by_asc_nulls_first_numbers_the_null_row_first() {
+        assert_eq!(
+            row_number_with_nulls(true, Some(true)),
+            vec![json!(3), json!(1), json!(2)]
+        );
+    }
+
+    #[test]
+    fn window_order_by_desc_nulls_last_numbers_the_null_row_last() {
+        assert_eq!(
+            row_number_with_nulls(false, Some(false)),
+            vec![json!(1), json!(3), json!(2)]
+        );
+    }
+
+    #[test]
+    fn window_order_by_without_nulls_clause_places_nulls_by_direction() {
+        assert_eq!(
+            row_number_with_nulls(true, None),
+            vec![json!(2), json!(3), json!(1)]
+        );
+        assert_eq!(
+            row_number_with_nulls(false, None),
+            vec![json!(2), json!(1), json!(3)]
+        );
     }
 }
