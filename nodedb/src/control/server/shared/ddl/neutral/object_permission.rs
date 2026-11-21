@@ -63,9 +63,10 @@ pub(crate) fn require_owner_or_admin(
         return Ok(());
     }
     let tenant_id = identity.tenant_id;
-    let registered_owner = state
-        .permissions
-        .get_owner("collection", database_id.as_u64(), tenant_id, collection);
+    let registered_owner =
+        state
+            .permissions
+            .get_owner("collection", database_id.as_u64(), tenant_id, collection);
     if registered_owner.as_deref() == Some(identity.username.as_str()) {
         return Ok(());
     }
