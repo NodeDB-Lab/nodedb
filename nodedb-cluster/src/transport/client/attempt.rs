@@ -66,6 +66,9 @@ struct LinkFailure {
     written: bool,
     /// The peer sent nothing for the RPC timeout. No resend goes to it.
     silent: bool,
+    /// The connection received a datagram since the stream opened and is
+    /// not closed. The peer is up, and its handler is slow.
+    peer_heard: bool,
 }
 
 impl LinkFailure {
@@ -76,6 +79,7 @@ impl LinkFailure {
             condemned: None,
             written: false,
             silent: failed.silent,
+            peer_heard: false,
         }
     }
 
@@ -205,6 +209,11 @@ impl NexarTransport {
 
     /// One attempt, recorded on the circuit breaker under `admission`.
     ///
+    /// A link failure counts against the breaker, with one exception. When
+    /// the connection received datagrams since the stream opened and is not
+    /// closed, the peer is up and its handler is slow. The breaker records
+    /// a success then, because any answer from the peer proves the link.
+    ///
     /// A link failure that condemns the pooled connection also evicts it, so
     /// the next attempt dials a fresh one.
     async fn attempt(
@@ -220,7 +229,11 @@ impl NexarTransport {
         );
         match &outcome {
             Attempt::LinkFailed(failure) => {
-                self.circuit_breaker.record_failure(target, admission);
+                if failure.peer_heard {
+                    self.circuit_breaker.record_success(target, admission);
+                } else {
+                    self.circuit_breaker.record_failure(target, admission);
+                }
                 if let Some(stable_id) = failure.condemned {
                     self.evict_connection(target, stable_id);
                 }
@@ -258,6 +271,7 @@ impl NexarTransport {
                 condemned: Some(stable_id),
                 written: false,
                 silent: false,
+                peer_heard: false,
             });
         }
         let received_before = received_datagrams(&conn);
@@ -277,6 +291,7 @@ impl NexarTransport {
                     condemned: broken.then_some(stable_id),
                     written,
                     silent: matches!(close_reason, Some(quinn::ConnectionError::TimedOut)),
+                    peer_heard: peer_heard(close_reason.is_some(), heard),
                 }
             })
     }
@@ -357,6 +372,15 @@ fn condemns_connection(timed_out: bool, closed: bool, heard: bool) -> bool {
     closed || (timed_out && !heard)
 }
 
+/// Whether a stream failure proves the peer is up.
+///
+/// `closed` and `heard` are as in [`condemns_connection`]. The peer is up
+/// when the connection is open and received a datagram since the stream
+/// opened.
+fn peer_heard(closed: bool, heard: bool) -> bool {
+    heard && !closed
+}
+
 /// UDP datagrams `conn` received so far.
 fn received_datagrams(conn: &quinn::Connection) -> u64 {
     conn.stats().udp_rx.datagrams
@@ -390,8 +414,25 @@ mod tests {
         assert!(!condemns_connection(false, false, true));
     }
 
-    /// A handler slower than the caller's read timeout counts against the
-    /// breaker, but the connection other sends share stays pooled.
+    #[test]
+    fn only_an_open_connection_that_was_heard_proves_the_peer_up() {
+        assert!(peer_heard(false, true));
+        // Closed connection: the peer is not proven up.
+        assert!(!peer_heard(true, true));
+        // Nothing received since the stream opened.
+        assert!(!peer_heard(false, false));
+        assert!(!peer_heard(true, false));
+    }
+
+    #[test]
+    fn a_link_failure_without_a_connection_does_not_prove_the_peer_up() {
+        assert!(!lost(false).peer_heard);
+        assert!(!lost(true).peer_heard);
+    }
+
+    /// A handler slower than the caller's read timeout on a live connection
+    /// does not count against the breaker, and the connection other sends
+    /// share stays pooled.
     #[tokio::test]
     async fn a_read_timeout_on_a_live_connection_keeps_it_pooled() {
         let (_server, client, _shutdown) = serve_echo().await;
@@ -414,12 +455,14 @@ mod tests {
 
         match outcome {
             Attempt::LinkFailed(LinkFailure {
-                condemned: None, ..
+                condemned: None,
+                peer_heard: true,
+                ..
             }) => {}
             other => panic!("expected a kept connection, got {other:?}"),
         }
         assert_eq!(client.peer_connection_stable_id(1), Some(pooled));
-        assert_eq!(client.circuit_breaker().failure_count(1), 1);
+        assert_eq!(client.circuit_breaker().failure_count(1), 0);
     }
 
     /// RPC timeout, and so QUIC idle timeout, of the liveness tests.
@@ -530,6 +573,7 @@ mod tests {
             condemned: None,
             written,
             silent: false,
+            peer_heard: false,
         }
     }
 
