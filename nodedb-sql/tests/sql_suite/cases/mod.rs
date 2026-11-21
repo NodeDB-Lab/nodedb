@@ -8,6 +8,7 @@ mod limit_offset_bounds;
 mod on_conflict_update_range_check;
 mod point_get_operand_order;
 mod positional_insert_column_binding;
+mod recursive_cte_outer_query;
 mod schema_qualified_rejection;
 mod timeseries_aggregate_routing;
 mod truncate_engine_routing;
