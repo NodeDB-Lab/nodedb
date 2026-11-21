@@ -85,3 +85,33 @@ async fn wrong_dimension_insert_is_22000_and_inserts_nothing() {
         .expect("read after the refused insert");
     assert!(rows.is_empty(), "the refused row is not stored: {rows:?}");
 }
+
+/// The first write has no index yet, so the declared width alone refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_write_of_the_wrong_width_is_refused_and_inserts_nothing() {
+    let srv = TestServer::start().await;
+    srv.exec("CREATE COLLECTION vd_first WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec("CREATE VECTOR INDEX idx_vd_first ON vd_first METRIC cosine DIM 3")
+        .await
+        .unwrap();
+
+    let error = srv
+        .exec("INSERT INTO vd_first { id: 'w2', embedding: [1.0, 0.0] }")
+        .await
+        .expect_err("a 2-wide first write into a DIM 3 index must fail");
+    assert!(
+        error.contains("22000") && error.contains("expected 3, got 2"),
+        "expected 22000 naming both widths, got: {error}"
+    );
+
+    srv.exec("INSERT INTO vd_first { id: 'ok3', embedding: [1.0, 0.0, 0.0] }")
+        .await
+        .expect("a 3-wide write succeeds after the refused one");
+    let rows = srv
+        .query_rows("SELECT id FROM vd_first ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+}

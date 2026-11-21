@@ -180,6 +180,11 @@ impl CoreLoop {
                     let store_key =
                         Self::vector_index_key(database_id, tid, collection, field_name);
                     self.check_vector_width(&store_key, field_name, floats.len())?;
+                    // `CREATE VECTOR INDEX ... DIM n` with no field registers the
+                    // width under the bare collection key, which is `params_key`
+                    // for the default field. The first write has no index yet,
+                    // so only this key holds the declared width.
+                    self.check_declared_width(params_key, field_name, floats.len())?;
                     // A declared `VECTOR(n)` column refuses another width, as
                     // a strict schema's vector column does.
                     if let Some(declared) = self.declared_schemaless_vector_dim(
@@ -271,6 +276,22 @@ impl CoreLoop {
         Ok(())
     }
 
+    /// Reject a vector whose width differs from the width declared under `key`.
+    /// A key with no declaration, or a declared width of 0, accepts any width.
+    fn check_declared_width(
+        &self,
+        key: &(nodedb_types::DatabaseId, crate::types::TenantId, String),
+        field_name: &str,
+        got: usize,
+    ) -> crate::Result<()> {
+        match self.declared_dims.get(key) {
+            Some(&declared) if declared != 0 && declared != got => {
+                Err(field_dimension_mismatch(field_name, declared, got))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Reject a vector whose width disagrees with the index it targets.
     ///
     /// Checks the width declared at `CREATE VECTOR INDEX ... DIM <n>` before
@@ -283,12 +304,7 @@ impl CoreLoop {
         field_name: &str,
         got: usize,
     ) -> crate::Result<()> {
-        if let Some(&declared) = self.declared_dims.get(index_key)
-            && declared != 0
-            && declared != got
-        {
-            return Err(field_dimension_mismatch(field_name, declared, got));
-        }
+        self.check_declared_width(index_key, field_name, got)?;
         if let Some(existing) = self.vector_collections.get(index_key)
             && existing.dim() != got
         {
