@@ -76,6 +76,11 @@ fn build_static_tx_class_impl(
             detail: "Calvin transaction spans multiple databases".to_owned(),
         });
     }
+    if tasks.iter().any(|task| task.tenant_id != tenant_id) {
+        return Err(Error::BadRequest {
+            detail: "Calvin transaction spans multiple tenants".to_owned(),
+        });
+    }
     // Every replica resolves a sequenced transaction on its own, and each
     // will accept other lines than its peers. A timeseries ingest resolves
     // to its rows on the submitting node, before it is sequenced.
