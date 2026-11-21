@@ -131,8 +131,19 @@ impl CoreLoop {
 
     /// Record a step that changes no path: raise its fence in the committed
     /// set, in a transaction of its own. The mirror holds no fence, so it
-    /// stays as it is.
-    pub(super) fn raise_fence_only(&self, step: &FencedStep<'_>) -> crate::Result<()> {
+    /// stays as it is. A step whose fence `committed` already holds writes
+    /// nothing, so a re-delivered step costs no storage write.
+    pub(super) fn raise_fence_only(
+        &self,
+        committed: &MaintainedIndexSet,
+        step: &FencedStep<'_>,
+    ) -> crate::Result<()> {
+        if committed
+            .fence_of(step.path, step.owner)
+            .is_some_and(|held| held >= step.fence)
+        {
+            return Ok(());
+        }
         let txn = self.sparse.begin_write()?;
         let mut set = self.sparse.maintained_indexes_in_txn(
             &txn,

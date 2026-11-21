@@ -7,10 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use nodedb_physical::physical_plan::{RedoOrigin, RedoPins, RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::calvin::VersionedReadEntry;
 
+use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::array_install_flush::ArrayStreamLoads;
 use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::handlers::timeseries::TsStreamLoads;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::IndexPath;
 use crate::types::Lsn;
 use crate::wal::redo::frame::FrameOrder;
 use crate::wal::{RedoRecord, RedoStreamRef, RedoSubRecord};
@@ -101,6 +103,10 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) struct StreamHe
 pub(super) struct CollectionTrack {
     pub(super) bitemporal: bool,
     pub(super) resolved: Vec<ResolvedSumTarget>,
+    /// The pinned UNIQUE paths this core judges, in pinned order. A claim
+    /// names its path by its position here. `Err` is the refusal of a
+    /// pinned `Ready` UNIQUE path this core does not maintain as unique.
+    pub(super) unique: Result<Vec<IndexPath>, ErrorCode>,
 }
 
 /// Reads of the read set held until they are checked together.

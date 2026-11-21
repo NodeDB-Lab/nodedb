@@ -12,7 +12,9 @@
 //! - the target row is absent, or is no object;
 //! - the target row's new images are over the row image limit, measured on
 //!   the bytes the install builds;
-//! - the target row's new balance gives a UNIQUE value two owners.
+//! - the target row's new balance gives a UNIQUE value two owners;
+//! - the target's pinned config names a `Ready` UNIQUE index this core does
+//!   not maintain as unique (`StalePinnedSchema`).
 //!
 //! A refusal there rolls the record back after part of it ran. So the check
 //! replays the folds over the record's images, in record order, against the
@@ -35,6 +37,7 @@ use crate::data::executor::enforcement::materialized_sum::delta::{
 };
 use crate::data::executor::enforcement::typeguard::GuardScope;
 use crate::data::executor::enforcement::unique::{claimed_values, violation};
+use crate::data::executor::enforcement::unique_paths::{UniqueTarget, judged_unique_paths};
 use crate::data::executor::handlers::document::read::decode::decode_scanned_document;
 use crate::data::executor::handlers::point::apply_put::stored_body::StoredBodyInput;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
@@ -355,9 +358,18 @@ impl CoreLoop {
         }
         // The install indexes the encoded body, with its generated columns.
         let image = self.unique_image(config, &doc_format::encode_to_msgpack(target_doc))?;
+        let paths = judged_unique_paths(
+            &self.maintained_indexes,
+            UniqueTarget {
+                database_id: scope.database_id,
+                tid: scope.tid,
+                collection,
+            },
+            &config.index_paths,
+        )?;
         let crs = self.crs_context();
         let doc_engine = DocumentEngine::new(&self.sparse, scope.database_id, scope.tid);
-        for path in config.index_paths.iter().filter(|path| path.unique) {
+        for path in paths {
             let needles = claimed_values(&image, path, &crs);
             if let Some(needle) =
                 folded.first_claimed_by_other(collection, surrogate, path, &needles, &crs)?

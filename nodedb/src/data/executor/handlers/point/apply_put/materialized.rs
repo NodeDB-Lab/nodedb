@@ -227,6 +227,7 @@ impl CoreLoop {
             check_unique_post_state(
                 &UniqueScope {
                     sparse: &self.sparse,
+                    maintained: &self.maintained_indexes,
                     database_id,
                     tid,
                     collection,

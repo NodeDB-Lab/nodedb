@@ -1537,6 +1537,21 @@ fn fill_wire(unique: bool) -> nodedb_physical::physical_plan::DocConfigWire {
     }
 }
 
+/// A core with no config of [`FILL`] that maintains `n` as a UNIQUE path,
+/// as a core does once the pinned index's build applied.
+fn fill_unique_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+    use crate::engine::document::store::IndexPath;
+    let (mut core, ends) = plain_core(dir);
+    core.maintained_indexes.insert_for_test(
+        (DatabaseId::DEFAULT, TenantId::new(TID), FILL.to_string()),
+        vec![IndexPath {
+            unique: true,
+            ..IndexPath::new("n")
+        }],
+    );
+    (core, ends)
+}
+
 /// Pins as a proposer sets them for a record that writes [`FILL`], whose
 /// proposer saw it with or without UNIQUE.
 fn fill_pins(unique: bool) -> nodedb_physical::physical_plan::RedoPins {
@@ -1617,7 +1632,7 @@ fn is_unique_violation(response: &Response) -> bool {
 /// pinned UNIQUE index. A task between slices sees no view.
 #[test]
 fn the_judged_view_survives_a_yield_and_no_task_between_slices_sees_it() {
-    let mut ring = Ring::open(plain_core);
+    let mut ring = Ring::open(fill_unique_core);
     ring.push_pinned_install_of(fill_with_late_duplicate(), &fill_pins(true));
     ring.tick();
     assert!(ring.validating(), "the validate parked");
@@ -1645,7 +1660,7 @@ fn the_judged_view_survives_a_yield_and_no_task_between_slices_sees_it() {
 #[test]
 fn a_register_between_validate_slices_changes_nothing() {
     for pinned_unique in [true, false] {
-        let mut ring = Ring::open(plain_core);
+        let mut ring = Ring::open(fill_unique_core);
         ring.push_pinned_install_of(fill_with_late_duplicate(), &fill_pins(pinned_unique));
         ring.tick();
         assert!(ring.validating(), "the validate parked");

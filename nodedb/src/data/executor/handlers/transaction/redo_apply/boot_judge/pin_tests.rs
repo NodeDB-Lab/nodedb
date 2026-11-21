@@ -8,9 +8,10 @@
 //! them as restart does.
 
 use nodedb_physical::physical_plan::{
-    CalvinInstall, CalvinReplySpec, MetaOp, PhysicalPlan, RedoOrigin, RedoPins,
+    CalvinInstall, CalvinReplySpec, DocIndexFence, DocIndexOwner, DocumentOp, MetaOp, PhysicalPlan,
+    RedoOrigin, RedoPins,
 };
-use nodedb_types::{StorageKey, Surrogate, Value};
+use nodedb_types::{DatabaseId, QualifiedCollection, StorageKey, Surrogate, Value};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::wal::{BootVerdictOutcome, RedoSubRecord};
@@ -21,8 +22,8 @@ use super::super::stream_validate::tests::{TID, record};
 use super::super::test_commit::doc_put_sub_record;
 use super::super::unique_handover_tests::{COLL, put, unique_core};
 use super::tests::{
-    MakeCore, Node, append, boot_and_close_with, marker_pinned, node, outcome_of, stored,
-    whole_pinned,
+    MakeCore, Node, append, append_index_step, boot_and_close_with, marker_pinned, node,
+    outcome_of, stored, whole_pinned,
 };
 
 const REFUSED: BootVerdictOutcome = BootVerdictOutcome::Refused {
@@ -242,6 +243,103 @@ fn pair_verdict(pins: &RedoPins, make_core: MakeCore) -> (Option<BootVerdictOutc
     let (node, lsn) = commit_pair(pins, pins, false);
     let booted = boot_and_close_with(&node, make_core);
     (outcome_of(&booted.verdicts, lsn), stored(&booted.core, 2))
+}
+
+/// The fence of descriptor version `version` of the first incarnation.
+fn fence(version: u64) -> DocIndexFence {
+    DocIndexFence {
+        incarnation: nodedb_types::Hlc::new(1, 0),
+        descriptor_version: version,
+    }
+}
+
+fn code_owner() -> DocIndexOwner {
+    DocIndexOwner::Named("code".into())
+}
+
+fn codes() -> QualifiedCollection {
+    QualifiedCollection::new(DatabaseId::DEFAULT, COLL)
+}
+
+/// The data-log build of the UNIQUE `code` index.
+fn build_code() -> PhysicalPlan {
+    PhysicalPlan::Document(DocumentOp::BackfillIndex {
+        collection: codes(),
+        path: "code".into(),
+        is_array: false,
+        unique: true,
+        case_insensitive: false,
+        predicate: None,
+        owner: code_owner(),
+        fence: fence(1),
+    })
+}
+
+/// The data-log retire of the `code` index, as DROP INDEX proposes it.
+fn retire_code() -> PhysicalPlan {
+    PhysicalPlan::Document(DocumentOp::DropIndex {
+        collection: codes(),
+        field: "code".into(),
+        owner: code_owner(),
+        fence: fence(2),
+    })
+}
+
+/// The build of `code`, row 1 `A`, the retire of `code`, then row 2 `A`,
+/// both rows pinned with a `Ready` UNIQUE `code`. Row 2 is a whole record
+/// or a stream marker. Returns the node and the LSN of row 2.
+fn commit_across_a_retire(streamed: bool) -> (Node, u64) {
+    let pinned = codes_pins(true);
+    let mut node = node();
+    append_index_step(&node, &build_code());
+    append(&node, &whole_pinned(vec![put(1, "A")], None, &pinned));
+    append_index_step(&node, &retire_code());
+    let plan = if streamed {
+        marker_pinned(&mut node, vec![put(2, "A")], &pinned)
+    } else {
+        whole_pinned(vec![put(2, "A")], None, &pinned)
+    };
+    let lsn = append(&node, &plan);
+    (node, lsn)
+}
+
+/// Row 2 lands after this core applied the retire of its pinned `Ready`
+/// UNIQUE index. Boot refuses it as final, the `StalePinnedSchema`
+/// refusal, and does not store it. Without the refusal it passes: the
+/// retire left no entry to probe.
+#[test]
+fn a_record_pinned_to_a_retired_unique_is_a_final_refusal_at_boot() {
+    for streamed in [false, true] {
+        let (node, lsn) = commit_across_a_retire(streamed);
+        let booted = boot_and_close_with(&node, unique_core);
+        assert_eq!(
+            outcome_of(&booted.verdicts, lsn),
+            Some(REFUSED),
+            "streamed {streamed}"
+        );
+        assert!(stored(&booted.core, 1), "row 1 is stored");
+        assert!(!stored(&booted.core, 2), "streamed {streamed}: row 2");
+    }
+}
+
+/// Rows 1 and 2 both claim `A` under a UNIQUE pin. The booting core's
+/// current config has no UNIQUE index, and its maintained set holds the
+/// unique owner of `code`. Boot refuses row 2 as a duplicate, as a whole
+/// record and as a stream marker.
+#[test]
+fn a_duplicate_under_a_unique_pin_is_refused_at_boot() {
+    for streamed in [false, true] {
+        let pinned = codes_pins(true);
+        let (node, lsn) = commit_pair(&pinned, &pinned, streamed);
+        let booted = boot_and_close_with(&node, no_unique_core);
+        assert_eq!(
+            outcome_of(&booted.verdicts, lsn),
+            Some(REFUSED),
+            "streamed {streamed}"
+        );
+        assert!(stored(&booted.core, 1), "row 1 is stored");
+        assert!(!stored(&booted.core, 2), "streamed {streamed}: row 2");
+    }
 }
 
 /// A core whose config digest equals the pin's digest reads its current

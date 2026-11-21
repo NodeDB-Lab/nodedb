@@ -4,8 +4,8 @@
 //! streamed validate folded.
 //!
 //! `unique::check_unique_post_state` walks the record's last writes in
-//! record order and each row's values in set order. Per unique path, in
-//! config order, it refuses:
+//! record order and each row's values in set order. Per judged unique path,
+//! in config order, it refuses:
 //!
 //! 1. the first value a second live row claims, at that row's position;
 //! 2. else the first claimed value a stored row holds that is not the
@@ -26,6 +26,8 @@ use super::post_state::{KeyPrefix, PostState};
 /// meet.
 pub(super) struct UniqueFinal<'a> {
     pub(super) collection: &'a str,
+    /// The UNIQUE paths this core judges, as `judged_unique_paths` keeps
+    /// them. A claim names its path by its position here.
     pub(super) paths: &'a [IndexPath],
     pub(super) doc_engine: DocumentEngine<'a>,
 }
@@ -40,9 +42,6 @@ impl PostState {
         scope: &UniqueFinal<'_>,
     ) -> crate::Result<Option<crate::Error>> {
         for (position, path) in (0u32..).zip(scope.paths) {
-            if !path.unique {
-                continue;
-            }
             if let Some(value) = self.second_live_owner(scope.collection, position)? {
                 return Ok(Some(violation(scope.collection, path, &value)));
             }

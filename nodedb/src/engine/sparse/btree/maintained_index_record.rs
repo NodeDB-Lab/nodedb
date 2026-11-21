@@ -100,6 +100,19 @@ impl MaintainedPath {
             .find(|o| o.owner.is_named())
             .or_else(|| self.owners.last())
     }
+
+    /// Whether a UNIQUE probe can judge the path's entries: an owner with
+    /// `unique` set has the effective owner's entry shape. A declared field
+    /// is never unique, so it never decides this alone.
+    pub fn judges_unique(&self) -> bool {
+        let Some(effective) = self.effective() else {
+            return false;
+        };
+        let shape = effective.shape();
+        self.owners
+            .iter()
+            .any(|owner| owner.unique && owner.shape() == shape)
+    }
 }
 
 /// The highest fence applied for one path and owner.
@@ -322,6 +335,38 @@ mod tests {
         set.remove_owner("$.email", &DocIndexOwner::Declared);
         assert!(set.shape("$.email").is_none());
         assert!(set.paths.is_empty());
+    }
+
+    #[test]
+    fn a_path_judges_unique_while_a_unique_owner_has_the_entry_shape() {
+        let unique = |name: &str, case_insensitive: bool| MaintainedOwner {
+            unique: true,
+            ..owner(DocIndexOwner::Named(name.into()), case_insensitive)
+        };
+        let judges = |set: &MaintainedIndexSet| {
+            set.paths
+                .iter()
+                .find(|p| p.path == "$.code")
+                .is_some_and(MaintainedPath::judges_unique)
+        };
+        let mut set = MaintainedIndexSet::empty(0, 1, "codes");
+        set.add_owner("$.code", owner(DocIndexOwner::Declared, false));
+        assert!(!judges(&set), "a declared field is not unique");
+
+        set.add_owner("$.code", unique("by_code", false));
+        assert!(judges(&set));
+
+        set.add_owner("$.code", owner(DocIndexOwner::Named("plain".into()), false));
+        assert!(
+            judges(&set),
+            "a newer plain index of the same shape keeps the unique entries"
+        );
+
+        set.add_owner("$.code", owner(DocIndexOwner::Named("folded".into()), true));
+        assert!(
+            !judges(&set),
+            "the entries follow a shape no unique owner has"
+        );
     }
 
     #[test]

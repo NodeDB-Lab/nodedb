@@ -71,7 +71,9 @@ impl CoreLoop {
                 .maintained_indexes(target.database_id, target.tid, target.collection)?;
         match committed.judge(step.path, step.owner, step.fence) {
             FenceVerdict::Stale => return Ok(()),
-            FenceVerdict::Apply if committed.top_level => return self.raise_fence_only(&step),
+            FenceVerdict::Apply if committed.top_level => {
+                return self.raise_fence_only(&committed, &step);
+            }
             FenceVerdict::Apply | FenceVerdict::NewIncarnation => {}
         }
         if let Some(ref m) = self.metrics {

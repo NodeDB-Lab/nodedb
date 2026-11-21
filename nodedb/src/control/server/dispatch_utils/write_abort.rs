@@ -65,8 +65,9 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::ExecutionLimitExceeded { .. }
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
-        // Decided by the entry's pins and the log-ordered stored layout, so
-        // a redelivery refuses it again. The client retries a new statement.
+        // Decided by the entry's pins against the log-ordered stored layout
+        // or maintained index set, so a redelivery refuses it again. The
+        // client retries a new statement.
         | ErrorCode::StalePinnedSchema { .. }
         | ErrorCode::SyncRejected { .. }
         | ErrorCode::NotFound

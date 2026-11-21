@@ -20,10 +20,11 @@ use nodedb_wal::{TombstoneSet, WalRecord};
 use crate::bootstrap::write_group_settle::close_judged_redos;
 use crate::bootstrap::write_group_settle::settle::SettleOutcome;
 use crate::control::distributed_applier::ProposalLedger;
-use crate::control::server::wal_dispatch::{WalAppendRequest, append_group_origin};
+use crate::control::server::wal_dispatch::{WalAppendRequest, append_group_origin, wal_append};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::document::store::DocumentEngine;
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 use crate::wal::{BootVerdict, BootVerdictOutcome, RedoSubRecord};
 
 use super::super::replay_fold::tests::settle;
@@ -114,6 +115,30 @@ pub(super) fn append(node: &Node, plan: &PhysicalPlan) -> u64 {
     .origin;
     node.wal.manager().sync().expect("sync");
     origin.lsn.as_u64()
+}
+
+/// Append the index step `plan` as its own record, as a live index step
+/// journals it, and make it durable. Returns the record's LSN.
+pub(super) fn append_index_step(node: &Node, plan: &PhysicalPlan) -> u64 {
+    let lsn = wal_append(WalAppendRequest {
+        wal: node
+            .wal
+            .manager()
+            .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User),
+        event_source: crate::event::EventSource::User,
+        tenant_id: TenantId::new(TID),
+        vshard_id: VShardId::new(0),
+        database_id: DatabaseId::DEFAULT,
+        plan,
+        credentials: None,
+        now_override: None,
+    })
+    .expect("index step append")
+    .lsn
+    .expect("an index step journals its own record");
+    node.wal.manager().sync().expect("sync");
+    lsn.as_u64()
 }
 
 /// A booted core and the verdicts its replay reached.

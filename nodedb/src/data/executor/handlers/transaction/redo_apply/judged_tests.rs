@@ -9,14 +9,18 @@
 use std::sync::Arc;
 
 use nodedb_physical::physical_plan::{
-    ConfigPin, ConfigPinKey, CrsPin, DocConfigWire, EnforcementOptions, RedoOrigin, RedoPins,
-    RedoSumTargets, RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, StorageMode,
+    ConfigPin, ConfigPinKey, CrsPin, DocConfigWire, DocIndexFence, DocIndexOwner,
+    EnforcementOptions, RedoOrigin, RedoPins, RedoSumTargets, RegisteredIndex,
+    RegisteredIndexState, ResolvedSumTarget, StorageMode,
 };
 use nodedb_types::{DatabaseId, Surrogate, TenantId};
 
-use crate::bridge::envelope::ErrorCode;
+use crate::bridge::envelope::{ErrorCode, Status};
+use crate::control::server::dispatch_utils::error_is_final_refusal;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::tests::make_core_with_dir;
 use crate::data::executor::enforcement::retention::judged_instant_ms;
+use crate::data::executor::handlers::document::index_maintenance::BackfillIndexParams;
 use crate::engine::document::store::CollectionConfig;
 use crate::types::Lsn;
 use crate::wal::RedoSubRecord;
@@ -26,7 +30,7 @@ use super::stream_validate::tests::{
     framed_pinned, hold, plain_core, record,
 };
 use super::stream_validate::{StreamLimits, StreamValidateInput};
-use super::unique_handover_tests::{COLL, put, seeded};
+use super::unique_handover_tests::{COLL, install, put, seeded};
 use super::whole_validate::WholeValidateInput;
 
 /// A batch bound that puts about one record in each batch.
@@ -200,13 +204,139 @@ fn a_newer_unique_on_the_core_passes_the_pinned_record() {
     }
 }
 
-/// The proposer saw a UNIQUE index the core lacks. The record
-/// refuses on every path.
+/// The proposer saw a UNIQUE index the core's current config lacks, and
+/// the core maintains its path as unique. The record refuses on every
+/// path.
 #[test]
 fn a_pinned_unique_the_core_lacks_refuses() {
     for verdict in verdicts(&codes_pins(true), drop_current_unique) {
         assert!(is_unique_violation(&verdict), "{verdict:?}");
     }
+}
+
+/// The fence of descriptor version `version` of the first incarnation.
+fn fence(version: u64) -> DocIndexFence {
+    DocIndexFence {
+        incarnation: nodedb_types::Hlc::new(1, 0),
+        descriptor_version: version,
+    }
+}
+
+/// The owner the `code` index builds and retires as.
+fn code_owner() -> DocIndexOwner {
+    DocIndexOwner::Named("code".into())
+}
+
+/// A build of the UNIQUE `code` index on `core`, judging the stored rows.
+fn build_unique_code(core: &mut CoreLoop) -> crate::Result<()> {
+    core.backfill_document_index(
+        DatabaseId::DEFAULT,
+        BackfillIndexParams {
+            tid: TID,
+            collection: COLL,
+            path: "code",
+            is_array: false,
+            unique: true,
+            judge_unique: true,
+            case_insensitive: false,
+            predicate: None,
+            owner: &code_owner(),
+            fence: fence(1),
+        },
+    )
+}
+
+/// Build the UNIQUE `code` index, then retire it, as a DROP INDEX does on
+/// the data log. The core's current config has no UNIQUE index.
+fn retire_unique(core: &mut CoreLoop) {
+    drop_current_unique(core);
+    build_unique_code(core).expect("the build applies");
+    core.purge_document_index_field(0, TID, COLL, "code", &code_owner(), fence(2))
+        .expect("the retire applies");
+    assert!(
+        core.maintained_indexes.path(0, TID, COLL, "code").is_none(),
+        "the retire leaves the path unmaintained"
+    );
+}
+
+fn is_stale_pin(verdict: &Result<(), ErrorCode>) -> bool {
+    matches!(
+        verdict,
+        Err(ErrorCode::StalePinnedSchema { detail }) if detail.contains(COLL)
+    )
+}
+
+/// A record pinned to a `Ready` UNIQUE index lands after this core applied
+/// the index's retire. The core holds no entry to probe, so the record is
+/// refused as stale on every path, and the refusal is final.
+#[test]
+fn a_pinned_ready_unique_the_core_retired_is_a_final_stale_refusal() {
+    for verdict in verdicts(&codes_pins(true), retire_unique) {
+        assert!(is_stale_pin(&verdict), "{verdict:?}");
+        if let Err(code) = verdict {
+            assert!(error_is_final_refusal(&crate::Error::DataPlane(code)));
+        }
+    }
+}
+
+/// The wire form of `codes` with its UNIQUE index on `code` in `state`.
+fn unique_wire_in(state: RegisteredIndexState) -> DocConfigWire {
+    let mut wire = wire(true);
+    for index in &mut wire.index_paths {
+        index.state = state;
+    }
+    wire
+}
+
+/// A core whose `codes` rows 1 and 2 both hold `A`, where a UNIQUE build of
+/// `code` was refused for the duplicate. The catalog keeps the index
+/// `Building`.
+fn failed_build_core(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+    let (mut core, req, resp) = make_core_with_dir(dir);
+    core.doc_configs
+        .insert(config_key(), CollectionConfig::new(COLL));
+    let installed = install(&mut core, 10, vec![put(1, "A"), put(2, "A")]);
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    let built = build_unique_code(&mut core);
+    assert!(
+        matches!(
+            &built,
+            Err(crate::Error::RejectedConstraint { constraint, .. }) if constraint == "unique"
+        ),
+        "{built:?}"
+    );
+    assert!(
+        core.maintained_indexes.path(0, TID, COLL, "code").is_none(),
+        "a refused build maintains nothing"
+    );
+    (core, Box::new((req, resp)))
+}
+
+/// After a UNIQUE build refused for duplicates, a record pinned with the
+/// index still `Building` is admitted on every path. Its UNIQUE path is
+/// skipped, so no stale refusal blocks the collection.
+#[test]
+fn a_record_pinned_with_a_building_unique_after_a_failed_build_is_admitted() {
+    let pinned = pins(vec![pin_of(
+        COLL,
+        &unique_wire_in(RegisteredIndexState::Building),
+    )]);
+    let mut held = hold(failed_build_core);
+    let mut verdicts = vec![whole(&mut held.core, &pinned, vec![put(3, "A")])];
+    for spill in [0, usize::MAX] {
+        verdicts.push(streamed(&mut held, &pinned, vec![put(3, "A")], &[], spill));
+    }
+    for verdict in &verdicts {
+        assert!(verdict.is_ok(), "{verdict:?}");
+    }
+
+    // The same record pinned `Ready` is refused as stale, so the case bites.
+    let ready = pins(vec![pin_of(
+        COLL,
+        &unique_wire_in(RegisteredIndexState::Ready),
+    )]);
+    let verdict = whole(&mut held.core, &ready, vec![put(3, "A")]);
+    assert!(is_stale_pin(&verdict), "{verdict:?}");
 }
 
 /// Two cores whose current configs differ reach one verdict on one

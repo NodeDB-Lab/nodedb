@@ -118,15 +118,15 @@ impl CoreLoop {
         // Both checks read the committed set and return before any row is
         // read. A build from an older descriptor than one already applied
         // for this owner changes nothing. A build whose owner the set
-        // already holds with this exact spec only raises the fence, so a
-        // re-delivered build costs one small write on every replica.
+        // already holds with this exact spec only raises the fence. A
+        // re-delivered build at a fence the set holds writes nothing.
         let committed = self
             .sparse
             .maintained_indexes(database_raw, tid, collection)?;
         match committed.judge(path, owner, fence) {
             FenceVerdict::Stale => return Ok(()),
             FenceVerdict::Apply if committed.holds_owner(path, &spec) => {
-                return self.raise_fence_only(&step);
+                return self.raise_fence_only(&committed, &step);
             }
             FenceVerdict::Apply | FenceVerdict::NewIncarnation => {}
         }

@@ -26,7 +26,8 @@ use super::doc_config_key::{DocConfigKey, DocConfigRef};
 /// What one collection maintains on one core.
 #[derive(Debug, Default, Clone)]
 struct CollectionIndexes {
-    /// Each path an owner is stored on, as its effective owner's spec.
+    /// Each path an owner is stored on, as its effective owner's spec. Its
+    /// `unique` is whether a UNIQUE probe can judge the path's entries.
     paths: Vec<IndexPath>,
     /// Whether every other top-level path is maintained in the top-level
     /// shape.
@@ -257,7 +258,7 @@ impl PreparedSet {
         let mut paths = Vec::with_capacity(set.paths.len());
         for entry in &set.paths {
             if let Some(spec) = entry.effective() {
-                paths.push(index_path(&entry.path, spec)?);
+                paths.push(index_path(&entry.path, spec, entry.judges_unique())?);
             }
         }
         Ok(Self {
@@ -277,7 +278,11 @@ impl PreparedSet {
 /// The spec a write maintains `path` by, from its effective owner. A stored
 /// predicate that does not parse is refused: maintaining the path without
 /// it writes entries for rows the partial index excludes.
-fn index_path(path: &str, spec: &MaintainedOwner) -> crate::Result<IndexPath> {
+///
+/// `unique` is whether a UNIQUE probe can judge the path's entries. It is
+/// set when any owner of the path is unique with the effective shape, so a
+/// newer plain index of the same shape keeps it.
+fn index_path(path: &str, spec: &MaintainedOwner, unique: bool) -> crate::Result<IndexPath> {
     let predicate = match spec.predicate.as_deref() {
         Some(text) => Some(
             crate::engine::document::predicate::IndexPredicate::parse(text).ok_or_else(|| {
@@ -301,7 +306,7 @@ fn index_path(path: &str, spec: &MaintainedOwner) -> crate::Result<IndexPath> {
         name,
         path: path.to_string(),
         is_array: spec.is_array,
-        unique: spec.unique,
+        unique,
         case_insensitive: spec.case_insensitive,
         state: nodedb_physical::physical_plan::RegisteredIndexState::Ready,
         predicate,

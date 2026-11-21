@@ -15,6 +15,7 @@ use nodedb_physical::physical_plan::RedoOrigin;
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::unique::claimed_values;
+use crate::data::executor::enforcement::unique_paths::{UniqueTarget, judged_unique_paths};
 use crate::engine::document::store::DocumentEngine;
 use crate::types::{DatabaseId, TenantId};
 
@@ -67,9 +68,21 @@ impl CoreLoop {
             return;
         };
         if !walk.collections.contains_key(collection) {
+            let unique = judged_unique_paths(
+                &self.maintained_indexes,
+                UniqueTarget {
+                    database_id,
+                    tid: input.tid,
+                    collection,
+                },
+                &config.index_paths,
+            )
+            .map(|paths| paths.into_iter().cloned().collect::<Vec<_>>())
+            .map_err(ErrorCode::from);
             let track = CollectionTrack {
                 bitemporal: self.is_bitemporal(database_id, input.tid, collection),
                 resolved: sum_targets_for(&header.sum_targets, collection),
+                unique,
             };
             walk.collections.insert(collection.to_string(), track);
         }
@@ -120,14 +133,15 @@ impl CoreLoop {
                         Rank::Collection(collection.to_string(), Phase::UniqueImage, op),
                         ErrorCode::from(error),
                     ),
+                    // A stale pinned path refuses the collection at its
+                    // UNIQUE finalize, so its claims are not kept.
                     Ok(image) => {
-                        let crs = self.crs_context();
-                        for (position, path) in (0u32..).zip(&config.index_paths) {
-                            if !path.unique {
-                                continue;
-                            }
-                            for value in claimed_values(&image, path, &crs) {
-                                post.claim(collection, position, value, op, doc.surrogate());
+                        if let Ok(paths) = &track.unique {
+                            let crs = self.crs_context();
+                            for (position, path) in (0u32..).zip(paths) {
+                                for value in claimed_values(&image, path, &crs) {
+                                    post.claim(collection, position, value, op, doc.surrogate());
+                                }
                             }
                         }
                     }
@@ -161,7 +175,7 @@ impl CoreLoop {
     ) {
         let database_id = input.task.request.database_id.as_u64();
         let commit = input.origin == RedoOrigin::Commit;
-        for collection in walk.collections.keys() {
+        for (collection, track) in &walk.collections {
             let config_key = (
                 DatabaseId::new(database_id),
                 TenantId::new(input.tid),
@@ -188,9 +202,19 @@ impl CoreLoop {
             if config.index_paths.iter().any(|path| path.unique)
                 && walk.verdict.admits_collection(collection, Phase::Unique, 0)
             {
+                let paths = match &track.unique {
+                    Ok(paths) => paths,
+                    Err(refusal) => {
+                        walk.verdict.offer(
+                            Rank::Collection(collection.clone(), Phase::Unique, 0),
+                            refusal.clone(),
+                        );
+                        continue;
+                    }
+                };
                 let scope = UniqueFinal {
                     collection,
-                    paths: &config.index_paths,
+                    paths,
                     doc_engine: DocumentEngine::new(&self.sparse, database_id, input.tid),
                 };
                 match walk.post.unique_violation(&scope) {

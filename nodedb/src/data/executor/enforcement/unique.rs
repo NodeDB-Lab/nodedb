@@ -19,8 +19,10 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::maintained_indexes::MaintainedIndexes;
 use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::typeguard::GuardScope;
+use crate::data::executor::enforcement::unique_paths::{UniqueTarget, judged_unique_paths};
 use crate::data::executor::handlers::write_body;
 use crate::engine::document::store::{
     CollectionConfig, DocumentEngine, IndexPath, extract_index_values,
@@ -51,9 +53,13 @@ pub(in crate::data::executor) struct PostImage<'a> {
 /// The collection a unit writes, and the committed index its claims meet.
 pub(in crate::data::executor) struct UniqueScope<'a> {
     pub sparse: &'a SparseEngine,
+    /// The paths this core maintains. A pinned UNIQUE path is judged only
+    /// as [`judged_unique_paths`] decides.
+    pub maintained: &'a MaintainedIndexes,
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
+    /// The judged config's index paths.
     pub paths: &'a [IndexPath],
     /// `false` when the unit truncated the collection: no committed row
     /// survives it.
@@ -66,11 +72,22 @@ pub(in crate::data::executor) struct UniqueScope<'a> {
 ///
 /// When a row appears more than once in `rows`, its last entry is its
 /// post-image. Every row in `rows` releases the values it holds committed.
+/// A pinned `Ready` UNIQUE path this core does not maintain as unique
+/// refuses the unit with `StalePinnedSchema` before any claim is judged.
 pub(in crate::data::executor) fn check_unique_post_state(
     scope: &UniqueScope<'_>,
     rows: &[PostImage<'_>],
 ) -> crate::Result<()> {
-    if !scope.paths.iter().any(|path| path.unique) {
+    let paths = judged_unique_paths(
+        scope.maintained,
+        UniqueTarget {
+            database_id: scope.database_id,
+            tid: scope.tid,
+            collection: scope.collection,
+        },
+        scope.paths,
+    )?;
+    if paths.is_empty() {
         return Ok(());
     }
     let last_write: HashMap<u32, usize> = rows
@@ -79,7 +96,7 @@ pub(in crate::data::executor) fn check_unique_post_state(
         .map(|(index, row)| (row.surrogate, index))
         .collect();
     let doc_engine = DocumentEngine::new(scope.sparse, scope.database_id, scope.tid);
-    for path in scope.paths.iter().filter(|path| path.unique) {
+    for path in paths {
         // Value → (owning row, whether that row is judged).
         let mut claims: HashMap<String, (u32, bool)> = HashMap::new();
         // Judged claims in unit order, so every replica names the same value.
@@ -170,7 +187,8 @@ impl CoreLoop {
     /// judged config holds it. A UNIQUE claim is a verdict, so a pinned
     /// write judges it by its proposer's indexes, as a committed redo's
     /// validate does. The judged config decodes stored rows in the core's
-    /// current storage mode.
+    /// current storage mode. The probe judges the paths
+    /// [`judged_unique_paths`] keeps against the core's maintained set.
     pub(in crate::data::executor) fn unique_config(
         &self,
         database_id: u64,
@@ -196,6 +214,7 @@ impl CoreLoop {
         check_unique_post_state(
             &UniqueScope {
                 sparse: &self.sparse,
+                maintained: &self.maintained_indexes,
                 database_id,
                 tid,
                 collection,
@@ -461,6 +480,7 @@ mod tests {
         check_unique_post_state(
             &UniqueScope {
                 sparse: &core.sparse,
+                maintained: &core.maintained_indexes,
                 database_id: DB,
                 tid: TID,
                 collection: COLL,

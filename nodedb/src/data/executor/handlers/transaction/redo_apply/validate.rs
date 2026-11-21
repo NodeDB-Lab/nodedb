@@ -17,7 +17,9 @@
 //! * BALANCED — the signed entries of every document write, judged per
 //!   collection across the whole record.
 //! * UNIQUE — the record's post-state: a unique value may have one owner among
-//!   the rows the record leaves untouched and the rows it writes.
+//!   the rows the record leaves untouched and the rows it writes. A pinned
+//!   `Ready` UNIQUE path this core does not maintain as unique refuses the
+//!   record with `StalePinnedSchema`.
 //! * Materialized-sum folds — every fold the install runs on this core
 //!   finds its resolution and its target row, and leaves each target's
 //!   UNIQUE values with one owner (`sum_fold_check`).
@@ -304,6 +306,7 @@ impl CoreLoop {
         check_unique_post_state(
             &UniqueScope {
                 sparse: &self.sparse,
+                maintained: &self.maintained_indexes,
                 database_id: scope.database_id,
                 tid: scope.tid,
                 collection: scope.collection,

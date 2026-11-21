@@ -55,7 +55,7 @@ pub(super) fn put(surrogate: u32, code: &str) -> RedoSubRecord {
     doc_put_sub_record(COLL, &format!("r{surrogate}"), &body(code), surrogate)
 }
 
-fn install(core: &mut CoreLoop, lsn: u64, ops: Vec<RedoSubRecord>) -> Response {
+pub(super) fn install(core: &mut CoreLoop, lsn: u64, ops: Vec<RedoSubRecord>) -> Response {
     let redo = RedoRecord {
         version: 1,
         ops,
