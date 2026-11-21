@@ -30,6 +30,13 @@ pub async fn alter_timeseries(
     }
 
     let name = parse_ident_token(parts[2])?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &name,
+        "alter timeseries collections",
+    )?;
     let tenant_id = identity.tenant_id;
     let updates = parse_set_clause(&parts[4..])?;
     let partition_by = match updates.get("partition_by").and_then(JsonValue::as_str) {
