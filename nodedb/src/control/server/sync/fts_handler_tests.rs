@@ -184,7 +184,9 @@ async fn unauthenticated_index_returns_fenced_without_dispatch() {
 async fn authenticated_index_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, indexes, _) = MockDispatcher::ok();
     let msg = make_index_msg("docs", "d1", "hello world");
 
@@ -208,7 +210,9 @@ async fn authenticated_index_dispatches_and_acks() {
 async fn empty_fields_dispatch_as_a_removal() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, indexes, _) = MockDispatcher::ok();
     let msg = make_index_msg("docs", "d1", "");
 
@@ -225,7 +229,9 @@ async fn empty_fields_dispatch_as_a_removal() {
 async fn unknown_index_dispatch_outcome_requires_reconnect() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let mock = MockDispatcher::err();
     let msg = make_index_msg("docs", "d1", "hello");
 
@@ -236,7 +242,9 @@ async fn unknown_index_dispatch_outcome_requires_reconnect() {
 async fn authenticated_delete_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
     let msg = make_delete_msg("docs", "d1");
 
@@ -265,7 +273,9 @@ async fn unauthenticated_delete_returns_fenced_without_dispatch() {
 async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
 
     let frame = session
@@ -285,7 +295,9 @@ async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
 async fn delete_of_a_bound_key_carries_the_home_surrogate() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.bound = Some(Surrogate::new(7));
 
@@ -302,7 +314,9 @@ async fn delete_of_a_bound_key_carries_the_home_surrogate() {
 async fn unreadable_index_and_delete_outcomes_require_reconnect() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.payload = Some(b"invalid msgpack".to_vec());
     assert!(
@@ -324,7 +338,9 @@ async fn unreadable_index_and_delete_outcomes_require_reconnect() {
 async fn surrogate_errors_require_reconnect_without_an_ack() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     assert!(
         session
             .handle_fts_index(&make_index_msg("docs", "d1", "hello"), &NoOpFtsDispatcher)
@@ -343,7 +359,9 @@ async fn surrogate_errors_require_reconnect_without_an_ack() {
 async fn terminal_index_and_delete_payloads_preserve_the_consumed_sequence() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.payload = Some(
         zerompk::to_msgpack_vec(&SyncAckResult::rejected(
@@ -375,7 +393,9 @@ async fn typed_index_and_delete_refusals_preserve_the_consumed_frontier() {
     use crate::bridge::envelope::ErrorCode;
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.error_code = Some(ErrorCode::SyncRejected {
         violation: nodedb_types::sync::violation::ViolationType::PermissionDenied,
@@ -409,7 +429,9 @@ async fn typed_index_and_delete_refusals_preserve_the_consumed_frontier() {
 async fn unknown_delete_dispatch_outcome_requires_reconnect() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     assert!(
         session
             .handle_fts_delete(&make_delete_msg("docs", "d1"), &MockDispatcher::err())

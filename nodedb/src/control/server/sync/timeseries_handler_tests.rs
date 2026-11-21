@@ -103,7 +103,9 @@ fn make_session() -> SyncSession {
 
 fn authenticate(session: &mut SyncSession) {
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     session.identity = Some(
         crate::control::security::identity::AuthenticatedIdentity::new_regular(
             1,
@@ -245,7 +247,9 @@ async fn undecodable_samples_close_without_consumption() {
 async fn authenticated_without_identity_rejects_without_dispatch() {
     let mut session = make_session();
     session.authenticated = true;
-    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, calls) = MockDispatcher::ok();
     let msg = make_push_msg("metrics");
 
