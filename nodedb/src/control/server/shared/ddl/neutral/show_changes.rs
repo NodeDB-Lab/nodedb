@@ -22,6 +22,33 @@ use crate::types::DatabaseId;
 
 use super::super::result::{DdlError, DdlResult};
 
+/// The value after `SINCE`: a single-quoted literal without its quotes (`''`
+/// stands for one quote), or the next word without a trailing `;`.
+fn since_value(rest: &str) -> String {
+    let rest = rest.trim_start();
+    let Some(body) = rest.strip_prefix('\'') else {
+        return rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .trim_end_matches(';')
+            .to_string();
+    };
+    let mut value = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\'' {
+            value.push(c);
+        } else if chars.peek() == Some(&'\'') {
+            value.push('\'');
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    value
+}
+
 /// Execute `SHOW CHANGES FOR <collection> [SINCE <timestamp>] [LIMIT <n>]`.
 pub fn show_changes(
     state: &SharedState,
@@ -35,11 +62,9 @@ pub fn show_changes(
         let coll_name =
             crate::control::server::shared::ddl::sql_parse::parse_ident_token(coll_token)?;
         let since_ms: u64 = if let Some(since_pos) = find_ascii_case_insensitive(sql, " SINCE ") {
-            let since_str = sql[since_pos + 7..]
-                .split_whitespace()
-                .next()
-                .unwrap_or("0");
-            match crate::control::server::shared::ddl::sql_parse::parse_since_timestamp(since_str) {
+            let since_str = since_value(&sql[since_pos + " SINCE ".len()..]);
+            match crate::control::server::shared::ddl::sql_parse::parse_since_timestamp(&since_str)
+            {
                 Ok(ms) => ms,
                 Err(msg) => {
                     return Err(DdlError::new("22007", msg.to_string()));
@@ -153,12 +178,45 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
     use crate::bridge::dispatch::Dispatcher;
     use crate::control::change_stream::{ChangeEvent, ChangeOperation};
     use crate::control::security::identity::{AuthMethod, DatabaseSet, Role};
     use crate::types::{Lsn, TenantId};
     use crate::wal::WalManager;
     use nodedb_types::RowIdentity;
+
+    #[test]
+    fn since_value_unquotes_a_literal_and_keeps_its_spaces() {
+        assert_eq!(
+            since_value("'2026-01-01T00:00:00Z' LIMIT 5"),
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            since_value("'2026-01-01 00:00:00' LIMIT 5"),
+            "2026-01-01 00:00:00"
+        );
+        assert_eq!(since_value("'it''s'"), "it's");
+    }
+
+    #[test]
+    fn since_value_reads_a_bare_word_without_its_semicolon() {
+        assert_eq!(since_value("0;"), "0");
+        assert_eq!(since_value("1700000000000 LIMIT 5"), "1700000000000");
+        assert_eq!(since_value(""), "0");
+    }
+
+    #[test]
+    fn a_quoted_iso_since_parses_like_the_bare_one() {
+        let quoted = since_value("'2026-01-01T00:00:00Z'");
+        assert_eq!(
+            crate::control::server::shared::ddl::sql_parse::parse_since_timestamp(&quoted).unwrap(),
+            crate::control::server::shared::ddl::sql_parse::parse_since_timestamp(
+                "2026-01-01T00:00:00Z"
+            )
+            .unwrap()
+        );
+    }
 
     fn test_state() -> (tempfile::TempDir, Arc<SharedState>) {
         let dir = tempfile::tempdir().expect("create test directory");
