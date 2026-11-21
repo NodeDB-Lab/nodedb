@@ -130,7 +130,7 @@ pub(super) fn rebuild_columns(
 
     let mut result = Vec::with_capacity(columns.len());
 
-    for (i, (snap_col, (col_name, _col_type))) in
+    for (i, (snap_col, (col_name, col_type))) in
         columns.into_iter().zip(schema_columns.iter()).enumerate()
     {
         let col_len = match &snap_col {
@@ -184,6 +184,19 @@ pub(super) fn rebuild_columns(
             ColumnSnapshot::Uuid(v) => ColumnData::Uuid(v),
             ColumnSnapshot::Bool(v) => ColumnData::Bool(v),
         };
+
+        // A column keeps the encoding its schema type builds. Every reader and
+        // the partition writer assume it, and a different encoding stops them.
+        if std::mem::discriminant(&col_data)
+            != std::mem::discriminant(&ColumnData::nulls(*col_type, 0))
+        {
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "snapshot column {} ('{}') has a different encoding than its schema type {:?}",
+                    i, col_name, col_type,
+                ),
+            });
+        }
 
         result.push(col_data);
     }
