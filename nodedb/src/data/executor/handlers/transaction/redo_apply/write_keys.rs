@@ -14,7 +14,9 @@ use crate::wal::RedoSubRecord;
 
 use super::sub_ops::{RedoKvOp, document_op, kv_op};
 
-fn edge_write(sub: &RedoSubRecord) -> Option<TxnWrite> {
+/// The edge `sub` writes, `None` for any sub-record that is no edge put or
+/// delete.
+pub(super) fn edge_write(sub: &RedoSubRecord) -> Option<TxnWrite> {
     let (collection, src, label, dst) = match RecordType::from_raw(sub.record_type)? {
         RecordType::Put => {
             let put = zerompk::from_msgpack::<crate::wal::EdgePutRedo>(&sub.payload).ok()?;

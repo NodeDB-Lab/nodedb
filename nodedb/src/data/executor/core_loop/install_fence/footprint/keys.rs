@@ -13,8 +13,9 @@
 
 use nodedb_array::types::ArrayId;
 use nodedb_types::QualifiedCollection;
+use nodedb_types::sync::wire::SyncProvenance;
 
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::super::state::FenceKey;
 use super::class::{Footprint, Scope};
@@ -24,13 +25,13 @@ const MALFORMED_SITE: &str = "fence_footprint: the task waits as a task of its d
 
 /// The keys of one task, built from its plan.
 pub(super) struct KeySet<'s> {
-    scope: &'s Scope,
+    scope: &'s Scope<'s>,
     keys: Vec<FenceKey>,
     malformed: bool,
 }
 
 impl<'s> KeySet<'s> {
-    pub(super) fn new(scope: &'s Scope) -> Self {
+    pub(super) fn new(scope: &'s Scope<'s>) -> Self {
         Self {
             scope,
             keys: Vec::new(),
@@ -59,7 +60,13 @@ impl<'s> KeySet<'s> {
     /// `name` qualified for the request's database. A name that cannot be
     /// qualified files a report and marks the set malformed.
     fn qualify(&mut self, name: &str) -> Option<QualifiedCollection> {
-        match QualifiedCollection::from_request(self.scope.db, name) {
+        self.qualify_in(self.scope.db, name)
+    }
+
+    /// `name` qualified for `db`. A name that cannot be qualified files a
+    /// report and marks the set malformed.
+    fn qualify_in(&mut self, db: DatabaseId, name: &str) -> Option<QualifiedCollection> {
+        match QualifiedCollection::from_request(db, name) {
             Ok(qualified) => Some(qualified),
             Err(error) => {
                 crate::diag::stored_collection_name_malformed(MALFORMED_SITE, name, &error);
@@ -110,10 +117,50 @@ impl<'s> KeySet<'s> {
         self
     }
 
+    /// The collection `name` of database `db`, stored or bare.
+    pub(super) fn named_in(mut self, db: DatabaseId, name: &str) -> Self {
+        match self.qualify_in(db, name) {
+            Some(qualified) => self.stored(qualified.as_str()),
+            None => self,
+        }
+    }
+
+    /// The high-water mark of the sync stream `provenance` names. Producer
+    /// zero takes no part in producer sequencing: its frame advances no
+    /// mark, and nothing is keyed.
+    pub(super) fn sync(mut self, provenance: Option<&SyncProvenance>) -> Self {
+        self.keys.extend(provenance.and_then(FenceKey::sync_stream));
+        self
+    }
+
+    /// The tenant-wide CRDT state of `tenant` in the request's database.
+    pub(super) fn crdt_tenant_of(mut self, tenant: TenantId) -> Self {
+        self.keys.push(FenceKey::CrdtTenant {
+            db: self.scope.db,
+            tenant,
+        });
+        self
+    }
+
+    /// The overlay of transaction `txn`.
+    pub(super) fn txn_overlay(mut self, txn: TxnId) -> Self {
+        self.keys.push(FenceKey::TxnOverlay(txn));
+        self
+    }
+
+    /// The footprint a malformed name leaves: the request's whole
+    /// database, or every state of the core when a key spans databases.
+    fn malformed_footprint(&self) -> Footprint {
+        if self.keys.iter().any(|key| key.database().is_none()) {
+            return Footprint::Core;
+        }
+        self.scope.whole_database()
+    }
+
     /// A read of the keys.
     pub(super) fn read(self) -> Footprint {
         if self.malformed {
-            return self.scope.whole_database();
+            return self.malformed_footprint();
         }
         Footprint::Keys(self.keys)
     }
@@ -121,7 +168,7 @@ impl<'s> KeySet<'s> {
     /// A write of the keys, by a task whose events carry its vShard.
     pub(super) fn write(self) -> Footprint {
         if self.malformed {
-            return self.scope.whole_database();
+            return self.malformed_footprint();
         }
         Footprint::Write {
             keys: self.keys,
@@ -131,30 +178,35 @@ impl<'s> KeySet<'s> {
 }
 
 /// A read of `collection` alone.
-pub(super) fn read_of(collection: &QualifiedCollection, scope: &Scope) -> Footprint {
+pub(super) fn read_of(collection: &QualifiedCollection, scope: &Scope<'_>) -> Footprint {
     KeySet::new(scope).collection(collection).read()
 }
 
 /// A write of `collection` alone.
-pub(super) fn write_of(collection: &QualifiedCollection, scope: &Scope) -> Footprint {
+pub(super) fn write_of(collection: &QualifiedCollection, scope: &Scope<'_>) -> Footprint {
     KeySet::new(scope).collection(collection).write()
 }
 
 #[cfg(test)]
 pub(super) mod tests {
+    use super::super::registry::tests::NO_REGISTRY;
     use super::*;
-    use crate::types::{DatabaseId, VShardId};
+    use crate::types::VShardId;
 
     pub(in crate::data::executor::core_loop::install_fence) const TENANT: TenantId =
         TenantId::new(1);
     pub(in crate::data::executor::core_loop::install_fence) const VSHARD: VShardId =
         VShardId::new(3);
 
-    pub(in crate::data::executor::core_loop::install_fence) fn scope() -> Scope {
+    /// The scope of a request of the default database, outside any
+    /// transaction, on a core whose registries hold nothing.
+    pub(in crate::data::executor::core_loop::install_fence) fn scope() -> Scope<'static> {
         Scope {
             db: DatabaseId::DEFAULT,
             tenant: TENANT,
             vshard: VSHARD,
+            txn: None,
+            registry: &NO_REGISTRY,
         }
     }
 
@@ -236,5 +288,65 @@ pub(super) mod tests {
     #[test]
     fn a_malformed_stored_name_is_the_whole_database() {
         assert_eq!(KeySet::new(&scope()).stored("x/y/z").read(), whole());
+    }
+
+    /// A sync stream spans databases, so no whole database covers it.
+    #[test]
+    fn a_malformed_name_beside_a_sync_stream_is_a_core_task() {
+        let provenance = SyncProvenance {
+            producer_id: 5,
+            epoch: 1,
+            stream_id: 8,
+            seq: 1,
+        };
+        assert_eq!(
+            KeySet::new(&scope())
+                .stored("x/y/z")
+                .sync(Some(&provenance))
+                .write(),
+            Footprint::Core
+        );
+    }
+
+    #[test]
+    fn a_sync_stream_keys_its_producer_and_stream() {
+        let provenance = SyncProvenance {
+            producer_id: 5,
+            epoch: 1,
+            stream_id: 8,
+            seq: 1,
+        };
+        assert_eq!(
+            KeySet::new(&scope()).sync(Some(&provenance)).read(),
+            Footprint::Keys(vec![FenceKey::SyncStream {
+                producer_id: 5,
+                stream_id: 8,
+            }])
+        );
+        let local = SyncProvenance {
+            producer_id: 0,
+            ..provenance
+        };
+        assert_eq!(
+            KeySet::new(&scope()).sync(Some(&local)).read(),
+            Footprint::Keys(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_crdt_tenant_and_an_overlay_key_in_their_forms() {
+        assert_eq!(
+            KeySet::new(&scope())
+                .crdt_tenant_of(TENANT)
+                .txn_overlay(TxnId::new(3))
+                .read(),
+            Footprint::Keys(vec![
+                FenceKey::CrdtTenant {
+                    db: DatabaseId::DEFAULT,
+                    tenant: TENANT,
+                },
+                FenceKey::TxnOverlay(TxnId::new(3)),
+            ])
+        );
     }
 }

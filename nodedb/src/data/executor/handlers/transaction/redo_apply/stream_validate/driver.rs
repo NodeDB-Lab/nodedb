@@ -92,6 +92,14 @@ impl StreamValidation {
     ) -> BTreeSet<FenceKey> {
         std::mem::take(&mut self.walk.read_keys)
     }
+
+    /// The keys of the state the ops walked since the last take write
+    /// beside their collections.
+    pub(in crate::data::executor::handlers::transaction::redo_apply) fn take_op_keys(
+        &mut self,
+    ) -> BTreeSet<FenceKey> {
+        std::mem::take(&mut self.walk.op_keys)
+    }
 }
 
 impl CoreLoop {

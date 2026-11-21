@@ -3,9 +3,10 @@
 //! The classes of state a task can touch, and how two of them join.
 
 use crate::data::executor::task::ExecutionTask;
-use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
 
 use super::super::state::FenceKey;
+use super::registry::FenceRegistry;
 
 /// The state a task can touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,23 +31,32 @@ pub(in crate::data::executor) enum Footprint {
 }
 
 /// What a task's footprint is derived from beside its plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::data::executor) struct Scope {
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) struct Scope<'c> {
     /// The request's database. Sum targets and graph state key by it.
     pub(in crate::data::executor) db: DatabaseId,
     /// The request's tenant. Graph state keys by it.
     pub(in crate::data::executor) tenant: TenantId,
     /// The vShard the task's events carry.
     pub(in crate::data::executor) vshard: VShardId,
+    /// The transaction the request runs in. Its overlay keys by it.
+    pub(in crate::data::executor) txn: Option<TxnId>,
+    /// The core state that names what an op touches beyond its plan.
+    pub(in crate::data::executor) registry: &'c dyn FenceRegistry,
 }
 
-impl Scope {
-    /// The scope of `task`'s request.
-    pub(in crate::data::executor) fn of(task: &ExecutionTask) -> Self {
+impl<'c> Scope<'c> {
+    /// The scope of `task`'s request on the core `registry` reads.
+    pub(in crate::data::executor) fn of(
+        task: &ExecutionTask,
+        registry: &'c dyn FenceRegistry,
+    ) -> Self {
         Self {
             db: task.request.database_id,
             tenant: task.request.tenant_id,
             vshard: task.request.vshard_id,
+            txn: task.request.txn_id,
+            registry,
         }
     }
 
@@ -65,6 +75,24 @@ impl Scope {
 }
 
 impl Footprint {
+    /// The footprint of a task of transaction `txn`: it also reads or
+    /// writes the transaction's overlay. A task that touches no key and
+    /// background work touch no overlay.
+    pub(in crate::data::executor) fn in_txn(self, txn: Option<TxnId>) -> Footprint {
+        let Some(txn) = txn else {
+            return self;
+        };
+        let touches_overlay = match &self {
+            Footprint::Keys(keys) => !keys.is_empty(),
+            Footprint::Background => false,
+            Footprint::Write { .. } | Footprint::WholeDatabase { .. } | Footprint::Core => true,
+        };
+        if !touches_overlay {
+            return self;
+        }
+        self.join(Footprint::Keys(vec![FenceKey::TxnOverlay(txn)]))
+    }
+
     /// The footprint of a task that does both.
     ///
     /// Keys and writes union their keys. Two writes join only on one
@@ -206,6 +234,28 @@ mod tests {
         assert_eq!(write(vec![key(0, "a")], 1).join(whole(0, 1)), whole(0, 1));
         assert_eq!(whole(0, 1).join(whole(7, 1)), Footprint::Core);
         assert_eq!(whole(0, 1).join(whole(0, 1)), whole(0, 1));
+    }
+
+    #[test]
+    fn a_task_of_a_transaction_keys_its_overlay() {
+        let overlay = FenceKey::TxnOverlay(TxnId::new(9));
+        let txn = Some(TxnId::new(9));
+        assert_eq!(
+            Footprint::Keys(vec![key(0, "a")]).in_txn(txn),
+            Footprint::Keys(vec![key(0, "a"), overlay.clone()])
+        );
+        assert_eq!(
+            write(vec![key(0, "a")], 1).in_txn(txn),
+            write(vec![key(0, "a"), overlay], 1)
+        );
+        // An overlay spans databases: no whole database covers it.
+        assert_eq!(whole(0, 1).in_txn(txn), Footprint::Core);
+        assert_eq!(
+            Footprint::Keys(Vec::new()).in_txn(txn),
+            Footprint::Keys(Vec::new())
+        );
+        assert_eq!(Footprint::Background.in_txn(txn), Footprint::Background);
+        assert_eq!(whole(0, 1).in_txn(None), whole(0, 1));
     }
 
     #[test]

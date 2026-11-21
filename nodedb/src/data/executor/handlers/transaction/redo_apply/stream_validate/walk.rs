@@ -136,6 +136,10 @@ pub(super) struct StreamWalk {
     /// The collections of the reads checked so far. A yielding install
     /// fences each before its slice ends.
     pub(super) read_keys: BTreeSet<FenceKey>,
+    /// The keys of the state the walked ops write beside their
+    /// collections: sync streams and the tenant's graph. A yielding
+    /// install fences each before its slice ends.
+    pub(super) op_keys: BTreeSet<FenceKey>,
     /// The instant the KV key images read at, in ms since the Unix epoch.
     pub(super) kv_now_ms: u64,
     pub(super) keyed: BTreeSet<String>,
@@ -160,6 +164,7 @@ impl StreamWalk {
             ops: 0,
             reads: Vec::new(),
             read_keys: BTreeSet::new(),
+            op_keys: BTreeSet::new(),
             kv_now_ms,
             keyed: BTreeSet::new(),
             held: InstallSpools::default(),

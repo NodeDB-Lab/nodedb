@@ -4,14 +4,14 @@
 //! slices.
 //!
 //! The install fence is armed before the validate, over every collection
-//! the record writes, every materialized-sum source and target, the graph
-//! state of the task's tenant, and the vShard the record's events carry.
-//! A stream marker names no op, so whether the content holds graph ops is
-//! unknown before the validate, and the graph is always fenced. The
+//! the record writes, every materialized-sum source and target, and the
+//! vShard the record's events carry. A stream marker names no op. So the
+//! graph state of the task's tenant and each sync stream join the fence in
+//! the slice that walks the ops writing them (see `stream_job`). The
 //! content header names the content's sum targets, and they join the fence
-//! in the slice that walks the header (see `stream_job`). So no write lands
-//! on what the record reads or writes between the validate's verdict and
-//! the install's first batch.
+//! in the slice that walks the header. So no write lands on what the record
+//! reads or writes between the validate's verdict and the install's first
+//! batch.
 //!
 //! The job opens validating, and its first slice runs inside the task.
 //! When the job has more to run, its ambient state leaves the core, the
@@ -117,8 +117,8 @@ impl CoreLoop {
     }
 
     /// Arm the install fence over what the record of `task` writes: the
-    /// stored `collections`, the sources and targets of `sum_targets`, the
-    /// graph state of its tenant, and the vShard its events carry. `false`
+    /// stored `collections`, the sources and targets of `sum_targets`, and
+    /// the vShard its events carry. `false`
     /// when a name is no stored collection name: nothing is armed.
     fn arm_stream_fence(
         &mut self,
@@ -128,10 +128,6 @@ impl CoreLoop {
     ) -> bool {
         let db = task.request.database_id;
         let mut keys = BTreeSet::new();
-        keys.insert(FenceKey::Graph {
-            db,
-            tenant: task.request.tenant_id,
-        });
         // Every event of the record carries the task's vShard. A write of
         // that vShard would advance its partition past the held events.
         keys.insert(FenceKey::VShard(task.request.vshard_id));

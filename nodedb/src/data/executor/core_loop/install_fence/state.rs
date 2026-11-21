@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, VecDeque};
 use nodedb_types::{NodeDbError, QualifiedCollection};
 
 use crate::data::executor::task::ExecutionTask;
-use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
+use crate::types::{DatabaseId, RequestId, TenantId, TxnId, VShardId};
 
 use super::footprint::Footprint;
 
@@ -29,6 +29,17 @@ pub(in crate::data::executor) enum FenceKey {
     /// The graph state of `tenant` in `db`: its CSR partition, its interned
     /// labels and its edge store.
     Graph { db: DatabaseId, tenant: TenantId },
+    /// The sync high-water mark of one producer's stream. The stream id
+    /// hashes the engine and the bare collection name, so the key spans
+    /// databases.
+    SyncStream { producer_id: u64, stream_id: u64 },
+    /// The tenant-wide CRDT state of `tenant` in `db`: the constraint
+    /// validator, its dead-letter queue, its deferred queue and the array
+    /// surrogate registry.
+    CrdtTenant { db: DatabaseId, tenant: TenantId },
+    /// The staging overlays, savepoints and resolve cursor of one
+    /// transaction on this core.
+    TxnOverlay(TxnId),
     /// The event partition of a vShard. The install's held events carry
     /// it. A write whose events carry it advances the partition past them.
     VShard(VShardId),
@@ -57,11 +68,26 @@ impl FenceKey {
             .collect()
     }
 
-    /// The database the key belongs to. A vShard spans databases.
+    /// The key of the stream mark `provenance` advances. Producer zero
+    /// takes no part in producer sequencing: its frame advances no mark,
+    /// and it has no key.
+    pub(in crate::data::executor) fn sync_stream(
+        provenance: &nodedb_types::sync::wire::SyncProvenance,
+    ) -> Option<Self> {
+        (provenance.producer_id != 0).then_some(FenceKey::SyncStream {
+            producer_id: provenance.producer_id,
+            stream_id: provenance.stream_id,
+        })
+    }
+
+    /// The database the key belongs to. A vShard, a sync stream and a
+    /// transaction's overlay span databases.
     pub(in crate::data::executor) fn database(&self) -> Option<DatabaseId> {
         match self {
-            FenceKey::Collection { db, .. } | FenceKey::Graph { db, .. } => Some(*db),
-            FenceKey::VShard(_) => None,
+            FenceKey::Collection { db, .. }
+            | FenceKey::Graph { db, .. }
+            | FenceKey::CrdtTenant { db, .. } => Some(*db),
+            FenceKey::SyncStream { .. } | FenceKey::TxnOverlay(_) | FenceKey::VShard(_) => None,
         }
     }
 }
@@ -293,6 +319,52 @@ mod tests {
         }]);
         assert!(!fence.admits(&whole(0, 1)));
         assert!(fence.admits(&whole(7, 1)));
+    }
+
+    /// A sync stream spans databases: a frame of the stream into any
+    /// database waits, and a whole-database task of another database runs.
+    #[test]
+    fn a_fenced_sync_stream_holds_its_frames_in_every_database() {
+        let stream = FenceKey::SyncStream {
+            producer_id: 3,
+            stream_id: 4,
+        };
+        let fence = fence(std::slice::from_ref(&stream));
+        let other = FenceKey::Collection {
+            db: DatabaseId::new(7),
+            name: "7/x".into(),
+        };
+        assert!(!fence.admits(&write(vec![other.clone(), stream], 1)));
+        assert!(fence.admits(&write(vec![other], 1)));
+        assert!(fence.admits(&whole(0, 1)), "the stream names no database");
+    }
+
+    /// A waiting CRDT apply holds its tenant's CRDT state and its database.
+    #[test]
+    fn a_waiting_crdt_tenant_key_holds_its_database() {
+        let tenant = FenceKey::CrdtTenant {
+            db: DatabaseId::DEFAULT,
+            tenant: TenantId::new(1),
+        };
+        let mut fence = fence(&[collection("a")]);
+        fence
+            .blocked
+            .add(&write(vec![collection("a"), tenant.clone()], 1));
+        assert!(!fence.admits(&write(vec![collection("c"), tenant], 2)));
+        assert!(!fence.admits(&whole(0, 2)));
+        assert!(fence.admits(&whole(7, 2)));
+    }
+
+    /// A transaction's overlay orders its own tasks alone.
+    #[test]
+    fn a_waiting_overlay_key_holds_its_transaction_alone() {
+        let overlay = |txn: u64| FenceKey::TxnOverlay(TxnId::new(txn));
+        let mut fence = fence(&[collection("a")]);
+        fence
+            .blocked
+            .add(&Footprint::Keys(vec![collection("a"), overlay(7)]));
+        assert!(!fence.admits(&Footprint::Keys(vec![overlay(7)])));
+        assert!(fence.admits(&Footprint::Keys(vec![overlay(8)])));
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod collection;
 mod driver;
 mod folds;
 mod op_checks;
+mod op_keys;
 mod post_state;
 mod resident;
 mod snapshot;

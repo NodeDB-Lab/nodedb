@@ -80,15 +80,20 @@ impl CoreLoop {
     }
 
     /// Hold `task` when the armed fence stops it. Returns the task when it
-    /// proceeds.
+    /// proceeds. The footprint, and the registry lookups it makes, run only
+    /// while a fence is armed. The waiter keeps the footprint it was held
+    /// by, so a registry change while it waits never changes what it holds.
     pub(in crate::data::executor) fn hold_fenced(
         &mut self,
         task: ExecutionTask,
     ) -> Option<ExecutionTask> {
+        if self.install_fence.is_none() {
+            return Some(task);
+        }
+        let footprint = footprint(&task, &*self);
         let Some(fence) = self.install_fence.as_mut() else {
             return Some(task);
         };
-        let footprint = footprint(&task);
         if fence.admits(&footprint) {
             return Some(task);
         }
@@ -303,11 +308,8 @@ mod tests {
     fn a_waiting_core_task_holds_every_later_task() {
         let (mut core, _tx, mut rx, _dir) = make_core();
         core.arm_install_fence(BTreeSet::new());
-        let size = MetaOp::QueryCollectionSize {
-            tenant_id: 1,
-            name: "a".into(),
-        };
-        queue(&mut core, 1, PhysicalPlan::Meta(size));
+        let list = MetaOp::ListTenantCollections { tenant_id: 1 };
+        queue(&mut core, 1, PhysicalPlan::Meta(list));
         queue(&mut core, 2, get("b"));
         queue(&mut core, 3, put("c"));
         core.tick();

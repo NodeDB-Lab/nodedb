@@ -26,6 +26,7 @@ use super::super::passes::final_refusal;
 use super::super::sub_ops::{RedoDocOp, document_op, kv_op, label_op};
 use super::super::validate::check_kv_row_image;
 use super::collection::post_state_failed;
+use super::op_keys::add_sub_record_keys;
 use super::verdict::Rank;
 use super::walk::{StreamValidateInput, StreamWalk};
 
@@ -40,6 +41,14 @@ impl CoreLoop {
     ) -> Result<(), ErrorCode> {
         let op = walk.ops;
         walk.ops += 1;
+        // Every op's keys join the fence, whatever the verdict holds: the
+        // slice that walked it arms them before the core runs another task.
+        add_sub_record_keys(
+            &sub,
+            input.task.request.database_id,
+            input.task.request.tenant_id,
+            &mut walk.op_keys,
+        );
         // Every version of the content stamps at least the floor, as the
         // installed record does.
         if let Some(floor) = input.reference.stamp_floor

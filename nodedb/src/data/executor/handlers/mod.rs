@@ -28,7 +28,7 @@ pub mod generated;
 pub mod graph;
 pub mod graph_algo;
 pub(in crate::data::executor) mod graph_algo_csr;
-mod graph_algo_edges;
+pub(in crate::data::executor) mod graph_algo_edges;
 pub mod graph_bsp;
 mod graph_edge_predicate;
 pub mod graph_expansion;

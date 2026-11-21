@@ -4,18 +4,23 @@
 //!
 //! A meta op that drops, converts, purges or reindexes one named collection
 //! keys that collection, and the graph of its tenant when it clears edges.
-//! Every other meta op checkpoints, snapshots, purges, installs or stages
-//! across collections, so it is a core task. A sampler, a checkpoint or a
-//! version purge keeps no client order, so it waits for the install and
-//! holds no later task. A cancel and a redo stream page read touch no state
-//! an install writes.
+//! A read of a named collection's size, hash chain or last values keys that
+//! collection. An aggregate op keys the aggregate and the root collection
+//! of its chain, which the core's aggregate graph names. A transaction's
+//! staging, resolve, savepoint and overlay drop key its overlay (see
+//! `txn`). Every other meta op checkpoints, snapshots, purges, installs or
+//! lists across collections, so it is a core task. A sampler, a checkpoint
+//! or a version purge keeps no client order, so it waits for the install
+//! and holds no later task. A cancel and a redo stream page read touch no
+//! state an install writes.
 
 use nodedb_physical::physical_plan::{ClusterEventOp, MetaOp};
 
 use crate::types::{DatabaseId, TenantId};
 
 use super::class::{Footprint, Scope};
-use super::keys::{KeySet, write_of};
+use super::keys::{KeySet, read_of, write_of};
+use super::txn::{drop_overlay_footprint, resolve_footprint, stage_write_footprint};
 
 pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
     match op {
@@ -50,18 +55,48 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::AwaitContinuousAggregateRefresh { collection, .. } => {
             write_of(collection, scope)
         }
-        // A definition's source is a collection or another aggregate, and
-        // only the core's aggregate graph names the root a chain reads. So
-        // the registration is a task of the definition's whole database.
+        // A definition's source is a collection or another aggregate. The
+        // core's aggregate graph names the root a chain reads.
         MetaOp::RegisterContinuousAggregate { def } => {
-            scope.whole_database_of(DatabaseId::new(def.database_id))
+            let db = DatabaseId::new(def.database_id);
+            let root = scope
+                .registry
+                .aggregate_source_root(db, scope.tenant, &def.source);
+            aggregate_write(root, db, &def.name, scope)
+        }
+        MetaOp::UnregisterContinuousAggregate { name } => {
+            let root = scope.registry.aggregate_root(scope.db, scope.tenant, name);
+            aggregate_write(root, scope.db, name, scope)
+        }
+        // A watermark read reads the aggregate's state, which its root's
+        // flushes fold into.
+        MetaOp::QueryAggregateWatermark { aggregate_name } => {
+            match scope
+                .registry
+                .aggregate_root(scope.db, scope.tenant, aggregate_name)
+            {
+                Some(root) => KeySet::new(scope)
+                    .stored(&root)
+                    .named_in(scope.db, aggregate_name)
+                    .read(),
+                None => scope.whole_database(),
+            }
+        }
+        MetaOp::QueryCollectionSize { name, .. } => KeySet::new(scope).requested(name).read(),
+        MetaOp::VerifyHashChain { collection }
+        | MetaOp::QueryLastValues { collection, .. }
+        | MetaOp::QueryLastValue { collection, .. } => read_of(collection, scope),
+        MetaOp::StageWrite { plan } => stage_write_footprint(plan, scope),
+        MetaOp::ResolveTxnPart { txn_id, plans, .. } => resolve_footprint(*txn_id, plans, scope),
+        MetaOp::DropTxnOverlay { txn_id } => drop_overlay_footprint(*txn_id, scope),
+        MetaOp::MarkSavepoint { txn_id, .. } | MetaOp::RollbackToSavepoint { txn_id, .. } => {
+            KeySet::new(scope).txn_overlay(*txn_id).read()
         }
         MetaOp::WalAppend { .. }
         | MetaOp::TransactionBatch { .. }
         | MetaOp::CreateSnapshot
         | MetaOp::Compact
         | MetaOp::InstallAggregateImage { .. }
-        | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::CreateTenantSnapshot { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
         | MetaOp::PurgeDepartedVShards { .. }
@@ -74,24 +109,14 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::PutSynonymGroup { .. }
         | MetaOp::DeleteSynonymGroup { .. }
         | MetaOp::SetCustomCrsSet { .. }
-        | MetaOp::StageWrite { .. }
-        | MetaOp::DropTxnOverlay { .. }
-        | MetaOp::MarkSavepoint { .. }
-        | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::ResolveTxnPart { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
         | MetaOp::RestoreRedo(_)
-        // A client's read of catalog sizes, hash chains, aggregates or last
-        // values keeps its order against the client's later writes. The
-        // envelope names no connection, so each holds every later task.
+        // A client's read of a tenant's collections or aggregates keeps its
+        // order against the client's later writes. The envelope names no
+        // connection, so each holds every later task.
         | MetaOp::ListTenantCollections { .. }
-        | MetaOp::QueryCollectionSize { .. }
-        | MetaOp::VerifyHashChain { .. }
-        | MetaOp::QueryAggregateWatermark { .. }
-        | MetaOp::QueryLastValues { .. }
-        | MetaOp::QueryLastValue { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered => Footprint::Core,
         // Work with no client order to keep, each correct after any later
@@ -108,6 +133,16 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::QueryStorageBytes { .. }
         | MetaOp::Checkpoint
         | MetaOp::PurgeVersionsBelow { .. } => Footprint::Background,
+    }
+}
+
+/// A write of the aggregate `name` of database `db` and of `root`, the
+/// root collection its chain reads. A chain the core cannot resolve is a
+/// task of the whole database `db`.
+fn aggregate_write(root: Option<String>, db: DatabaseId, name: &str, scope: &Scope) -> Footprint {
+    match root {
+        Some(root) => KeySet::new(scope).stored(&root).named_in(db, name).write(),
+        None => scope.whole_database_of(db),
     }
 }
 
@@ -130,8 +165,9 @@ pub(super) fn cluster_event_footprint(op: &ClusterEventOp, scope: &Scope) -> Foo
 mod tests {
     use nodedb_physical::physical_plan::PhysicalPlan;
 
-    use super::super::keys::tests::{TENANT, coll, graph, key, scope, write};
+    use super::super::keys::tests::{TENANT, coll, graph, key, scope, whole, write};
     use super::super::plan::plan_footprint;
+    use super::super::registry::tests::{FakeRegistry, NO_REGISTRY};
     use super::*;
     use crate::types::RequestId;
 
@@ -179,6 +215,84 @@ mod tests {
             target_request_id: RequestId::new(1),
         };
         assert_eq!(class(cancel), Footprint::Keys(Vec::new()));
+    }
+
+    #[test]
+    fn a_named_meta_read_keys_its_collection() {
+        let size = MetaOp::QueryCollectionSize {
+            tenant_id: TENANT.as_u64(),
+            name: "b".into(),
+        };
+        assert_eq!(class(size), Footprint::Keys(vec![key("b")]));
+        let chain = MetaOp::VerifyHashChain {
+            collection: coll("ledger"),
+        };
+        assert_eq!(class(chain), Footprint::Keys(vec![key("ledger")]));
+        let last = MetaOp::QueryLastValue {
+            collection: coll("ts"),
+            series_id: 1,
+            system_time: nodedb_types::SystemTimeScope::Current,
+        };
+        assert_eq!(class(last), Footprint::Keys(vec![key("ts")]));
+    }
+
+    /// A registry whose aggregate `ts_1m` is rooted at `ts`.
+    const AGGREGATES: FakeRegistry = FakeRegistry {
+        aggregate: Some(("ts_1m", "ts")),
+        ..NO_REGISTRY
+    };
+
+    fn with_aggregates(op: MetaOp) -> Footprint {
+        let scope = Scope {
+            registry: &AGGREGATES,
+            ..scope()
+        };
+        plan_footprint(&PhysicalPlan::Meta(op), &scope)
+    }
+
+    #[test]
+    fn an_aggregate_op_keys_the_aggregate_and_its_root() {
+        let drop = MetaOp::UnregisterContinuousAggregate {
+            name: "ts_1m".into(),
+        };
+        assert_eq!(with_aggregates(drop), write(vec![key("ts"), key("ts_1m")]));
+        let watermark = MetaOp::QueryAggregateWatermark {
+            aggregate_name: "ts_1m".into(),
+        };
+        assert_eq!(
+            with_aggregates(watermark),
+            Footprint::Keys(vec![key("ts"), key("ts_1m")])
+        );
+    }
+
+    #[test]
+    fn an_aggregate_the_core_does_not_register_is_its_whole_database() {
+        let drop = MetaOp::UnregisterContinuousAggregate {
+            name: "gone".into(),
+        };
+        assert_eq!(with_aggregates(drop), whole());
+    }
+
+    /// A core resolves a registration through its source chain.
+    #[test]
+    fn a_core_resolves_an_aggregate_of_an_aggregate_to_its_root() {
+        let (mut core, _tx, _rx, _dir) = crate::data::executor::core_loop::tests::make_core();
+        let def = |name: &str, source: &str| {
+            crate::engine::timeseries::continuous_agg::test_support::exact_def(name, source, "1m")
+        };
+        core.continuous_agg_mgr
+            .register(TENANT.as_u64(), def("ts_1m", "ts"));
+        let scope = Scope {
+            registry: &core,
+            ..scope()
+        };
+        let register = MetaOp::RegisterContinuousAggregate {
+            def: def("ts_1h", "ts_1m"),
+        };
+        assert_eq!(
+            plan_footprint(&PhysicalPlan::Meta(register), &scope),
+            write(vec![key("ts"), key("ts_1h")])
+        );
     }
 
     #[test]

@@ -3,9 +3,10 @@
 //! A parked install holds back only the tasks that touch what it writes.
 //!
 //! The install parks on [`FILL`] in the default database, with its events
-//! on vShard 0 and its graph fence on the request's tenant. A write of
-//! another collection of the same database runs between the install's
-//! batches. The same write of [`FILL`] waits until the install ends.
+//! on vShard 0. It writes no graph state, so the tenant's graph stays
+//! unfenced. A write of another collection of the same database runs
+//! between the install's batches. The same write of [`FILL`] waits until
+//! the install ends.
 
 use nodedb_array::types::ArrayId;
 use nodedb_physical::physical_plan::{
@@ -25,17 +26,17 @@ use super::equivalence_tests::FILL;
 use super::yield_tests::{INSTALL, OTHER_VSHARD, Ring, request, tick_until_answered_while_waiting};
 
 /// The collection the install never touches.
-const OTHER: &str = "b";
+pub(super) const OTHER: &str = "b";
 /// The request id of the task each case queues behind the install.
-const TASK: u64 = 20;
+pub(super) const TASK: u64 = 20;
 
-fn coll(name: &str) -> QualifiedCollection {
+pub(super) fn coll(name: &str) -> QualifiedCollection {
     QualifiedCollection::new(DatabaseId::DEFAULT, name)
 }
 
 /// A request of `plan` whose events carry another vShard than the
 /// install's.
-fn off_vshard(plan: PhysicalPlan) -> Request {
+pub(super) fn off_vshard(plan: PhysicalPlan) -> Request {
     let mut request = request(TASK, plan);
     request.vshard_id = OTHER_VSHARD;
     request
@@ -43,8 +44,14 @@ fn off_vshard(plan: PhysicalPlan) -> Request {
 
 /// A core whose install of [`FILL`] parked, with `task` queued behind it.
 fn parked_with(task: Request) -> Ring {
+    parked_install_with(|ring| ring.push_fill_install(), task)
+}
+
+/// A core whose install, queued by `push_install`, parked with `task`
+/// queued behind it.
+pub(super) fn parked_install_with(push_install: impl FnOnce(&mut Ring), task: Request) -> Ring {
     let mut ring = Ring::open(plain_core);
-    ring.push_fill_install();
+    push_install(&mut ring);
     ring.push(task, None);
     ring.tick();
     assert!(ring.core.has_parked_install(), "the install parked");
@@ -53,7 +60,11 @@ fn parked_with(task: Request) -> Ring {
 
 /// `task` runs while the install is parked.
 fn assert_runs(task: Request) {
-    let mut ring = parked_with(task);
+    assert_runs_in(parked_with(task));
+}
+
+/// [`TASK`] ran while the install of `ring` is parked.
+pub(super) fn assert_runs_in(mut ring: Ring) {
     assert!(
         ring.answer(TASK).is_some(),
         "the task ran between the install's batches"
@@ -67,7 +78,11 @@ fn assert_runs(task: Request) {
 
 /// `task` waits until the install ends, then runs.
 fn assert_waits(task: Request) {
-    let mut ring = parked_with(task);
+    assert_waits_in(parked_with(task));
+}
+
+/// [`TASK`] waits until the install of `ring` ends, then runs.
+pub(super) fn assert_waits_in(mut ring: Ring) {
     tick_until_answered_while_waiting(&mut ring, INSTALL, &[TASK]);
     ring.tick_until_answered(TASK);
 }
@@ -79,7 +94,7 @@ fn assert_keyed(plan_of: impl Fn(&str) -> PhysicalPlan) {
     assert_waits(off_vshard(plan_of(FILL)));
 }
 
-fn point_put(name: &str, targets: Vec<ResolvedSumTarget>) -> PhysicalPlan {
+pub(super) fn point_put(name: &str, targets: Vec<ResolvedSumTarget>) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointPut {
         collection: coll(name),
         document_id: "d1".into(),
@@ -93,7 +108,7 @@ fn point_put(name: &str, targets: Vec<ResolvedSumTarget>) -> PhysicalPlan {
     })
 }
 
-fn kv_put(name: &str, provenance: Option<SyncProvenance>) -> PhysicalPlan {
+pub(super) fn kv_put(name: &str, provenance: Option<SyncProvenance>) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
         collection: coll(name),
         declared_columns: KvDeclaredColumns::none(),
@@ -107,7 +122,7 @@ fn kv_put(name: &str, provenance: Option<SyncProvenance>) -> PhysicalPlan {
     })
 }
 
-fn edge_put(name: &str) -> PhysicalPlan {
+pub(super) fn edge_put(name: &str) -> PhysicalPlan {
     PhysicalPlan::Graph(GraphOp::EdgePut {
         collection: coll(name),
         src_id: "alice".into(),
@@ -286,30 +301,24 @@ fn a_write_whose_sum_target_is_fenced_waits() {
     assert_waits(off_vshard(point_put(OTHER, vec![target])));
 }
 
-/// The graph fence covers the install's tenant alone.
+/// An install that writes no graph state leaves its tenant's graph
+/// unfenced.
 #[test]
-fn an_edge_put_of_another_tenant_runs() {
-    let mut task = off_vshard(edge_put("social"));
-    task.tenant_id = TenantId::new(TID + 1);
-    assert_runs(task);
+fn an_edge_put_of_the_installs_tenant_runs_past_an_install_with_no_graph_writes() {
+    assert_runs(off_vshard(edge_put("social")));
 }
 
 #[test]
-fn an_edge_put_of_the_installs_tenant_waits() {
-    assert_waits(off_vshard(edge_put("social")));
-}
-
-#[test]
-fn a_label_write_of_the_installs_tenant_waits() {
-    assert_waits(off_vshard(PhysicalPlan::Graph(GraphOp::SetNodeLabels {
+fn a_label_write_of_the_installs_tenant_runs_past_an_install_with_no_graph_writes() {
+    assert_runs(off_vshard(PhysicalPlan::Graph(GraphOp::SetNodeLabels {
         node_id: "alice".into(),
         labels: vec!["Person".into()],
     })));
 }
 
 #[test]
-fn a_graph_read_of_the_installs_tenant_waits() {
-    assert_waits(off_vshard(PhysicalPlan::Graph(GraphOp::Stats {
+fn a_graph_read_runs_past_an_install_with_no_graph_writes() {
+    assert_runs(off_vshard(PhysicalPlan::Graph(GraphOp::Stats {
         collection: None,
         as_of: None,
     })));
@@ -324,15 +333,15 @@ fn a_write_of_the_installs_vshard_waits() {
     assert_waits(task);
 }
 
-/// A sync frame advances its producer's high-water mark, which no key
-/// names, so it waits as a task of its whole database.
+/// A sync frame keys its collection and its stream. An install whose ops
+/// carry no provenance fences no stream.
 #[test]
-fn a_sync_frame_of_another_collection_waits() {
+fn a_sync_frame_of_another_collection_runs_past_an_install_of_no_sync_frame() {
     let provenance = SyncProvenance {
         producer_id: 9,
         epoch: 1,
         stream_id: 1,
         seq: 1,
     };
-    assert_waits(off_vshard(kv_put(OTHER, Some(provenance))));
+    assert_runs(off_vshard(kv_put(OTHER, Some(provenance))));
 }

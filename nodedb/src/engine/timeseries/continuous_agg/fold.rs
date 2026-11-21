@@ -113,6 +113,19 @@ impl ContinuousAggregateManager {
         }
     }
 
+    /// Root raw source of a chain that reads `source`, under its storage
+    /// name: `source` itself when it is no registered aggregate, else the
+    /// root of that aggregate. `None` when the chain loops.
+    pub fn root_of_source(&self, database_id: u64, tenant_id: u64, source: &str) -> Option<String> {
+        if self
+            .definitions
+            .contains_key(&(database_id, tenant_id, source.to_string()))
+        {
+            return self.root_of(database_id, tenant_id, source);
+        }
+        Some(storage_root(database_id, source))
+    }
+
     /// Every root collection with a registered aggregate, sorted.
     pub fn root_sources(&self) -> Vec<AggKey> {
         let mut roots: Vec<AggKey> = self

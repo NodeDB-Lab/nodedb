@@ -5,7 +5,7 @@
 //! An array keys by its database and the stored name its writes go by,
 //! the name an install arms. An array read reads tiles an install flushes,
 //! so it keys the array too. A sync frame, a write with sync provenance,
-//! is a task of the array's whole database.
+//! also keys the high-water mark of its stream.
 
 use nodedb_array::types::ArrayId;
 use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp};
@@ -61,12 +61,12 @@ pub(super) fn cluster_array_footprint(op: &ClusterArrayOp, scope: &Scope) -> Foo
     }
 }
 
-/// A write of `array_id`, or of its whole database for a sync frame.
+/// A write of `array_id`, and of the stream mark a sync frame advances.
 fn sync_write(array_id: &ArrayId, provenance: &Option<SyncProvenance>, scope: &Scope) -> Footprint {
-    match provenance {
-        Some(_) => scope.whole_database_of(array_id.database_id),
-        None => KeySet::new(scope).array(array_id).write(),
-    }
+    KeySet::new(scope)
+        .array(array_id)
+        .sync(provenance.as_ref())
+        .write()
 }
 
 #[cfg(test)]
@@ -97,6 +97,32 @@ mod tests {
             vshard_id: 0,
         });
         assert_eq!(class(put), write(vec![key("grid")]));
+    }
+
+    #[test]
+    fn an_array_sync_frame_keys_its_array_and_its_stream() {
+        let delete = PhysicalPlan::Array(ArrayOp::Delete {
+            array_id: array("grid"),
+            coords_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: Some(SyncProvenance {
+                producer_id: 2,
+                epoch: 1,
+                stream_id: 3,
+                seq: 1,
+            }),
+            vshard_id: 0,
+        });
+        assert_eq!(
+            class(delete),
+            write(vec![
+                key("grid"),
+                crate::data::executor::core_loop::install_fence::FenceKey::SyncStream {
+                    producer_id: 2,
+                    stream_id: 3,
+                },
+            ])
+        );
     }
 
     #[test]

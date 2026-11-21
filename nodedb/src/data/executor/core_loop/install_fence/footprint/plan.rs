@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The footprint of a task, from its plan alone.
+//! The footprint of a task, from its plan and the core's registries.
 //!
 //! A read of named state gets `Keys`, and a write of named state gets
-//! `Write`. An op this module cannot bound to keys is a task of its whole
-//! database. A misfiled write breaks the fence, so every match is
-//! exhaustive. A write names the vShard its events carry, the task's own:
-//! its events advance that vShard's partition.
+//! `Write`. An op whose plan names only an index, an aggregate or a
+//! transaction asks the core's registries for the rest. An op this module
+//! cannot bound to keys is a task of its whole database. A misfiled write
+//! breaks the fence, so every match is exhaustive. A write names the
+//! vShard its events carry, the task's own: its events advance that
+//! vShard's partition. A task of a transaction also keys its overlay.
 
-use nodedb_physical::physical_plan::{CrdtOp, PhysicalPlan, QueryOp};
+use nodedb_physical::physical_plan::{PhysicalPlan, QueryOp};
 
 use crate::data::executor::task::ExecutionTask;
 
 use super::array::{array_footprint, cluster_array_footprint};
 use super::class::{Footprint, Scope};
+use super::crdt::crdt_footprint;
 use super::document::document_footprint;
 use super::engines::{
     columnar_footprint, spatial_footprint, text_footprint, timeseries_footprint, vector_footprint,
@@ -22,14 +25,22 @@ use super::graph::graph_footprint;
 use super::keys::read_of;
 use super::kv::kv_footprint;
 use super::meta::{cluster_event_footprint, meta_footprint};
+use super::registry::FenceRegistry;
 
-/// The footprint of `task`.
-pub(in crate::data::executor) fn footprint(task: &ExecutionTask) -> Footprint {
-    plan_footprint(task.plan(), &Scope::of(task))
+/// The footprint of `task` on the core `registry` reads.
+pub(in crate::data::executor) fn footprint(
+    task: &ExecutionTask,
+    registry: &dyn FenceRegistry,
+) -> Footprint {
+    let scope = Scope::of(task, registry);
+    plan_footprint(task.plan(), &scope).in_txn(scope.txn)
 }
 
 /// The footprint of `plan`, run in `scope`.
-pub(in crate::data::executor) fn plan_footprint(plan: &PhysicalPlan, scope: &Scope) -> Footprint {
+pub(in crate::data::executor) fn plan_footprint(
+    plan: &PhysicalPlan,
+    scope: &Scope<'_>,
+) -> Footprint {
     match plan {
         PhysicalPlan::Document(op) => document_footprint(op, scope),
         PhysicalPlan::Kv(op) => kv_footprint(op, scope),
@@ -48,7 +59,7 @@ pub(in crate::data::executor) fn plan_footprint(plan: &PhysicalPlan, scope: &Sco
     }
 }
 
-fn query_footprint(op: &QueryOp, scope: &Scope) -> Footprint {
+fn query_footprint(op: &QueryOp, scope: &Scope<'_>) -> Footprint {
     match op {
         QueryOp::Aggregate {
             collection, input, ..
@@ -77,38 +88,11 @@ fn query_footprint(op: &QueryOp, scope: &Scope) -> Footprint {
     }
 }
 
-/// A CRDT op serves from or writes a Loro document whose sync state no key
-/// names, so it is a task of its whole database.
-fn crdt_footprint(op: &CrdtOp, scope: &Scope) -> Footprint {
-    match op {
-        CrdtOp::Read { .. }
-        | CrdtOp::Apply { .. }
-        | CrdtOp::ApplyAuthenticated { .. }
-        | CrdtOp::ImportSnapshot { .. }
-        | CrdtOp::SetConstraints { .. }
-        | CrdtOp::DropConstraints { .. }
-        | CrdtOp::ReadConstraints { .. }
-        | CrdtOp::SetPolicy { .. }
-        | CrdtOp::GetPolicy { .. }
-        | CrdtOp::ReadAtVersion { .. }
-        | CrdtOp::GetVersionVector { .. }
-        | CrdtOp::ExportDelta { .. }
-        | CrdtOp::RestoreToVersion { .. }
-        | CrdtOp::CompactAtVersion { .. }
-        | CrdtOp::ListInsert { .. }
-        | CrdtOp::ListDelete { .. }
-        | CrdtOp::ListMove { .. }
-        | CrdtOp::DocUpsert { .. }
-        | CrdtOp::DocDelete { .. }
-        | CrdtOp::PreviewApply { .. } => scope.whole_database(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use nodedb_physical::physical_plan::DocumentOp;
 
-    use super::super::keys::tests::{coll, key, scope, whole};
+    use super::super::keys::tests::{coll, key, scope};
     use super::*;
 
     fn point_get(name: &str) -> PhysicalPlan {
@@ -140,14 +124,6 @@ mod tests {
             plan_footprint(&post, &scope()),
             Footprint::Keys(vec![key("a")])
         );
-    }
-
-    #[test]
-    fn a_crdt_op_is_its_whole_database() {
-        let policy = PhysicalPlan::Crdt(CrdtOp::GetPolicy {
-            collection: coll("cr"),
-        });
-        assert_eq!(plan_footprint(&policy, &scope()), whole());
     }
 
     #[test]

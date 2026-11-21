@@ -33,6 +33,7 @@ impl StreamValidation {
         let read_keys: usize = walk
             .read_keys
             .iter()
+            .chain(&walk.op_keys)
             .map(|key| size_of::<FenceKey>() + key_name_len(key))
             .sum();
         [
@@ -137,6 +138,10 @@ fn track_bytes(track: &CollectionTrack) -> usize {
 fn key_name_len(key: &FenceKey) -> usize {
     match key {
         FenceKey::Collection { name, .. } => name.len(),
-        FenceKey::Graph { .. } | FenceKey::VShard(_) => 0,
+        FenceKey::Graph { .. }
+        | FenceKey::SyncStream { .. }
+        | FenceKey::CrdtTenant { .. }
+        | FenceKey::TxnOverlay(_)
+        | FenceKey::VShard(_) => 0,
     }
 }

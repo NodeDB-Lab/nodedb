@@ -40,7 +40,7 @@ use super::install::job_stage::ParkPoint;
 /// The bytes of one batch the core cuts a stream into.
 const YIELD_BATCH_BYTES: usize = 4096;
 /// Filler rows a record writes: several batches of them.
-const ROWS: u32 = 300;
+pub(super) const ROWS: u32 = 300;
 /// Filler rows a record writes when a case needs many validate slices.
 const MANY_ROWS: u32 = 1200;
 /// The database of the foreign writes, which the fence never holds.
@@ -190,7 +190,17 @@ impl Ring {
     /// Queue the install of `ops`, which write [`FILL`], as request
     /// [`INSTALL`].
     fn push_install_of(&mut self, ops: Vec<RedoSubRecord>) {
-        let plan = self.marker_plan(&record(ops), vec![FILL.to_string()], Vec::new(), None);
+        self.push_install_writing(ops, vec![FILL.to_string()]);
+    }
+
+    /// Queue the install of `ops`, which write the stored `collections`,
+    /// as request [`INSTALL`].
+    pub(super) fn push_install_writing(
+        &mut self,
+        ops: Vec<RedoSubRecord>,
+        collections: Vec<String>,
+    ) {
+        let plan = self.marker_plan(&record(ops), collections, Vec::new(), None);
         self.push(install_request(INSTALL, plan, LSN), None);
     }
 

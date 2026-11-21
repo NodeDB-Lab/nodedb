@@ -10,7 +10,8 @@
 //! slice that walks it fences the header's sum targets before any other
 //! task runs. A header whose names the fence cannot key runs the rest of
 //! the job to its end in that slice. Each slice also fences the collection
-//! of every read it checked.
+//! of every read it checked, and the sync streams and graph state its ops
+//! write.
 //!
 //! The slice that finds the stream ended takes the verdict. A refusal
 //! answers, and the caller releases the fence. Content that passed opens
@@ -134,6 +135,7 @@ impl StreamJob {
                 Ok(ValidateSlice::Ran) => {
                     validating.fence_header_targets(core, task);
                     validating.fence_checked_reads(core);
+                    validating.fence_walked_ops(core);
                     if validating.parks {
                         *self = Self::Validating(validating);
                         return StepOutcome::Ran;
@@ -177,6 +179,17 @@ impl ValidatingJob {
     /// leaves none to check.
     fn fence_checked_reads(&mut self, core: &mut CoreLoop) {
         let keys = self.validation.take_read_keys();
+        if !keys.is_empty() {
+            core.arm_install_fence(keys);
+        }
+    }
+
+    /// Fence the state the slice's ops write beside their collections: the
+    /// sync stream of each sync frame, and the tenant's graph when an op
+    /// writes an edge, an edge cut or a node label. No op installs before
+    /// the walk ends, so each key is armed before its state is written.
+    fn fence_walked_ops(&mut self, core: &mut CoreLoop) {
+        let keys = self.validation.take_op_keys();
         if !keys.is_empty() {
             core.arm_install_fence(keys);
         }

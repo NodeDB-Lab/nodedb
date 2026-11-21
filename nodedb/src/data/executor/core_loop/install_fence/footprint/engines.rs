@@ -3,8 +3,7 @@
 //! Footprints of vector, text, columnar, timeseries and spatial ops.
 //!
 //! Each write keys its collection. A sync frame, a write with sync
-//! provenance, also advances its producer's high-water mark, which no key
-//! names, so it is a task of its whole database.
+//! provenance, also keys the high-water mark of its stream.
 
 use nodedb_physical::physical_plan::{ColumnarOp, SpatialOp, TextOp, TimeseriesOp, VectorOp};
 use nodedb_types::QualifiedCollection;
@@ -14,16 +13,16 @@ use super::class::{Footprint, Scope};
 use super::keys::{KeySet, read_of, write_of};
 use super::plan::plan_footprint;
 
-/// A write of `collection`, or of the whole database for a sync frame.
+/// A write of `collection`, and of the stream mark a sync frame advances.
 fn sync_write(
     collection: &QualifiedCollection,
     provenance: &Option<SyncProvenance>,
     scope: &Scope,
 ) -> Footprint {
-    match provenance {
-        Some(_) => scope.whole_database(),
-        None => write_of(collection, scope),
-    }
+    KeySet::new(scope)
+        .collection(collection)
+        .sync(provenance.as_ref())
+        .write()
 }
 
 pub(super) fn vector_footprint(op: &VectorOp, scope: &Scope) -> Footprint {
@@ -160,7 +159,7 @@ mod tests {
     use nodedb_physical::physical_plan::{ColumnarInsertIntent, PhysicalPlan};
     use nodedb_types::{RlsWriteCheck, Surrogate};
 
-    use super::super::keys::tests::{coll, graph, key, scope, whole, write};
+    use super::super::keys::tests::{coll, graph, key, scope, write};
     use super::*;
 
     fn class(plan: PhysicalPlan) -> Footprint {
@@ -176,6 +175,14 @@ mod tests {
         })
     }
 
+    /// The stream key of [`provenance`].
+    fn stream() -> crate::data::executor::core_loop::install_fence::FenceKey {
+        crate::data::executor::core_loop::install_fence::FenceKey::SyncStream {
+            producer_id: 1,
+            stream_id: 1,
+        }
+    }
+
     fn vector_insert(provenance: Option<SyncProvenance>) -> PhysicalPlan {
         PhysicalPlan::Vector(VectorOp::Insert {
             collection: coll("v"),
@@ -189,9 +196,12 @@ mod tests {
     }
 
     #[test]
-    fn a_vector_insert_keys_its_collection_unless_it_is_a_sync_frame() {
+    fn a_vector_insert_keys_its_collection_and_a_sync_frame_its_stream() {
         assert_eq!(class(vector_insert(None)), write(vec![key("v")]));
-        assert_eq!(class(vector_insert(provenance())), whole());
+        assert_eq!(
+            class(vector_insert(provenance())),
+            write(vec![key("v"), stream()])
+        );
     }
 
     #[test]
@@ -223,7 +233,7 @@ mod tests {
             surrogate: None,
             provenance: provenance(),
         });
-        assert_eq!(class(delete), whole());
+        assert_eq!(class(delete), write(vec![key("t"), stream()]));
     }
 
     #[test]
