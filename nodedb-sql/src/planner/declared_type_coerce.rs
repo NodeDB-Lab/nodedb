@@ -893,9 +893,9 @@ mod tests {
     /// above: it is coerced to a typed instant like any other `TIMESTAMP` /
     /// `TIMESTAMPTZ` column, read-side primary key included — see "Why an
     /// instant-typed primary key is the one exception" on
-    /// `coerce_rows_to_declared_types`. Before this fix, `is_exempt` matched
-    /// on name alone, so this literal would stay the bare integer it reached
-    /// the planner as.
+    /// `coerce_rows_to_declared_types`. `is_exempt` carves this case out by
+    /// type, not by name alone, so this literal coerces to the typed instant
+    /// instead of staying the bare integer it reached the planner as.
     #[test]
     fn an_instant_typed_primary_key_column_is_not_exempt() {
         let columns = [
