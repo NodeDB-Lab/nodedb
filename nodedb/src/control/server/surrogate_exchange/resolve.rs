@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Coordinator-side routed-surrogate-exchange helpers (F1b).
+//! Coordinator-side routed-surrogate-exchange helpers.
 //!
 //! [`assign_surrogate_routed`] turns a `(collection, pk)` key into the
 //! AUTHORITATIVE global surrogate, routing the assign to the LEADER of the key's
@@ -23,9 +23,10 @@
 //! - **Leader is self**: resolve LOCALLY — this node already owns the home
 //!   vShard, so a self-RPC will be a pointless extra hop.
 //! - **Leader is a remote node**: register the leader's address from the live
-//!   topology (so `send_rpc` to a not-yet-warmed peer does not fail with
-//!   `NodeUnreachable`), then send one `AssignSurrogateRequest` and map the
-//!   reply to the authoritative surrogate (or a typed error).
+//!   topology, so an RPC to a not-yet-warmed peer does not fail with
+//!   `NodeUnreachable`. Then send one `AssignSurrogateRequest` per
+//!   frame-sized batch of keys and map the reply to one authoritative
+//!   surrogate per key, or a typed error.
 //!
 //! # Plane discipline
 //!
@@ -36,10 +37,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use nodedb_cluster::rpc_codec::reply_wait;
 use nodedb_cluster::{
     AssignSurrogateRequest, AssignSurrogateResponse, NexarTransport, RaftRpc, RoutingTable,
 };
-use nodedb_types::{CollectionKey, Surrogate};
+use nodedb_types::{CollectionKey, Surrogate, WireBytes};
 
 use crate::control::cluster::warm_peers::register_peers_from_topology;
 use crate::control::state::SharedState;
@@ -51,7 +53,7 @@ use super::unbound::{assign_unbound_routed, lookup_unbound_routed};
 pub(super) enum Route<'a> {
     /// Resolve against THIS node's allocator / catalog.
     Local,
-    /// Send exactly one RPC to the home vShard's leader.
+    /// Send one RPC per key batch to the home vShard's leader.
     Remote {
         leader: u64,
         transport: &'a Arc<NexarTransport>,
@@ -130,32 +132,32 @@ fn leader_for(
     Ok(leader)
 }
 
-/// The row identity a one-shot exchange resolves.
+/// The row identities one request resolves.
 ///
-/// Bundled rather than passed as loose parameters because these six travel
-/// together to the leader as one request and mean nothing apart: a `pk` without
-/// its `collection`, or either without the scoping ids, names no row.
-pub(super) struct ExchangeKey<'a> {
+/// Bundled because these travel together to the leader as one request and
+/// mean nothing apart. A pk without its `collection`, or either without the
+/// scoping ids, names no row.
+pub(super) struct ExchangeBatch<'a> {
     pub(super) vshard: VShardId,
     pub(super) collection: CollectionKey<'a>,
     pub(super) tenant_id: TenantId,
-    pub(super) pk: &'a [u8],
+    pub(super) pks: &'a [&'a [u8]],
     pub(super) trace_id: TraceId,
 }
 
 /// Build the one-shot request sent to the home leader.
 pub(super) fn build_request(
     state: &SharedState,
-    key: ExchangeKey<'_>,
+    batch: ExchangeBatch<'_>,
     lookup_only: bool,
 ) -> AssignSurrogateRequest {
-    let ExchangeKey {
+    let ExchangeBatch {
         vshard,
         collection,
         tenant_id,
-        pk,
+        pks,
         trace_id,
-    } = key;
+    } = batch;
     // What is left of the running statement's budget: a surrogate assignment is
     // work the statement waits on, so it stops when the statement does.
     let deadline_remaining_ms = crate::control::server::shared::session::statement_deadline_ms(
@@ -168,36 +170,56 @@ pub(super) fn build_request(
         // The bare catalog name: the leader rebuilds the canonical key from
         // it and `database_id`.
         collection: collection.name().to_string(),
-        pk: pk.to_vec(),
+        pks: pks.iter().map(|pk| WireBytes::from(pk.to_vec())).collect(),
         deadline_remaining_ms,
         trace_id: trace_id.0,
-        lookup_only: Some(lookup_only),
+        lookup_only,
     }
 }
 
-/// Dispatch the one-shot RPC to `leader`, returning the reply body or a typed
-/// error. Registers the leader's address first so a not-yet-warmed peer does not
-/// fail with `NodeUnreachable`.
+/// Dispatch the one-shot RPC to `leader`, returning one answer per requested
+/// key, in request order, or a typed error.
+///
+/// Registers the leader's address first, so a not-yet-warmed peer does not
+/// fail with `NodeUnreachable`. The leader's work can outlast the transport's
+/// fixed RPC timeout: a reservation wait, a Raft proposal with leader-change
+/// retries, the local apply. The reply read waits for the request's own
+/// budget plus the reply margin instead.
 pub(super) async fn send_to_leader(
     state: &SharedState,
     transport: &Arc<NexarTransport>,
     leader: u64,
     req: AssignSurrogateRequest,
-) -> crate::Result<AssignSurrogateResponse> {
+) -> crate::Result<Vec<Option<u32>>> {
     let mut targets = BTreeSet::new();
     targets.insert(leader);
     register_peers_from_topology(state, transport, &targets);
 
+    let asked = req.pks.len();
+    let read_timeout = reply_wait(req.deadline_remaining_ms);
     match transport
-        .send_rpc(leader, RaftRpc::AssignSurrogateRequest(req))
+        .send_rpc_with_read_timeout(leader, RaftRpc::AssignSurrogateRequest(req), read_timeout)
         .await
     {
-        Ok(RaftRpc::AssignSurrogateResponse(resp)) => match resp.error {
-            None => Ok(resp),
-            Some(e) => Err(crate::Error::Internal {
-                detail: format!("surrogate-exchange failed on leader node {leader}: {e:?}"),
-            }),
-        },
+        Ok(RaftRpc::AssignSurrogateResponse(AssignSurrogateResponse {
+            surrogates,
+            error: None,
+        })) => {
+            if surrogates.len() != asked {
+                return Err(crate::Error::Internal {
+                    detail: format!(
+                        "surrogate-exchange: leader node {leader} answered {} of {asked} keys",
+                        surrogates.len()
+                    ),
+                });
+            }
+            Ok(surrogates)
+        }
+        // The leader's error keeps its class: a spent budget, a deadline or a
+        // leader change reads on this node as it read on the leader.
+        Ok(RaftRpc::AssignSurrogateResponse(AssignSurrogateResponse {
+            error: Some(e), ..
+        })) => Err(crate::Error::from(e)),
         Ok(other) => Err(crate::Error::Internal {
             detail: format!("surrogate-exchange: unexpected reply from node {leader}: {other:?}"),
         }),
@@ -236,11 +258,11 @@ pub async fn assign_surrogate_routed(
 ///
 /// A binding this node's catalog holds is already the log-order winner (a
 /// replica's apply, or a winner kept earlier), so it answers without a
-/// request. The other keys go to the home: on the home leader they are minted
-/// in one Raft entry; from any other node they go to the leader as concurrent
-/// requests, at most `MAX_ROUTED_IN_FLIGHT` at a time. Every winner a remote
-/// home answers is bound in this node's catalog first-wins, so a later lookup
-/// here makes no request.
+/// request. The other keys go to the home. On the home leader they are minted
+/// in one Raft entry per frame-sized batch. From any other node each such
+/// batch is one request to the leader. Every winner a remote home answers is
+/// bound in this node's catalog first-wins, so a later lookup here makes no
+/// request.
 pub async fn assign_surrogates_routed(
     state: &SharedState,
     collection: CollectionKey<'_>,
@@ -259,9 +281,8 @@ pub async fn assign_surrogates_routed(
 }
 
 /// [`lookup_surrogate_routed`] for many keys of one collection, in `pks`
-/// order, local bindings first, at most `MAX_ROUTED_IN_FLIGHT` requests in
-/// flight at a time. Every winner a remote home answers is bound in this
-/// node's catalog first-wins.
+/// order, local bindings first, one request per frame-sized batch. Every
+/// winner a remote home answers is bound in this node's catalog first-wins.
 pub async fn lookup_surrogates_routed(
     state: &SharedState,
     collection: CollectionKey<'_>,

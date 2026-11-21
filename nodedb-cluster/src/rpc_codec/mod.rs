@@ -85,5 +85,8 @@ pub use shuffle::{
     ShuffleConsumeRequest, ShuffleConsumeResponse, ShuffleProduceRequest, ShuffleProduceResponse,
     ShufflePushChunk, ShufflePushEnd, ShufflePushRequest, SortKey,
 };
-pub use surrogate::{AssignSurrogateRequest, AssignSurrogateResponse};
+pub use surrogate::{
+    ASSIGN_SURROGATE_KEY_BUDGET, ASSIGN_SURROGATE_KEY_OVERHEAD, AssignSurrogateRequest,
+    AssignSurrogateResponse,
+};
 pub use vshard::VShardRefusal;

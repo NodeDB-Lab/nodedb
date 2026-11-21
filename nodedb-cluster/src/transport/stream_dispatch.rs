@@ -86,10 +86,10 @@ pub(super) async fn try_handle_oneshot_rpc<H: RaftRpcHandler>(
     }
 
     // 4g. Routed-surrogate-exchange: an `AssignSurrogateRequest` is a
-    //     ONE-SHOT request/response. This node is the home vShard's leader; it
-    //     assign-or-returns the authoritative surrogate for the `(collection,
-    //     pk)` endpoint key and replies with exactly one
-    //     `AssignSurrogateResponse` carrying the surrogate (or a typed error).
+    //     ONE-SHOT request/response. This node is the home vShard's leader. It
+    //     assigns or returns the authoritative surrogate of every key the
+    //     request carries and replies with exactly one
+    //     `AssignSurrogateResponse`: one answer per key, or a typed error.
     //     The reply is written on this same bidi stream's send half (mirroring
     //     the consume arms above), then `finish()`ed.
     if let RaftRpc::AssignSurrogateRequest(req) = request {

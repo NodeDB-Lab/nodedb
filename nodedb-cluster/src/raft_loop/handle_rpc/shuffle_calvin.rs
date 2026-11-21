@@ -134,14 +134,13 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         match &self.assign_remote_surrogate {
             Some(assigner) => assigner.on_assign_surrogate(req).await,
             None => AssignSurrogateResponse {
-                surrogate: 0,
+                surrogates: Vec::new(),
                 error: Some(TypedClusterError::Internal {
                     code: 0,
                     message: "assign-remote-surrogate not configured \
                               (no AssignRemoteSurrogate installed)"
                         .into(),
                 }),
-                found: None,
             },
         }
     }

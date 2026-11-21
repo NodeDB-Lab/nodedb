@@ -147,9 +147,8 @@ impl RaftRpcHandler for EchoHandler {
         _req: nodedb_cluster::rpc_codec::AssignSurrogateRequest,
     ) -> nodedb_cluster::rpc_codec::AssignSurrogateResponse {
         nodedb_cluster::rpc_codec::AssignSurrogateResponse {
-            surrogate: 0,
+            surrogates: Vec::new(),
             error: None,
-            found: None,
         }
     }
 

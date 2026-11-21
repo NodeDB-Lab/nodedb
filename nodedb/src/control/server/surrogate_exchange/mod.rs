@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Routed-surrogate-exchange (F1b): the leader-side cluster hook that
-//! assign-or-returns the authoritative surrogate for a `(collection, pk)`
-//! endpoint key, and the coordinator-side helper that routes the request to the
-//! home vShard's leader (or assigns locally when this node IS the leader).
+//! Routed-surrogate-exchange: the leader-side cluster hook that assigns or
+//! returns the authoritative surrogate of a batch of `(collection, pk)` keys,
+//! and the coordinator-side helpers that route each batch to the home
+//! vShard's leader, or assign locally when this node IS the leader.
 
 pub mod authority;
+mod batch;
 pub mod home_bridge;
 pub mod hook;
 pub mod resolve;

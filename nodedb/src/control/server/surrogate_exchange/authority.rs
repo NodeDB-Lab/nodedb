@@ -21,6 +21,7 @@
 //! leader. Without a data-group Raft (a single node) the local catalog is the
 //! home, and binds directly.
 
+use nodedb_cluster::rpc_codec::ASSIGN_SURROGATE_KEY_BUDGET;
 use nodedb_types::{CollectionKey, Surrogate};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -28,34 +29,19 @@ use crate::control::state::SharedState;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite, propose_replicated_entry};
 use crate::types::{TenantId, VShardId};
 
-/// The surrogate of `(collection, pk)`, minted and bound on `home`'s group
-/// when the key has none. Runs on the leader of `home`, the key's collection
-/// home vShard.
-pub(crate) async fn assign_at_home(
-    state: &SharedState,
-    home: VShardId,
-    collection: CollectionKey<'_>,
-    tenant_id: TenantId,
-    pk: &[u8],
-) -> crate::Result<Surrogate> {
-    let mut bound = assign_many_at_home(state, home, collection, tenant_id, &[pk]).await?;
-    bound.pop().ok_or_else(|| crate::Error::Internal {
-        detail: format!(
-            "surrogate bind of a key in '{}' on vShard {} returned no surrogate",
-            collection.name(),
-            home.as_u32()
-        ),
-    })
-}
+use super::batch::key_batches;
 
-/// [`assign_at_home`] for many keys of one collection, in `pks` order. Every
-/// key the home binds none of is minted in one `SurrogateBind` entry.
+/// The surrogate of each of `pks`, in `pks` order, minted and bound on
+/// `home`'s group for every key the home binds none of. Runs on the leader
+/// of `home`, the keys' collection home vShard. The proposals end at
+/// `deadline`.
 pub(crate) async fn assign_many_at_home(
     state: &SharedState,
     home: VShardId,
     collection: CollectionKey<'_>,
     tenant_id: TenantId,
     pks: &[&[u8]],
+    deadline: tokio::time::Instant,
 ) -> crate::Result<Vec<Surrogate>> {
     let local = state
         .surrogate_assigner
@@ -67,7 +53,7 @@ pub(crate) async fn assign_many_at_home(
             unbound.push(pk);
         }
     }
-    let minted = mint_many_at_home(state, home, collection, tenant_id, &unbound).await?;
+    let minted = mint_many_at_home(state, home, collection, tenant_id, &unbound, deadline).await?;
     let winners: FxHashMap<&[u8], Surrogate> = unbound.iter().copied().zip(minted).collect();
     pks.iter()
         .zip(local)
@@ -85,20 +71,47 @@ pub(crate) async fn assign_many_at_home(
         .collect()
 }
 
-/// Bind every key of `unbound` on `home`'s group in one `SurrogateBind`
-/// entry, and return each key's log-order winner, in `unbound` order.
+/// Bind every key of `unbound` on `home`'s group, and return each key's
+/// log-order winner, in `unbound` order.
 ///
 /// `unbound` holds keys this node's catalog bound none of when the caller
 /// read it. A key bound since keeps that binding: the apply is first-wins,
 /// and the winner it answers is the earlier one. The apply on this node
 /// binds every key before the proposal resolves, so each winner is in this
 /// node's catalog on return. Runs on the leader of `home`.
+///
+/// Each batch of [`key_batches`] is one `SurrogateBind` entry, so every
+/// entry fits one RPC frame. The batches propose concurrently and end at
+/// `deadline`.
 pub(crate) async fn mint_many_at_home(
     state: &SharedState,
     home: VShardId,
     collection: CollectionKey<'_>,
     tenant_id: TenantId,
     unbound: &[&[u8]],
+    deadline: tokio::time::Instant,
+) -> crate::Result<Vec<Surrogate>> {
+    // Built in a loop, not by an iterator closure: a closure over a borrowed
+    // key, held across the await below, fails every caller's `Send` check.
+    let mut entries = Vec::new();
+    for batch in key_batches(unbound, ASSIGN_SURROGATE_KEY_BUDGET) {
+        entries.push(mint_entry(
+            state, home, collection, tenant_id, batch, deadline,
+        ));
+    }
+    let minted = futures::future::try_join_all(entries).await?;
+    Ok(minted.into_iter().flatten().collect())
+}
+
+/// Bind every key of `unbound` on `home`'s group in one `SurrogateBind`
+/// entry, and return each key's log-order winner, in `unbound` order.
+async fn mint_entry(
+    state: &SharedState,
+    home: VShardId,
+    collection: CollectionKey<'_>,
+    tenant_id: TenantId,
+    unbound: &[&[u8]],
+    deadline: tokio::time::Instant,
 ) -> crate::Result<Vec<Surrogate>> {
     if unbound.is_empty() {
         return Ok(Vec::new());
@@ -122,8 +135,6 @@ pub(crate) async fn mint_many_at_home(
             binds,
         },
     );
-    let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
-        .tokio_instant();
     let payload = propose_replicated_entry(state, proposer, entry, deadline).await?;
     // The apply answers the winner of every identity, in entry order.
     let winners: Vec<u32> =

@@ -113,9 +113,8 @@ impl RaftRpcHandler for EchoHandler {
         _req: nodedb_cluster::rpc_codec::AssignSurrogateRequest,
     ) -> nodedb_cluster::rpc_codec::AssignSurrogateResponse {
         nodedb_cluster::rpc_codec::AssignSurrogateResponse {
-            surrogate: 0,
+            surrogates: Vec::new(),
             error: None,
-            found: None,
         }
     }
 
@@ -263,12 +262,11 @@ impl RaftRpcHandler for SentinelHandler {
     ) -> nodedb_cluster::rpc_codec::AssignSurrogateResponse {
         self.invoked.store(true, Ordering::SeqCst);
         nodedb_cluster::rpc_codec::AssignSurrogateResponse {
-            surrogate: 0,
+            surrogates: Vec::new(),
             error: Some(nodedb_cluster::rpc_codec::TypedClusterError::Internal {
                 code: 0,
                 message: "sentinel: unexpected assign-surrogate dispatch".into(),
             }),
-            found: None,
         }
     }
 

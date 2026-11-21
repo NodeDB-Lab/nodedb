@@ -7,9 +7,9 @@
 
 /// Hook for routed-surrogate-exchange.
 ///
-/// `nodedb-cluster` cannot depend on `nodedb` (circular), so the assign logic —
-/// run a LOCAL `SurrogateAssigner::assign` for the `(collection, pk)` endpoint
-/// key carried by the request — lives in `nodedb` behind this `Send + Sync` hook.
+/// `nodedb-cluster` cannot depend on `nodedb` (circular), so the assign logic
+/// for the keys the request carries lives in `nodedb` behind this
+/// `Send + Sync` hook.
 /// The transport read-loop calls [`on_assign_surrogate`](Self::on_assign_surrogate)
 /// when an `AssignSurrogateRequest` arrives at the home vShard's LEADER and writes
 /// the returned [`AssignSurrogateResponse`](crate::rpc_codec::AssignSurrogateResponse)
@@ -25,16 +25,15 @@
 /// request against a node with no assigner installed returns a typed "not
 /// configured" error.
 ///
-/// The hook is **async** for signature symmetry with the other one-shot hooks;
-/// the host-crate implementation performs a synchronous local assign (the
-/// `SurrogateAssigner` is a sync `Send + Sync` facade) and never touches
-/// io_uring or the Data Plane directly.
+/// The hook is **async**: the host-crate implementation proposes the batch's
+/// unbound keys through the home vShard's Raft log and awaits the apply. It
+/// works to the request's `deadline_remaining_ms` and never touches io_uring
+/// or the Data Plane directly.
 #[async_trait::async_trait]
 pub trait AssignRemoteSurrogate: Send + Sync + 'static {
-    /// Assign-or-return the authoritative surrogate for the `(collection, pk)`
-    /// endpoint key carried by `req`. Returns an [`AssignSurrogateResponse`] with
-    /// the surrogate on success or a typed error on failure (never a silent
-    /// drop).
+    /// Assign or return the authoritative surrogate of every key `req`
+    /// carries. Returns an [`AssignSurrogateResponse`] with one answer per key
+    /// on success, or a typed error on failure. Never a silent drop.
     async fn on_assign_surrogate(
         &self,
         req: crate::rpc_codec::AssignSurrogateRequest,

@@ -13,7 +13,11 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Owned bytes whose msgpack form is `bin`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// The rkyv form is the inner byte vector, for RPC frames that carry raw keys.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct WireBytes(Vec<u8>);
 
 impl WireBytes {

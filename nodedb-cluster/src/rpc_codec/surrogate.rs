@@ -1,82 +1,89 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Routed-surrogate-exchange one-shot RPC (F1b).
+//! Routed-surrogate-exchange one-shot RPC.
 //!
-//! A coordinator planning a cross-shard graph edge needs the AUTHORITATIVE
-//! global surrogate (the stable `u32` cross-engine identity) for an endpoint key
-//! whose home vShard is owned by ANOTHER node. It sends an
-//! [`AssignSurrogateRequest`] to that vShard's LEADER; the leader runs a LOCAL
-//! `SurrogateAssigner::assign` for `(collection, pk)` — which, because the leader
-//! IS the home node, yields the authoritative (first-wins, idempotent) value —
-//! and replies with exactly one [`AssignSurrogateResponse`]. One-shot
-//! request/response; no streaming.
+//! A coordinator needs the AUTHORITATIVE global surrogate (the stable `u32`
+//! cross-engine identity) for keys whose collection home vShard is led by
+//! ANOTHER node. It sends one [`AssignSurrogateRequest`] per batch of keys to
+//! that vShard's LEADER. The leader IS the home, so its answer is the
+//! first-wins value every owner stores. It mints every unbound key of the
+//! batch in one Raft entry and replies with one [`AssignSurrogateResponse`].
+//! One-shot request/response, no streaming.
 //!
-//! The same exchange also serves READ-ONLY resolution: with
-//! `lookup_only: Some(true)` the leader looks the binding up and never
-//! allocates, replying with `found: Some(false)` when the key names no
-//! existing row.
+//! The same exchange also serves READ-ONLY resolution. With `lookup_only` set,
+//! the leader looks each binding up and never allocates. A key that names no
+//! existing row answers `None`.
 //!
 //! Discriminants 34/35 are permanently assigned to these variants.
 
+use nodedb_types::WireBytes;
+
 use super::discriminants::*;
 use super::execute::TypedClusterError;
-use super::header::write_frame;
+use super::header::{MAX_RPC_PAYLOAD_SIZE, write_frame};
 use super::raft_rpc::RaftRpc;
 use crate::error::{ClusterError, Result};
 
+/// The largest total of key bytes one request carries, each key counted with
+/// [`ASSIGN_SURROGATE_KEY_OVERHEAD`].
+///
+/// The leader proposes the batch's unbound keys as one Raft entry. That entry
+/// encodes each key byte in up to two bytes and travels in one AppendEntries
+/// frame. A quarter of the frame cap keeps the entry and its envelope inside
+/// that frame.
+pub const ASSIGN_SURROGATE_KEY_BUDGET: usize = MAX_RPC_PAYLOAD_SIZE as usize / 4;
+
+/// Bytes counted per key beside the key's own bytes: its length and offset in
+/// the request, its answer in the reply, and its surrogate in the Raft entry.
+pub const ASSIGN_SURROGATE_KEY_OVERHEAD: usize = 16;
+
 // ── Wire types ──────────────────────────────────────────────────────────────
 
-/// Coordinator → leader routed-surrogate-exchange request (F1b).
+/// Coordinator → leader routed-surrogate-exchange request.
 ///
-/// Carries the endpoint key `(collection, pk)` plus the identity scope
-/// (`database_id`, `tenant_id`) and routing key (`vshard_id`) the home vShard was
-/// resolved from. The `deadline_remaining_ms` / `trace_id` fields mirror
-/// [`ExecuteRequest`](super::execute::ExecuteRequest) so the leader-side handler
-/// shares the same deadline / tracing prologue as the other one-shot RPCs.
-///
-/// Cross-version safety: new optional fields should be added as `Option<T>`.
+/// Carries the keys `(collection, pks)` plus the identity scope
+/// (`database_id`, `tenant_id`) and the home vShard (`vshard_id`) they route
+/// to. Every key belongs to the one collection. The `deadline_remaining_ms`
+/// and `trace_id` fields mirror [`ExecuteRequest`](super::execute::ExecuteRequest).
+/// The leader works to `deadline_remaining_ms` and refuses a request whose
+/// budget is spent.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct AssignSurrogateRequest {
-    /// Home vShard the `(collection, pk)` endpoint key routes to.
+    /// Home vShard every key of `pks` routes to.
     pub vshard_id: u32,
     pub database_id: u64,
     pub tenant_id: u64,
-    /// Bare catalog name of the collection the surrogate is scoped to. With
+    /// Bare catalog name of the collection the surrogates are scoped to. With
     /// `database_id` it forms the canonical collection key.
     pub collection: String,
-    /// Primary-key bytes of the endpoint whose surrogate is being resolved.
-    pub pk: Vec<u8>,
+    /// Primary-key bytes of each key to resolve. The reply answers them in
+    /// this order.
+    pub pks: Vec<WireBytes>,
     pub deadline_remaining_ms: u64,
     pub trace_id: [u8; 16],
-    /// `Some(true)` = READ-ONLY resolution: the leader must look the binding up
-    /// and never allocate. Used when the key names a row that is expected to
-    /// already exist (e.g. a materialized-sum join key pointing at a target
-    /// row); allocating there would mint identity for a row that does not
-    /// exist. `Some(false)` / `None` = the historical get-or-create assign.
-    pub lookup_only: Option<bool>,
+    /// `true` = READ-ONLY resolution: the leader looks each binding up and
+    /// never allocates. A key expected to name an existing row uses it. An
+    /// allocation there mints identity for a row that does not exist.
+    /// `false` = get-or-create assign.
+    pub lookup_only: bool,
 }
 
 /// Terminal reply to an [`AssignSurrogateRequest`].
 ///
-/// `error: None` carries the authoritative `surrogate` (a non-zero `u32` when the
-/// leader has a wired catalog; `0` is only ever returned with an `error`).
-/// `error: Some(e)` means the leader-side assign failed (lock poisoned, backend
-/// error, or no assign-remote-surrogate hook configured); `surrogate` is `0` in
-/// that case.
+/// With `error: None`, `surrogates` holds one answer per key of the request,
+/// in its order:
+/// - `Some(s)`: the key's authoritative surrogate.
+/// - `None`: the key has no binding. Only a `lookup_only` request answers it.
+///
+/// With `error: Some(e)` the leader ran nothing to completion and
+/// `surrogates` is empty.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct AssignSurrogateResponse {
-    /// The authoritative surrogate. `0` only on error, or on a `lookup_only`
-    /// request that found no binding (`found: Some(false)`).
-    pub surrogate: u32,
+    /// One answer per requested key, in request order. An explicit `Option`
+    /// marks a miss: zero is a reserved sentinel that also appears in
+    /// catalog-less fixtures, so it cannot mean "no such row".
+    pub surrogates: Vec<Option<u32>>,
     pub error: Option<TypedClusterError>,
-    /// Reply to a `lookup_only` request: `Some(true)` = a binding exists and
-    /// `surrogate` carries it, `Some(false)` = no binding exists. `None` on a
-    /// reply to an assign request, which always binds.
-    ///
-    /// An explicit flag rather than `surrogate == 0`: zero is a reserved
-    /// sentinel that also appears in catalog-less fixtures, so overloading it
-    /// would make "no such row" indistinguishable from "row zero".
-    pub found: Option<bool>,
 }
 
 // ── Codec ────────────────────────────────────────────────────────────────────
@@ -165,48 +172,79 @@ mod tests {
         }
     }
 
+    /// A batched request keeps every key, in order, byte for byte.
     #[test]
-    fn roundtrip_assign_surrogate_request() {
+    fn roundtrip_batched_assign_request() {
+        let pks: Vec<WireBytes> = vec![
+            WireBytes::from(b"alice".to_vec()),
+            WireBytes::from(vec![0x00, 0x80, 0xFF]),
+            WireBytes::from(Vec::new()),
+            WireBytes::from(b"bob".to_vec()),
+        ];
         let req = AssignSurrogateRequest {
             vshard_id: 512,
             database_id: 7,
             tenant_id: 42,
             collection: "people".into(),
-            pk: vec![0x61, 0x6C, 0x69, 0x63, 0x65],
+            pks: pks.clone(),
             deadline_remaining_ms: 5000,
             trace_id: [9u8; 16],
-            lookup_only: None,
+            lookup_only: false,
         };
-        let decoded = roundtrip_req(req.clone());
+        let decoded = roundtrip_req(req);
         assert_eq!(decoded.vshard_id, 512);
         assert_eq!(decoded.database_id, 7);
         assert_eq!(decoded.tenant_id, 42);
         assert_eq!(decoded.collection, "people");
-        assert_eq!(decoded.pk, vec![0x61, 0x6C, 0x69, 0x63, 0x65]);
+        assert_eq!(decoded.pks, pks);
         assert_eq!(decoded.deadline_remaining_ms, 5000);
         assert_eq!(decoded.trace_id, [9u8; 16]);
+        assert!(!decoded.lookup_only);
+    }
+
+    /// A request that fills the key budget encodes inside one RPC frame.
+    #[test]
+    fn a_full_key_budget_fits_one_frame() {
+        let key_len = 1024;
+        let count = ASSIGN_SURROGATE_KEY_BUDGET / (key_len + ASSIGN_SURROGATE_KEY_OVERHEAD);
+        let req = AssignSurrogateRequest {
+            vshard_id: 1,
+            database_id: 1,
+            tenant_id: 1,
+            collection: "people".into(),
+            pks: vec![WireBytes::from(vec![0xFFu8; key_len]); count],
+            deadline_remaining_ms: 1000,
+            trace_id: [0u8; 16],
+            lookup_only: false,
+        };
+        let encoded = super::super::encode(
+            &RaftRpc::AssignSurrogateRequest(req),
+            &crate::cluster_epoch::ClusterEpochState::default(),
+        )
+        .unwrap();
+        assert!(encoded.len() <= MAX_RPC_PAYLOAD_SIZE as usize);
     }
 
     #[test]
-    fn roundtrip_assign_surrogate_request_empty_pk() {
+    fn roundtrip_assign_request_with_no_keys() {
         let req = AssignSurrogateRequest {
             vshard_id: 0,
             database_id: 0,
             tenant_id: 0,
             collection: String::new(),
-            pk: vec![],
+            pks: Vec::new(),
             deadline_remaining_ms: 1000,
             trace_id: [0u8; 16],
-            lookup_only: None,
+            lookup_only: false,
         };
         let decoded = roundtrip_req(req);
-        assert!(decoded.pk.is_empty());
+        assert!(decoded.pks.is_empty());
         assert!(decoded.collection.is_empty());
         assert_eq!(decoded.deadline_remaining_ms, 1000);
     }
 
-    /// A read-only request round-trips its flag: dropping it on the wire would
-    /// silently turn a lookup into an allocating assign on the leader.
+    /// A read-only request keeps its flag on the wire. A dropped flag turns a
+    /// lookup into an allocating assign on the leader.
     #[test]
     fn roundtrip_lookup_only_request() {
         let req = AssignSurrogateRequest {
@@ -214,49 +252,43 @@ mod tests {
             database_id: 1,
             tenant_id: 2,
             collection: "accounts".into(),
-            pk: b"acc-1".to_vec(),
+            pks: vec![
+                WireBytes::from(b"acc-1".to_vec()),
+                WireBytes::from(b"acc-2".to_vec()),
+            ],
             deadline_remaining_ms: 1000,
             trace_id: [1u8; 16],
-            lookup_only: Some(true),
+            lookup_only: true,
         };
         let decoded = roundtrip_req(req);
-        assert_eq!(decoded.lookup_only, Some(true));
+        assert!(decoded.lookup_only);
+        assert_eq!(decoded.pks.len(), 2);
     }
 
-    /// A lookup miss is carried by `found`, not by a zero surrogate.
+    /// A batched reply keeps each answer in its slot, a miss as `None`.
     #[test]
-    fn roundtrip_lookup_miss_response() {
+    fn roundtrip_batched_response_with_a_miss() {
         let decoded = roundtrip_resp(AssignSurrogateResponse {
-            surrogate: 0,
+            surrogates: vec![Some(12345), None, Some(0), Some(7)],
             error: None,
-            found: Some(false),
         });
-        assert_eq!(decoded.found, Some(false));
-        assert!(decoded.error.is_none());
-    }
-
-    #[test]
-    fn roundtrip_assign_surrogate_response_ok() {
-        let decoded = roundtrip_resp(AssignSurrogateResponse {
-            surrogate: 12345,
-            error: None,
-            found: None,
-        });
-        assert_eq!(decoded.surrogate, 12345);
+        assert_eq!(
+            decoded.surrogates,
+            vec![Some(12345), None, Some(0), Some(7)]
+        );
         assert!(decoded.error.is_none());
     }
 
     #[test]
     fn roundtrip_assign_surrogate_response_error() {
         let decoded = roundtrip_resp(AssignSurrogateResponse {
-            surrogate: 0,
+            surrogates: Vec::new(),
             error: Some(TypedClusterError::Internal {
                 code: 0x7,
                 message: "assign-remote-surrogate not configured".into(),
             }),
-            found: None,
         });
-        assert_eq!(decoded.surrogate, 0);
+        assert!(decoded.surrogates.is_empty());
         match decoded.error {
             Some(TypedClusterError::Internal { code, message }) => {
                 assert_eq!(code, 0x7);

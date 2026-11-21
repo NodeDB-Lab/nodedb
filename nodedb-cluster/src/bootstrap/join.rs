@@ -610,9 +610,8 @@ mod tests {
                 _req: crate::rpc_codec::AssignSurrogateRequest,
             ) -> crate::rpc_codec::AssignSurrogateResponse {
                 crate::rpc_codec::AssignSurrogateResponse {
-                    surrogate: 0,
+                    surrogates: Vec::new(),
                     error: None,
-                    found: None,
                 }
             }
 

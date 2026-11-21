@@ -104,12 +104,11 @@ pub trait RaftRpcHandler: Send + Sync + 'static {
         req: ShuffleAggregateConsumeRequest,
     ) -> impl std::future::Future<Output = ShuffleAggregateConsumeResponse> + Send;
 
-    /// Routed-surrogate-exchange (F1b). This node is the LEADER of the home
-    /// vShard for the `(collection, pk)` endpoint key carried by `req`:
-    /// assign-or-return the AUTHORITATIVE global surrogate (a LOCAL assign on the
-    /// leader yields the authoritative, first-wins, idempotent value) and return
-    /// it. The transport writes exactly one [`AssignSurrogateResponse`] carrying
-    /// the surrogate (or a typed error) back to the coordinator.
+    /// Routed-surrogate-exchange. This node is the LEADER of the home vShard
+    /// of every key `req` carries. It assigns or returns each key's
+    /// AUTHORITATIVE global surrogate: first-wins and idempotent. The transport
+    /// writes exactly one [`AssignSurrogateResponse`] back to the coordinator:
+    /// one answer per key, or a typed error.
     fn on_assign_surrogate(
         &self,
         req: AssignSurrogateRequest,
