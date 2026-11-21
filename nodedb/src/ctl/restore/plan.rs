@@ -670,6 +670,99 @@ mod tests {
         assert!(err.to_string().contains("6..=8"), "{err}");
     }
 
+    /// The base holds writes through LSN 7, inside the missing segment. The
+    /// anchors left resolve 3.5 ms to LSN 5, below the base, yet the gap is
+    /// the cause, so the restore names it instead of refusing the base.
+    #[tokio::test]
+    async fn a_time_target_across_a_gap_names_the_range_before_judging_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        three_segments(&env, dir.path()).await;
+        let crc = crate::wal::archiver::segment_crc32c(&dir.path().join("seg-6")).unwrap();
+        env.cold
+            .delete_archived_wal_segment(NODE, INC, 6, &[crc])
+            .await
+            .unwrap();
+        let archive = Archive::list(&env.cold, NODE, INC).await.unwrap();
+        let life = life(vec![base(1, 6, 7)]);
+
+        let err = plan_restore(&env, &life, &archive, &time(3 * MS + MS / 2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Coverage(CoverageError::Gap {
+                    from: 6,
+                    to: 9,
+                    replay_start: 6,
+                    target: 12
+                })
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("6..=9"), "{err}");
+    }
+
+    /// No anchor is later than the target, so nothing bounds the batches it
+    /// covers. A whole archive refuses the target. A segment missing after
+    /// the last anchor names its range.
+    #[tokio::test]
+    async fn a_time_target_past_the_last_anchor_is_refused_and_names_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        use Rec::*;
+        archive_segment(
+            &env,
+            dir.path(),
+            1,
+            &[Put, Put, Anchor(MS), Put, Anchor(2 * MS)],
+        )
+        .await;
+        archive_segment(&env, dir.path(), 6, &[Put, Put]).await;
+        archive_segment(&env, dir.path(), 8, &[Put, Put]).await;
+        let life = life(vec![base(1, 0, 2)]);
+
+        let whole = Archive::list(&env.cold, NODE, INC).await.unwrap();
+        let err = plan_restore(&env, &life, &whole, &time(3 * MS))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::NoAnchorPastTarget {
+                    anchored_lsn: 5,
+                    archived_through: 9,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+
+        let crc = crate::wal::archiver::segment_crc32c(&dir.path().join("seg-6")).unwrap();
+        env.cold
+            .delete_archived_wal_segment(NODE, INC, 6, &[crc])
+            .await
+            .unwrap();
+        let gapped = Archive::list(&env.cold, NODE, INC).await.unwrap();
+        let err = plan_restore(&env, &life, &gapped, &time(3 * MS))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Coverage(CoverageError::Gap {
+                    from: 6,
+                    to: 7,
+                    replay_start: 6,
+                    target: 9
+                })
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("6..=7"), "{err}");
+    }
+
     fn part(origin: u64, part: u32, parts: u32) -> Rec {
         Rec::Group(crate::wal::WriteGroup::part_of(origin, part, parts))
     }

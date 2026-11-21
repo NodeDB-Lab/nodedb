@@ -6,7 +6,10 @@
 //! An anchor in a missing segment is invisible, so the newest anchor the
 //! archive shows can be older than the target's true LSN. The resolution
 //! stands only when the archive holds every record from the resolved LSN up
-//! to the first anchor past the target.
+//! to the first anchor past the target. A gap there fails the restore with
+//! the missing range, before any base is judged against the resolved LSN.
+//! With no anchor past the target, nothing proves the archive holds every
+//! batch committed by it, so the target is refused.
 
 use nodedb_types::temporal::LsnTimeError;
 
@@ -35,13 +38,14 @@ pub(super) async fn resolve_time(
         let start = scanner.archive.containing(replay_start).unwrap_or(0);
         let (timeline, first_past) = anchors_from(scanner, start, target_ns).await?;
         let applied_high = base.meta.applied_high_lsn.as_u64();
-        miss = match timeline.lsn_at_or_before(target_ns) {
-            Ok(lsn) if lsn >= applied_high => {
-                if let Some(first_past) = first_past {
-                    require_contiguous(scanner, lsn.saturating_add(1), first_past).await?;
-                }
-                return Ok(lsn);
-            }
+        let resolved = timeline.lsn_at_or_before(target_ns);
+        // A gap above the resolved LSN hides the target's true LSN. The gap
+        // is the error, so it is checked before any base judges the LSN.
+        if let Ok(lsn) = &resolved {
+            require_bounded(scanner, *lsn, first_past, target_ns).await?;
+        }
+        miss = match resolved {
+            Ok(lsn) if lsn >= applied_high => return Ok(lsn),
             Ok(lsn) => RestoreError::NoBaseAtOrBelow {
                 target_lsn: lsn,
                 oldest_applied_high_lsn: applied_high,
@@ -85,6 +89,45 @@ async fn anchors_from(
         .find(|a| a.hlc_wall_ns > target_ns)
         .map(|a| a.lsn);
     Ok((Timeline::from_anchors(anchors), first_past))
+}
+
+/// Check that the archive proves `lsn` is the last anchored LSN committed by
+/// `target_ns`.
+///
+/// An anchor past the target bounds the check: every LSN up to it must be
+/// archived. With no such anchor, nothing in the archive bounds the batches
+/// committed by the target. The segment that holds them can be unarchived.
+/// The walk then checks every LSN through the archive's last record, so a
+/// gap names its range. A gapless archive still fails with
+/// `NoAnchorPastTarget`.
+async fn require_bounded(
+    scanner: &mut Scanner<'_, '_>,
+    lsn: u64,
+    first_past: Option<u64>,
+    target_ns: u64,
+) -> Result<(), RestoreError> {
+    if let Some(first_past) = first_past {
+        return require_contiguous(scanner, lsn.saturating_add(1), first_past).await;
+    }
+    let archived_through = archived_through(scanner).await?.unwrap_or(lsn);
+    require_contiguous(scanner, lsn.saturating_add(1), archived_through).await?;
+    Err(RestoreError::NoAnchorPastTarget {
+        target_ns,
+        anchored_lsn: lsn,
+        archived_through,
+    })
+}
+
+/// The highest record LSN the archive holds, `None` when it holds none.
+async fn archived_through(scanner: &mut Scanner<'_, '_>) -> Result<Option<u64>, RestoreError> {
+    let count = scanner.archive.segments().len();
+    for index in (0..count).rev() {
+        let (_, scan) = scanner.scan(index).await?;
+        if scan.last_lsn.is_some() {
+            return Ok(scan.last_lsn);
+        }
+    }
+    Ok(None)
 }
 
 /// Check that the archive holds every LSN in `from..=through`. A gap fails

@@ -90,6 +90,18 @@ pub enum RestoreError {
     },
 
     #[error(
+        "no archived WAL time anchor is later than the target {target_ns}ns; the last anchor \
+         is at LSN {anchored_lsn} and the archive ends at LSN {archived_through}, so a batch \
+         committed by the target can be missing from the archive; wait for the WAL archiver \
+         to upload a segment with a later anchor, or restore to an earlier target"
+    )]
+    NoAnchorPastTarget {
+        target_ns: u64,
+        anchored_lsn: u64,
+        archived_through: u64,
+    },
+
+    #[error(
         "no base snapshot holds only writes at or below LSN {target_lsn}; the oldest base \
          holds writes through LSN {oldest_applied_high_lsn}"
     )]
