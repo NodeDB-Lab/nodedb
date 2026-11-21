@@ -97,6 +97,7 @@ impl SharedState {
             audit_max_entries,
             idle_timeout_secs,
             session_absolute_timeout_secs,
+            ddl_authorization,
         } = auth;
         let StoreParts {
             orgs,
@@ -230,6 +231,7 @@ impl SharedState {
             audit_max_entries,
             idle_timeout_secs,
             session_absolute_timeout_secs,
+            ddl_authorization,
             shape_registry: Arc::new(crate::control::server::sync::shape::ShapeRegistry::new()),
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             notify_bus: crate::control::notify_bus::NotifyBus::default(),

@@ -145,6 +145,25 @@ Who can execute cluster and database-scoped DDL:
 
 **Promotion note:** `ALTER DATABASE ... PROMOTE` is restricted to Superuser only because promotion is irreversible and breaks lineage to the source replica. The operational risk is high; cluster-admin credentials must be distributed across at least two operators and stored in a sealed vault.
 
+## DDL Authorization Mode
+
+The `[auth]` config key `ddl_authorization` chooses who may run schema DDL. The node reads it once at startup. A change needs a restart. Every node of a cluster must carry the same value.
+
+```toml
+[auth]
+ddl_authorization = "open"
+```
+
+| Value          | Creating an object | Changing or dropping an object                   | Tenant-wide statements        |
+| -------------- | ------------------ | ------------------------------------------------ | ----------------------------- |
+| `open`         | No check (default) | No check                                         | No check                      |
+| `tenant_admin` | TenantAdmin        | TenantAdmin                                      | TenantAdmin                   |
+| `permission`   | `Create` permission | `Alter` (`Drop` for a drop) permission on it    | `Admin` permission            |
+| `owner`        | No check           | Owner of the object or TenantAdmin               | TenantAdmin                   |
+| `mix`          | `Create` permission | Owner of the object or TenantAdmin              | TenantAdmin                   |
+
+A superuser passes in every mode. A refusal is SQLSTATE 42501. The existing checks on `DROP COLLECTION`, `CREATE INDEX` and `DROP INDEX` apply in every mode.
+
 ## Permission Hierarchy
 
 ```

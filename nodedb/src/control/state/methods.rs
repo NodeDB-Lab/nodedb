@@ -323,6 +323,11 @@ impl SharedState {
         self.session_absolute_timeout_secs
     }
 
+    /// DDL authorization policy chosen by the `[auth] ddl_authorization` config.
+    pub fn ddl_authorization(&self) -> crate::config::auth::DdlAuthorizationMode {
+        self.ddl_authorization
+    }
+
     /// Override the idle and absolute session-timeout fields. Intended for
     /// tests, which build `SharedState` with both set to `0` (disabled) and
     /// need a short idle window to exercise the listener watchdog. Requires

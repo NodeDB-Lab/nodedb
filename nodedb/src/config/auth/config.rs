@@ -193,6 +193,12 @@ pub struct AuthConfig {
     /// rate-limit, miss-spike detection.
     #[serde(default)]
     pub session: SessionHandleConfig,
+
+    /// How schema DDL is authorized: `open` (default, no check),
+    /// `tenant_admin`, `permission`, `owner` or `mix`. Every node of a
+    /// cluster must carry the same value.
+    #[serde(default)]
+    pub ddl_authorization: super::DdlAuthorizationMode,
 }
 
 impl Default for AuthConfig {
@@ -220,6 +226,7 @@ impl Default for AuthConfig {
             escalation: None,
             tls_policy: None,
             session: SessionHandleConfig::default(),
+            ddl_authorization: super::DdlAuthorizationMode::default(),
         }
     }
 }
