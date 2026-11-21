@@ -458,6 +458,8 @@ mod tests {
         let key = PlanCacheKey {
             sql_text_hash: hash_sql("SELECT * FROM users"),
             placeholder_types_hash: 0,
+            tenant_id: 1,
+            database_id: 0,
             version_set: vs.clone(),
         };
 
@@ -520,6 +522,8 @@ mod tests {
         let full_key = PlanCacheKey {
             sql_text_hash: sql_key.sql_text_hash,
             placeholder_types_hash: sql_key.placeholder_types_hash,
+            tenant_id: 1,
+            database_id: 0,
             version_set: vs.clone(),
         };
         cache.insert_version_set(sql_key.clone(), vs.clone());
@@ -583,6 +587,8 @@ mod tests {
                     let full_key = PlanCacheKey {
                         sql_text_hash: sql_hash,
                         placeholder_types_hash: ph_hash,
+                        tenant_id: 1,
+                        database_id: 0,
                         version_set: stored_vs.clone(),
                     };
                     if cache.get(&full_key).is_some() {
@@ -597,6 +603,8 @@ mod tests {
             let full_key = PlanCacheKey {
                 sql_text_hash: sql_hash,
                 placeholder_types_hash: ph_hash,
+                tenant_id: 1,
+                database_id: 0,
                 version_set: vs.clone(),
             };
             cache.insert_version_set(sql_key, vs);

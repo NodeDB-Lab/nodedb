@@ -94,6 +94,8 @@ impl Gateway {
                 let full_key = PlanCacheKey {
                     sql_text_hash: sql_hash,
                     placeholder_types_hash: ph_hash,
+                    tenant_id: ctx.tenant_id.as_u64(),
+                    database_id: ctx.database_id.as_u64(),
                     version_set: stored_vs.clone(),
                 };
                 if let Some(cached_plan) = self.plan_cache.get(&full_key) {
@@ -125,6 +127,8 @@ impl Gateway {
             let actual_key = PlanCacheKey {
                 sql_text_hash: sql_hash,
                 placeholder_types_hash: ph_hash,
+                tenant_id: ctx.tenant_id.as_u64(),
+                database_id: ctx.database_id.as_u64(),
                 version_set: actual_vs.clone(),
             };
             self.plan_cache

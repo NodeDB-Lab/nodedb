@@ -87,6 +87,8 @@ mod tests {
         PlanCacheKey {
             sql_text_hash: hash_sql(sql),
             placeholder_types_hash: 0,
+            tenant_id: 1,
+            database_id: 0,
             version_set: GatewayVersionSet::from_pairs(vec![(col.into(), version)]),
         }
     }
