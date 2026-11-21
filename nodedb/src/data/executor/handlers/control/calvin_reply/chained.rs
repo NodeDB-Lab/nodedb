@@ -135,9 +135,11 @@ impl CoreLoop {
         overlay: &TxnOverlay,
         coll_key: &CollKey,
     ) -> Result<BTreeMap<RowIdentity, Vec<u8>>, ErrorCode> {
+        // The linked body and its decode read the install config the body
+        // derives under. A pinned slice's is its proposer's.
         let config = self
-            .doc_configs
-            .get(coll_key)
+            .install_doc_config(coll_key)
+            .map_err(ErrorCode::from)?
             .ok_or_else(|| ErrorCode::Internal {
                 detail: format!(
                     "calvin RETURNING: chained collection '{}' has no config",

@@ -20,9 +20,14 @@
 //! A plain replicated write that carries its proposer's pins opens the view
 //! for its whole apply, with its rule reads on the validate view. Such a
 //! write never parks, so the view drops when its task ends.
+//!
+//! A Calvin stage and its resolve carry their slice's pins and open the
+//! view the same way. So a replica stages the rows and verdicts its
+//! proposer planned, whatever configs it holds.
 
 use nodedb_physical::physical_plan::{
-    DeclaredColumn, DocumentPinNeeds, MetaOp, PhysicalPlan, RedoPins, document_pin_needs,
+    DeclaredColumn, DocumentPinNeeds, MetaOp, PhysicalPlan, PinnedWrite, RedoPins,
+    document_pin_needs,
 };
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -37,10 +42,18 @@ use super::judged_configs::JudgedConfigs;
 /// Refuse `task`, a plain replicated write pinned with `pins`, when it
 /// writes or folds into a collection `pins` hold no pin of. Only a document
 /// write requires pins. Every core refuses a malformed task alike.
+///
+/// A Calvin stage is judged by [`check_stage_pinned`] over its plans.
 pub(in crate::data::executor) fn check_task_pinned(
     task: &ExecutionTask,
     pins: &RedoPins,
 ) -> Result<(), ConfigPinError> {
+    if let PhysicalPlan::Meta(
+        MetaOp::CalvinExecuteStatic { plans, .. } | MetaOp::CalvinExecuteActive { plans, .. },
+    ) = task.plan()
+    {
+        return check_stage_pinned(task, pins, plans);
+    }
     let needs = if let PhysicalPlan::Document(op) = task.plan() {
         document_pin_needs(op)
     } else {
@@ -52,6 +65,38 @@ pub(in crate::data::executor) fn check_task_pinned(
         task.request.tenant_id,
         needs.writes,
         &needs.sum_targets,
+    )
+}
+
+/// Refuse `task`, a Calvin stage pinned with `pins`, when one of `plans`
+/// writes or folds into a collection `pins` hold no pin of. A document
+/// write requires the pins its install requires. A KV write requires its
+/// collection's pin, as the committed redo's validate does. Every replica
+/// refuses such a stage alike, before it stages anything.
+fn check_stage_pinned(
+    task: &ExecutionTask,
+    pins: &RedoPins,
+    plans: &[PhysicalPlan],
+) -> Result<(), ConfigPinError> {
+    let mut writes: Vec<(PinnedWrite, &str)> = Vec::new();
+    let mut sum_targets = Vec::new();
+    for plan in plans {
+        if let PhysicalPlan::Document(op) = plan {
+            let needs = document_pin_needs(op);
+            writes.extend(needs.writes);
+            sum_targets.extend(needs.sum_targets);
+        } else if let PhysicalPlan::Kv(op) = plan
+            && let Some(collection) = op.collection()
+        {
+            writes.push((PinnedWrite::KvRows, collection));
+        }
+    }
+    check_written_pinned(
+        pins,
+        task.request.database_id,
+        task.request.tenant_id,
+        writes,
+        &sum_targets,
     )
 }
 

@@ -78,9 +78,9 @@ impl CoreLoop {
             (database_id, TenantId::new(tid), collection.to_string());
 
         // Reject direct updates to generated columns, matching the durable
-        // and point-write staging paths.
-        let config_key = (database_id, TenantId::new(tid), collection.to_string());
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // and point-write staging paths. The rule reads the judged config: a
+        // pinned stage judges by its proposer's rules.
+        if let Some(config) = self.judged_doc_config(&coll_key)
             && let Err(e) =
                 generated::check_generated_readonly(updates, &config.enforcement.generated_columns)
         {

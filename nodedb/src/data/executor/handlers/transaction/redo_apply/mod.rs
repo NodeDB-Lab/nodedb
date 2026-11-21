@@ -48,6 +48,8 @@
 //!   and restart replay applies them.
 //! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
 //!   redo entry.
+//! - [`calvin_pin_tests`]: a Calvin stage reads its configs under the
+//!   slice's pins.
 //! - [`cross_shard_fold_tests`]: a record never folds a cross-shard sum
 //!   target on the source's core.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
@@ -60,6 +62,8 @@ pub(in crate::data::executor) mod calvin_fold_tests;
 mod calvin_install;
 #[cfg(test)]
 mod calvin_install_tests;
+#[cfg(test)]
+mod calvin_pin_tests;
 mod clone_copy;
 mod config_pins;
 #[cfg(test)]

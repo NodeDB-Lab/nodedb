@@ -113,7 +113,9 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
-        let config = self.doc_configs.get(&config_key);
+        // The limit is a verdict, so it reads the judged config. Its storage
+        // mode is the current one, the mode a stored body renders in.
+        let config = self.judged_doc_config(&config_key);
         let strict = config.and_then(|config| match &config.storage_mode {
             StorageMode::Strict { schema } => Some(schema),
             StorageMode::Schemaless => None,

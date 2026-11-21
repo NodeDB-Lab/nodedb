@@ -98,13 +98,15 @@ impl CoreLoop {
             Some(Staged::Tombstone) | None => None,
         });
 
+        let chained =
+            matches!(target.engine, RowEngine::Document) && self.hash_chained(&coll_key)?;
         let rows = match (target.image, target.engine) {
             (ReplyImage::Before, _) => {
                 let rows =
                     self.calvin_removed_rows(&at, target, &slots, overlay.base_visible(&coll_key))?;
                 self.calvin_image_docs(&at, &rows)?
             }
-            (ReplyImage::After, RowEngine::Document) if self.hash_chained(&coll_key) => {
+            (ReplyImage::After, RowEngine::Document) if chained => {
                 return Ok(PlanReturning {
                     reply: CalvinReply::Rows(Vec::new()),
                     images: None,
@@ -185,11 +187,14 @@ impl CoreLoop {
         })
     }
 
-    /// Whether `coll_key` links each row it stores into a hash chain.
-    fn hash_chained(&self, coll_key: &CollKey) -> bool {
-        self.doc_configs
-            .get(coll_key)
-            .is_some_and(|config| config.enforcement.hash_chain)
+    /// Whether `coll_key` links each row it stores into a hash chain. The
+    /// chain link is row-body shape, so it reads the install config. `Err`
+    /// when the collection's pin does not decode.
+    fn hash_chained(&self, coll_key: &CollKey) -> Result<bool, ErrorCode> {
+        Ok(self
+            .install_doc_config(coll_key)
+            .map_err(ErrorCode::from)?
+            .is_some_and(|config| config.enforcement.hash_chain))
     }
 
     /// The documents of `rows`, each keyed by its row identity.

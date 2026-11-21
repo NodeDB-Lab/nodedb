@@ -169,8 +169,10 @@ impl CoreLoop {
         );
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
 
-        // Reject direct updates to generated columns (matches the durable path).
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // Reject direct updates to generated columns (matches the durable
+        // path). The rule reads the judged config: a pinned stage judges by
+        // its proposer's rules.
+        if let Some(config) = self.judged_doc_config(&config_key)
             && let Err(e) =
                 generated::check_generated_readonly(updates, &config.enforcement.generated_columns)
         {
@@ -231,24 +233,18 @@ impl CoreLoop {
     }
 
     /// Run BASE ∪ OVERLAY UNIQUE checks for an incoming put/insert body.
+    /// The UNIQUE set is a verdict, so it reads the judged config. A pinned
+    /// stage judges by its proposer's indexes.
     fn stage_check_unique(&self, ctx: &StageCtx<'_>, value: &[u8]) -> crate::Result<()> {
-        let config_key = (
-            crate::types::DatabaseId::new(ctx.database_id),
-            TenantId::new(ctx.tid),
-            ctx.collection.to_string(),
-        );
-        let Some(config) = self.doc_configs.get(&config_key).cloned() else {
+        let Some(config) = self.unique_config(ctx.database_id, ctx.tid, ctx.collection) else {
             return Ok(());
         };
-        if config.index_paths.iter().all(|p| !p.unique) {
-            return Ok(());
-        }
         // An incoming body that will not decode cannot be checked against the
         // UNIQUE indexes at all; skipping the check here would let it stage
         // and commit over a value another row already owns.
         let mut incoming_doc = doc_format::decode_document(value)?;
-        evaluate_generated(&config, &mut incoming_doc, &self.crs_context())?;
-        self.stage_unique_check(ctx, &config, &incoming_doc)
+        evaluate_generated(config, &mut incoming_doc, &self.crs_context())?;
+        self.stage_unique_check(ctx, config, &incoming_doc)
     }
 
     /// Encode `value` as the row the COMMIT install writes, gate it on the

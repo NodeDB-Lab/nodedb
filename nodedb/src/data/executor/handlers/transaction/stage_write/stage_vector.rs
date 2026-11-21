@@ -274,9 +274,10 @@ impl CoreLoop {
         if let Some(key) = self.check_vector_direct_index(scope.database_id, scope.tid, spec)? {
             return Ok(key);
         }
+        // The declared width is a verdict, so it reads the judged config. A
+        // pinned stage judges by its proposer's width.
         let declared_dim = self
-            .doc_configs
-            .get(&scope.coll_key)
+            .judged_doc_config(&scope.coll_key)
             .and_then(|config| config.vector_primary.as_ref())
             .map(|primary| primary.dim as usize);
         if let Some(dim) = declared_dim

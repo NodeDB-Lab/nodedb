@@ -20,6 +20,7 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::typeguard::GuardScope;
+use crate::data::executor::handlers::transaction::redo_apply::fit_stored_rewrite;
 use crate::data::executor::handlers::upsert::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::handlers::write_body;
 use crate::data::executor::strict_format;
@@ -107,6 +108,8 @@ impl CoreLoop {
             TenantId::new(ctx.tid),
             ctx.collection.to_string(),
         );
+        // The stored bytes are in the core's current storage mode, so they
+        // decode under the current config.
         let strict_schema: Option<StrictSchema> =
             self.doc_configs.get(&config_key).and_then(|config| {
                 if let StorageMode::Strict { ref schema } = config.storage_mode {
@@ -132,27 +135,25 @@ impl CoreLoop {
             write_body::assigned_names(on_conflict_updates)
         };
 
+        // The merged row is a row body: it derives under the install config
+        // and its CRS set. A pinned stage's are its proposer's.
+        let crs = self.install_crs_context();
         let merged = if on_conflict_updates.is_empty() {
             merge_values(existing_val, new_val)
         } else {
-            apply_on_conflict_updates(
-                existing_val,
-                &new_val,
-                on_conflict_updates,
-                &self.crs_context(),
-            )?
+            apply_on_conflict_updates(existing_val, &new_val, on_conflict_updates, &crs)?
         };
 
         // Apply typeguards and generated columns to the merged row, as the
         // durable merge does, judging the assigned and injected fields.
-        let merged = match self.doc_configs.get(&config_key) {
+        let mut merged = match self.install_doc_config(&config_key)? {
             Some(config) if write_body::rewrites_body(config) => {
                 let mut doc = serde_json::Value::from(merged);
                 write_body::materialize_write_body(
                     config,
                     &mut doc,
                     GuardScope::Assigned(&assigned),
-                    &self.crs_context(),
+                    &crs,
                 )
                 .map_err(crate::Error::DataPlane)?;
                 nodedb_types::Value::from(doc)
@@ -160,14 +161,25 @@ impl CoreLoop {
             _ => merged,
         };
 
-        let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
+        let bitemporal = self.install_is_bitemporal(ctx.database_id, ctx.tid, ctx.collection)?;
         let sys_from = if bitemporal {
             self.bitemporal_ordinal()
         } else {
             0
         };
 
-        if let Some(ref schema) = strict_schema {
+        if strict_schema.is_some() {
+            // The tuple encodes under the install config's schema, as an
+            // update's rewrite does. A pin older than the stored row's layout
+            // refuses the upsert.
+            let Some(schema) = self.write_rewrite_schema(&config_key, current_bytes)? else {
+                return Err(crate::Error::Internal {
+                    detail: "strict config missing during staged upsert re-encode".into(),
+                });
+            };
+            if let nodedb_types::Value::Object(fields) = &mut merged {
+                fit_stored_rewrite(schema, fields, &assigned);
+            }
             if bitemporal && schema.bitemporal {
                 strict_format::value_to_binary_tuple_bitemporal(
                     &merged,
@@ -189,7 +201,7 @@ impl CoreLoop {
             })?;
             // A declared numeric column holds the value its type stores, as
             // on the durable path.
-            strict_format::coerce_declared_body(body, self.declared_columns(&config_key))
+            strict_format::coerce_declared_body(body, self.declared_columns(&config_key)?)
         }
     }
 

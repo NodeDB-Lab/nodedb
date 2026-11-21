@@ -18,6 +18,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::typeguard::GuardScope;
 use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
 use crate::data::executor::handlers::merge_helpers::check_declared_pk_not_null;
+use crate::data::executor::handlers::transaction::redo_apply::{assigns, rewrite_keeps_field};
 use crate::data::executor::handlers::write_body;
 use crate::data::executor::{doc_format, strict_format};
 use crate::types::TenantId;
@@ -74,7 +75,12 @@ impl CoreLoop {
         // eventual COMMIT replay must agree on what was generated. Contrast
         // `stage_apply_update` below, which decodes a body it just read out of
         // the overlay and therefore propagates.
-        let value: Vec<u8> = if let Some(config) = self.doc_configs.get(&config_key)
+        //
+        // The body derives under the install config and its CRS set. A
+        // pinned stage's are its proposer's, so every replica stages one body.
+        let install = self.install_doc_config(&config_key)?;
+        let crs = self.install_crs_context();
+        let value: Vec<u8> = if let Some(config) = install
             && write_body::rewrites_body(config)
         {
             // A native body keeps every field's type through the rewrite, as
@@ -87,7 +93,7 @@ impl CoreLoop {
                     config,
                     &mut doc,
                     GuardScope::Document,
-                    &self.crs_context(),
+                    &crs,
                 )
                 .map_err(crate::Error::DataPlane)?;
                 zerompk::to_msgpack_vec(&doc).map_err(|e| crate::Error::Serialization {
@@ -95,13 +101,8 @@ impl CoreLoop {
                     detail: format!("staged native body: {e}"),
                 })?
             } else if let Ok(mut doc) = doc_format::decode_document(value) {
-                write_body::materialize_write_body(
-                    config,
-                    &mut doc,
-                    GuardScope::Document,
-                    &self.crs_context(),
-                )
-                .map_err(crate::Error::DataPlane)?;
+                write_body::materialize_write_body(config, &mut doc, GuardScope::Document, &crs)
+                    .map_err(crate::Error::DataPlane)?;
                 doc_format::encode_to_msgpack(&doc)
             } else {
                 value.to_vec()
@@ -112,12 +113,14 @@ impl CoreLoop {
 
         // A declared numeric column holds the value its type stores, as on
         // the durable path.
-        let value = strict_format::coerce_declared_body(value, self.declared_columns(&config_key))?;
+        let value =
+            strict_format::coerce_declared_body(value, self.declared_columns(&config_key)?)?;
 
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let bitemporal = self.install_is_bitemporal(database_id, tid, collection)?;
         let sys_from = self.bitemporal_ordinal();
 
-        if let Some(config) = self.doc_configs.get(&config_key)
+        // A put writes a fresh row, so it encodes under the install schema.
+        if let Some(config) = install
             && let StorageMode::Strict { ref schema } = config.storage_mode
         {
             // Inject the auto-generated `_rowid` primary key from the surrogate
@@ -177,13 +180,15 @@ impl CoreLoop {
             TenantId::new(tid),
             collection.to_string(),
         );
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let bitemporal = self.install_is_bitemporal(database_id, tid, collection)?;
         let sys_from = if bitemporal {
             self.bitemporal_ordinal()
         } else {
             0
         };
 
+        // The stored bytes are in the core's current storage mode, so they
+        // decode under the current config.
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let StorageMode::Strict { ref schema } = c.storage_mode {
                 Some(schema.clone())
@@ -214,7 +219,9 @@ impl CoreLoop {
         // semantics): a later assignment observing a column updated earlier in
         // the same statement still sees the pre-statement value.
         let eval_doc: nodedb_types::Value = doc.clone().into();
-        let crs = self.crs_context();
+        // The post-image is a row body: it derives under the install config
+        // and its CRS set. A pinned stage's are its proposer's.
+        let crs = self.install_crs_context();
         if let Some(obj) = doc.as_object_mut() {
             for (field, update_val) in updates {
                 let val =
@@ -247,7 +254,7 @@ impl CoreLoop {
 
         // Apply typeguards to the patched row, judging the assigned and
         // injected fields, then recompute generated columns.
-        if let Some(config) = self.doc_configs.get(&config_key)
+        if let Some(config) = self.install_doc_config(&config_key)?
             && write_body::rewrites_body(config)
         {
             let assigned = write_body::assigned_names(updates);
@@ -262,26 +269,37 @@ impl CoreLoop {
 
         // A declared numeric column holds the value its type stores, whether
         // the assignment was a literal or computed.
-        strict_format::coerce_declared_doc(&mut doc, self.declared_columns(&config_key))?;
+        strict_format::coerce_declared_doc(&mut doc, self.declared_columns(&config_key)?)?;
 
-        match strict_schema.as_ref() {
-            Some(schema) => {
-                let ndb_val: nodedb_types::Value = doc.into();
-                let bytes = if bitemporal && schema.bitemporal {
-                    strict_format::value_to_binary_tuple_bitemporal(
-                        &ndb_val,
-                        schema,
-                        sys_from,
-                        i64::MIN,
-                        i64::MAX,
-                        collection,
-                    )
-                } else {
-                    strict_format::value_to_binary_tuple(&ndb_val, schema, collection)
-                }?;
-                Ok(bytes)
-            }
-            None => Ok(doc_format::encode_to_msgpack(&doc)),
+        if strict_schema.is_none() {
+            return Ok(doc_format::encode_to_msgpack(&doc));
         }
+        // The tuple encodes under the install config's schema. A pinned
+        // stage's is its proposer's, so every replica stages one tuple. A pin
+        // older than the stored row's layout refuses the update.
+        let Some(schema) = self.write_rewrite_schema(&config_key, current_bytes)? else {
+            return Err(crate::Error::Internal {
+                detail: "strict config missing during staged re-encode".into(),
+            });
+        };
+        let mut ndb_val: nodedb_types::Value = doc.into();
+        // A column the current schema added after the install schema reads
+        // as null, so it is dropped. A field the update assigns stays.
+        if let nodedb_types::Value::Object(fields) = &mut ndb_val {
+            fields.retain(|field, _| rewrite_keeps_field(schema, field, assigns(updates, field)));
+        }
+        let bytes = if bitemporal && schema.bitemporal {
+            strict_format::value_to_binary_tuple_bitemporal(
+                &ndb_val,
+                schema,
+                sys_from,
+                i64::MIN,
+                i64::MAX,
+                collection,
+            )
+        } else {
+            strict_format::value_to_binary_tuple(&ndb_val, schema, collection)
+        }?;
+        Ok(bytes)
     }
 }
