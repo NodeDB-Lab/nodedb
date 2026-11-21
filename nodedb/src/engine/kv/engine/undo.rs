@@ -41,6 +41,13 @@ impl KvEngine {
         if prior.is_none() && !self.tables.contains_key(&tkey) {
             return Ok(());
         }
+        // A conflicting identity restores nothing, before the wheel changes.
+        if self
+            .register_table_identity(tkey, database_id, tenant_id, collection)
+            .is_err()
+        {
+            return Ok(());
+        }
         let composite = expiry_key(database_id, tenant_id, collection, key);
         let current_meta = self.tables.get(&tkey).and_then(|t| t.get_entry_meta(key));
         if let Some(meta) = current_meta
@@ -49,17 +56,19 @@ impl KvEngine {
             self.expiry.cancel(&composite, meta.expire_at_ms);
         }
 
-        let removed = self
-            .table_for_write_or_create(tkey, database_id, tenant_id, collection)
-            .restore_version(
-                key,
-                prior.map(|p| LiveVersion {
-                    value: &p.value,
-                    expire_at_ms: p.expire_at_ms,
-                    surrogate: p.surrogate,
-                    sys_from: p.sys_from,
-                }),
-            );
+        let Ok(table) = self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
+        else {
+            return Ok(());
+        };
+        let removed = table.restore_version(
+            key,
+            prior.map(|p| LiveVersion {
+                value: &p.value,
+                expire_at_ms: p.expire_at_ms,
+                surrogate: p.surrogate,
+                sys_from: p.sys_from,
+            }),
+        );
         self.recharge_table(tkey);
 
         if let Some(prior) = prior

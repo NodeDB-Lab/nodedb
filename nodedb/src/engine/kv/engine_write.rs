@@ -191,6 +191,8 @@ impl KvEngine {
         if matches!(identity, RowIdentity::KeepExisting) && old_meta.is_none() {
             return Ok(None);
         }
+        // Refused before the expiry wheel and the ordinal clock change.
+        self.register_table_identity(tkey, database_id, tenant_id, collection)?;
 
         let has_indexes = self.indexes.get(&tkey).is_some_and(|idx| !idx.is_empty());
         let old_expire = old_meta.and_then(|m| m.has_ttl.then_some(m.expire_at_ms));
@@ -204,7 +206,7 @@ impl KvEngine {
 
         // Fetch-or-create the table, bumping its write epoch — the single
         // chokepoint the aggregate result cache reads to detect this write.
-        let table = self.table_for_write_or_create(tkey, database_id, tenant_id, collection);
+        let table = self.table_for_write_or_create(tkey, database_id, tenant_id, collection)?;
         let old = match identity {
             RowIdentity::Bind(surrogate) => table.put(key, value, expire_at, surrogate, ordinal),
             RowIdentity::KeepExisting => table.rewrite(key, value, expire_at, ordinal),

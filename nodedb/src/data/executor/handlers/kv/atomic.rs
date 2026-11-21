@@ -49,6 +49,9 @@ pub(in crate::data::executor) fn atomic_error_code(
         AtomicError::Declared(error) | AtomicError::Rejected(error) => (*error).into(),
         AtomicError::Unbound(error) => error.into(),
         AtomicError::RowTooLarge(error) => error.into(),
+        AtomicError::Identity(error) => ErrorCode::Internal {
+            detail: error.to_string(),
+        },
     }
 }
 

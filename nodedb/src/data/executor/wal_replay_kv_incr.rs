@@ -202,6 +202,10 @@ impl CoreLoop {
                 self.replay_record_unapplied("kv", "incr_identity", record_lsn, &error.to_string());
                 0
             }
+            Err(AtomicError::Identity(error)) => {
+                self.replay_record_unapplied("kv", "incr_identity", record_lsn, &error.to_string());
+                0
+            }
             // Refused the same way on every replica (`replay_policy`).
             Err(AtomicError::RowTooLarge(error)) => {
                 self.replay_kv_row_too_large("incr", record_lsn, error);

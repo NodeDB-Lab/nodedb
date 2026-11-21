@@ -54,21 +54,21 @@ impl KvEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-    ) -> &mut KvHashTable {
+    ) -> Result<&mut KvHashTable, super::KvIdentityConflict> {
+        self.register_table_identity(tkey, database_id, tenant_id, collection)?;
         self.bump_write_epoch(tkey);
-        self.register_table_identity(tkey, database_id, tenant_id, collection);
         let default_capacity = self.default_capacity;
         let load_factor_threshold = self.load_factor_threshold;
         let rehash_batch_size = self.rehash_batch_size;
         let inline_threshold = self.inline_threshold;
-        self.tables.entry(tkey).or_insert_with(|| {
+        Ok(self.tables.entry(tkey).or_insert_with(|| {
             KvHashTable::new(
                 default_capacity,
                 load_factor_threshold,
                 rehash_batch_size,
                 inline_threshold,
             )
-        })
+        }))
     }
 }
 

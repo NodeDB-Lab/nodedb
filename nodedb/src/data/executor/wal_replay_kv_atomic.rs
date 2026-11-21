@@ -265,6 +265,15 @@ impl CoreLoop {
                 );
                 Some(0)
             }
+            Err(AtomicError::Identity(error)) => {
+                self.replay_record_unapplied(
+                    "kv",
+                    "incr_float_identity",
+                    record_lsn,
+                    &error.to_string(),
+                );
+                Some(0)
+            }
             // Refused the same way on every replica (`replay_policy`).
             Err(AtomicError::RowTooLarge(error)) => {
                 self.replay_kv_row_too_large("incr_float", record_lsn, error);
@@ -364,6 +373,10 @@ impl CoreLoop {
                 return;
             }
             AtomicError::Unbound(error) => {
+                self.replay_record_unapplied("kv", "swap_identity", record_lsn, &error.to_string());
+                return;
+            }
+            AtomicError::Identity(error) => {
                 self.replay_record_unapplied("kv", "swap_identity", record_lsn, &error.to_string());
                 return;
             }

@@ -57,7 +57,7 @@ impl KvEngine {
                 params.database_id,
                 params.tenant_id,
                 params.collection,
-            )
+            )?
             .splice_history(
                 params.key,
                 HistoryVersion {
@@ -100,8 +100,12 @@ impl KvEngine {
         };
         self.observe_ordinal(newest);
         let tkey = table_key(database_id, tenant_id, collection);
-        self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
-            .restore_history(key, versions);
+        // A conflicting identity restores nothing.
+        let Ok(table) = self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
+        else {
+            return Ok(());
+        };
+        table.restore_history(key, versions);
         self.recharge_table(tkey);
         Ok(())
     }
@@ -169,8 +173,12 @@ impl KvEngine {
         if versions.is_empty() && !self.tables.contains_key(&tkey) {
             return;
         }
-        self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
-            .replace_history(key, versions);
+        // A conflicting identity replaces nothing.
+        let Ok(table) = self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
+        else {
+            return;
+        };
+        table.replace_history(key, versions);
         self.recharge_table(tkey);
     }
 }

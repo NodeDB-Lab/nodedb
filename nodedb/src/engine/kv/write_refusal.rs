@@ -52,6 +52,9 @@ pub enum KvWriteRefusal {
     /// The row's key and value are over the row limit.
     #[error(transparent)]
     RowTooLarge(#[from] KvRowTooLarge),
+    /// The table key already names another tenant's or collection's table.
+    #[error(transparent)]
+    IdentityConflict(#[from] super::engine::KvIdentityConflict),
 }
 
 impl KvWriteRefusal {

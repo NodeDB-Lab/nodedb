@@ -29,6 +29,6 @@ pub use expiry_due::DueExpiry;
 pub use history_merge::KvHistoryOverlap;
 pub use newest::KvCollectionNewest;
 pub use reads::{KvEntryImage, KvKeyRef};
-pub use state::{KvEngine, ScanResult};
+pub use state::{KvEngine, KvIdentityConflict, ScanResult};
 pub use versioned_reads::{KvVersionRow, KvVersionedScan};
 pub use write_scope::{KvWriteScope, KvWriteScopeGuard};

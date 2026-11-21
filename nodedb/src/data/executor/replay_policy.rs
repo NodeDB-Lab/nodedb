@@ -218,6 +218,9 @@ impl CoreLoop {
             crate::engine::kv::KvWriteRefusal::RowTooLarge(error) => {
                 self.replay_kv_row_too_large(stage, record_lsn, error);
             }
+            crate::engine::kv::KvWriteRefusal::IdentityConflict(error) => {
+                self.replay_record_unapplied("kv", stage, record_lsn, &error.to_string());
+            }
         }
     }
 

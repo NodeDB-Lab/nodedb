@@ -80,6 +80,9 @@ impl From<crate::engine::kv::KvWriteRefusal> for ErrorCode {
         match e {
             crate::engine::kv::KvWriteRefusal::Unbound(e) => e.into(),
             crate::engine::kv::KvWriteRefusal::RowTooLarge(e) => e.into(),
+            crate::engine::kv::KvWriteRefusal::IdentityConflict(e) => Self::Internal {
+                detail: e.to_string(),
+            },
         }
     }
 }

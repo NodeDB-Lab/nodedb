@@ -12,6 +12,21 @@ use crate::engine::kv::index::KvIndexSet;
 use super::memory::KvMemory;
 use super::write_scope::KvWriteScope;
 
+/// A table key that already names a different (database, tenant, collection).
+/// The engine refuses the second identity, so one table never serves two
+/// tenants.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "KV table key of '{collection}' (tenant {tenant_id}) is already held by '{held_collection}' \
+     (tenant {held_tenant_id}); the second identity is refused"
+)]
+pub struct KvIdentityConflict {
+    pub collection: String,
+    pub tenant_id: u64,
+    pub held_collection: String,
+    pub held_tenant_id: u64,
+}
+
 /// Result of a KV SCAN operation: `(entries, next_cursor_bytes)`.
 ///
 /// Each entry is `(key_bytes, value_bytes)`. `next_cursor` is empty
@@ -116,7 +131,24 @@ impl KvEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-    ) {
+    ) -> Result<(), KvIdentityConflict> {
+        let held = self.hash_to_tenant.get(&tkey).copied();
+        if let Some(held_tenant) = held {
+            let held_database = self.hash_to_database.get(&tkey).map(|d| d.as_u64());
+            let held_collection = self.hash_to_collection.get(&tkey).map(String::as_str);
+            if held_tenant != tenant_id
+                || held_database != Some(database_id)
+                || held_collection != Some(collection)
+            {
+                return Err(KvIdentityConflict {
+                    collection: collection.to_owned(),
+                    tenant_id,
+                    held_collection: held_collection.unwrap_or_default().to_owned(),
+                    held_tenant_id: held_tenant,
+                });
+            }
+            return Ok(());
+        }
         self.hash_to_database
             .entry(tkey)
             .or_insert(DatabaseId::new(database_id));
@@ -124,5 +156,6 @@ impl KvEngine {
         self.hash_to_collection
             .entry(tkey)
             .or_insert_with(|| collection.to_string());
+        Ok(())
     }
 }

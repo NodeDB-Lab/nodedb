@@ -90,6 +90,15 @@ pub enum AtomicError {
     /// The key and the computed value are over the row limit, so nothing was
     /// written.
     RowTooLarge(KvRowTooLarge),
+    /// The table key already names another tenant's or collection's table,
+    /// so nothing was written.
+    Identity(super::engine::KvIdentityConflict),
+}
+
+impl From<super::engine::KvIdentityConflict> for AtomicError {
+    fn from(error: super::engine::KvIdentityConflict) -> Self {
+        Self::Identity(error)
+    }
 }
 
 impl From<UnboundKvWrite> for AtomicError {
@@ -235,7 +244,7 @@ impl KvEngine {
         } = step;
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, &ctx);
+        let table = self.ensure_table(tkey, &ctx)?;
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let (value, computed) = compute::incr(current.as_deref(), delta, shape)?;
@@ -280,7 +289,7 @@ impl KvEngine {
     ) -> Result<Incremented<f64>, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, &ctx);
+        let table = self.ensure_table(tkey, &ctx)?;
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let (value, computed) = compute::incr_float(current.as_deref(), delta, shape)?;
@@ -311,7 +320,7 @@ impl KvEngine {
     ) -> Result<CasResult, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, &ctx);
+        let table = self.ensure_table(tkey, &ctx)?;
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
 
@@ -345,7 +354,7 @@ impl KvEngine {
     ) -> Result<GetSetResult, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, &ctx);
+        let table = self.ensure_table(tkey, &ctx)?;
         let old = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let write_bytes = compute::getset(old.as_deref(), new_value)?;
         // Decided before the value is installed — see `incr_resolved`.
@@ -361,20 +370,24 @@ impl KvEngine {
 
     /// Ensure a hash table exists for (database, tenant, collection),
     /// creating if needed. Returns a mutable reference to the table.
-    fn ensure_table(&mut self, tkey: u64, ctx: &AtomicKeyCtx<'_>) -> &mut KvHashTable {
-        self.register_table_identity(tkey, ctx.database_id, ctx.tenant_id, ctx.collection);
+    fn ensure_table(
+        &mut self,
+        tkey: u64,
+        ctx: &AtomicKeyCtx<'_>,
+    ) -> Result<&mut KvHashTable, AtomicError> {
+        self.register_table_identity(tkey, ctx.database_id, ctx.tenant_id, ctx.collection)?;
         let default_capacity = self.default_capacity;
         let load_factor_threshold = self.load_factor_threshold;
         let rehash_batch_size = self.rehash_batch_size;
         let inline_threshold = self.inline_threshold;
-        self.tables.entry(tkey).or_insert_with(|| {
+        Ok(self.tables.entry(tkey).or_insert_with(|| {
             KvHashTable::new(
                 default_capacity,
                 load_factor_threshold,
                 rehash_batch_size,
                 inline_threshold,
             )
-        })
+        }))
     }
 
     /// Internal helper: put a value into the hash table, handling TTL and expiry.
@@ -462,7 +475,12 @@ impl KvEngine {
         // Write the value, bumping this table's write epoch — the single
         // chokepoint the aggregate result cache reads to detect this write.
         let ordinal = self.write_ordinal();
-        let table = self.table_for_write_or_create(tkey, database_id, tenant_id, collection);
+        // The caller registered this identity through `ensure_table`, so a
+        // conflict cannot arise here. A conflict writes nothing.
+        let Ok(table) = self.table_for_write_or_create(tkey, database_id, tenant_id, collection)
+        else {
+            return Ok(());
+        };
         table.put(key, value, expire_at, surrogate, ordinal);
         self.recharge_table(tkey);
 
