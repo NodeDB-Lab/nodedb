@@ -51,6 +51,7 @@ pub mod match_ops;
 pub mod materialized_view;
 pub mod metering_ddl;
 pub mod observability;
+pub(crate) mod object_permission;
 pub mod oidc;
 pub mod org_ddl;
 pub mod period_lock;
