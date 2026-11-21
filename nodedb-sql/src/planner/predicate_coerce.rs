@@ -46,7 +46,7 @@
 
 use crate::error::Result;
 use crate::resolver::columns::TableScope;
-use crate::types::{BinaryOp, ColumnInfo, SqlDataType, SqlExpr, SqlValue, UnaryOp};
+use crate::types::{BinaryOp, ColumnInfo, SqlExpr, SqlValue, UnaryOp};
 
 use super::declared_type_coerce::{coerce_value, is_instant};
 
@@ -177,7 +177,7 @@ fn coerce_literal(
 mod tests {
     use super::*;
     use crate::resolver::columns::ResolvedTable;
-    use crate::types::{CollectionInfo, ColumnInfo, EngineType};
+    use crate::types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType};
     use nodedb_types::datetime::NdbDateTime;
 
     /// `2020-03-05T10:00:00Z` as epoch milliseconds.
