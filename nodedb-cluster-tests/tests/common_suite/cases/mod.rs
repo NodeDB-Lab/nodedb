@@ -103,6 +103,7 @@ mod descriptor_lease_forwarding_and_renewal;
 mod descriptor_lease_planner_integration;
 mod descriptor_replay_incarnation;
 mod descriptor_versioning_cross_node;
+mod doc_index_lifecycle_cluster;
 mod gateway_execute;
 mod gateway_hung_node_budget;
 mod gather_join_in_txn_occ;

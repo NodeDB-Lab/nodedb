@@ -5,9 +5,10 @@
 //! A KV collection keeps its rows in the `KvEngine`, which maintains its own
 //! per-field secondary indexes on every write. `CREATE INDEX` on a KV
 //! collection therefore builds the index there, and `DROP INDEX` removes it
-//! there. Both run through the autocommit write funnel, which appends the
-//! `kv_register_index` / `kv_drop_index` WAL record. That record and the KV
-//! checkpoint carry the index across a restart.
+//! there. Both are proposed to every replica of the collection's vShard, and
+//! each replica's write funnel appends the `kv_register_index` /
+//! `kv_drop_index` WAL record. That record and the KV checkpoint carry the
+//! index across a restart.
 //!
 //! The KV engine indexes one top-level field by equality. It has no UNIQUE
 //! check, no COLLATE NOCASE fold, no partial predicate and no array or nested
@@ -16,7 +17,7 @@
 
 use crate::control::security::catalog::StoredCollection;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_types::QualifiedCollection;
 
@@ -107,9 +108,8 @@ pub(crate) async fn drop_kv_index(
     dispatch_durable(state, tenant_id, database_id, collection, plan, "drop").await
 }
 
-/// Dispatch a KV index plan through the autocommit write funnel, which
-/// appends its WAL record, and fail on a refused reply. A refusal keeps its
-/// SQLSTATE and code.
+/// Propose a KV index plan to every replica of the collection's vShard, and
+/// fail on a refused reply. A refusal keeps its SQLSTATE and code.
 async fn dispatch_durable(
     state: &SharedState,
     tenant_id: TenantId,
@@ -118,25 +118,15 @@ async fn dispatch_durable(
     plan: PhysicalPlan,
     step: &str,
 ) -> Result<(), DdlError> {
-    crate::control::server::dispatch_utils::dispatch_autocommit_write(
+    super::engine_step::propose_index_step(
         state,
-        crate::control::server::dispatch_utils::AutocommitWrite {
-            tenant_id,
-            database_id,
-            vshard_id: nodedb_types::CollectionKey::from_bare(database_id, collection).vshard(),
-            plan,
-            trace_id: TraceId::ZERO,
-            event_source: crate::event::EventSource::User,
-            txn_id: None,
-            // Index maintenance is a system write.
-            user_roles: Vec::new(),
-        },
+        tenant_id,
+        database_id,
+        collection,
+        plan,
+        &format!("key-value index {step} on '{collection}'"),
     )
-    .await
-    .and_then(crate::control::server::shared::response_payload::payload_or_typed_error)
-    .map_err(|e| {
-        DdlError::from_error_in_context(&format!("key-value index {step} on '{collection}'"), &e)
-    })?;
+    .await?;
     Ok(())
 }
 

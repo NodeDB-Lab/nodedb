@@ -391,7 +391,30 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             declared_primary_key: declared_primary_key.as_deref(),
         }),
 
-        // Not a write — reads / scans / index DDL-metadata / system ops.
+        // A secondary index's entries derive from the rows every replica
+        // holds, so each replica builds or purges them at the same log
+        // position.
+        DocumentOp::BackfillIndex {
+            collection,
+            path,
+            is_array,
+            unique,
+            case_insensitive,
+            predicate,
+        } => ReplicatedWrite::DocIndexBuild {
+            collection: collection.as_str().to_owned(),
+            path: path.clone(),
+            is_array: *is_array,
+            unique: *unique,
+            case_insensitive: *case_insensitive,
+            predicate: predicate.clone(),
+        },
+        DocumentOp::DropIndex { collection, field } => ReplicatedWrite::DocIndexRetire {
+            collection: collection.as_str().to_owned(),
+            field: field.clone(),
+        },
+
+        // Not a write — reads / scans / collection config / system ops.
         DocumentOp::ResolveWrite(_)
         | DocumentOp::PointGet { .. }
         | DocumentOp::Scan { .. }
@@ -400,8 +423,6 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
         | DocumentOp::IndexedFetch { .. }
         | DocumentOp::EstimateCount { .. }
         | DocumentOp::MaterializeScan { .. }
-        | DocumentOp::Register { .. }
-        | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. } => return None,
+        | DocumentOp::Register { .. } => return None,
     })
 }

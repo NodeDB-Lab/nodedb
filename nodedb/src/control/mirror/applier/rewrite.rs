@@ -102,6 +102,8 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         | ReplicatedWrite::KvDropSortedIndex { .. }
         | ReplicatedWrite::KvRegisterIndex { .. }
         | ReplicatedWrite::KvDropIndex { .. }
+        | ReplicatedWrite::DocIndexBuild { .. }
+        | ReplicatedWrite::DocIndexRetire { .. }
         | ReplicatedWrite::KvFieldSet { .. }
         | ReplicatedWrite::KvTransfer { .. }
         | ReplicatedWrite::KvTransferItem { .. }

@@ -157,17 +157,14 @@ impl CoreLoop {
             let record_type = RecordType::from_raw(record.logical_record_type());
             let is_put = record_type == Some(RecordType::Put);
             let is_delete = record_type == Some(RecordType::Delete);
-            if !is_put && !is_delete {
+            if self.replay_document_index_step(record, record_type, num_cores, tombstones)
+                || (!is_put && !is_delete)
+            {
                 continue;
             }
 
-            let vshard_id = record.header.vshard_id as usize;
-            let target_core = if num_cores > 0 {
-                vshard_id % num_cores
-            } else {
-                0
-            };
-            if target_core != self.core_id {
+            let vshard = crate::types::VShardId::new(record.header.vshard_id);
+            if crate::types::core_for_vshard(vshard, num_cores) != self.core_id {
                 continue;
             }
 

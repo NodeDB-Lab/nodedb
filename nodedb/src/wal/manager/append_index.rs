@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! WAL appends for FTS, spatial, and graph index records, plus write-abort
-//! and collection-tombstone markers.
+//! WAL appends for FTS, spatial, document secondary-index, and graph index
+//! records, plus write-abort and collection-tombstone markers.
 
 use nodedb_wal::record::RecordType;
 
@@ -55,6 +55,30 @@ impl WalAppender<'_> {
         p: &[u8],
     ) -> crate::Result<Lsn> {
         self.append_record(RecordType::SpatialDelete, tid, vs, db, p)
+    }
+
+    /// Append a `DocumentIndexBuild` record. The payload is an encoded
+    /// `DocumentIndexBuildRecord`.
+    pub fn append_document_index_build(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::DocumentIndexBuild, tid, vs, db, p)
+    }
+
+    /// Append a `DocumentIndexRetire` record. The payload is an encoded
+    /// `DocumentIndexRetireRecord`.
+    pub fn append_document_index_retire(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::DocumentIndexRetire, tid, vs, db, p)
     }
 
     /// Append a `GraphNodeLabelSet` record. The payload is an encoded

@@ -90,7 +90,9 @@
 //! `kv_variants_match_oracle`. `VectorOp::{SetParams, DropIndex}` take the
 //! same inverse divergence for the same reason: each rides its own
 //! autocommit `VectorParams` / `VectorIndexDrop` record, and a transaction's
-//! redo record carries no index DDL.
+//! redo record carries no index DDL. `DocumentOp::{BackfillIndex, DropIndex}`
+//! take it too, with their `DocumentIndexBuild` / `DocumentIndexRetire`
+//! records.
 //!
 //! `DocumentOp::Truncate`, `KvOp::Truncate`, `VectorOp::DirectTruncate`,
 //! `ColumnarOp::Truncate`, and `TimeseriesOp::Truncate` classify `true`: in a

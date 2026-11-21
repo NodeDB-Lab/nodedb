@@ -10,6 +10,7 @@ use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::ctx::DecodeCtx;
 use super::document;
 use super::document::{PointInsertOptions, PutFields, ReturningFields, UpsertExtras};
+use super::document_index;
 use super::document_join;
 use crate::bridge::envelope::PhysicalPlan;
 
@@ -318,6 +319,27 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 rls_filters,
             },
         ),
+        ReplicatedWrite::DocIndexBuild {
+            collection,
+            path,
+            is_array,
+            unique,
+            case_insensitive,
+            predicate,
+        } => document_index::index_build(
+            database_id,
+            document_index::IndexBuildFields {
+                collection,
+                path,
+                is_array: *is_array,
+                unique: *unique,
+                case_insensitive: *case_insensitive,
+                predicate: predicate.as_deref(),
+            },
+        ),
+        ReplicatedWrite::DocIndexRetire { collection, field } => {
+            document_index::index_retire(database_id, collection, field)
+        }
         _ => Err(crate::Error::Internal {
             detail: "entry_document::decode_arm called with a non-Document ReplicatedWrite \
                 variant (dispatch bug in decode/entry.rs's grouped Document match arm)"

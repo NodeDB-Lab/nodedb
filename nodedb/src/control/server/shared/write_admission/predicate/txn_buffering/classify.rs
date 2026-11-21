@@ -45,8 +45,6 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | DocumentOp::Register { .. }
             | DocumentOp::IndexLookup { .. }
             | DocumentOp::IndexedFetch { .. }
-            | DocumentOp::DropIndex { .. }
-            | DocumentOp::BackfillIndex { .. }
             | DocumentOp::EstimateCount { .. }
             | DocumentOp::MaterializeScan { .. }
             // Read-only classification pass issued by the Control-Plane expander itself.
@@ -54,6 +52,14 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             // Built by write-resolve on the autocommit path, proposed straight through Raft.
             | DocumentOp::ResolvedWrite { .. },
         ) => false,
+
+        // ---- Document: index DDL — encoded, but autocommit-only ----
+        // Like the KV and vector index DDL: each rides its own autocommit
+        // `DocumentIndexBuild` / `DocumentIndexRetire` record, and a
+        // transaction's redo record carries no index DDL.
+        PhysicalPlan::Document(DocumentOp::DropIndex { .. } | DocumentOp::BackfillIndex { .. }) => {
+            false
+        }
 
         // `Merge`/`UpdateFromJoin`/`InsertSelect` never reach the log — the
         // session expander stages them as point ops, and the log has no
@@ -684,18 +690,6 @@ mod tests {
                 offset: 0,
                 sort_keys: Vec::new(),
                 system_time: SystemTimeScope::Current,
-            }),
-            PhysicalPlan::Document(DocumentOp::DropIndex {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                field: "f".into(),
-            }),
-            PhysicalPlan::Document(DocumentOp::BackfillIndex {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                path: "$.f".into(),
-                is_array: false,
-                unique: false,
-                case_insensitive: false,
-                predicate: None,
             }),
             PhysicalPlan::Document(DocumentOp::EstimateCount {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -2437,6 +2431,18 @@ mod tests {
             PhysicalPlan::Kv(KvOp::DropIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "f".into(),
+            }),
+            PhysicalPlan::Document(DocumentOp::DropIndex {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: "f".into(),
+            }),
+            PhysicalPlan::Document(DocumentOp::BackfillIndex {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                path: "$.f".into(),
+                is_array: false,
+                unique: false,
+                case_insensitive: false,
+                predicate: None,
             }),
             PhysicalPlan::Vector(VectorOp::SetParams {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

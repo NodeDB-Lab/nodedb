@@ -8,7 +8,8 @@
 //! into:
 //! - [`entry`]: thin top-level dispatcher (`from_replicated_entry`, `decode_replicated_entry`).
 //! - [`ctx`]: shared `DecodeCtx` (tenancy scope).
-//! - [`entry_document`] / [`document`] / [`document_join`]: `PhysicalPlan::Document`.
+//! - [`entry_document`] / [`document`] / [`document_join`] / [`document_index`]:
+//!   `PhysicalPlan::Document`.
 //! - [`entry_array`]: Raft-native array cell writes → `PhysicalPlan::Array`.
 //! - [`entry_kv`] / [`kv`] / [`kv_resolved`]: `PhysicalPlan::Kv`.
 //! - [`entry_graph`] / [`graph`]: `PhysicalPlan::Graph`.
@@ -23,6 +24,7 @@ mod columnar;
 mod crdt;
 mod ctx;
 mod document;
+mod document_index;
 mod document_join;
 mod entry;
 mod entry_array;

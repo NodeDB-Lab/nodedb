@@ -229,11 +229,45 @@ pub(super) fn wal_append_document_op(
         // Resolved on the Control Plane into `BatchInsert` pages; the Data
         // Plane refuses it.
         DocumentOp::InsertSelect { .. } => None,
-        // Collection config and derived index entries: the catalog holds the
-        // config, and the index entries derive from the journalled rows.
-        DocumentOp::Register { .. }
-        | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. } => None,
+        // Collection config: the catalog holds it.
+        DocumentOp::Register { .. } => None,
+        // A secondary index's build and purge journal themselves. Replay runs
+        // each at its LSN, against the rows stored below it.
+        DocumentOp::BackfillIndex {
+            collection,
+            path,
+            is_array,
+            unique,
+            case_insensitive,
+            predicate,
+        } => {
+            let record = crate::wal::DocumentIndexBuildRecord {
+                collection: collection.as_str().to_owned(),
+                path: path.clone(),
+                is_array: *is_array,
+                unique: *unique,
+                case_insensitive: *case_insensitive,
+                predicate: predicate.clone(),
+            };
+            Some(wal.append_document_index_build(
+                tenant_id,
+                vshard_id,
+                database_id,
+                &record.to_bytes()?,
+            )?)
+        }
+        DocumentOp::DropIndex { collection, field } => {
+            let record = crate::wal::DocumentIndexRetireRecord {
+                collection: collection.as_str().to_owned(),
+                field: field.clone(),
+            };
+            Some(wal.append_document_index_retire(
+                tenant_id,
+                vshard_id,
+                database_id,
+                &record.to_bytes()?,
+            )?)
+        }
     };
     Ok(appended)
 }
@@ -332,6 +366,60 @@ mod tests {
             "PointDelete must produce a durable LSN"
         );
         let _ = last_record_of_type(&wal, nodedb_wal::record::RecordType::Delete);
+    }
+
+    #[test]
+    fn index_build_appends_its_own_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let plan = PhysicalPlan::Document(DocumentOp::BackfillIndex {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+            path: "$.email".to_string(),
+            is_array: false,
+            unique: true,
+            case_insensitive: false,
+            predicate: Some("active = true".to_string()),
+        });
+        let outcome = super::super::wal_append_if_write(
+            &wal,
+            TenantId::new(1),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            &plan,
+        )
+        .expect("append");
+        assert!(outcome.lsn.is_some(), "an index build journals a record");
+        let record = last_record_of_type(&wal, nodedb_wal::record::RecordType::DocumentIndexBuild);
+        let decoded =
+            crate::wal::DocumentIndexBuildRecord::from_bytes(&record.payload).expect("decode");
+        assert_eq!(decoded.collection, "users");
+        assert_eq!(decoded.path, "$.email");
+        assert!(decoded.unique);
+        assert_eq!(decoded.predicate.as_deref(), Some("active = true"));
+    }
+
+    #[test]
+    fn index_purge_appends_its_own_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let plan = PhysicalPlan::Document(DocumentOp::DropIndex {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+            field: "$.email".to_string(),
+        });
+        let outcome = super::super::wal_append_if_write(
+            &wal,
+            TenantId::new(1),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            &plan,
+        )
+        .expect("append");
+        assert!(outcome.lsn.is_some(), "an index purge journals a record");
+        let record = last_record_of_type(&wal, nodedb_wal::record::RecordType::DocumentIndexRetire);
+        let decoded =
+            crate::wal::DocumentIndexRetireRecord::from_bytes(&record.payload).expect("decode");
+        assert_eq!(decoded.collection, "users");
+        assert_eq!(decoded.field, "$.email");
     }
 
     #[test]

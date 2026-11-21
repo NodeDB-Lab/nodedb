@@ -7,6 +7,7 @@ pub mod columnar_dml_updates;
 pub mod crdt_doc_payload;
 pub mod crdt_list_payload;
 pub mod crdt_payload;
+pub mod document_index_payload;
 pub mod group_commit;
 pub mod manager;
 pub mod redo;
@@ -20,6 +21,7 @@ pub(crate) use crdt_list_payload::CrdtListOpWalRecord;
 pub(crate) use crdt_payload::{
     CrdtDeltaSigning, CrdtDeltaTarget, CrdtDeltaWalError, CrdtDeltaWalPayload,
 };
+pub(crate) use document_index_payload::{DocumentIndexBuildRecord, DocumentIndexRetireRecord};
 pub use manager::WalManager;
 pub use redo::{
     ARRAY_RESTORE, ArrayRestoreRedo, BootVerdict, BootVerdictOutcome, COLUMNAR_RESTORE,

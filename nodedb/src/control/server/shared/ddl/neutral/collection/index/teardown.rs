@@ -23,9 +23,8 @@
 //! cannot propagate and files a `Capture` instead.
 
 use crate::control::security::catalog::{IndexKind, StoredIndexRecord};
-use crate::control::server::dispatch_utils::MintedRecords;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId};
 
 use super::super::super::super::result::DdlError;
 use crate::control::server::shared::session::ddl_buffer;
@@ -188,52 +187,27 @@ async fn teardown_now_or_at_commit(
     if deferred {
         return Ok(());
     }
-    dispatch(state, tenant_id, database_id, collection, plan, None).await
+    dispatch(state, tenant_id, database_id, collection, plan).await
 }
 
-/// Dispatch one teardown plan to the Data Plane, surfacing both transport and
-/// handler-side failures. `minted` holds the record appended for the plan;
-/// the funnel closes its outcome-floor window from the plan's outcome.
+/// Propose one teardown plan to every replica of the collection's vShard.
+/// Each replica purges the entries at the plan's log position and appends
+/// its WAL record, so a re-created index on any node starts from none.
 pub(crate) async fn dispatch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     collection: &str,
     plan: crate::bridge::envelope::PhysicalPlan,
-    minted: Option<MintedRecords>,
 ) -> Result<(), DdlError> {
-    let vshard = nodedb_types::CollectionKey::from_bare(database_id, collection).vshard();
-    let response =
-        crate::control::server::dispatch_utils::dispatch_trusted_internal_write_to_data_plane(
-            state,
-            crate::control::server::dispatch_utils::WriteDispatch {
-                tenant_id,
-                database_id,
-                vshard_id: vshard,
-                plan,
-                trace_id: TraceId::ZERO,
-                event_source: crate::event::EventSource::User,
-                txn_id: None,
-                wal_lsn: None,
-                resolved_now_ms: None,
-                minted,
-                system_ordinal: None,
-            },
-        )
-        .await
-        .map_err(|e| DdlError::from_error_in_context("index teardown dispatch failed", &e))?;
-
-    if response.status == crate::bridge::envelope::Status::Error {
-        return Err(match response.error_code.as_deref() {
-            Some(code) => DdlError::from_error_in_context(
-                "index teardown failed",
-                &crate::Error::DataPlane(code.clone()),
-            ),
-            None => DdlError::internal(format!(
-                "index teardown failed: {}",
-                String::from_utf8_lossy(&response.payload)
-            )),
-        });
-    }
+    super::engine_step::propose_index_step(
+        state,
+        tenant_id,
+        database_id,
+        collection,
+        plan,
+        "index teardown failed",
+    )
+    .await?;
     Ok(())
 }

@@ -130,7 +130,11 @@ pub fn replay_surrogate_records(
             // A stream reference names chunks and binds nothing.
             | RecordType::RedoStreamRef
             // A commit boundary names a redo's reads and binds nothing.
-            | RecordType::RedoBoundary => {}
+            | RecordType::RedoBoundary
+            // A document index build or purge derives entries from rows
+            // whose surrogates are already bound.
+            | RecordType::DocumentIndexBuild
+            | RecordType::DocumentIndexRetire => {}
         }
     }
     Ok(stats)

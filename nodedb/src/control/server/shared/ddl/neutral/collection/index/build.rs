@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Build a secondary index committed in the `Building` state: backfill it on
-//! every node, then mark it `Ready`.
+//! every replica through the collection's data group, then mark it `Ready`.
 //!
 //! An autocommit `CREATE INDEX` runs this at once. Inside an explicit
 //! transaction the statement buffers the `Building` entry and defers this to
@@ -10,12 +10,11 @@
 use crate::control::security::catalog::IndexBuildState;
 use crate::control::server::shared::session::ddl_effect::SecondaryIndexBuild;
 use crate::control::state::SharedState;
-use crate::types::TraceId;
 
 use super::super::super::super::result::DdlError;
 use super::commit::commit_collection_mutation;
 
-/// Backfill `build` on every node and flip it to `Ready`.
+/// Backfill `build` on every replica and flip it to `Ready`.
 ///
 /// A collection that no longer carries the index by name is skipped: the
 /// same transaction dropped it before COMMIT. UNIQUE violations surface as
@@ -62,16 +61,13 @@ pub(crate) async fn build_secondary_index(
         return mark_ready(state, build).await;
     }
 
-    // Register the Building index on this node before the backfill scans,
-    // so a write that lands after the scan maintains it. The post-apply
-    // register of a transaction's buffered entry runs asynchronously.
-    super::super::dispatch_register_from_stored(state, &coll)
-        .await
-        .map_err(|e| DdlError::from_error(&e))?;
-
-    // The backfill runs on the local Data Plane (single node) or the leader
-    // (cluster), vShard-local per core.
-    let vshard = nodedb_types::CollectionKey::from_bare(database_id, collection).vshard();
+    // Every node registered the Building index when it applied the Building
+    // catalog entry: that apply awaits the Register on every core. The build
+    // proposal carries this node's metadata floor, so each replica applies
+    // the build only after that Register, and a write after the scan
+    // maintains the index. Every replica of the collection's vShard builds
+    // from the rows it holds at the build's log position. A UNIQUE duplicate
+    // refuses the build on every replica with `23505`.
     let backfill_plan = crate::bridge::envelope::PhysicalPlan::Document(
         nodedb_physical::physical_plan::DocumentOp::BackfillIndex {
             collection: nodedb_types::QualifiedCollection::new(database_id, collection),
@@ -82,45 +78,13 @@ pub(crate) async fn build_secondary_index(
             predicate: predicate.clone(),
         },
     );
-    let backfill_resp = crate::control::server::dispatch_utils::dispatch_to_data_plane(
+    super::engine_step::propose_index_step(
         state,
         tenant_id,
         database_id,
-        vshard,
+        collection,
         backfill_plan,
-        TraceId::ZERO,
-    )
-    .await
-    .map_err(|e| DdlError::from_error(&e))?;
-
-    if backfill_resp.status == crate::bridge::envelope::Status::Error {
-        // A coded refusal keeps its SQLSTATE: a duplicate key is `23505`.
-        return Err(match backfill_resp.error_code.as_deref() {
-            Some(code) => DdlError::from_error_in_context(
-                "index backfill",
-                &crate::Error::DataPlane(code.clone()),
-            ),
-            None => DdlError::internal(format!(
-                "index backfill: {}",
-                String::from_utf8_lossy(&backfill_resp.payload)
-            )),
-        });
-    }
-
-    // Every other node backfills the rows it hosts. Single-node and peerless
-    // clusters return at once.
-    super::super::index_fanout::backfill_on_peers(
-        state,
-        super::super::index_fanout::PeerBackfill {
-            tenant_id,
-            database_id,
-            collection,
-            path: extraction_path,
-            is_array: *is_array,
-            unique: *unique,
-            case_insensitive: *case_insensitive,
-            predicate: predicate.as_deref(),
-        },
+        "index backfill",
     )
     .await?;
 

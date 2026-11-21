@@ -1101,6 +1101,22 @@ pub enum ReplicatedWrite {
         tenant_id: u64,
         plans: Vec<super::calvin_frozen_reply::PlanSequenceEffects>,
     },
+    /// Build a document secondary index from the rows every replica holds at
+    /// this log position. Carries every field of `DocumentOp::BackfillIndex`.
+    DocIndexBuild {
+        collection: String,
+        path: String,
+        is_array: bool,
+        unique: bool,
+        case_insensitive: bool,
+        predicate: Option<String>,
+    },
+    /// Remove every entry of a document secondary index field at this log
+    /// position. Carries every field of `DocumentOp::DropIndex`.
+    DocIndexRetire {
+        collection: String,
+        field: String,
+    },
 }
 
 #[cfg(test)]
@@ -1316,6 +1332,18 @@ mod tests {
                     ],
                     refused: false,
                 }],
+            },
+            ReplicatedWrite::DocIndexBuild {
+                collection: "users".into(),
+                path: "$.email".into(),
+                is_array: false,
+                unique: true,
+                case_insensitive: true,
+                predicate: Some("active = true".into()),
+            },
+            ReplicatedWrite::DocIndexRetire {
+                collection: "users".into(),
+                field: "$.email".into(),
             },
         ];
 

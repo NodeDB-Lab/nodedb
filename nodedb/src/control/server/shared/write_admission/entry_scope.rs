@@ -133,6 +133,8 @@ pub(super) fn entry_scope(
         | ReplicatedWrite::KvDropSortedIndex { .. }
         | ReplicatedWrite::KvRegisterIndex { .. }
         | ReplicatedWrite::KvDropIndex { .. }
+        | ReplicatedWrite::DocIndexBuild { .. }
+        | ReplicatedWrite::DocIndexRetire { .. }
         | ReplicatedWrite::KvFieldSet { .. }
         | ReplicatedWrite::KvTransfer { .. }
         | ReplicatedWrite::KvTransferItem { .. }

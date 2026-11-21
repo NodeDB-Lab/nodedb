@@ -138,7 +138,9 @@ pub fn replay_sync_hwm_records(
             | RecordType::WriteGroup
             | RecordType::RedoChunk
             | RecordType::RedoStreamRef
-            | RecordType::RedoBoundary => {}
+            | RecordType::RedoBoundary
+            | RecordType::DocumentIndexBuild
+            | RecordType::DocumentIndexRetire => {}
         }
     }
 

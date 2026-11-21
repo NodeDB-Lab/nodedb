@@ -55,6 +55,8 @@ fn document_is_write(op: &DocumentOp) -> bool {
         | DocumentOp::EstimateCount { .. }
         | DocumentOp::MaterializeScan { .. }
         | DocumentOp::Register { .. }
+        // `NotAWrite` in `plan_vshard`, as the KV index ops: index DDL is
+        // proposed through the data group and never scheduled.
         | DocumentOp::DropIndex { .. }
         | DocumentOp::BackfillIndex { .. }
         // `Merge` is `Permission::Write` but `Unroutable` in `plan_vshard`

@@ -205,6 +205,10 @@ impl ReplicatedWrite {
             | ReplicatedWrite::KvDropSortedIndex { .. }
             | ReplicatedWrite::KvRegisterIndex { .. }
             | ReplicatedWrite::KvDropIndex { .. }
+            // Index entries derive from stored rows. The metadata floor
+            // orders the step after the index's registration.
+            | ReplicatedWrite::DocIndexBuild { .. }
+            | ReplicatedWrite::DocIndexRetire { .. }
             | ReplicatedWrite::KvFieldSet { .. }
             | ReplicatedWrite::KvTransfer { .. }
             | ReplicatedWrite::KvTransferItem { .. }

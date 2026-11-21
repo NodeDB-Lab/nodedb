@@ -129,6 +129,10 @@ impl ReplicatedWrite {
             | Self::KvDropSortedIndex { .. }
             | Self::KvRegisterIndex { .. }
             | Self::KvDropIndex { .. }
+            // A build indexes each version at the system time it holds, and
+            // a purge removes entries. Neither stamps a version.
+            | Self::DocIndexBuild { .. }
+            | Self::DocIndexRetire { .. }
             | Self::ConstraintChange { .. } => None,
         }
     }

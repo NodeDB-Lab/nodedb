@@ -121,7 +121,9 @@ fn to_physical_plan(
         | ReplicatedWrite::ApplyBalanceDelta { .. }
         | ReplicatedWrite::DocumentResolvedWrite { .. }
         | ReplicatedWrite::MergeApply { .. }
-        | ReplicatedWrite::UpdateFromJoinApply { .. } => {
+        | ReplicatedWrite::UpdateFromJoinApply { .. }
+        | ReplicatedWrite::DocIndexBuild { .. }
+        | ReplicatedWrite::DocIndexRetire { .. } => {
             Ok((entry_document::decode_arm(ctx, write)?, None))
         }
         // The full `Vector*` variant family dispatches to one helper — see

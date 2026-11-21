@@ -163,9 +163,10 @@ fn document_routing(op: &DocumentOp, database_id: DatabaseId) -> PlanRouting {
         | DocumentOp::IndexedFetch { .. }
         | DocumentOp::EstimateCount { .. }
         | DocumentOp::MaterializeScan { .. }
-        | DocumentOp::Register { .. }
-        | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. } => PlanRouting::NotAWrite,
+        | DocumentOp::Register { .. } => PlanRouting::NotAWrite,
+        // Index DDL, as for the KV index ops: autocommit-only, proposed
+        // through the collection's data group, never scheduled.
+        DocumentOp::DropIndex { .. } | DocumentOp::BackfillIndex { .. } => PlanRouting::NotAWrite,
     }
 }
 

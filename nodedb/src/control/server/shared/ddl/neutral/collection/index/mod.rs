@@ -6,6 +6,7 @@ pub mod build;
 pub mod commit;
 pub mod create;
 pub mod drop;
+pub mod engine_step;
 pub mod kv_index;
 pub mod teardown;
 pub mod text_build;

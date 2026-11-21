@@ -139,6 +139,10 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         | RecordType::RedoStreamRef
         // A commit boundary names what a redo's install validates. It
         // writes no row.
-        | RecordType::RedoBoundary => None,
+        | RecordType::RedoBoundary
+        // A document index build or purge changes derived index entries
+        // only. Its forward path emits no WriteEvent.
+        | RecordType::DocumentIndexBuild
+        | RecordType::DocumentIndexRetire => None,
     }
 }

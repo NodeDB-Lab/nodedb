@@ -434,6 +434,23 @@ pub enum RecordType {
     ///
     /// Required: skipping it applies a record boot can not validate.
     RedoBoundary = 71 | 0x8000,
+
+    /// Document engine: build one secondary index from the rows the core
+    /// holds (`CREATE INDEX` on a document collection). Payload: the
+    /// collection, the index path, and its array, UNIQUE, case-fold and
+    /// partial-predicate options.
+    ///
+    /// Required: skipping it on replay leaves the index without the entries
+    /// of every row stored before the build.
+    DocumentIndexBuild = 72 | 0x8000,
+
+    /// Document engine: remove every entry of one secondary index field
+    /// (`DROP INDEX` on a document collection). Payload: the collection and
+    /// the field.
+    ///
+    /// Required: skipping it on replay leaves stale entries that a
+    /// re-created index of the same field serves.
+    DocumentIndexRetire = 73 | 0x8000,
 }
 
 impl RecordType {
@@ -496,6 +513,8 @@ impl RecordType {
             x if x == 69 | 0x8000 => Some(Self::RedoChunk),
             x if x == 70 | 0x8000 => Some(Self::RedoStreamRef),
             x if x == 71 | 0x8000 => Some(Self::RedoBoundary),
+            x if x == 72 | 0x8000 => Some(Self::DocumentIndexBuild),
+            x if x == 73 | 0x8000 => Some(Self::DocumentIndexRetire),
             _ => None,
         }
     }
@@ -536,6 +555,12 @@ mod tests {
         assert!(RecordType::is_required(RecordType::RedoChunk as u32));
         assert!(RecordType::is_required(RecordType::RedoStreamRef as u32));
         assert!(RecordType::is_required(RecordType::RedoBoundary as u32));
+        assert!(RecordType::is_required(
+            RecordType::DocumentIndexBuild as u32
+        ));
+        assert!(RecordType::is_required(
+            RecordType::DocumentIndexRetire as u32
+        ));
     }
 
     #[test]
@@ -592,6 +617,8 @@ mod tests {
             RecordType::RedoChunk,
             RecordType::RedoStreamRef,
             RecordType::RedoBoundary,
+            RecordType::DocumentIndexBuild,
+            RecordType::DocumentIndexRetire,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

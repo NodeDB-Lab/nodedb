@@ -54,6 +54,7 @@ mod wal_replay_columnar_dml;
 mod wal_replay_columnar_image;
 mod wal_replay_columnar_restore;
 mod wal_replay_columnar_truncate;
+mod wal_replay_document_index;
 mod wal_replay_fts;
 mod wal_replay_graph_labels;
 mod wal_replay_kv_atomic;

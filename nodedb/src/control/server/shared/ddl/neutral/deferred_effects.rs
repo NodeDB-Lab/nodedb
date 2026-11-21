@@ -74,7 +74,7 @@ async fn run_one(state: &SharedState, effect: DeferredDdlEffect) -> Result<(), D
             database_id,
             collection,
             plan,
-        } => teardown::dispatch(state, tenant_id, database_id, &collection, plan, None).await,
+        } => teardown::dispatch(state, tenant_id, database_id, &collection, plan).await,
         DeferredDdlEffect::SortedIndexRegister {
             tenant_id,
             database_id,
