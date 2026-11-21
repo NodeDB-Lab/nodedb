@@ -170,6 +170,7 @@ async fn unauthenticated_returns_fence() {
 async fn authenticated_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, calls) = MockDispatcher::ok(2);
     let msg = make_insert_msg(
         "metrics",
@@ -195,6 +196,7 @@ async fn authenticated_dispatches_and_acks() {
 async fn unknown_dispatch_outcome_closes_without_ack() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let mock = MockDispatcher::err();
     let msg = make_insert_msg("metrics", vec![vec![Value::Integer(1), Value::Float(1.0)]]);
 
@@ -205,6 +207,7 @@ async fn unknown_dispatch_outcome_closes_without_ack() {
 async fn malformed_rows_and_payloads_close_without_ack() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, calls) = MockDispatcher::ok(1);
     let mut msg = make_insert_msg("metrics", vec![vec![Value::Integer(1)]]);
     msg.rows[0] = vec![0xc1];
@@ -220,6 +223,7 @@ async fn typed_refusal_and_hold_preserve_actual_frontiers() {
     use crate::bridge::envelope::{ErrorCode, SyncHold};
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _) = MockDispatcher::ok(1);
     let mut msg = make_insert_msg("metrics", vec![vec![Value::Integer(1)]]);
     msg.seq = 5;

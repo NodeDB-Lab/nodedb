@@ -446,6 +446,7 @@ mod tests {
         session.tenant_id = Some(identity.tenant_id);
         session.identity = Some(identity);
         session.authenticated = true;
+        session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
         session
     }
 
@@ -521,6 +522,7 @@ mod tests {
         session.tenant_id = Some(identity.tenant_id);
         session.identity = Some(identity);
         session.authenticated = true;
+        session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
 
         let (mut rx, _crx) =
             state

@@ -74,6 +74,7 @@ fn duplicate(_write: &KvPushWrite) -> crate::Result<Vec<u8>> {
 fn authenticated() -> SyncSession {
     let mut session = SyncSession::new("kv-push".to_string());
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     session.producer_id = 11;
     session.accepted_epoch = 1;
     session

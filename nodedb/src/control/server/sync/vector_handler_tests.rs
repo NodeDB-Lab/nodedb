@@ -176,6 +176,7 @@ async fn unauthenticated_insert_is_fenced_without_dispatch() {
 async fn authenticated_insert_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, inserts, _) = MockDispatcher::ok();
     let msg = make_insert_msg("vecs", "v1", vec![1.0, 0.0, 0.0]);
 
@@ -191,6 +192,7 @@ async fn authenticated_insert_dispatches_and_acks() {
 async fn insert_dimension_mismatch_rejects() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, _) = MockDispatcher::ok();
     let mut msg = make_insert_msg("vecs", "v1", vec![1.0, 0.0, 0.0]);
     msg.dim = 5; // Mismatch: vector.len() == 3, dim == 5
@@ -208,6 +210,7 @@ async fn insert_dimension_mismatch_rejects() {
 async fn an_unknown_insert_dispatch_outcome_closes_without_an_ack() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let mock = MockDispatcher::err();
     let msg = make_insert_msg("vecs", "v1", vec![1.0, 0.0]);
 
@@ -218,6 +221,7 @@ async fn an_unknown_insert_dispatch_outcome_closes_without_an_ack() {
 async fn authenticated_delete_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
     let msg = make_delete_msg("vecs", "v1");
 
@@ -246,6 +250,7 @@ async fn unauthenticated_delete_is_fenced_without_dispatch() {
 async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
 
     let frame = session
@@ -265,6 +270,7 @@ async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
 async fn delete_of_a_bound_key_carries_the_home_surrogate() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.bound = Some(Surrogate::new(7));
 
@@ -281,6 +287,7 @@ async fn delete_of_a_bound_key_carries_the_home_surrogate() {
 async fn a_surrogate_service_error_closes_without_a_terminal_ack() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let insert = make_insert_msg("vecs", "v1", vec![1.0]);
     assert!(
         session
@@ -301,6 +308,7 @@ async fn a_surrogate_service_error_closes_without_a_terminal_ack() {
 async fn an_invalid_collection_qualifier_is_fenced_without_surrogate_assignment() {
     let mut session = make_session();
     session.authenticated = true;
+    session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
     let (mock, inserts, _) = MockDispatcher::ok();
     let msg = make_insert_msg("other/db/vecs", "v1", vec![1.0]);
     let ack: VectorInsertAckMsg = session

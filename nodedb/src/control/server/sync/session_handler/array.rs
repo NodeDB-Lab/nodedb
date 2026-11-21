@@ -346,6 +346,7 @@ mod tests {
     fn array_session() -> SyncSession {
         let mut session = SyncSession::new("s".into());
         session.authenticated = true;
+        session.tenant_id.get_or_insert(crate::types::TenantId::new(1));
         session
     }
 

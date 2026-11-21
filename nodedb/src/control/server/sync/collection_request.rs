@@ -10,11 +10,15 @@ impl SyncSession {
     /// The reason an engine frame naming `collection` is refused, or `None`
     /// when the session may dispatch it.
     ///
-    /// An unauthenticated session is refused. So is a collection name that
+    /// An unauthenticated session is refused. So is a session with no
+    /// tenant. So is a collection name that
     /// is empty, holds a stray `/`, or carries another database's qualifier.
     pub(super) fn entry_refusal(&self, collection: &str) -> Option<String> {
         if !self.authenticated {
             return Some("unauthenticated".to_string());
+        }
+        if self.tenant_id.is_none() {
+            return Some("session has no tenant".to_string());
         }
         request_collection(self.database_id(), collection)
             .err()
@@ -38,6 +42,15 @@ impl SyncSession {
     pub(super) fn refuse_delta_collection(&mut self, msg: &mut DeltaPushMsg) -> Option<SyncFrame> {
         if !self.authenticated {
             return None;
+        }
+        if self.tenant_id.is_none() {
+            self.mutations_rejected += 1;
+            let reject = DeltaRejectMsg {
+                mutation_id: msg.mutation_id,
+                reason: "session has no tenant".to_string(),
+                compensation: None,
+            };
+            return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
         match request_collection(self.database_id(), &msg.collection) {
             Ok(bare) => {
