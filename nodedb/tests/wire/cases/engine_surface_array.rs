@@ -231,3 +231,23 @@ async fn array_slice_describe_types_match_rows() {
     ys.sort_unstable();
     assert_eq!(ys, [0, 1, 2, 3]);
 }
+
+#[tokio::test]
+async fn array_ddl_prepares_and_runs_on_the_extended_query() {
+    let srv = TestServer::start().await;
+    for sql in [
+        "CREATE ARRAY ext_arr DIMS (x INT64 [0..100]) ATTRS (v FLOAT64) TILE_EXTENTS (16)",
+        "ALTER ARRAY ext_arr ALTER ATTR v SET (NODATA 0)",
+        "DROP ARRAY ext_arr",
+    ] {
+        let stmt = srv
+            .client
+            .prepare(sql)
+            .await
+            .unwrap_or_else(|e| panic!("Parse must keep `{sql}`: {e}"));
+        srv.client
+            .execute(&stmt, &[])
+            .await
+            .unwrap_or_else(|e| panic!("Execute must run `{sql}`: {e}"));
+    }
+}

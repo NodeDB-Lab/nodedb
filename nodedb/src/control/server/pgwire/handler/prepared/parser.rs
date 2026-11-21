@@ -435,6 +435,9 @@ impl QueryParser for NodeDbQueryParser {
             Err(error) => {
                 let state = error_to_sqlstate(&error).1;
                 if !is_dsl_statement(sql)
+                    && !crate::control::planner::sql_plan_convert::convert::is_metadata_refusal(
+                        &error,
+                    )
                     && super::parse_refusal::reported_at_parse(state, count_placeholders(sql) > 0)
                 {
                     return Err(error_to_pg(&error));

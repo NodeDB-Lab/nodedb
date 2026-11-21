@@ -245,11 +245,21 @@ impl ConvertContext {
     pub fn require_execute(&self, operation: &str) -> crate::Result<()> {
         if self.is_metadata() {
             return Err(crate::Error::PlanError {
-                detail: format!("{operation} is not available during metadata planning"),
+                detail: format!("{operation}{METADATA_REFUSAL_SUFFIX}"),
             });
         }
         Ok(())
     }
+}
+
+/// Tail of the error [`ConvertContext::require_execute`] answers.
+const METADATA_REFUSAL_SUFFIX: &str = " is not available during metadata planning";
+
+/// Whether `error` is the refusal of [`ConvertContext::require_execute`]. The
+/// statement is valid and plans only at Execute, so a Parse keeps it instead
+/// of failing.
+pub fn is_metadata_refusal(error: &crate::Error) -> bool {
+    matches!(error, crate::Error::PlanError { detail } if detail.ends_with(METADATA_REFUSAL_SUFFIX))
 }
 
 /// Convert a list of SqlPlans to PhysicalTasks with the surrogate answers
@@ -343,7 +353,7 @@ pub(super) fn convert_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConvertContext, PlanningPurpose};
+    use super::{ConvertContext, PlanningPurpose, is_metadata_refusal};
     use std::sync::{Arc, RwLock};
 
     use crate::control::security::credential::CredentialStore;
@@ -372,6 +382,25 @@ mod tests {
             prefetched: Default::default(),
             reads_txn_snapshot: false,
         }
+    }
+
+    #[test]
+    fn require_execute_in_metadata_planning_answers_the_deferral_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let credentials = Arc::new(
+            CredentialStore::open(&dir.path().join("system.redb")).expect("credential store"),
+        );
+        let registry = Arc::new(RwLock::new(SurrogateRegistry::new()));
+        let wal: Arc<dyn SurrogateWalAppender> = Arc::new(NoopWalAppender);
+        let assigner = Arc::new(SurrogateAssigner::new(registry, credentials, wal));
+        let metadata = context(PlanningPurpose::Metadata, Arc::clone(&assigner));
+        let error = metadata.require_execute("CREATE ARRAY").unwrap_err();
+        assert!(is_metadata_refusal(&error));
+        assert!(!is_metadata_refusal(&crate::Error::PlanError {
+            detail: "syntax error".into()
+        }));
+        let execute = context(PlanningPurpose::Execute, assigner);
+        assert!(execute.require_execute("CREATE ARRAY").is_ok());
     }
 
     #[test]
