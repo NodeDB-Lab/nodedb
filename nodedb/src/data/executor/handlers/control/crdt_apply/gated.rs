@@ -733,16 +733,20 @@ mod tests {
         let engine = core
             .get_crdt_engine(seed.request.database_id, seed.request.tenant_id)
             .expect("engine");
-        assert!(engine.set_collection_constraints(
-            "users",
-            2,
-            vec![nodedb_crdt::Constraint {
-                name: "users_email_unique".into(),
-                collection: "users".into(),
-                field: "email".into(),
-                kind: nodedb_crdt::ConstraintKind::Unique,
-            }],
-        ));
+        assert!(
+            engine
+                .set_collection_constraints(
+                    "users",
+                    2,
+                    vec![nodedb_crdt::Constraint {
+                        name: "users_email_unique".into(),
+                        collection: "users".into(),
+                        field: "email".into(),
+                        kind: nodedb_crdt::ConstraintKind::Unique,
+                    }],
+                )
+                .expect("constraint install")
+        );
         let response = core.execute_crdt_apply(&task_at(12), fenced_params());
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
         assert_eq!(

@@ -303,6 +303,7 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::DescriptorVersionAnomaly { .. } => NodeDbError::internal(e.to_string()),
         Error::CatalogIntegrityViolation { .. } => NodeDbError::internal(e.to_string()),
         Error::CollectionUnstamped { .. } => NodeDbError::internal(e.to_string()),
+        Error::ConstraintScope { .. } => NodeDbError::internal(e.to_string()),
         Error::Promql(promql_err) => NodeDbError::bad_request(promql_err.to_string()),
         Error::DependentObjectsExist {
             tenant_id: _,

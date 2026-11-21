@@ -621,16 +621,20 @@ pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
         let engine = core
             .get_crdt_engine(task.request.database_id, task.request.tenant_id)
             .expect("engine");
-        assert!(engine.set_collection_constraints(
-            "users",
-            1,
-            vec![nodedb_crdt::Constraint {
-                name: "users_email_unique".into(),
-                collection: "users".into(),
-                field: "email".into(),
-                kind: nodedb_crdt::ConstraintKind::Unique,
-            }],
-        ));
+        assert!(
+            engine
+                .set_collection_constraints(
+                    "users",
+                    1,
+                    vec![nodedb_crdt::Constraint {
+                        name: "users_email_unique".into(),
+                        collection: "users".into(),
+                        field: "email".into(),
+                        kind: nodedb_crdt::ConstraintKind::Unique,
+                    }],
+                )
+                .expect("constraint install")
+        );
         engine
             .set_collection_policy_typed("users", nodedb_crdt::policy::CollectionPolicy::strict());
     }

@@ -27,22 +27,38 @@ impl TestClusterNode {
         tenant: nodedb_types::TenantId,
         collection: &str,
     ) -> Vec<nodedb_crdt::Constraint> {
+        self.crdt_constraints_in(nodedb_types::DatabaseId::DEFAULT, tenant, collection)
+            .await
+    }
+
+    /// Read the CRDT constraint set installed in THIS node's local per-core
+    /// validator for the bare `collection` of `database` and `tenant`.
+    ///
+    /// Reads under the stored name, as [`Self::crdt_constraints`] does for
+    /// the default database. Returns an empty vec on dispatch error or
+    /// non-Ok response.
+    pub async fn crdt_constraints_in(
+        &self,
+        database: nodedb_types::DatabaseId,
+        tenant: nodedb_types::TenantId,
+        collection: &str,
+    ) -> Vec<nodedb_crdt::Constraint> {
         use nodedb::bridge::envelope::{Priority, Request, Status};
         use nodedb::event::EventSource;
-        use nodedb::types::{DatabaseId, ReadConsistency, RequestId, VShardId};
+        use nodedb::types::{ReadConsistency, RequestId, VShardId};
         use nodedb_physical::physical_plan::{CrdtOp, PhysicalPlan};
 
         let request_id = RequestId::new(HARNESS_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
         let vshard_id = VShardId::new(nodedb_cluster::routing::vshard_for_collection(
-            nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, collection),
+            nodedb_types::CollectionKey::from_bare(database, collection),
         ));
         let request = Request {
             request_id,
             tenant_id: tenant,
-            database_id: DatabaseId::DEFAULT,
+            database_id: database,
             vshard_id,
             plan: PhysicalPlan::Crdt(CrdtOp::ReadConstraints {
-                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+                collection: nodedb_types::QualifiedCollection::new(database, collection),
             }),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
             priority: Priority::Normal,

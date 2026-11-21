@@ -686,6 +686,18 @@ pub enum Error {
         name: String,
     },
 
+    /// A CRDT constraint install met a constraint that does not name the
+    /// stored form of its own database. The validator keeps its prior set.
+    /// The catalog derives every set, so this is a broken invariant.
+    #[error(
+        "constraint install under '{install_key}' refused: {refusal}. Every name must be \
+         the stored name of the install key's database"
+    )]
+    ConstraintScope {
+        install_key: String,
+        refusal: super::constraint_scope::ConstraintScopeRefusal,
+    },
+
     /// A `catalog_entry::apply_to` call left redb with a `Put*` primary row
     /// with no matching `StoredOwner`, or vice versa. Fails closed rather
     /// than persisting the orphan for the next boot verifier to find.

@@ -91,6 +91,7 @@ mod committed_publish_metadata_lag;
 mod constraint_delivery;
 mod continuous_aggregate_serving;
 mod crdt_compact_cross_node;
+mod crdt_constraint_named_database;
 mod cross_node_pk_lookup;
 mod cross_node_pk_write;
 mod cross_node_read_occ_abort;

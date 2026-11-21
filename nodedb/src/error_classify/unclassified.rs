@@ -27,6 +27,7 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::DescriptorVersionAnomaly { .. }
         | Error::CatalogIntegrityViolation { .. }
         | Error::CollectionUnstamped { .. }
+        | Error::ConstraintScope { .. }
         | Error::MaterializedSumResolutionMissing { .. }
         | Error::CascadeCycle { .. } => true,
         // A CRDT error is classified unless its Data-Plane verdict is a

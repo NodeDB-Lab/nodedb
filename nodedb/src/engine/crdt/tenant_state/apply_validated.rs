@@ -12,6 +12,7 @@ use nodedb_crdt::state::CrdtState;
 use nodedb_crdt::validator::{ValidationOutcome, Violation};
 use nodedb_types::sync::violation::ViolationType;
 
+use super::apply_rejection::violation_to_type;
 use super::apply_target::ApplyTarget;
 use super::core::{TenantCrdtEngine, loro_root};
 
@@ -338,231 +339,14 @@ impl TenantCrdtEngine {
             imported_ops: admission.new_operations,
         }
     }
-
-    /// A document identical to `collection`'s authoritative state, to import a
-    /// delta into before deciding whether to keep it.
-    ///
-    /// Reuses the candidate left behind by the previous apply when there is
-    /// one. Building it costs a full encode and decode of the collection —
-    /// Loro's own `fork` is implemented the same way, so there is no cheaper
-    /// copy available — and a run of deltas (WAL replay, a committed batch, a
-    /// sync burst) would otherwise pay that per delta rather than once.
-    ///
-    /// The candidate is only ever returned to the pool after a clean apply. A
-    /// delta that was refused for any reason leaves its operations in the
-    /// candidate — Loro buffers even causally-pending ones — so a poisoned
-    /// candidate is dropped rather than reused.
-    fn take_apply_candidate(
-        &mut self,
-        collection: &str,
-    ) -> Result<CrdtState, nodedb_crdt::CrdtError> {
-        if let Some(candidate) = self.apply_candidates.remove(collection) {
-            // A candidate is only usable while it still matches the state it
-            // was cloned from. Anything else that touches this collection — a
-            // local write through `state_mut`, a transaction rollback, a
-            // snapshot import, a purge — leaves it behind, and installing a
-            // behind candidate as authoritative would silently discard those
-            // writes. Checking the frontier here means no other mutation site
-            // has to remember this one exists; a stale candidate is simply
-            // rebuilt.
-            let current_frontier = self.collections.get(collection).map(|s| s.frontier());
-            if current_frontier.is_some_and(|frontier| frontier == candidate.frontier()) {
-                return Ok(candidate);
-            }
-        }
-        // The candidate becomes authoritative on a clean apply, so it must be
-        // born with the same derived peer id `state_mut` would have given the
-        // collection. The node's base peer id would mint operation ids that
-        // collide across collections — the silent row-drop `collection_peer_id`
-        // exists to prevent.
-        let peer_id = self.peer_id_of(collection);
-        match self.collections.get(collection) {
-            // Its own snapshot, exported on the line above: admitted as local,
-            // because under the peer ceilings a collection that outgrew them
-            // would fail to seed and every subsequent delta would report
-            // `Malformed` — silently unwritable, with the sender blamed for it.
-            Some(current) => {
-                let snapshot = current.export_snapshot()?;
-                CrdtState::from_local_snapshot(peer_id, &snapshot)
-            }
-            None => CrdtState::new(peer_id),
-        }
-    }
-
-    /// Drop every retained apply candidate.
-    ///
-    /// Callers that apply a run of deltas — WAL replay, a committed batch —
-    /// call this when the run ends, so the second document per collection does
-    /// not outlive the work it accelerates.
-    pub fn clear_apply_candidates(&mut self) {
-        self.apply_candidates.clear();
-    }
-
-    /// How many collections are currently holding a retained candidate.
-    #[cfg(test)]
-    pub(crate) fn apply_candidate_count(&self) -> usize {
-        self.apply_candidates.len()
-    }
-
-    /// The Loro peer id of a collection's authoritative document.
-    #[cfg(test)]
-    pub(crate) fn collection_peer_id_for_test(&self, collection: &str) -> Option<u64> {
-        self.collections.get(collection).map(|s| s.peer_id())
-    }
-
-    /// Dead-letter a delta whose writes break the collection shape. The
-    /// caller gets the fault as a schema violation.
-    fn reject_shape_fault(
-        &mut self,
-        collection: &str,
-        delta: &[u8],
-        peer_id: u64,
-        fault: &nodedb_crdt::CrdtError,
-    ) -> ValidatedApplyOutcome {
-        let reason = fault.to_string();
-        let violation = Violation {
-            constraint_name: ROW_SHAPE_CONSTRAINT.to_string(),
-            reason: reason.clone(),
-            hint: nodedb_crdt::CompensationHint::ManualIntervention {
-                reason: reason.clone(),
-            },
-        };
-        let wire = ViolationType::SchemaViolation {
-            field: shape_fault_target(fault),
-            reason,
-        };
-        self.dead_letter(collection, delta, peer_id, &violation, wire)
-    }
-
-    /// Enqueue a rejected delta to the DLQ and report it as `wire`.
-    ///
-    /// The DLQ entry carries the INTERNAL compensation hint verbatim. The wire
-    /// hint the client sees derives from `wire`, never from the DLQ. The DLQ
-    /// id and timestamp are node-local and non-deterministic, so they are not
-    /// returned. A delta the DLQ cannot hold is recorded nowhere, so the apply
-    /// reports [`ValidatedApplyOutcome::DeadLetterRefused`].
-    fn dead_letter(
-        &mut self,
-        collection: &str,
-        delta: &[u8],
-        peer_id: u64,
-        violation: &Violation,
-        wire: ViolationType,
-    ) -> ValidatedApplyOutcome {
-        // No authenticated user identity is threaded to the apply path in this
-        // layer, so the DLQ records `0` (unauthenticated).
-        let user_id = 0u64;
-        let tenant_id = self.tenant_id().as_u64();
-
-        // The violated constraint by name, so the DLQ entry records the real
-        // collection and field. An unresolved name records a
-        // ManualIntervention entry under a placeholder CHECK constraint.
-        let resolved = self
-            .constraints_for_collection(collection)
-            .into_iter()
-            .find(|c| c.name == violation.constraint_name);
-        let (constraint, hint) = match resolved {
-            Some(constraint) => (constraint, violation.hint.clone()),
-            None => (
-                nodedb_crdt::Constraint {
-                    name: violation.constraint_name.clone(),
-                    collection: collection.to_string(),
-                    field: String::new(),
-                    kind: nodedb_crdt::ConstraintKind::Check {
-                        expr: String::new(),
-                        description: "unresolved constraint".to_string(),
-                    },
-                },
-                nodedb_crdt::CompensationHint::ManualIntervention {
-                    reason: violation.reason.clone(),
-                },
-            ),
-        };
-        let enqueued = self
-            .validator
-            .dlq_mut()
-            .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
-                peer_id,
-                user_id,
-                tenant_id,
-                delta: delta.to_vec(),
-                constraint: &constraint,
-                reason: violation.reason.clone(),
-                hint,
-            });
-        match enqueued {
-            Ok(id) => {
-                self.last_dead_letter = Some(id);
-                ValidatedApplyOutcome::Rejected(wire)
-            }
-            Err(error) => {
-                crate::diag::crdt_dead_letter_not_enqueued(
-                    &error,
-                    tenant_id,
-                    collection,
-                    &constraint.name,
-                );
-                ValidatedApplyOutcome::DeadLetterRefused {
-                    violation: wire,
-                    error,
-                }
-            }
-        }
-    }
-}
-
-/// Name the dead-letter entry of a delta that breaks the collection shape.
-const ROW_SHAPE_CONSTRAINT: &str = "crdt_row_shape";
-
-/// The container or row a shape fault names, as `collection/row` for a row.
-fn shape_fault_target(fault: &nodedb_crdt::CrdtError) -> String {
-    match fault {
-        nodedb_crdt::CrdtError::NonMapRootContainer { container, .. } => container.clone(),
-        nodedb_crdt::CrdtError::NonMapRowValue {
-            collection, row_id, ..
-        } => format!("{collection}/{row_id}"),
-        other => other.to_string(),
-    }
-}
-
-/// Translate an internal [`Violation`] into the deterministic wire
-/// [`ViolationType`] by matching the internal compensation hint.
-///
-/// `ViolationType` is `#[non_exhaustive]`; any hint we do not model maps to the
-/// generic `ConstraintViolation` carrying the human-readable reason.
-fn violation_to_type(violation: &Violation) -> ViolationType {
-    use nodedb_crdt::CompensationHint;
-    match &violation.hint {
-        CompensationHint::RetryWithDifferentValue {
-            field,
-            conflicting_value,
-            ..
-        } => ViolationType::UniqueViolation {
-            field: field.clone(),
-            value: conflicting_value.clone(),
-        },
-        CompensationHint::CreateReferencedRow { ref_key, .. } => ViolationType::ForeignKeyMissing {
-            referenced_id: ref_key.clone(),
-        },
-        CompensationHint::ProvideRequiredField { field } => ViolationType::NotNullViolation {
-            field: field.clone(),
-        },
-        CompensationHint::DeleteThenRetry { .. } | CompensationHint::ManualIntervention { .. } => {
-            ViolationType::ConstraintViolation {
-                detail: violation.reason.clone(),
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use loro::LoroValue;
-    use nodedb_crdt::CompensationHint;
     use nodedb_crdt::constraint::ConstraintSet;
     use nodedb_crdt::policy::CollectionPolicy;
     use nodedb_crdt::state::CrdtState;
-    use nodedb_crdt::validator::Violation;
 
     use super::*;
     use crate::types::TenantId;
@@ -653,23 +437,27 @@ mod tests {
         );
     }
 
-    /// The catalog derives a constraint under the bare name. It still holds a
+    /// The catalog derives a constraint under the stored name. It holds a
     /// named database's writes, and a server-built row shares the delta's root.
     #[test]
     fn a_named_database_enforces_the_constraints_it_installed() {
         const STORED: &str = "7/users";
         let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
         engine.set_collection_policy_typed(STORED, CollectionPolicy::strict());
-        assert!(engine.set_collection_constraints(
-            STORED,
-            1,
-            vec![nodedb_crdt::Constraint {
-                name: "users_email_unique".into(),
-                collection: "users".into(),
-                field: "email".into(),
-                kind: nodedb_crdt::ConstraintKind::Unique,
-            }],
-        ));
+        assert!(
+            engine
+                .set_collection_constraints(
+                    STORED,
+                    1,
+                    vec![nodedb_crdt::Constraint {
+                        name: "users_email_unique".into(),
+                        collection: STORED.into(),
+                        field: "email".into(),
+                        kind: nodedb_crdt::ConstraintKind::Unique,
+                    }],
+                )
+                .unwrap()
+        );
         assert_eq!(engine.constraints_for_collection(STORED).len(), 1);
         engine
             .doc_upsert(STORED, "u1", &[("email", LoroValue::String("a@x".into()))])
@@ -688,6 +476,74 @@ mod tests {
         );
         assert!(!engine.row_exists(STORED, "u2"));
         assert!(engine.row_exists(STORED, "u1"));
+    }
+
+    /// A foreign key in a named database references the stored name of its
+    /// referent, and the row lookup finds the referent's rows there.
+    #[test]
+    fn a_named_database_enforces_a_foreign_key_between_its_collections() {
+        const ORDERS: &str = "7/orders";
+        const USERS: &str = "7/users";
+        let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
+        engine.set_collection_policy_typed(ORDERS, CollectionPolicy::strict());
+        assert!(
+            engine
+                .set_collection_constraints(
+                    ORDERS,
+                    1,
+                    vec![nodedb_crdt::Constraint {
+                        name: "orders_user_fk".into(),
+                        collection: ORDERS.into(),
+                        field: "user_id".into(),
+                        kind: nodedb_crdt::ConstraintKind::ForeignKey {
+                            ref_collection: USERS.into(),
+                            ref_key: "id".into(),
+                        },
+                    }],
+                )
+                .unwrap()
+        );
+        engine
+            .doc_upsert(USERS, "u1", &[("email", LoroValue::String("a@x".into()))])
+            .unwrap();
+
+        let order = |peer: u64, row_id: &str, user_id: &str| {
+            raw_delta(peer, |doc| {
+                let row = doc
+                    .get_map("orders")
+                    .insert_container(row_id, loro::LoroMap::new())
+                    .unwrap();
+                row.insert("user_id", user_id).unwrap();
+            })
+        };
+
+        let outcome = engine.apply_committed_delta_validated(
+            ORDERS,
+            &order(5, "o1", "u1"),
+            ApplyTarget::Collection,
+            5,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+        assert!(
+            matches!(outcome, ValidatedApplyOutcome::Clean { .. }),
+            "{outcome:?}"
+        );
+        assert!(engine.row_exists(ORDERS, "o1"));
+
+        let outcome = engine.apply_committed_delta_validated(
+            ORDERS,
+            &order(6, "o2", "u9"),
+            ApplyTarget::Collection,
+            6,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+        match outcome {
+            ValidatedApplyOutcome::Rejected(ViolationType::ForeignKeyMissing { referenced_id }) => {
+                assert_eq!(referenced_id, "u9");
+            }
+            other => panic!("expected ForeignKeyMissing, got {other:?}"),
+        }
+        assert!(!engine.row_exists(ORDERS, "o2"));
     }
 
     #[test]
@@ -1432,65 +1288,7 @@ mod tests {
         assert_eq!(engine.dlq_len(), 0);
     }
 
-    fn violation_with(hint: CompensationHint) -> Violation {
-        Violation {
-            constraint_name: "c".into(),
-            reason: "boom".into(),
-            hint,
-        }
-    }
-
-    #[test]
-    fn translator_maps_each_hint() {
-        assert_eq!(
-            violation_to_type(&violation_with(CompensationHint::RetryWithDifferentValue {
-                field: "email".into(),
-                conflicting_value: "x".into(),
-                suggestion: "x2".into(),
-            })),
-            ViolationType::UniqueViolation {
-                field: "email".into(),
-                value: "x".into(),
-            }
-        );
-        assert_eq!(
-            violation_to_type(&violation_with(CompensationHint::CreateReferencedRow {
-                ref_collection: "orgs".into(),
-                ref_key: "org-7".into(),
-                missing_value: "org-7".into(),
-            })),
-            ViolationType::ForeignKeyMissing {
-                referenced_id: "org-7".into(),
-            }
-        );
-        assert_eq!(
-            violation_to_type(&violation_with(CompensationHint::ProvideRequiredField {
-                field: "name".into(),
-            })),
-            ViolationType::NotNullViolation {
-                field: "name".into(),
-            }
-        );
-        assert_eq!(
-            violation_to_type(&violation_with(CompensationHint::ManualIntervention {
-                reason: "nope".into(),
-            })),
-            ViolationType::ConstraintViolation {
-                detail: "boom".into(),
-            }
-        );
-        assert_eq!(
-            violation_to_type(&violation_with(CompensationHint::DeleteThenRetry {
-                collection: "users".into(),
-                conflicting_key: "a".into(),
-            })),
-            ViolationType::ConstraintViolation {
-                detail: "boom".into(),
-            }
-        );
-    }
-
-    /// Contract guard: the peer-delta apply module stays deterministic.
+    /// Contract guard: the peer-delta apply modules stay deterministic.
     ///
     /// The Raft-committed apply path (`apply_committed_delta_validated` →
     /// pure `Validator::validate`) must never reach for the local write
@@ -1500,15 +1298,21 @@ mod tests {
     /// future edit from silently diverging replicas at identical log indices.
     #[test]
     fn apply_module_stays_deterministic() {
-        const SRC: &str = include_str!("apply_validated.rs");
+        const SOURCES: [(&str, &str); 3] = [
+            ("apply_validated.rs", include_str!("apply_validated.rs")),
+            ("apply_candidate.rs", include_str!("apply_candidate.rs")),
+            ("apply_rejection.rs", include_str!("apply_rejection.rs")),
+        ];
         // Concatenated so this test's own source carries no contiguous token
         // that would self-match the guard.
         let forbidden = concat!("validate", "_or_", "reject");
-        assert!(
-            !SRC.contains(forbidden),
-            "apply_validated.rs must not reference the local write path's \
-             signed/seq-gated check — the Raft-applied peer-delta path must \
-             stay deterministic (pure Validator::validate only)"
-        );
+        for (file, src) in SOURCES {
+            assert!(
+                !src.contains(forbidden),
+                "{file} must not reference the local write path's \
+                 signed/seq-gated check — the Raft-applied peer-delta path must \
+                 stay deterministic (pure Validator::validate only)"
+            );
+        }
     }
 }

@@ -52,13 +52,18 @@ impl CoreLoop {
                 return self.response_error(task, ErrorCode::from(e));
             }
         };
-        // A `false` return means the incoming version is older than the one
-        // already installed: a stale duplicate was correctly ignored by the
-        // fence, which is success, not an error.
-        if engine.set_collection_constraints(collection, constraint_version, decoded) {
-            self.checkpoint_coordinator.mark_dirty("crdt", 1);
-        } else {
-            debug!(core = self.core_id, %collection, constraint_version, "stale constraint version ignored");
+        // `Ok(false)` means the incoming version is older than the one
+        // already installed: the fence ignores a stale duplicate, which is
+        // success. A set in the wrong name form fails the whole op.
+        match engine.set_collection_constraints(collection, constraint_version, decoded) {
+            Ok(true) => self.checkpoint_coordinator.mark_dirty("crdt", 1),
+            Ok(false) => {
+                debug!(core = self.core_id, %collection, constraint_version, "stale constraint version ignored");
+            }
+            Err(e) => {
+                warn!(core = self.core_id, error = %e, "crdt constraint install refused");
+                return self.response_error(task, ErrorCode::from(e));
+            }
         }
         self.response_ok(task)
     }

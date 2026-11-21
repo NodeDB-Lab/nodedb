@@ -170,6 +170,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CollectionUnstamped { .. }
+        | crate::Error::ConstraintScope { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }

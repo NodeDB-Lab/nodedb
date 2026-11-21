@@ -187,6 +187,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CollectionUnstamped { .. }
+        | crate::Error::ConstraintScope { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }
@@ -343,6 +344,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::Ddl(_)
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CollectionUnstamped { .. }
+        | crate::Error::ConstraintScope { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }

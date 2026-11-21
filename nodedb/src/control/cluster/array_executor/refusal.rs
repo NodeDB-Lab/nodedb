@@ -158,6 +158,7 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::RemoteTyped { .. }
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CollectionUnstamped { .. }
+        | crate::Error::ConstraintScope { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::Promql(_)
         | crate::Error::DependentObjectsExist { .. }

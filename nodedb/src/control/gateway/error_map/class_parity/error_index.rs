@@ -3,7 +3,7 @@
 //! A dense index per `crate::Error` variant.
 
 /// The number of `crate::Error` variants [`error_variant_index`] numbers.
-pub(super) const ERROR_VARIANT_COUNT: usize = 129;
+pub(super) const ERROR_VARIANT_COUNT: usize = 130;
 
 /// A dense index per `crate::Error` variant. Exhaustive, so a new variant
 /// fails to compile here until it gets an index, and
@@ -128,6 +128,7 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::RestoreVerificationFailed { .. } => 113,
         E::BackupCaptureMoved { .. } => 114,
         E::CollectionUnstamped { .. } => 37,
+        E::ConstraintScope { .. } => 129,
         E::NumericValueOutOfRange { .. } => 116,
         E::InvalidTextRepresentation { .. } => 117,
         E::DatatypeMismatch { .. } => 118,

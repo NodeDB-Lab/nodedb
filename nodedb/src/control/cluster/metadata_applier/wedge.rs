@@ -55,6 +55,9 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         // The committed entry carries the row it writes, so an unstamped row
         // is unstamped on every re-delivery.
         crate::Error::CollectionUnstamped { .. } => ApplyFailureClass::Permanent,
+        // The committed entry carries the constraint set, so a set in the
+        // wrong name form is refused on every re-delivery.
+        crate::Error::ConstraintScope { .. } => ApplyFailureClass::Permanent,
         // The bytes being encoded/decoded are fixed by the committed entry, so
         // a codec rejection is reproducible.
         crate::Error::Serialization { .. } | crate::Error::Codec { .. } => {

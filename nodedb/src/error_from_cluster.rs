@@ -256,6 +256,7 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
             | Error::CollectionUnstamped { .. }
+            | Error::ConstraintScope { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)
             | Error::DependentObjectsExist { .. }

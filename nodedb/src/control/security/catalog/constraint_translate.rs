@@ -7,10 +7,15 @@
 //! KV typed schemas, columnar type strings, and schemaless type guards), and
 //! `CHECK` (from schemaless type-guard predicates). Foreign keys are
 //! deliberately out of scope here.
+//!
+//! Each constraint's `collection` is the stored name, `QualifiedCollection::new`
+//! of the row's database. The validator installs and finds a constraint under
+//! that name. A derived constraint name uses the bare name, as in
+//! `{name}_{field}_notnull`.
 
 use nodedb_crdt::{Constraint, ConstraintKind};
-use nodedb_types::CollectionType;
 use nodedb_types::columnar::{ColumnDef, DocumentMode};
+use nodedb_types::{CollectionType, QualifiedCollection};
 
 use super::collection::StoredCollection;
 
@@ -21,7 +26,11 @@ use super::collection::StoredCollection;
 /// encoded constraint sets to decide whether a re-publish is needed.
 pub fn collection_constraints(stored: &StoredCollection) -> Vec<Constraint> {
     let mut out: Vec<Constraint> = Vec::new();
-    let collection = stored.name.as_str();
+    let names = CollectionNames {
+        stored: QualifiedCollection::new(stored.database_id, &stored.name),
+        bare: stored.name.as_str(),
+    };
+    let collection = names.stored.as_str();
 
     // UNIQUE — one constraint per unique secondary index.
     //
@@ -49,7 +58,7 @@ pub fn collection_constraints(stored: &StoredCollection) -> Vec<Constraint> {
         Some(columns) => {
             for col in columns {
                 if !col.nullable {
-                    out.push(not_null(collection, &col.name));
+                    out.push(not_null(&names, &col.name));
                 }
             }
         }
@@ -58,7 +67,7 @@ pub fn collection_constraints(stored: &StoredCollection) -> Vec<Constraint> {
                 let (_, is_pk, is_not_null, _) =
                     nodedb_sql::ddl_ast::collection_type::parse_column_type_str_full(type_str);
                 if is_not_null || is_pk {
-                    out.push(not_null(collection, name));
+                    out.push(not_null(&names, name));
                 }
             }
         }
@@ -67,11 +76,11 @@ pub fn collection_constraints(stored: &StoredCollection) -> Vec<Constraint> {
     // NOT NULL / CHECK — schemaless type guards.
     for guard in &stored.type_guards {
         if guard.required {
-            out.push(not_null(collection, &guard.field));
+            out.push(not_null(&names, &guard.field));
         }
         if let Some(expr) = &guard.check_expr {
             out.push(Constraint {
-                name: format!("{collection}_{}_check", guard.field),
+                name: format!("{}_{}_check", names.bare, guard.field),
                 collection: collection.to_string(),
                 field: guard.field.clone(),
                 kind: ConstraintKind::Check {
@@ -98,11 +107,19 @@ fn typed_schema_columns(collection_type: &CollectionType) -> Option<&[ColumnDef]
     }
 }
 
+/// The two names of the collection a constraint set derives from.
+struct CollectionNames<'a> {
+    /// The stored name each constraint's `collection` holds.
+    stored: QualifiedCollection,
+    /// The bare name each derived constraint name starts with.
+    bare: &'a str,
+}
+
 /// Build a `NOT NULL` constraint with the canonical name scheme.
-fn not_null(collection: &str, field: &str) -> Constraint {
+fn not_null(names: &CollectionNames<'_>, field: &str) -> Constraint {
     Constraint {
-        name: format!("{collection}_{field}_notnull"),
-        collection: collection.to_string(),
+        name: format!("{}_{field}_notnull", names.bare),
+        collection: names.stored.as_str().to_string(),
         field: field.to_string(),
         kind: ConstraintKind::NotNull,
     }
@@ -271,6 +288,44 @@ mod tests {
         assert_eq!(got[0].kind, ConstraintKind::NotNull);
         assert_eq!(got[1].name, "accounts_email_unique");
         assert_eq!(got[1].kind, ConstraintKind::Unique);
+    }
+
+    #[test]
+    fn a_named_database_scopes_each_constraint_to_the_stored_name() {
+        let mut c = base("people");
+        c.database_id = nodedb_types::DatabaseId::new(7);
+        c.indexes.push(idx("people_email_unique", "$.email", true));
+        c.type_guards.push(TypeGuardFieldDef {
+            field: "age".to_string(),
+            type_expr: "INT".to_string(),
+            required: true,
+            check_expr: Some("age > 0".to_string()),
+            default_expr: None,
+            value_expr: None,
+        });
+        let got = collection_constraints(&c);
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "people_age_check",
+                "people_age_notnull",
+                "people_email_unique"
+            ]
+        );
+        for constraint in &got {
+            assert_eq!(constraint.collection, "7/people", "{}", constraint.name);
+        }
+    }
+
+    #[test]
+    fn the_default_database_scopes_each_constraint_to_the_bare_name() {
+        let mut c = base("people");
+        c.indexes.push(idx("people_email_unique", "$.email", true));
+        c.type_guards.push(guard("title", true));
+        for constraint in collection_constraints(&c) {
+            assert_eq!(constraint.collection, "people", "{}", constraint.name);
+        }
     }
 
     #[test]

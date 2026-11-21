@@ -141,6 +141,7 @@ impl GatewayErrorMap {
             | Error::Ddl(_)
             | Error::DescriptorVersionAnomaly { .. }
             | Error::CollectionUnstamped { .. }
+            | Error::ConstraintScope { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::Promql(_)
             | Error::DependentObjectsExist { .. }

@@ -6,6 +6,8 @@
 //! queue for a single tenant. Lives on the Data Plane (one per tenant per core).
 
 pub mod apply;
+mod apply_candidate;
+mod apply_rejection;
 pub mod apply_target;
 pub mod apply_validated;
 pub mod constraints;

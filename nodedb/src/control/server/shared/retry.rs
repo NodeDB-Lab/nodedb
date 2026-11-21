@@ -215,6 +215,7 @@ impl RetryableSchemaChange for Error {
             | Error::RemoteTyped { .. }
             | Error::DescriptorVersionAnomaly { .. }
             | Error::CollectionUnstamped { .. }
+            | Error::ConstraintScope { .. }
             | Error::CatalogIntegrityViolation { .. }
             | Error::DataPlane(_)
             | Error::Promql(_)

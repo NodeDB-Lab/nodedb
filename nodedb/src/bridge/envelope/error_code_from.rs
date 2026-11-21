@@ -379,6 +379,7 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::Ddl(_)
             | crate::Error::DescriptorVersionAnomaly { .. }
             | crate::Error::CollectionUnstamped { .. }
+            | crate::Error::ConstraintScope { .. }
             | crate::Error::CatalogIntegrityViolation { .. }
             | crate::Error::CascadeCycle { .. }) => Self::Internal {
                 detail: e.to_string(),

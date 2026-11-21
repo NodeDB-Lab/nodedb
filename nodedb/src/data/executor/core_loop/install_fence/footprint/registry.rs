@@ -10,7 +10,6 @@
 //! otherwise.
 
 use nodedb_crdt::constraint::ConstraintKind;
-use nodedb_types::QualifiedCollection;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, TenantId, TxnId};
@@ -39,8 +38,9 @@ pub(in crate::data::executor) trait FenceRegistry {
         source: &str,
     ) -> Option<String>;
 
-    /// The collections the foreign-key constraints of `collection` read.
-    /// A tenant with no CRDT state holds no constraint.
+    /// The stored names of the collections the foreign-key constraints of
+    /// the stored name `collection` read. A tenant with no CRDT state holds
+    /// no constraint.
     fn crdt_referents(&self, db: DatabaseId, tenant: TenantId, collection: &str) -> Vec<String>;
 
     /// The collections whose state the drop of transaction `txn`'s overlay
@@ -80,13 +80,9 @@ impl FenceRegistry for CoreLoop {
         let Some(engine) = self.crdt_engines.get(&(db, tenant)) else {
             return Vec::new();
         };
-        // A constraint names its collection stored or bare.
-        let bare = QualifiedCollection::bare_of_stored(collection);
-        let mut constraints = engine.validator.constraints_for(collection);
-        if bare != collection {
-            constraints.extend(engine.validator.constraints_for(bare));
-        }
-        let mut referents: Vec<String> = constraints
+        let mut referents: Vec<String> = engine
+            .validator
+            .constraints_for(collection)
             .into_iter()
             .filter_map(|constraint| match &constraint.kind {
                 ConstraintKind::ForeignKey { ref_collection, .. }

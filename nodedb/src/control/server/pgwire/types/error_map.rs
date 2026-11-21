@@ -474,6 +474,7 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         | crate::Error::DescriptorVersionAnomaly { .. }
         | crate::Error::CatalogIntegrityViolation { .. }
         | crate::Error::CollectionUnstamped { .. }
+        | crate::Error::ConstraintScope { .. }
         | crate::Error::CascadeCycle { .. } => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
     }
 }

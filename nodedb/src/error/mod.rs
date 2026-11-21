@@ -17,11 +17,13 @@
 //! `crate::error_classify`, which borrows so the wire paths that only hold a
 //! `&Error` classify through the same table.
 
+mod constraint_scope;
 mod conversions;
 mod dispatch_capacity;
 mod ollp;
 mod types;
 
+pub use constraint_scope::ConstraintScopeRefusal;
 pub use dispatch_capacity::DispatchCapacityScope;
 pub use ollp::OllpExhaustedCause;
 pub use types::{Error, RegressedOffsets, Result};

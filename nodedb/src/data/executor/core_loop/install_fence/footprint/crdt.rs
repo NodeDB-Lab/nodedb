@@ -85,7 +85,7 @@ fn validated<'s>(
         KeySet::new(scope)
             .collection(collection)
             .crdt_tenant_of(tenant),
-        |keys, referent| keys.requested(referent),
+        |keys, referent| keys.stored(referent),
     )
 }
 

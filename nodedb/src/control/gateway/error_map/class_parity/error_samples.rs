@@ -346,6 +346,13 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             tenant_id: 1,
             name: collection(),
         },
+        E::ConstraintScope {
+            install_key: "7/c".into(),
+            refusal: crate::error::ConstraintScopeRefusal::CollectionMismatch {
+                constraint: "c_email_unique".into(),
+                collection: collection(),
+            },
+        },
         E::CatalogIntegrityViolation {
             entry_kind: "PutCollection".into(),
             detail: text(),

@@ -257,7 +257,7 @@ impl CoreLoop {
                 })?;
             constraints.push(c);
         }
-        engine.set_collection_constraints(collection, constraint_version, constraints);
+        engine.set_collection_constraints(collection, constraint_version, constraints)?;
         Ok(())
     }
 
