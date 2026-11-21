@@ -372,9 +372,9 @@ async fn columnar_declared_non_id_primary_key_on_conflict_do_nothing_on_declared
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn columnar_declared_non_id_primary_key_on_conflict_do_nothing_other_column_is_refused() {
-    // Before this fix, `DO NOTHING` ran no target check at all: a target
-    // naming the wrong column was silently accepted and the row was deduped
-    // by the real key regardless of what the clause named.
+    // `DO NOTHING` runs the same target check as `DO UPDATE`: a target
+    // naming the wrong column is refused, never silently deduped by the
+    // real key.
     let server = TestServer::start().await;
 
     server
