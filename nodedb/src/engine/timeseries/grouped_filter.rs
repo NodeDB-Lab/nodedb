@@ -320,7 +320,7 @@ fn i64_column_mask(
         FilterOp::Ne => {
             let a = (rt.gte_i64)(slice, fv);
             let b = (rt.lte_i64)(slice, fv);
-            simd_filter::bitmask_not(&simd_filter::bitmask_and(&a, &b), row_count)
+            simd_filter::bitmask_not(&simd_filter::bitmask_and(&a, &b), slice.len())
         }
         _ => {
             return Err(UnsupportedPredicate::new(

@@ -315,4 +315,37 @@ mod tests {
         let passing2: usize = mask2.iter().filter(|&&b| b).count();
         assert_eq!(passing2, 5); // indices 0, 2, 4, 6, 8
     }
+
+    /// A row past the end of a short column does not exist and matches no
+    /// operator, `ne` included.
+    #[test]
+    fn a_row_past_a_short_integer_column_matches_no_row() {
+        use crate::engine::timeseries::columnar_memtable::TimeKind;
+
+        for (ty, data) in [
+            (ColumnType::Int64, ColumnData::Int64(vec![1, 2, 9])),
+            (
+                ColumnType::Timestamp(TimeKind::Millis),
+                ColumnData::Timestamp(vec![1, 2, 9]),
+            ),
+        ] {
+            let schema = vec![("n".into(), ty)];
+            let columns = vec![Some(data)];
+            let src = PartitionColumns {
+                schema: &schema,
+                columns: &columns,
+                sym_dicts: &std::collections::HashMap::new(),
+            };
+            let f = ScanFilter {
+                field: "n".into(),
+                op: FilterOp::Ne,
+                value: nodedb_types::Value::Integer(9),
+                clauses: vec![],
+                expr: None,
+            };
+            let bm = eval_filters_bitmask(&src, &[f], 100).unwrap();
+            let indices = nodedb_query::simd_filter::bitmask_to_indices(&bm);
+            assert_eq!(indices, vec![0u32, 1], "{ty:?}");
+        }
+    }
 }
