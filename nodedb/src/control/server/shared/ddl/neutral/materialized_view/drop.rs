@@ -63,7 +63,7 @@ pub async fn drop_materialized_view(
         .flatten()
         .is_some_and(|view| view.owner == identity.username);
     if !owns_view {
-        crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        crate::control::server::shared::ddl::neutral::object_permission::require_drop_permission(
             state,
             identity,
             database_id,
