@@ -114,10 +114,10 @@ pub(crate) fn run(
     // a transaction's statements are polled on whichever worker tokio picks,
     // so the DDL buffer must follow the task across every await. The stream
     // scope puts every request of the connection on its own stream.
-    let id = context.id;
+    let request_stream = factory.request_stream(context.id);
     Box::pin(
         crate::control::server::shared::session::connection_stream::scoped(
-            id,
+            request_stream,
             crate::control::server::shared::session::conn_scope::scoped(isolate_connection_future(
                 run_inner(stream, tls_acceptor, factory, context),
             )),

@@ -104,6 +104,7 @@ impl PeerCall {
             vshard_id: None,
             read_groups: Vec::new(),
             user_roles: Vec::new(),
+            stream: crate::control::server::shared::session::forwarded_stream::current_on_wire(),
         });
         // `deadline` bounds each attempt's response read and the whole call,
         // retries included. The transport's own `rpc_timeout` does not

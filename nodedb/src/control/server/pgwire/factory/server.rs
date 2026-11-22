@@ -84,6 +84,14 @@ impl NodeDbPgHandlerFactory {
         }
     }
 
+    /// The request stream of accepted connection `id`, named by this node.
+    pub(crate) fn request_stream(
+        &self,
+        id: ConnectionId,
+    ) -> crate::bridge::envelope::RequestStream {
+        crate::bridge::envelope::RequestStream::client(self.state.node_id, id)
+    }
+
     pub(crate) fn register_connection(
         &self,
         context: PgConnectionContext,

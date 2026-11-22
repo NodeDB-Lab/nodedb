@@ -9,7 +9,7 @@ pub mod types;
 
 pub use types::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,
-    PLAN_DECODE_FAILED, TypedClusterError,
+    ForwardedStream, PLAN_DECODE_FAILED, TypedClusterError,
 };
 
 pub(in crate::rpc_codec) use codec::{

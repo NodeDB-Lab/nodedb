@@ -19,6 +19,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+use crate::bridge::envelope::RequestStream;
 use crate::config::auth::AuthMode;
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::server::shared::session::connection_stream;
@@ -120,13 +121,14 @@ impl IlpListener {
                                     continue;
                                 }
                             };
+                            let request_stream = RequestStream::client(state.node_id, connection_id);
                             let state = Arc::clone(&state);
                             let auth_mode = auth_mode.clone();
 
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(request_stream, async move {
                                         let _permit = permit;
                                         match tokio::time::timeout(
                                             std::time::Duration::from_secs(10),
@@ -157,7 +159,7 @@ impl IlpListener {
                                 });
                             } else {
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(request_stream, async move {
                                         let _permit = permit;
                                         let cs = ConnStream::plain(stream);
                                         if let Err(e) = handle_ilp_connection(cs, peer, &state, &auth_mode).await {

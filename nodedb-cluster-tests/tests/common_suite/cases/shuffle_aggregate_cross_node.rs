@@ -198,6 +198,7 @@ async fn produce(
         trace_id: [0u8; 16],
         descriptor_versions: vec![],
         read_groups: vec![],
+        stream: None,
     };
     let resp = transport
         .send_rpc_to_addr(producer_addr, RaftRpc::ShuffleProduceRequest(req))
@@ -232,6 +233,7 @@ async fn aggregate_part(
         database_id: 0,
         deadline_remaining_ms: 15_000,
         trace_id: [0u8; 16],
+        stream: None,
     };
     let resp = transport
         .send_rpc_to_addr(owner_addr, RaftRpc::ShuffleAggregateConsumeRequest(req))

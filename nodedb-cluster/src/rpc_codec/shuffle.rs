@@ -12,7 +12,7 @@
 //! Discriminants 25/26/27 are permanently assigned to these variants.
 
 use super::discriminants::*;
-use super::execute::{DescriptorVersionEntry, TypedClusterError};
+use super::execute::{DescriptorVersionEntry, ForwardedStream, TypedClusterError};
 use super::header::write_frame;
 use super::raft_rpc::RaftRpc;
 use crate::error::{ClusterError, Result};
@@ -112,6 +112,9 @@ pub struct ShuffleProduceRequest {
     /// Raft groups the producer confirms before its scan, as a linearizable
     /// read leg (see `ExecuteRequest::read_groups`). Empty otherwise.
     pub read_groups: Vec<u64>,
+    /// The client stream the scan belongs to on its origin node (see
+    /// `ExecuteRequest::stream`). `None` for internal work.
+    pub stream: Option<ForwardedStream>,
 }
 
 /// Terminal reply to a [`ShuffleProduceRequest`].
@@ -180,6 +183,9 @@ pub struct ShuffleConsumeRequest {
     pub database_id: u64,
     pub deadline_remaining_ms: u64,
     pub trace_id: [u8; 16],
+    /// The client stream the join belongs to on its origin node (see
+    /// `ExecuteRequest::stream`). `None` for internal work.
+    pub stream: Option<ForwardedStream>,
 }
 
 /// Terminal reply to a [`ShuffleConsumeRequest`].
@@ -248,6 +254,9 @@ pub struct ShuffleAggregateConsumeRequest {
     pub database_id: u64,
     pub deadline_remaining_ms: u64,
     pub trace_id: [u8; 16],
+    /// The client stream the aggregate belongs to on its origin node (see
+    /// `ExecuteRequest::stream`). `None` for internal work.
+    pub stream: Option<ForwardedStream>,
 }
 
 /// Terminal reply to a [`ShuffleAggregateConsumeRequest`].
@@ -591,6 +600,10 @@ mod tests {
                 version: 11,
             }],
             read_groups: vec![3, 8],
+            stream: Some(ForwardedStream {
+                origin_node: 4,
+                connection: 12,
+            }),
         };
         let decoded = roundtrip_produce_req(req.clone());
         assert_eq!(decoded.shuffle_id, req.shuffle_id);
@@ -610,6 +623,7 @@ mod tests {
         assert_eq!(decoded.descriptor_versions[0].collection, "orders");
         assert_eq!(decoded.descriptor_versions[0].version, 11);
         assert_eq!(decoded.read_groups, vec![3, 8]);
+        assert_eq!(decoded.stream, req.stream);
     }
 
     #[test]
@@ -628,8 +642,10 @@ mod tests {
             trace_id: [0u8; 16],
             descriptor_versions: vec![],
             read_groups: vec![],
+            stream: None,
         };
         let decoded = roundtrip_produce_req(req);
+        assert!(decoded.stream.is_none());
         assert!(decoded.keys.is_empty());
         assert!(decoded.part_node_map.is_empty());
         assert!(decoded.descriptor_versions.is_empty());
@@ -726,6 +742,10 @@ mod tests {
             database_id: 4,
             deadline_remaining_ms: 8000,
             trace_id: [3u8; 16],
+            stream: Some(ForwardedStream {
+                origin_node: 5,
+                connection: 21,
+            }),
         };
         let decoded = roundtrip_consume_req(req.clone());
         assert_eq!(decoded.shuffle_id, req.shuffle_id);
@@ -743,6 +763,7 @@ mod tests {
         assert_eq!(decoded.database_id, 4);
         assert_eq!(decoded.deadline_remaining_ms, 8000);
         assert_eq!(decoded.trace_id, [3u8; 16]);
+        assert_eq!(decoded.stream, req.stream);
     }
 
     #[test]
@@ -759,8 +780,10 @@ mod tests {
             database_id: 0,
             deadline_remaining_ms: 1000,
             trace_id: [0u8; 16],
+            stream: None,
         };
         let decoded = roundtrip_consume_req(req);
+        assert!(decoded.stream.is_none());
         assert!(decoded.on.is_empty());
         assert_eq!(decoded.limit, u64::MAX);
         assert_eq!(decoded.join_type, "left");
@@ -850,6 +873,10 @@ mod tests {
             database_id: 4,
             deadline_remaining_ms: 8000,
             trace_id: [3u8; 16],
+            stream: Some(ForwardedStream {
+                origin_node: 6,
+                connection: 33,
+            }),
         };
         let decoded = roundtrip_agg_consume_req(req.clone());
         assert_eq!(decoded.shuffle_id, req.shuffle_id);
@@ -870,6 +897,7 @@ mod tests {
         assert_eq!(decoded.database_id, 4);
         assert_eq!(decoded.deadline_remaining_ms, 8000);
         assert_eq!(decoded.trace_id, [3u8; 16]);
+        assert_eq!(decoded.stream, req.stream);
     }
 
     #[test]
@@ -886,8 +914,10 @@ mod tests {
             database_id: 0,
             deadline_remaining_ms: 1000,
             trace_id: [0u8; 16],
+            stream: None,
         };
         let decoded = roundtrip_agg_consume_req(req);
+        assert!(decoded.stream.is_none());
         assert!(decoded.group_by.is_empty());
         assert!(decoded.aggregates_bytes.is_empty());
         assert!(decoded.sort_keys.is_empty());

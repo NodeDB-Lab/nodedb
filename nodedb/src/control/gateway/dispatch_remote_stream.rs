@@ -135,6 +135,8 @@ pub(super) async fn dispatch_remote_stream(
         vshard_id: scoped_vshard,
         read_groups,
         user_roles,
+        // The leg keeps the client's stream on the leader's cores.
+        stream: crate::control::server::shared::session::forwarded_stream::current_on_wire(),
     });
 
     debug!(

@@ -23,5 +23,5 @@ pub use response::{EdgeImage, Response, RowEffect, RowVersion, WriteSetEntry};
 pub use row_context::describe_row_context;
 pub use stage_vote::StageVote;
 pub use status::{Priority, Status};
-pub use stream::RequestStream;
+pub use stream::{ClientStream, RequestStream};
 pub use sync_hold::SyncHold;

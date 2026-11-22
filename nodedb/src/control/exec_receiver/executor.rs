@@ -26,6 +26,7 @@ use super::backup_cut::take_backup_cut;
 use super::plan_decode::decode_plan;
 use super::read_leg::confirm_read_leg;
 use super::request_validation::validate_request;
+use super::stream_scope::on_request_stream;
 use super::support::{PLAN_DECODE_FAILED, SinkOutcome, execution_error_to_typed};
 
 fn reject_unadmitted_crdt_apply(plan: &PhysicalPlan) -> Result<(), TypedClusterError> {
@@ -63,7 +64,11 @@ impl PlanExecutor for LocalPlanExecutor {
         let exporter = Arc::clone(&self.state.trace_exporter);
         let start = SystemTime::now();
         let span = info_span!("executor.execute_plan", trace_id = %trace_id, tenant_id);
-        let resp = self.execute_plan_inner(req).instrument(span).await;
+        // The leg runs on the client stream the sender carried.
+        let resp = match self.execute_plan_on_stream(req).instrument(span).await {
+            Ok(resp) => resp,
+            Err(error) => ExecuteResponse::err(error),
+        };
         // Emit one OTLP executor span per leaseholder so the gateway's
         // upstream span joins the N leaseholder spans into a single
         // distributed trace via the shared `trace_id`.
@@ -89,10 +94,12 @@ impl PlanExecutor for LocalPlanExecutor {
         let exporter = Arc::clone(&self.state.trace_exporter);
         let start = SystemTime::now();
         let span = info_span!("executor.execute_plan_streaming", trace_id = %trace_id, tenant_id);
+        // The leg runs on the client stream the sender carried.
         let outcome = self
-            .execute_plan_streaming_inner(req, sink)
+            .execute_plan_streaming_on_stream(req, sink)
             .instrument(span)
-            .await;
+            .await
+            .unwrap_or_else(Some);
         exporter.emit(EmitSpanParams {
             span_name: "executor.execute_plan_streaming",
             trace_id,
@@ -121,6 +128,23 @@ impl PlanExecutor for LocalPlanExecutor {
 }
 
 impl LocalPlanExecutor {
+    /// [`Self::execute_plan_inner`] on the stream `req` names.
+    async fn execute_plan_on_stream(
+        &self,
+        req: ExecuteRequest,
+    ) -> Result<ExecuteResponse, TypedClusterError> {
+        on_request_stream(req.stream, self.execute_plan_inner(req)).await
+    }
+
+    /// [`Self::execute_plan_streaming_inner`] on the stream `req` names.
+    async fn execute_plan_streaming_on_stream(
+        &self,
+        req: ExecuteRequest,
+        sink: impl ChunkSink,
+    ) -> Result<Option<TypedClusterError>, TypedClusterError> {
+        on_request_stream(req.stream, self.execute_plan_streaming_inner(req, sink)).await
+    }
+
     /// Shared validation + decode prologue for both the one-shot and streaming
     /// paths: validate deadline + descriptor versions, decode the plan, reject
     /// unresolved Exchange nodes.  Returns `(plan, database_id, deadline)` on

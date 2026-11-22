@@ -240,6 +240,8 @@ pub async fn resolve_shuffle_aggregate(
 
     // 6. Dispatch ALL producers CONCURRENTLY (single side=0). Each producer
     //    hash-partitions its per-group partial states on the GROUP BY columns.
+    // Each producer's scan keeps the client's stream on its node.
+    let stream = crate::control::server::shared::session::forwarded_stream::current_on_wire();
     let mut produce_futures = Vec::with_capacity(producers.len());
     for &node in &producers {
         let req = ShuffleProduceRequest {
@@ -256,6 +258,7 @@ pub async fn resolve_shuffle_aggregate(
             trace_id: trace_id.0,
             descriptor_versions: Vec::<DescriptorVersionEntry>::new(),
             read_groups: read_groups.clone(),
+            stream,
         };
         produce_futures.push(send_produce(transport, node, req));
     }
@@ -309,6 +312,7 @@ pub async fn resolve_shuffle_aggregate(
             database_id: database_id.as_u64(),
             deadline_remaining_ms,
             trace_id: trace_id.0,
+            stream,
         };
         consume_futures.push(send_consume(transport, entry.node_id, req));
     }

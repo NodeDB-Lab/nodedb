@@ -106,11 +106,13 @@ pub async fn ws_handler(
                 .into_response();
         }
     };
+    let request_stream =
+        crate::bridge::envelope::RequestStream::client(state.shared.node_id, connection_id);
     let trace_id = crate::control::trace_context::extract_from_headers(&headers);
     ws.on_upgrade(move |socket| async move {
         match isolate_connection_future(
             crate::control::server::shared::session::connection_stream::scoped(
-                connection_id,
+                request_stream,
                 handle_ws_connection(
                     socket,
                     state,

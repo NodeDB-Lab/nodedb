@@ -156,7 +156,9 @@ impl NodeDbPgHandler {
     /// accepted connection sends internal work.
     pub(super) fn request_stream(&self) -> crate::bridge::envelope::RequestStream {
         match self.session_id {
-            SessionId::Connection(id) => crate::bridge::envelope::RequestStream::Connection(id),
+            SessionId::Connection(id) => {
+                crate::bridge::envelope::RequestStream::client(self.state.node_id, id)
+            }
             SessionId::LegacySocket(_) => crate::bridge::envelope::RequestStream::Internal,
         }
     }

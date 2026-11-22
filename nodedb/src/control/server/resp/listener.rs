@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+use crate::bridge::envelope::RequestStream;
 use crate::control::security::sessions::session_ended;
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::server::shared::session::connection_stream;
@@ -117,11 +118,12 @@ impl RespListener {
                                     continue;
                                 }
                             };
+                            let request_stream = RequestStream::client(state.node_id, connection_id);
                             let state = Arc::clone(&state);
 
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
-                                connections.spawn(connection_stream::scoped(connection_id, async move {
+                                connections.spawn(connection_stream::scoped(request_stream, async move {
                                     match tokio::time::timeout(
                                         std::time::Duration::from_secs(10),
                                         acceptor.accept(stream),
@@ -144,7 +146,7 @@ impl RespListener {
                                     drop(permit);
                                 }));
                             } else {
-                                connections.spawn(connection_stream::scoped(connection_id, async move {
+                                connections.spawn(connection_stream::scoped(request_stream, async move {
                                     let cs = ConnStream::plain(stream);
                                     if let Err(e) = handle_connection(cs, peer, &state).await {
                                         debug!(%peer, error = %e, "RESP connection error");

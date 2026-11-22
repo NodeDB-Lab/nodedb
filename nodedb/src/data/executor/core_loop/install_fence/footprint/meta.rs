@@ -308,7 +308,7 @@ mod tests {
         let connection =
             crate::control::server::shared::session::ConnectionId::new(1).expect("non-zero id");
         let client = Scope {
-            stream: crate::bridge::envelope::RequestStream::Connection(connection),
+            stream: crate::bridge::envelope::RequestStream::client(1, connection),
             ..scope()
         };
         let reads = [

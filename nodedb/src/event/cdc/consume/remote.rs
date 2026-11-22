@@ -253,6 +253,8 @@ pub async fn consume_remote(
         vshard_id: None,
         read_groups: Vec::new(),
         user_roles: Vec::new(),
+        // A client's consume keeps its stream on the leader.
+        stream: crate::control::server::shared::session::forwarded_stream::current_on_wire(),
     });
     let response = transport
         .send_rpc(leader_node, request)

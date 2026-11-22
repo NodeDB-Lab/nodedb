@@ -4,17 +4,23 @@
 
 use futures::{Stream, StreamExt};
 
+use crate::control::server::shared::session::connection_stream;
+
 use super::binding::SessionBinding;
 
 /// Yield the items of `stream` until `binding` is killed, then end.
 ///
 /// The kill drops `stream`, the path a client disconnect already takes for
 /// these read-only bodies. The binding lives as long as the returned stream.
+///
+/// The body is polled after its handler returns. Each poll runs on the
+/// request stream current at this call, so the requests the body sends keep
+/// the client's stream.
 pub fn stream_until_ended<S>(stream: S, mut binding: SessionBinding) -> impl Stream<Item = S::Item>
 where
     S: Stream,
 {
-    async_stream::stream! {
+    connection_stream::carry_current(async_stream::stream! {
         // A stream serves for as long as it stays connected, so it is never idle.
         binding.set_statement("stream");
         let mut stream = std::pin::pin!(stream);
@@ -29,7 +35,7 @@ where
                 None => break,
             }
         }
-    }
+    })
 }
 
 #[cfg(test)]

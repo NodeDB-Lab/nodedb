@@ -108,7 +108,7 @@ mod tests {
 
     use super::super::types::{
         DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk,
-        ExecuteStreamEnd, PLAN_DECODE_FAILED, TypedClusterError,
+        ExecuteStreamEnd, ForwardedStream, PLAN_DECODE_FAILED, TypedClusterError,
     };
 
     fn roundtrip_req(req: ExecuteRequest) -> ExecuteRequest {
@@ -168,6 +168,7 @@ mod tests {
             vshard_id: None,
             read_groups: Vec::new(),
             user_roles: Vec::new(),
+            stream: None,
         };
         let decoded = roundtrip_req(req.clone());
         assert_eq!(decoded.plan_bytes, req.plan_bytes);
@@ -195,6 +196,7 @@ mod tests {
             vshard_id: None,
             read_groups: Vec::new(),
             user_roles: Vec::new(),
+            stream: None,
         };
         let decoded = roundtrip_req(req);
         assert!(decoded.descriptor_versions.is_empty());
@@ -213,6 +215,7 @@ mod tests {
             vshard_id: Some(nodedb_types::id::VShardId::new(513)),
             read_groups: vec![7, 9],
             user_roles: vec!["approver".into()],
+            stream: None,
         };
         let decoded = roundtrip_req(req);
         assert_eq!(
@@ -222,6 +225,54 @@ mod tests {
         assert_eq!(decoded.txn_id, Some(nodedb_types::id::TxnId::new(9)));
         assert_eq!(decoded.read_groups, vec![7, 9]);
         assert_eq!(decoded.user_roles, vec!["approver".to_string()]);
+    }
+
+    fn request_on(stream: Option<ForwardedStream>) -> ExecuteRequest {
+        ExecuteRequest {
+            plan_bytes: vec![0x01],
+            tenant_id: 1,
+            database_id: 0,
+            deadline_remaining_ms: 1000,
+            trace_id: [0u8; 16],
+            descriptor_versions: vec![],
+            txn_id: None,
+            vshard_id: None,
+            read_groups: Vec::new(),
+            user_roles: Vec::new(),
+            stream,
+        }
+    }
+
+    /// A forwarded client leg keeps its origin node and connection.
+    #[test]
+    fn roundtrip_execute_request_carries_the_client_stream() {
+        let stream = ForwardedStream {
+            origin_node: 3,
+            connection: 7,
+        };
+        assert_eq!(roundtrip_req(request_on(Some(stream))).stream, Some(stream));
+    }
+
+    /// An internal leg carries no stream.
+    #[test]
+    fn roundtrip_execute_request_without_a_stream_stays_internal() {
+        assert_eq!(roundtrip_req(request_on(None)).stream, None);
+    }
+
+    /// The streaming request shares the body, so it keeps the stream too.
+    #[test]
+    fn roundtrip_execute_stream_request_carries_the_client_stream() {
+        let stream = ForwardedStream {
+            origin_node: 2,
+            connection: 9,
+        };
+        let rpc = RaftRpc::ExecuteStreamRequest(request_on(Some(stream)));
+        let epoch = crate::cluster_epoch::ClusterEpochState::default();
+        let encoded = crate::rpc_codec::encode(&rpc, &epoch).unwrap();
+        match crate::rpc_codec::decode(&encoded, &epoch).unwrap() {
+            RaftRpc::ExecuteStreamRequest(decoded) => assert_eq!(decoded.stream, Some(stream)),
+            other => panic!("expected ExecuteStreamRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -433,6 +484,7 @@ mod tests {
             vshard_id: None,
             read_groups: Vec::new(),
             user_roles: Vec::new(),
+            stream: None,
         };
         let rpc = RaftRpc::ExecuteStreamRequest(req.clone());
         let encoded =

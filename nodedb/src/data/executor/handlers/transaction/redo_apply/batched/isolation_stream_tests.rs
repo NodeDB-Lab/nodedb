@@ -28,7 +28,7 @@ fn on_stream(stream: RequestStream, id: u64, plan: PhysicalPlan) -> Request {
 }
 
 fn connection(id: u64) -> RequestStream {
-    RequestStream::Connection(ConnectionId::new(id).expect("non-zero id"))
+    RequestStream::client(1, ConnectionId::new(id).expect("non-zero id"))
 }
 
 fn list() -> PhysicalPlan {

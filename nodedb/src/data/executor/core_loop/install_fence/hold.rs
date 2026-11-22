@@ -328,7 +328,7 @@ mod tests {
         let connection = crate::control::server::shared::session::ConnectionId::new(connection)
             .expect("non-zero id");
         ExecutionTask::new(Request {
-            stream: crate::bridge::envelope::RequestStream::Connection(connection),
+            stream: crate::bridge::envelope::RequestStream::client(1, connection),
             ..request(id, plan)
         })
     }

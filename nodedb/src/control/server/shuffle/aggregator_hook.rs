@@ -170,8 +170,10 @@ impl RegistryShuffleAggregator {
             tenant_id: TenantId::new(req.tenant_id),
             database_id: DatabaseId::from(req.database_id),
             vshard_id: crate::types::VShardId::new(0),
-            // A shuffle hop another node sent carries no client connection.
-            stream: crate::bridge::envelope::RequestStream::Internal,
+            // The aggregate runs on the client stream the coordinator carried.
+            stream: crate::control::server::shared::session::forwarded_stream::received(
+                req.stream,
+            )?,
             plan,
             deadline: hop_deadline,
             priority: Priority::Normal,

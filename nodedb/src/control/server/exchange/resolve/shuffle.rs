@@ -254,6 +254,8 @@ pub async fn resolve_shuffle_join(
     // 7. Dispatch ALL producers CONCURRENTLY (build side=0, probe side=1), but
     //    keep the two sides' futures SEPARATE so each side's read vShards
     //    fold independently.
+    // Each producer's scan keeps the client's stream on its node.
+    let stream = crate::control::server::shared::session::forwarded_stream::current_on_wire();
     let mut build_produce_futures = Vec::with_capacity(build_nodes.len());
     for &node in &build_nodes {
         let req = ShuffleProduceRequest {
@@ -270,6 +272,7 @@ pub async fn resolve_shuffle_join(
             trace_id: trace_id.0,
             descriptor_versions: Vec::<DescriptorVersionEntry>::new(),
             read_groups: build_read_groups.clone(),
+            stream,
         };
         build_produce_futures.push(send_produce(transport, node, req));
     }
@@ -289,6 +292,7 @@ pub async fn resolve_shuffle_join(
             trace_id: trace_id.0,
             descriptor_versions: Vec::<DescriptorVersionEntry>::new(),
             read_groups: probe_read_groups.clone(),
+            stream,
         };
         probe_produce_futures.push(send_produce(transport, node, req));
     }
@@ -342,6 +346,7 @@ pub async fn resolve_shuffle_join(
             database_id: database_id.as_u64(),
             deadline_remaining_ms,
             trace_id: trace_id.0,
+            stream,
         };
         consume_futures.push(send_consume(transport, entry.node_id, req));
     }

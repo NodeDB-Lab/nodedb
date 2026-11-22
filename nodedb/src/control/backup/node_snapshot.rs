@@ -76,6 +76,7 @@ pub(super) async fn snapshot_remote(
         vshard_id: None,
         read_groups: Vec::new(),
         user_roles: Vec::new(),
+        stream: crate::control::server::shared::session::forwarded_stream::current_on_wire(),
     });
 
     let resp = transport

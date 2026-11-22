@@ -137,6 +137,8 @@ impl RegistryShuffleProducer {
             read_groups: req.read_groups.clone(),
             // A shuffle produce scan writes nothing, so no role is judged.
             user_roles: Vec::new(),
+            // The scan runs on the coordinator client's stream.
+            stream: req.stream,
         };
 
         let executor = LocalPlanExecutor::new(Arc::clone(&self.state));

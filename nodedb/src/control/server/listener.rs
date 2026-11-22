@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use super::admission::AdmissionRegistry;
 use super::native::session::{NativeConnectionResources, NativeSession};
+use crate::bridge::envelope::RequestStream;
 use crate::control::server::shared::session::connection_stream;
 use crate::control::server::shared::{ConnectionFutureOutcome, isolate_connection_future};
 use crate::control::state::SharedState;
@@ -148,6 +149,7 @@ impl Listener {
                                     continue;
                                 }
                             };
+                            let request_stream = RequestStream::client(state.node_id, connection_id);
                             state.connections_accepted.fetch_add(1, Ordering::Relaxed);
                             info!(%peer_addr, connection_id = %connection_id, "new native connection");
                             let resources =
@@ -160,7 +162,7 @@ impl Listener {
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(request_stream, async move {
                                         let _permit = permit;
                                         match tokio::time::timeout(
                                             Duration::from_secs(10),
@@ -195,7 +197,7 @@ impl Listener {
                                 });
                             } else {
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(request_stream, async move {
                                         let _permit = permit;
                                         let session = NativeSession::new(
                                             stream,

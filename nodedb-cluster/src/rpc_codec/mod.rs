@@ -61,7 +61,7 @@ pub use data_propose::{
 };
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,
-    PLAN_DECODE_FAILED, TypedClusterError,
+    ForwardedStream, PLAN_DECODE_FAILED, TypedClusterError,
 };
 pub use frame_refusal::FrameRefusal;
 pub use header::{HEADER_SIZE, MAX_RPC_PAYLOAD_SIZE};

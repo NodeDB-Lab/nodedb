@@ -193,6 +193,7 @@ async fn shuffle_produce_partitions_and_fans_out_across_nodes() {
         trace_id: [0u8; 16],
         descriptor_versions: vec![], // ProviderScan touches no catalog collection
         read_groups: vec![],
+        stream: None,
     };
 
     // The coordinator drives the producer node directly via its QUIC address and

@@ -9,6 +9,7 @@ mod plan_decode;
 mod read_leg;
 mod request_validation;
 mod stream_events;
+mod stream_scope;
 mod support;
 mod surrogate_binds;
 mod tenant_marks;

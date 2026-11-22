@@ -54,6 +54,21 @@ pub struct ExecuteRequest {
     /// write carries them to every replica, which judges a role-guarded
     /// state transition against them. Empty for a read or a system write.
     pub user_roles: Vec<String>,
+    /// The client stream the leg belongs to on its origin node. `None` for
+    /// internal work, which orders against no client stream.
+    pub stream: Option<ForwardedStream>,
+}
+
+/// A client connection named by the node that accepted it.
+///
+/// Connection ids are unique per process only. The origin node keeps two
+/// nodes' equal ids apart on the receiving node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ForwardedStream {
+    /// The node that accepted the client connection.
+    pub origin_node: u64,
+    /// The connection id on the origin node. Never zero.
+    pub connection: u64,
 }
 
 /// Response to an `ExecuteRequest`.

@@ -19,8 +19,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use nodedb_types::{NodeDbError, QualifiedCollection};
 
-use crate::bridge::envelope::Request;
-use crate::control::server::shared::session::ConnectionId;
+use crate::bridge::envelope::{ClientStream, Request};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, RequestId, TenantId, TxnId, VShardId};
 
@@ -97,8 +96,9 @@ impl FenceKey {
     }
 }
 
-/// The ordered stream of one client task: its connection and its vShard.
-pub(in crate::data::executor) type StreamKey = (ConnectionId, VShardId);
+/// The ordered stream of one client task: its node-qualified connection and
+/// its vShard.
+pub(in crate::data::executor) type StreamKey = (ClientStream, VShardId);
 
 /// The stream of `request`. `None` for internal work, which orders against
 /// no client stream.
@@ -492,8 +492,18 @@ mod tests {
         assert!(fence.admits(&Footprint::Keys(vec![collection("b")])));
     }
 
-    fn connection(id: u64) -> ConnectionId {
-        ConnectionId::new(id).expect("non-zero id")
+    /// Connection `id` accepted by node `origin_node`.
+    fn connection_of(origin_node: u64, id: u64) -> ClientStream {
+        ClientStream {
+            origin_node,
+            id: crate::control::server::shared::session::ConnectionId::new(id)
+                .expect("non-zero id"),
+        }
+    }
+
+    /// Connection `id` accepted by this test's local node.
+    fn connection(id: u64) -> ClientStream {
+        connection_of(1, id)
     }
 
     /// A task of `connection` on `vshard`, or internal work with `None`.
@@ -502,6 +512,14 @@ mod tests {
         let stream = connection_id.map_or(RequestStream::Internal, |id| {
             RequestStream::Connection(connection(id))
         });
+        task_on_stream(stream, vshard)
+    }
+
+    /// A task of `stream` on `vshard`.
+    fn task_on_stream(
+        stream: crate::bridge::envelope::RequestStream,
+        vshard: u32,
+    ) -> ExecutionTask {
         ExecutionTask::new(Request {
             stream,
             vshard_id: VShardId::new(vshard),
@@ -519,6 +537,25 @@ mod tests {
 
     fn read(name: &str) -> Footprint {
         Footprint::Keys(vec![collection(name)])
+    }
+
+    /// Two nodes' connections with one id are distinct streams. A waiter
+    /// forwarded from one node holds no task of the other node's client.
+    #[test]
+    fn equal_connection_ids_of_two_origin_nodes_are_distinct_streams() {
+        use crate::bridge::envelope::RequestStream;
+        let first = connection_of(1, 7);
+        let second = connection_of(2, 7);
+        assert_ne!(first, second);
+        let mut fence = fence(&[]);
+        fence.hold(
+            task_on_stream(RequestStream::Connection(first), 0),
+            Footprint::Ordered,
+        );
+        let on = |client: ClientStream| Some((client, VShardId::new(0)));
+        assert!(!fence.admits_task(&read("b"), on(first)));
+        assert!(fence.admits_task(&read("b"), on(second)));
+        assert!(fence.admits_task(&write(vec![collection("b")], 0), on(second)));
     }
 
     /// A waiting client list holds its own connection's later task on its

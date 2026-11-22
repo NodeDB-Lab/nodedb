@@ -124,6 +124,7 @@ async fn execute_on_node(node: &TestClusterNode, plan: PhysicalPlan) -> ExecuteR
         vshard_id: None,
         read_groups: Vec::new(),
         user_roles: Vec::new(),
+        stream: None,
     };
     match transport
         .send_rpc_to_addr(node.listen_addr, RaftRpc::ExecuteRequest(request))
