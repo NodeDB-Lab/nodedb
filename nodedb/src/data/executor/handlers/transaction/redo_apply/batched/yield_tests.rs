@@ -137,7 +137,7 @@ impl Ring {
     }
 
     /// The install of `redo` as a stream marker in this core's WAL.
-    fn marker_plan(
+    pub(super) fn marker_plan(
         &mut self,
         redo: &RedoRecord,
         collections: Vec<String>,
@@ -249,7 +249,7 @@ pub(super) fn request(id: u64, plan: PhysicalPlan) -> Request {
     request
 }
 
-fn install_request(id: u64, plan: PhysicalPlan, lsn: u64) -> Request {
+pub(super) fn install_request(id: u64, plan: PhysicalPlan, lsn: u64) -> Request {
     let mut request = request(id, plan);
     request.wal_lsn = Some(Lsn::new(lsn));
     request
@@ -356,7 +356,7 @@ fn holds_foreign(sparse: &SparseEngine) -> bool {
 }
 
 /// The filler rows `core` holds.
-fn installed_rows(core: &CoreLoop) -> usize {
+pub(super) fn installed_rows(core: &CoreLoop) -> usize {
     (FILL_FROM..FILL_FROM + ROWS)
         .filter(|surrogate| {
             core.sparse
@@ -380,7 +380,7 @@ fn scanned_rows(response: &Response) -> usize {
         .0
 }
 
-fn assert_ok(response: &Response) {
+pub(super) fn assert_ok(response: &Response) {
     assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
 }
 

@@ -124,5 +124,6 @@ pub(in crate::data::executor) use judged_scope::{check_task_pinned, same_pin_set
 pub(in crate::data::executor) use state::{
     RedoApplyPass, RedoApplyScope, RedoApplyState, TsInstalled,
 };
+pub(in crate::data::executor) use stream_validate::add_sub_record_keys;
 pub(in crate::data::executor) use sub_ops::{RedoDocOp, RedoKvOp, document_ops, kv_ops};
 pub(in crate::data::executor) use validate::CommitBoundary;

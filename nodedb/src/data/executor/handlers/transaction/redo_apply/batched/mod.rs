@@ -16,6 +16,8 @@ mod state;
 
 #[cfg(test)]
 mod boot_tests;
+#[cfg(test)]
+mod concurrent_redo_tests;
 #[cfg(all(test, feature = "failpoints"))]
 mod crash_tests;
 #[cfg(test)]

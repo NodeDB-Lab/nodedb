@@ -20,6 +20,7 @@ pub(in crate::data::executor::handlers::transaction::redo_apply) mod tests;
 pub(in crate::data::executor::handlers::transaction::redo_apply) use driver::{
     StreamValidation, ValidateSlice,
 };
+pub(in crate::data::executor) use op_keys::add_sub_record_keys;
 pub(in crate::data::executor::handlers::transaction::redo_apply) use resident::{
     string_bytes, sum_targets_bytes,
 };

@@ -10,6 +10,7 @@ mod keys;
 mod kv;
 mod meta;
 mod plan;
+mod redo;
 mod registry;
 mod txn;
 

@@ -32,8 +32,9 @@ type VectorPutTuple = (String, Vec<f32>, usize, String, u32, Option<SyncProvenan
 type VectorDeleteTuple = (String, Option<u32>, String, Option<SyncProvenance>);
 
 /// Add to `keys` the keys of the state the install of `sub` writes beside
-/// its collection. `db` and `tenant` are the installing request's.
-pub(super) fn add_sub_record_keys(
+/// its collection. `db` and `tenant` are the installing request's. The
+/// install fence keys a whole record's ops with it too.
+pub(in crate::data::executor) fn add_sub_record_keys(
     sub: &RedoSubRecord,
     db: DatabaseId,
     tenant: TenantId,

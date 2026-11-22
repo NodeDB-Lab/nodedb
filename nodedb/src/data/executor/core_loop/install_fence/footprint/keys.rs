@@ -148,6 +148,26 @@ impl<'s> KeySet<'s> {
         self
     }
 
+    /// Keys built in the form their install arms them, such as a redo
+    /// sub-record's sync stream and graph state.
+    pub(super) fn armed(mut self, keys: impl IntoIterator<Item = FenceKey>) -> Self {
+        self.keys.extend(keys);
+        self
+    }
+
+    /// A write of the keys, by a task whose events carry its vShard. A
+    /// malformed name leaves a core task, for a task that writes stored
+    /// names of any database.
+    pub(super) fn write_or_core(self) -> Footprint {
+        if self.malformed {
+            return Footprint::Core;
+        }
+        Footprint::Write {
+            keys: self.keys,
+            vshard: self.scope.vshard,
+        }
+    }
+
     /// The footprint a malformed name leaves: the request's whole
     /// database, or every state of the core when a key spans databases.
     fn malformed_footprint(&self) -> Footprint {

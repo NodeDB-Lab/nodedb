@@ -10,8 +10,10 @@
 //! staging, resolve, savepoint and overlay drop key its overlay (see
 //! `txn`). A list of a tenant's collections or aggregates is an unkeyed
 //! read: a client's holds its own stream, internal work holds the core.
-//! Every other meta op checkpoints, snapshots, purges or installs across
-//! collections, so it is a core task. A sampler, a checkpoint
+//! A committed redo that holds its content inline keys what its install
+//! writes and reads (see `redo`). A Calvin slice and a stream marker are
+//! core tasks. Every other meta op checkpoints, snapshots, purges or
+//! installs across collections, so it is a core task. A sampler, a checkpoint
 //! or a version purge keeps no client order, so it waits for the install
 //! and holds no later task. A cancel and a redo stream page read touch no
 //! state an install writes.
@@ -22,6 +24,7 @@ use crate::types::{DatabaseId, TenantId};
 
 use super::class::{Footprint, Scope};
 use super::keys::{KeySet, read_of, write_of};
+use super::redo::{RedoPlan, redo_footprint};
 use super::txn::{drop_overlay_footprint, resolve_footprint, stage_write_footprint};
 
 pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
@@ -111,8 +114,25 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::SetCustomCrsSet { .. }
         | MetaOp::CalvinDrop { .. }
         | MetaOp::CalvinResolve { .. }
-        | MetaOp::ApplyTransactionRedo { .. }
+        // A committed Calvin slice also ends its staged state.
+        | MetaOp::ApplyTransactionRedo { calvin: Some(_), .. }
         | MetaOp::RestoreRedo(_) => Footprint::Core,
+        MetaOp::ApplyTransactionRedo {
+            redo,
+            collections,
+            sum_targets,
+            calvin: None,
+            reads,
+            ..
+        } => redo_footprint(
+            &RedoPlan {
+                redo,
+                collections,
+                sum_targets,
+                reads,
+            },
+            scope,
+        ),
         // A read of a tenant's collections or aggregates keeps its order
         // against later tasks of its own stream. A client's read holds its
         // own connection's later tasks. Internal work holds every later task.
@@ -294,6 +314,228 @@ mod tests {
             plan_footprint(&PhysicalPlan::Meta(register), &scope),
             write(vec![key("ts"), key("ts_1h")])
         );
+    }
+
+    mod redo {
+        use std::collections::BTreeSet;
+
+        use nodedb_physical::physical_plan::{
+            CalvinInstall, CalvinReplySpec, MetaOp, RedoOrigin, RedoSumTargets, ResolvedSumTarget,
+        };
+        use nodedb_types::Surrogate;
+        use nodedb_types::calvin::{EngineTag, ReadKeyIdent, VersionedReadEntry};
+        use nodedb_types::sync::wire::SyncProvenance;
+        use nodedb_wal::record::RecordType;
+
+        use super::super::super::class::Footprint;
+        use super::super::super::keys::tests::{VSHARD, graph, key};
+        use super::class;
+        use crate::data::executor::core_loop::install_fence::FenceKey;
+        use crate::data::executor::handlers::transaction::redo_apply::test_commit::doc_put_sub_record;
+        use crate::wal::{RedoRecord, RedoStreamId, RedoStreamRef, RedoSubRecord};
+
+        /// What a committed redo plan names beside its record.
+        #[derive(Default)]
+        struct Named {
+            sum_targets: Vec<RedoSumTargets>,
+            reads: Vec<VersionedReadEntry>,
+            calvin: Option<CalvinInstall>,
+        }
+
+        fn record(ops: Vec<RedoSubRecord>) -> RedoRecord {
+            RedoRecord {
+                version: 1,
+                ops,
+                calvin_stamp: None,
+                cross_shard_applied: None,
+                row_sources: Vec::new(),
+                publishes: Vec::new(),
+                row_changes: Vec::new(),
+                user_roles: Vec::new(),
+                sum_targets: Vec::new(),
+                pins: Default::default(),
+            }
+        }
+
+        fn doc_put(collection: &str) -> RedoSubRecord {
+            let body = nodedb_types::json_to_msgpack(&serde_json::json!({"n": 1})).expect("body");
+            doc_put_sub_record(collection, "d1", &body, 1)
+        }
+
+        /// The install of the encoded `redo` into the stored `collections`,
+        /// with what `named` names.
+        fn plan(redo: Vec<u8>, collections: &[&str], named: Named) -> MetaOp {
+            MetaOp::ApplyTransactionRedo {
+                redo,
+                collections: collections.iter().map(|name| name.to_string()).collect(),
+                sum_targets: named.sum_targets,
+                origin: RedoOrigin::Commit,
+                calvin: named.calvin,
+                reads: named.reads,
+                snapshot_ordinal: None,
+                pins: Default::default(),
+            }
+        }
+
+        /// The install of `redo` into the stored `collections`.
+        fn apply(redo: &RedoRecord, collections: &[&str]) -> MetaOp {
+            let bytes = redo.to_bytes().expect("encode redo");
+            plan(bytes, collections, Named::default())
+        }
+
+        /// The install of one document put into `a`, with what `named`
+        /// names.
+        fn put_into_a(named: Named) -> MetaOp {
+            let bytes = record(vec![doc_put("a")]).to_bytes().expect("encode redo");
+            plan(bytes, &["a"], named)
+        }
+
+        /// The keys a write footprint holds, on the request's vShard.
+        fn written(footprint: Footprint) -> BTreeSet<FenceKey> {
+            match footprint {
+                Footprint::Write { keys, vshard } => {
+                    assert_eq!(vshard, VSHARD, "the write carries the request's vShard");
+                    keys.into_iter().collect()
+                }
+                other @ (Footprint::Keys(_)
+                | Footprint::WholeDatabase { .. }
+                | Footprint::Core
+                | Footprint::Ordered
+                | Footprint::Background) => panic!("a write footprint, got {other:?}"),
+            }
+        }
+
+        fn read_of(collection: &str) -> VersionedReadEntry {
+            VersionedReadEntry {
+                engine: EngineTag::Document,
+                collection: collection.into(),
+                key: ReadKeyIdent::Predicate,
+                home_vshard: None,
+            }
+        }
+
+        #[test]
+        fn a_whole_redo_keys_its_collections_sum_targets_and_reads() {
+            let op = put_into_a(Named {
+                sum_targets: vec![RedoSumTargets {
+                    collection: "a".into(),
+                    resolved: vec![ResolvedSumTarget::new("totals", "k", Surrogate::new(5))],
+                }],
+                reads: vec![read_of("r")],
+                calvin: None,
+            });
+            assert_eq!(
+                written(class(op)),
+                BTreeSet::from([key("a"), key("totals"), key("r")])
+            );
+        }
+
+        #[test]
+        fn a_whole_redo_keys_the_graph_and_sync_stream_its_ops_write() {
+            let edge = RedoSubRecord {
+                record_type: RecordType::Put as u32,
+                payload: zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
+                    collection: "knows".into(),
+                    src_id: "a".into(),
+                    label: "KNOWS".into(),
+                    dst_id: "b".into(),
+                    properties: Vec::new(),
+                    src_surrogate: 1,
+                    dst_surrogate: 2,
+                    system_from: Some(5),
+                    applied: None,
+                    valid_from_ms: None,
+                    valid_until_ms: None,
+                })
+                .expect("encode edge put"),
+            };
+            let provenance = SyncProvenance {
+                producer_id: 7,
+                epoch: 1,
+                stream_id: 42,
+                seq: 1,
+            };
+            let frame = RedoSubRecord {
+                record_type: RecordType::VectorPut as u32,
+                payload: crate::control::server::wal_dispatch::encode_vector_put_payload(
+                    "v",
+                    &[1.0, 2.0],
+                    2,
+                    "",
+                    Surrogate::new(9),
+                    Some(&provenance),
+                )
+                .expect("encode vector put"),
+            };
+            let op = apply(&record(vec![edge, frame]), &["knows", "v"]);
+            assert_eq!(
+                written(class(op)),
+                BTreeSet::from([
+                    key("knows"),
+                    key("v"),
+                    graph(),
+                    FenceKey::SyncStream {
+                        producer_id: 7,
+                        stream_id: 42,
+                    },
+                ])
+            );
+        }
+
+        #[test]
+        fn a_calvin_slice_is_core() {
+            let op = put_into_a(Named {
+                calvin: Some(CalvinInstall {
+                    epoch: 1,
+                    position: 0,
+                    epoch_system_ms: 0,
+                    reply: CalvinReplySpec::Count(Vec::new()),
+                    user_write: true,
+                    mirror: false,
+                }),
+                ..Named::default()
+            });
+            assert_eq!(class(op), Footprint::Core);
+        }
+
+        #[test]
+        fn a_stream_marker_is_core() {
+            let reference = RedoStreamRef {
+                stream: RedoStreamId::Session {
+                    vshard: 1,
+                    idempotency_key: 2,
+                },
+                len: 0,
+                chunks: Vec::new(),
+                publish_position: None,
+                entry: None,
+                stamp_floor: None,
+            };
+            let marker = reference.marker(None, None, Vec::new()).expect("marker");
+            assert_eq!(class(apply(&marker, &["a"])), Footprint::Core);
+        }
+
+        #[test]
+        fn an_undecodable_redo_is_core() {
+            let op = plan(vec![0xff, 0x00, 0x13], &["a"], Named::default());
+            assert_eq!(class(op), Footprint::Core);
+        }
+
+        #[test]
+        fn a_malformed_collection_name_is_core() {
+            let op = apply(&record(vec![doc_put("a")]), &["x/y/z"]);
+            assert_eq!(class(op), Footprint::Core);
+        }
+
+        /// A read that names no collection reads its whole vShard.
+        #[test]
+        fn a_read_of_no_collection_is_core() {
+            let op = put_into_a(Named {
+                reads: vec![read_of("")],
+                ..Named::default()
+            });
+            assert_eq!(class(op), Footprint::Core);
+        }
     }
 
     #[test]
