@@ -57,6 +57,45 @@ pub(super) fn plain_table_factor(
 /// output row. Every other item resolves against `scope` unchanged, so an
 /// accessor nested where it must not be (an aggregate argument, a subquery)
 /// still refuses through that clause's own scope.
+/// The generated name an unaliased projection or window item takes: the
+/// expression's own rendered text, case-folded everywhere except inside a
+/// single-quoted string literal. `SELECT ROW_NUMBER() OVER (...)` and a
+/// matching window spec must land on the same name ([`extract_window_functions`]
+/// calls this too), and two items differing only by a quoted literal's case
+/// (`tag = 'A'` vs `tag = 'a'`) must not collide onto it: `Value::String`
+/// equality is case-sensitive, so folding a literal's case would silently
+/// merge two computations that produce different values.
+///
+/// A doubled quote (`''`) inside a literal is SQL's own escape for one
+/// literal quote, never a literal boundary; this walk tracks that so it
+/// does not toggle out of the quoted span on an escaped quote.
+pub(crate) fn unaliased_item_name(expr: &ast::Expr) -> String {
+    let text = format!("{expr}");
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_literal = false;
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            if in_literal && chars.peek() == Some(&'\'') {
+                out.push(c);
+                if let Some(c2) = chars.next() {
+                    out.push(c2);
+                }
+                continue;
+            }
+            in_literal = !in_literal;
+            out.push(c);
+            continue;
+        }
+        if in_literal {
+            out.push(c);
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
 pub fn convert_projection(
     items: &[ast::SelectItem],
     scope: &TableScope,
@@ -67,7 +106,7 @@ pub fn convert_projection(
     for item in items {
         match item {
             ast::SelectItem::UnnamedExpr(expr) => {
-                let alias = format!("{expr}").to_lowercase();
+                let alias = unaliased_item_name(expr);
                 if let Some(cp) = convert_cp_item(expr, alias.clone(), cp_scope.as_ref())? {
                     result.push(cp);
                     continue;
@@ -377,5 +416,54 @@ pub(super) fn extract_float_array(expr: &ast::Expr) -> Result<Vec<f32>> {
         _ => Err(SqlError::Unsupported {
             detail: format!("expected array literal, got: {expr}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    use super::unaliased_item_name;
+
+    fn expr_of(sql: &str) -> sqlparser::ast::Expr {
+        Parser::new(&GenericDialect {})
+            .try_with_sql(sql)
+            .expect("tokenize")
+            .parse_expr()
+            .expect("parse")
+    }
+
+    /// Two unaliased items differing only by a quoted string literal's case
+    /// get different generated names: folding the literal's own case would
+    /// collide two computations `Value::String` equality (case-sensitive)
+    /// treats as different.
+    #[test]
+    fn a_quoted_literal_keeps_its_case_in_the_generated_name() {
+        let upper = unaliased_item_name(&expr_of("count(case when tag = 'A' then 1 end)"));
+        let lower = unaliased_item_name(&expr_of("count(case when tag = 'a' then 1 end)"));
+        assert_ne!(upper, lower);
+        assert!(upper.contains("'A'"), "{upper}");
+        assert!(lower.contains("'a'"), "{lower}");
+    }
+
+    /// Everything outside a quoted literal still folds, so the original bug
+    /// (`ROW_NUMBER() OVER (...)` named differently by two call sites) stays
+    /// fixed: an unquoted identifier or keyword's case never survives.
+    #[test]
+    fn text_outside_a_literal_still_folds() {
+        assert_eq!(
+            unaliased_item_name(&expr_of("ROW_NUMBER()")),
+            "row_number()"
+        );
+    }
+
+    /// A doubled quote is SQL's escape for one literal quote, not a literal
+    /// boundary: the text after it keeps folding as part of the same
+    /// literal, not as code outside it.
+    #[test]
+    fn a_doubled_quote_stays_inside_the_literal() {
+        let name = unaliased_item_name(&expr_of("tag = 'A''B'"));
+        assert!(name.contains("'A''B'"), "{name}");
     }
 }

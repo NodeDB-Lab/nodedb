@@ -17,6 +17,7 @@ use sqlparser::ast;
 use crate::error::{Result, SqlError};
 use crate::functions::registry::{FunctionCategory, FunctionRegistry};
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_ident};
+use crate::planner::select::helpers::unaliased_item_name;
 use crate::planner::sort::{sort_ascending, sort_nulls_first};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
@@ -37,10 +38,10 @@ pub fn extract_window_functions(
     let mut specs = Vec::new();
     for item in &select.projection {
         let (expr, alias) = match item {
-            // The projection names an unaliased item by its lowered text
-            // (`select/helpers.rs`). The window spec must carry the same name,
-            // or its column never matches the projection.
-            ast::SelectItem::UnnamedExpr(e) => (e, format!("{e}").to_lowercase()),
+            // The projection names an unaliased item by `unaliased_item_name`
+            // (`select/helpers.rs`). The window spec must carry the same
+            // name, or its column never matches the projection.
+            ast::SelectItem::UnnamedExpr(e) => (e, unaliased_item_name(e)),
             ast::SelectItem::ExprWithAlias { expr, alias } => (expr, normalize_ident(alias)),
             _ => continue,
         };
