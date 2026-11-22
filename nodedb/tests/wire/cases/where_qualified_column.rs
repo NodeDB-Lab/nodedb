@@ -133,3 +133,54 @@ async fn mismatched_qualifier_errors_instead_of_zero_rows() {
          not a silent 0-row result"
     );
 }
+
+// ── Every predicate shape, not only `=` ──────────────────────────────────
+
+async fn seeded_predicates() -> TestServer {
+    let srv = TestServer::start().await;
+    srv.exec(
+        "CREATE COLLECTION qp1 (id TEXT PRIMARY KEY, n INT, label TEXT) \
+         WITH (engine='document_strict')",
+    )
+    .await
+    .unwrap();
+    srv.exec("INSERT INTO qp1 (id, n, label) VALUES ('a', 1, 'x'), ('b', 2, 'y'), ('c', 3, 'z')")
+        .await
+        .unwrap();
+    srv
+}
+
+async fn ids(srv: &TestServer, sql: &str) -> Vec<String> {
+    srv.query_rows(sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_qualified_column_matches_in_every_predicate_shape() {
+    let srv = seeded_predicates().await;
+    for (predicate, expected) in [
+        ("qp1.id IN ('a', 'b')", vec!["a", "b"]),
+        ("qp1.id NOT IN ('a', 'b')", vec!["c"]),
+        ("qp1.n BETWEEN 1 AND 2", vec!["a", "b"]),
+        ("qp1.label LIKE 'x%'", vec!["a"]),
+    ] {
+        let sql = format!("SELECT id FROM qp1 WHERE {predicate} ORDER BY id");
+        assert_eq!(ids(&srv, &sql).await, expected, "{sql}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_alias_qualified_column_matches_in_every_predicate_shape() {
+    let srv = seeded_predicates().await;
+    for (predicate, expected) in [
+        ("z.id IN ('a', 'b')", vec!["a", "b"]),
+        ("z.n BETWEEN 2 AND 3", vec!["b", "c"]),
+    ] {
+        let sql = format!("SELECT z.id FROM qp1 AS z WHERE {predicate} ORDER BY z.id");
+        assert_eq!(ids(&srv, &sql).await, expected, "{sql}");
+    }
+}

@@ -14,6 +14,7 @@ use super::super::dml_helpers::{
 use crate::engine_rules::{self, DeleteParams, TruncateParams, UpdateParams};
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_object_name_checked};
+use crate::planner::ast_helpers::strip_and_convert_filters;
 use crate::planner::declared_type_coerce::coerce_assignments_to_declared_types;
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
@@ -55,9 +56,8 @@ fn plan_update_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<V
     }
 
     let table_name = extract_table_name_from_table_with_joins(&update.table)?;
-    // Validate an optional target alias even though the non-FROM update plan
-    // does not retain it.
-    crate::parser::normalize::table_name_from_factor(&update.table.relation)?;
+    let target_alias = crate::parser::normalize::table_name_from_factor(&update.table.relation)?
+        .and_then(|(_, alias)| alias);
     let info = catalog
         .get_collection(DatabaseId::DEFAULT, &table_name)?
         .ok_or_else(|| SqlError::UnknownTable {
@@ -69,6 +69,13 @@ fn plan_update_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<V
         alias: None,
         info: info.clone(),
     })?;
+    // A WHERE clause may qualify its own column by the table's name or, once
+    // aliased, by that alias (the alias then hides the name, the same rule
+    // `single_table_qualifiers` applies for SELECT) -- `orders.status = 1` or
+    // `o.status = 1` for `UPDATE orders o ...`. Stripped here, or the
+    // qualified name reaches the filter as a literal "o.status" field key no
+    // stored document ever has, and the UPDATE silently matches no row.
+    let where_ref = target_alias.as_deref().unwrap_or(table_name.as_str());
 
     let mut assigns = convert_assignments(&update.assignments, &target_scope, &target_scope)?;
     // Re-type each literal assignment to its declared column type before the
@@ -83,7 +90,7 @@ fn plan_update_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<V
     check_declared_float_ranges_in_assignments(&info.columns, &assigns)?;
 
     let filters = match &update.selection {
-        Some(expr) => super::super::select::convert_where_to_filters(expr, &target_scope)?,
+        Some(expr) => strip_and_convert_filters(vec![expr.clone()], where_ref, &target_scope)?,
         None => Vec::new(),
     };
 
@@ -198,7 +205,8 @@ fn plan_delete_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<V
         detail: "DELETE requires a FROM table".into(),
     })?;
     let table_name = extract_table_name_from_table_with_joins(from)?;
-    crate::parser::normalize::table_name_from_factor(&from.relation)?;
+    let target_alias = crate::parser::normalize::table_name_from_factor(&from.relation)?
+        .and_then(|(_, alias)| alias);
     let info = catalog
         .get_collection(DatabaseId::DEFAULT, &table_name)?
         .ok_or_else(|| SqlError::UnknownTable {
@@ -210,9 +218,14 @@ fn plan_delete_rows(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<V
         alias: None,
         info: info.clone(),
     })?;
+    // See plan_update_rows: a WHERE clause may qualify its own column by the
+    // table's name or, once aliased, by that alias -- stripped here, or the
+    // qualified name reaches the filter as a field key no stored document
+    // ever has, and the DELETE silently matches no row.
+    let where_ref = target_alias.as_deref().unwrap_or(table_name.as_str());
 
     let filters = match &delete.selection {
-        Some(expr) => super::super::select::convert_where_to_filters(expr, &target_scope)?,
+        Some(expr) => strip_and_convert_filters(vec![expr.clone()], where_ref, &target_scope)?,
         None => Vec::new(),
     };
 
