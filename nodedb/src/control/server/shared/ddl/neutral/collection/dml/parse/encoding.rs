@@ -24,26 +24,51 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn fields_to_in
     fields_to_write_sql("INSERT INTO", collection, std::slice::from_ref(fields))
 }
 
-/// Build one SQL INSERT statement from the field maps of its rows, in row
-/// order. See `fields_to_insert_sql` for the identifier quoting rationale.
-pub(in crate::control::server::shared::ddl::neutral::collection) fn rows_to_insert_sql(
+/// Build the SQL INSERT statements for the field maps of `rows`, in row order.
+/// See `fields_to_insert_sql` for the identifier quoting rationale and
+/// `write_statements` for the grouping rule.
+pub(in crate::control::server::shared::ddl::neutral::collection) fn rows_to_insert_sqls(
     collection: &str,
     rows: &[std::collections::HashMap<String, nodedb_types::Value>],
-) -> String {
-    fields_to_write_sql("INSERT INTO", collection, rows)
+) -> Vec<String> {
+    write_statements("INSERT INTO", collection, rows)
 }
 
-/// Build one SQL UPSERT statement from the field maps of its rows, in row
-/// order. See `fields_to_insert_sql` for the identifier quoting rationale.
-pub(in crate::control::server::shared::ddl::neutral::collection) fn fields_to_upsert_sql(
+/// Build the SQL UPSERT statements for the field maps of `rows`, in row order.
+/// See `fields_to_insert_sql` for the identifier quoting rationale and
+/// `write_statements` for the grouping rule.
+pub(in crate::control::server::shared::ddl::neutral::collection) fn fields_to_upsert_sqls(
     collection: &str,
     rows: &[std::collections::HashMap<String, nodedb_types::Value>],
-) -> String {
-    fields_to_write_sql("UPSERT INTO", collection, rows)
+) -> Vec<String> {
+    write_statements("UPSERT INTO", collection, rows)
 }
 
-/// The column list is the sorted union of every row's keys. A row missing
-/// a column writes `NULL` there.
+/// One statement per run of consecutive rows that name the same keys. A key a
+/// row does not name stays out of its statement, so a declared DEFAULT fills it
+/// on insert and an upsert leaves the stored field alone. A statement never
+/// writes `NULL` for a key its row did not supply.
+fn write_statements(
+    keyword: &str,
+    collection: &str,
+    rows: &[std::collections::HashMap<String, nodedb_types::Value>],
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut start = 0;
+    for end in 1..=rows.len() {
+        let run_ends = end == rows.len()
+            || rows[end].len() != rows[start].len()
+            || rows[end].keys().any(|k| !rows[start].contains_key(k));
+        if run_ends {
+            statements.push(fields_to_write_sql(keyword, collection, &rows[start..end]));
+            start = end;
+        }
+    }
+    statements
+}
+
+/// The column list is the sorted union of every row's keys. The caller passes
+/// rows that name the same keys, so no cell is filled.
 fn fields_to_write_sql(
     keyword: &str,
     collection: &str,
@@ -103,7 +128,7 @@ mod tests {
             "a); DROP COLLECTION other; --",
             nodedb_types::Value::Integer(1),
         );
-        let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
+        let sql = fields_to_upsert_sqls("t", std::slice::from_ref(&fields)).remove(0);
         let quoted = "\"a); DROP COLLECTION other; --\"";
         assert!(sql.contains(quoted));
         for part in sql.split(quoted) {
@@ -131,7 +156,7 @@ mod tests {
             "a\"); DROP COLLECTION other; --",
             nodedb_types::Value::Integer(1),
         );
-        let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
+        let sql = fields_to_upsert_sqls("t", std::slice::from_ref(&fields)).remove(0);
         assert!(sql.contains("\"a\"\"); DROP COLLECTION other; --\""));
     }
 
@@ -140,30 +165,48 @@ mod tests {
     #[test]
     fn upsert_sql_writes_a_nan_float_as_a_float8_cast() {
         let fields = one_field("score", nodedb_types::Value::Float(f64::NAN));
-        let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
+        let sql = fields_to_upsert_sqls("t", std::slice::from_ref(&fields)).remove(0);
         assert!(sql.ends_with(", 'NaN'::FLOAT8)"), "{sql}");
     }
 
     #[test]
     fn upsert_sql_writes_an_infinite_float_as_a_float8_cast() {
         let fields = one_field("score", nodedb_types::Value::Float(f64::INFINITY));
-        let sql = fields_to_upsert_sql("t", std::slice::from_ref(&fields));
+        let sql = fields_to_upsert_sqls("t", std::slice::from_ref(&fields)).remove(0);
         assert!(sql.ends_with(", 'Infinity'::FLOAT8)"), "{sql}");
     }
 
     #[test]
-    fn upsert_sql_writes_one_tuple_per_row_over_the_column_union() {
+    fn upsert_sql_writes_one_tuple_per_row_of_the_same_keys() {
+        let mut first = HashMap::new();
+        first.insert("id".into(), nodedb_types::Value::String("a".into()));
+        first.insert("n".into(), nodedb_types::Value::Integer(1));
+        let mut second = first.clone();
+        second.insert("n".into(), nodedb_types::Value::Integer(2));
+        let sqls = fields_to_upsert_sqls("t", &[first, second]);
+        assert_eq!(sqls.len(), 1);
+        assert!(
+            sqls[0].starts_with("UPSERT INTO t (\"id\", \"n\") VALUES ("),
+            "{}",
+            sqls[0]
+        );
+        assert_eq!(sqls[0].matches("), (").count(), 1, "{}", sqls[0]);
+    }
+
+    #[test]
+    fn a_row_missing_a_key_never_gets_a_null_for_it() {
         let mut first = HashMap::new();
         first.insert("id".into(), nodedb_types::Value::String("a".into()));
         first.insert("n".into(), nodedb_types::Value::Integer(1));
         let mut second = HashMap::new();
         second.insert("id".into(), nodedb_types::Value::String("b".into()));
-        let sql = fields_to_upsert_sql("t", &[first, second]);
-        assert!(
-            sql.starts_with("UPSERT INTO t (\"id\", \"n\") VALUES ("),
-            "{sql}"
-        );
-        assert_eq!(sql.matches("), (").count(), 1, "{sql}");
-        assert!(sql.ends_with(", NULL)"), "{sql}");
+        for sqls in [
+            rows_to_insert_sqls("t", &[first.clone(), second.clone()]),
+            fields_to_upsert_sqls("t", &[first, second]),
+        ] {
+            assert_eq!(sqls.len(), 2, "{sqls:?}");
+            assert!(!sqls[1].contains("NULL"), "{}", sqls[1]);
+            assert!(!sqls[1].contains("\"n\""), "{}", sqls[1]);
+        }
     }
 }

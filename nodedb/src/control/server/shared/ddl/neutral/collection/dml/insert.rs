@@ -18,7 +18,7 @@ use super::insert_row::prepare_insert_row;
 use super::insert_vectors::{RowVectorCtx, insert_row_vectors};
 use super::parse::ParsedInsert;
 use super::parse::{
-    authorize_write_target, parse_write_statement, plan_and_dispatch, rows_to_insert_sql,
+    authorize_write_target, parse_write_statement, plan_and_dispatch, rows_to_insert_sqls,
 };
 use super::triggers::{fire_before_triggers, fire_instead_triggers, fire_sync_after_triggers};
 use crate::control::trigger::statement_txn::{fires_joined_body, in_block, with_statement_txn};
@@ -124,23 +124,34 @@ async fn insert_parsed(
     // list has to be re-attached here or the planner never sees it.
     let rows: Vec<HashMap<String, nodedb_types::Value>> =
         prepared.iter().map(|row| row.fields.clone()).collect();
-    let mut insert_sql = rows_to_insert_sql(coll_name, &rows);
-    if let Some(ref columns) = parsed.returning_clause {
-        insert_sql.push_str(" RETURNING ");
-        insert_sql.push_str(columns);
+    let statements = rows_to_insert_sqls(coll_name, &rows);
+    if statements.len() > 1 && parsed.returning_clause.is_some() {
+        return Err(DdlError::new(
+            "0A000",
+            "INSERT with RETURNING needs every object literal to name the same keys",
+        ));
     }
-    let returned_rows = plan_and_dispatch(
-        state,
-        identity,
-        tenant_id,
-        database_id,
-        &insert_sql,
-        txn_ctx,
-        // The statement fires its INSTEAD OF, BEFORE and SYNC AFTER bodies
-        // around this write itself.
-        false,
-    )
-    .await?;
+    let mut returned_rows = Vec::new();
+    for mut insert_sql in statements {
+        if let Some(ref columns) = parsed.returning_clause {
+            insert_sql.push_str(" RETURNING ");
+            insert_sql.push_str(columns);
+        }
+        returned_rows.extend(
+            plan_and_dispatch(
+                state,
+                identity,
+                tenant_id,
+                database_id,
+                &insert_sql,
+                txn_ctx,
+                // The statement fires its INSTEAD OF, BEFORE and SYNC AFTER
+                // bodies around this write itself.
+                false,
+            )
+            .await?,
+        );
+    }
 
     // Track field names in catalog for schemaless collections. Learned fields
     // are part of the replicated descriptor, so they go out through the
