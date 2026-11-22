@@ -13,6 +13,11 @@ pub(crate) enum SetMergeMode {
     Intersect,
     /// Keep rows of the first payload absent from every later payload.
     Except,
+    /// Keep each row `min(count in every payload)` times.
+    IntersectAll,
+    /// Keep each row of the first payload `count - sum(count in later payloads)`
+    /// times, at least zero.
+    ExceptAll,
 }
 
 /// Merge payloads for INTERSECT or EXCEPT.
@@ -21,7 +26,8 @@ pub(crate) enum SetMergeMode {
 /// and `columns[i]` is that branch's output column keys in SELECT-list
 /// order. Two rows match only when every position holds an equal value (see
 /// `row_key`). The output holds the surviving rows of the first payload,
-/// byte for byte and deduplicated by identity, as one msgpack array. No
+/// byte for byte and deduplicated by identity, as one msgpack array. The
+/// `All` modes keep duplicates by multiplicity instead. No
 /// payloads yields an empty array. Branches of different column counts, a
 /// payload [`payload_rows`] refuses, or a row that does not decode fail the
 /// merge.
@@ -36,6 +42,52 @@ pub(crate) fn merge_set_op_payloads(
     };
 
     let first_rows = keyed_rows(&compare, 0, first)?;
+    if matches!(mode, SetMergeMode::IntersectAll | SetMergeMode::ExceptAll) {
+        let mut counts: Vec<std::collections::HashMap<Vec<String>, usize>> = Vec::new();
+        for (offset, payload) in others.iter().enumerate() {
+            let mut map = std::collections::HashMap::new();
+            for (identity, _) in keyed_rows(&compare, offset + 1, payload)? {
+                *map.entry(identity).or_insert(0usize) += 1;
+            }
+            counts.push(map);
+        }
+        // Per identity, how many first-payload rows may still be kept
+        // (`IntersectAll`) or must still be dropped (`ExceptAll`).
+        let mut budget: std::collections::HashMap<Vec<String>, usize> =
+            std::collections::HashMap::new();
+        let kept: Vec<Vec<u8>> = first_rows
+            .into_iter()
+            .filter(|(identity, _)| {
+                let left = budget.entry(identity.clone()).or_insert_with(|| {
+                    let per_other = counts.iter().map(|m| m.get(identity).copied().unwrap_or(0));
+                    match mode {
+                        SetMergeMode::IntersectAll => per_other.min().unwrap_or(0),
+                        _ => per_other.sum(),
+                    }
+                });
+                match mode {
+                    SetMergeMode::IntersectAll => {
+                        if *left > 0 {
+                            *left -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => {
+                        if *left > 0 {
+                            *left -= 1;
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                }
+            })
+            .map(|(_, row)| row)
+            .collect();
+        return Ok(encode_msgpack_array(&kept));
+    }
     let mut other_sets: Vec<std::collections::HashSet<Vec<String>>> = Vec::new();
     for (offset, payload) in others.iter().enumerate() {
         other_sets.push(
@@ -48,6 +100,7 @@ pub(crate) fn merge_set_op_payloads(
     let keep = |identity: &Vec<String>| match mode {
         SetMergeMode::Intersect => other_sets.iter().all(|set| set.contains(identity)),
         SetMergeMode::Except => !other_sets.iter().any(|set| set.contains(identity)),
+        SetMergeMode::IntersectAll | SetMergeMode::ExceptAll => false,
     };
 
     let mut seen = std::collections::HashSet::with_capacity(first_rows.len());

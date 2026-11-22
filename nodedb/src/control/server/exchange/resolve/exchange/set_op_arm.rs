@@ -69,8 +69,8 @@ pub(super) async fn resolve_set_op(
 
 /// Merge materialized branch payloads with `op`. Each payload is one msgpack
 /// array of flat row maps, and `columns[i]` is branch `i`'s output column
-/// keys in SELECT-list order. `UNION` dedups, and `INTERSECT [ALL]` and
-/// `EXCEPT [ALL]` filter, by positional value identity. `UNION ALL`
+/// keys in SELECT-list order. `UNION`, `INTERSECT`, and `EXCEPT` dedup by positional value identity.
+/// `INTERSECT ALL` and `EXCEPT ALL` keep multiplicity (minimum and difference of counts). `UNION ALL`
 /// concatenates. A payload in no row shape, or branches of different column
 /// counts, fail the merge.
 fn merge_set_op_rows(
@@ -81,12 +81,12 @@ fn merge_set_op_rows(
     match op {
         SetOpKind::UnionAll => merge_payload_rows(payloads),
         SetOpKind::UnionDistinct => dedup_union_payloads(payloads, columns),
-        SetOpKind::Intersect | SetOpKind::IntersectAll => {
-            merge_set_op_payloads(payloads, SetMergeMode::Intersect, columns)
+        SetOpKind::Intersect => merge_set_op_payloads(payloads, SetMergeMode::Intersect, columns),
+        SetOpKind::IntersectAll => {
+            merge_set_op_payloads(payloads, SetMergeMode::IntersectAll, columns)
         }
-        SetOpKind::Except | SetOpKind::ExceptAll => {
-            merge_set_op_payloads(payloads, SetMergeMode::Except, columns)
-        }
+        SetOpKind::Except => merge_set_op_payloads(payloads, SetMergeMode::Except, columns),
+        SetOpKind::ExceptAll => merge_set_op_payloads(payloads, SetMergeMode::ExceptAll, columns),
     }
 }
 
@@ -129,6 +129,31 @@ mod tests {
         let right = encode_array(&[serde_json::json!({"x": 2}), serde_json::json!({"x": 3})]);
         let merged = merge_set_op_rows(&[left, right], SetOpKind::Intersect, &x()).unwrap();
         assert_eq!(decode(&merged), r#"[{"x":2}]"#);
+    }
+
+    #[test]
+    fn intersect_all_keeps_the_minimum_multiplicity() {
+        let left = encode_array(&[
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"x": 2}),
+        ]);
+        let right = encode_array(&[serde_json::json!({"x": 1}), serde_json::json!({"x": 1})]);
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::IntersectAll, &x()).unwrap();
+        assert_eq!(decode(&merged), r#"[{"x":1},{"x":1}]"#);
+    }
+
+    #[test]
+    fn except_all_keeps_the_count_difference() {
+        let left = encode_array(&[
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"x": 1}),
+            serde_json::json!({"x": 1}),
+        ]);
+        let right = encode_array(&[serde_json::json!({"x": 1})]);
+        let merged = merge_set_op_rows(&[left, right], SetOpKind::ExceptAll, &x()).unwrap();
+        assert_eq!(decode(&merged), r#"[{"x":1},{"x":1}]"#);
     }
 
     #[test]
