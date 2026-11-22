@@ -40,6 +40,12 @@ pub async fn create_sparse_index(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "sparse indexes",
+    )?;
     // This surface carries no options, so any trailing token is a statement
     // the handler does not implement rather than one it can ignore.
     let stmt = parse_index_statement(sql, LEADING, &HEADER, &[], CONTEXT)?;

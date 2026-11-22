@@ -49,6 +49,15 @@ pub async fn create_materialized_view(
         return create_streaming_mv(state, identity, database_id, &name, &query_sql).await;
     }
 
+    // Creating a periodic view follows the node's DDL authorization mode.
+    // The streaming path above checks tenant admin.
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "materialized views",
+    )?;
+
     // Validate source collection exists.
     {
         let catalog = state.credentials.catalog();

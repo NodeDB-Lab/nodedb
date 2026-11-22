@@ -94,6 +94,13 @@ pub async fn build_and_persist(
         balanced_raw,
     } = *req;
 
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "collections and tables",
+    )?;
+
     validate_name(name, variant.label)?;
     if variant.require_columns && columns.is_empty() {
         return Err(err(

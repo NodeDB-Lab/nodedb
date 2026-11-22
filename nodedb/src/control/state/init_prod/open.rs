@@ -192,6 +192,7 @@ impl SharedState {
                 audit_max_entries: auth_config.audit_max_entries,
                 idle_timeout_secs: auth_config.idle_timeout_secs,
                 session_absolute_timeout_secs: auth_config.session_absolute_timeout_secs,
+                ddl_authorization: auth_config.ddl_authorization,
             },
             stores: StoreParts {
                 orgs,

@@ -61,6 +61,13 @@ pub async fn convert_collection(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (collection, target_type, explicit_columns) = parse_convert_sql(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "convert collections",
+    )?;
     let tenant_id = identity.tenant_id;
 
     // Refused before the proposal: a mirror takes its rows from its source.

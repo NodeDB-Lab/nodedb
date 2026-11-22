@@ -159,6 +159,7 @@ fn test_auth_and_buses(wal: &Arc<WalManager>) -> crate::Result<(AuthInputs, BusP
         audit_max_entries: 0,
         idle_timeout_secs: 0,
         session_absolute_timeout_secs: 0,
+        ddl_authorization: crate::config::auth::DdlAuthorizationMode::default(),
     };
     let buses = BusParts {
         audit,

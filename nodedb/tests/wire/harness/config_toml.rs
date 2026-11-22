@@ -74,6 +74,11 @@ pub(super) struct TuningOverrides {
     /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
     /// so a superseded version leaves about 12 s after its successor.
     pub(super) fast_version_cleanup: bool,
+    /// Overrides `[auth] ddl_authorization` (`"open"`, `"tenant_admin"`,
+    /// `"permission"`, `"owner"` or `"mix"`), so a test can exercise a DDL
+    /// permission check without the shipped `open` default admitting
+    /// every caller.
+    pub(super) ddl_authorization: Option<&'static str>,
 }
 
 impl TuningOverrides {
@@ -177,6 +182,14 @@ impl TuningOverrides {
             ..Self::default()
         }
     }
+
+    /// Boot with `[auth] ddl_authorization` set to `mode`.
+    pub(super) fn ddl_authorization(mode: &'static str) -> Self {
+        Self {
+            ddl_authorization: Some(mode),
+            ..Self::default()
+        }
+    }
 }
 
 /// Write `nodedb.toml` into `dir` and return its path.
@@ -197,6 +210,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
          password_expiry_days = 0\n\
          audit_retention_days = 0\n"
     );
+    if let Some(mode) = tuning.ddl_authorization {
+        toml.push_str(&format!("ddl_authorization = \"{mode}\"\n"));
+    }
     // A test's own client connections are still open at shutdown. The
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.

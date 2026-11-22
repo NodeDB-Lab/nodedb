@@ -45,6 +45,12 @@ pub async fn create_sorted_index(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "sorted indexes",
+    )?;
     // Extract index name.
     let rest = nodedb_types::strip_prefix_ascii_case_insensitive(sql, "CREATE SORTED INDEX ")
         .ok_or_else(|| ddl_err("42601", "expected CREATE SORTED INDEX"))?;

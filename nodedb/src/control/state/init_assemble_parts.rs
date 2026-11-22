@@ -105,6 +105,7 @@ pub(super) struct AuthInputs {
     pub(super) audit_max_entries: u64,
     pub(super) idle_timeout_secs: u64,
     pub(super) session_absolute_timeout_secs: u64,
+    pub(super) ddl_authorization: crate::config::auth::DdlAuthorizationMode,
 }
 
 /// Security, metering, array-sync, and event stores.

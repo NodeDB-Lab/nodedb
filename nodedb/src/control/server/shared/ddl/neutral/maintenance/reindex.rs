@@ -43,6 +43,13 @@ pub async fn handle_reindex(
     // `nodedb_sql::ddl_ast::parse` already applied the canonical identifier
     // convention, so both names arrive in their stored form.
     let collection = collection.to_string();
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "reindex collections",
+    )?;
     let index_name = index_name.map(str::to_string);
     let tenant_id = identity.tenant_id;
 

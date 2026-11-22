@@ -26,6 +26,13 @@ pub fn handle_compact(
     }
 
     let collection = parse_ident_token(parts[1])?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "compact collections",
+    )?;
     let tenant_id = identity.tenant_id;
 
     // Verify collection exists.

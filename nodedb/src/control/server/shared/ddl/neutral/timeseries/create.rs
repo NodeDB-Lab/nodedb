@@ -20,6 +20,13 @@ pub async fn create_timeseries(
     parts: &[&str],
     database_id: nodedb_types::DatabaseId,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    super::super::object_permission::require_create_permission(
+        state,
+        identity,
+        database_id,
+        "timeseries collections",
+    )?;
+
     if parts.len() < 3 {
         return Err(ddl_err(
             "42601",

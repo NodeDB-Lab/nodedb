@@ -48,6 +48,13 @@ pub async fn handle_alter_vector_index_set(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (collection, field_name) = parse_collection_column(sql, " ON ")?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &collection,
+        "set vector index parameters",
+    )?;
     let overlay = parse_set_clause(sql)?;
     let tenant_id = identity.tenant_id;
 

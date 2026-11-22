@@ -32,6 +32,14 @@ pub async fn add_state_constraint(
             .ok_or_else(|| err("42601", "missing collection name"))?,
     )?;
 
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change constraints",
+    )?;
+
     let constraint_name = parse_ident_token(
         parts
             .iter()
@@ -99,6 +107,14 @@ pub async fn add_transition_check(
             .ok_or_else(|| err("42601", "missing collection name"))?,
     )?;
 
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change constraints",
+    )?;
+
     let check_idx = parts
         .iter()
         .position(|p| p.eq_ignore_ascii_case("CHECK"))
@@ -155,6 +171,14 @@ pub async fn add_check_constraint(
         parts
             .get(2)
             .ok_or_else(|| err("42601", "missing collection name"))?,
+    )?;
+
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change constraints",
     )?;
 
     let constraint_name = parse_ident_token(
@@ -248,6 +272,14 @@ pub async fn drop_constraint(
             .position(|p| p.eq_ignore_ascii_case("ON"))
             .and_then(|i| parts.get(i + 1))
             .ok_or_else(|| err("42601", "DROP CONSTRAINT requires ON <collection>"))?,
+    )?;
+
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change constraints",
     )?;
 
     let catalog = state.credentials.catalog();

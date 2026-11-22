@@ -27,6 +27,12 @@ pub async fn alter_schedule(
     action: &str,
     cron_expr: Option<&str>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    crate::control::server::shared::ddl::neutral::object_permission::require_tenant_wide(
+        state,
+        identity,
+        database_id,
+        "alter schedules",
+    )?;
     let tenant_id = identity.tenant_id.as_u64();
 
     // Look up the schedule in the registry.

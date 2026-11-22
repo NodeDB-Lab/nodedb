@@ -98,6 +98,8 @@ pub struct SharedState {
     pub(super) idle_timeout_secs: u64,
     /// Absolute session lifetime in seconds (0 = disabled).
     pub(super) session_absolute_timeout_secs: u64,
+    /// DDL authorization policy, read once at startup.
+    pub(super) ddl_authorization: crate::config::auth::DdlAuthorizationMode,
     /// Cluster topology. Boot wires it from the cluster handle before the
     /// state is shared; `None` only on a state no boot wired.
     pub cluster_topology: Option<Arc<RwLock<nodedb_cluster::ClusterTopology>>>,
