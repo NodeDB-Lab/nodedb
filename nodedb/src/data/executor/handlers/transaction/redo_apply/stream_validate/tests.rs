@@ -137,7 +137,20 @@ impl StreamWal {
             publish_position: None,
             entry: None,
             stamp_floor: None,
+            keys: declared_keys(content),
         }
+    }
+}
+
+/// The keys a proposer declares for `content`, by the walk it runs. A case
+/// that writes a record the walk cannot decode keeps the keys of the
+/// records before it: the validate refuses that content.
+pub(in crate::data::executor::handlers::transaction::redo_apply) fn declared_keys(
+    content: &[u8],
+) -> crate::wal::RedoStreamKeys {
+    let mut walk = crate::wal::StreamKeysWalk::new();
+    match walk.walk(content) {
+        Ok(()) | Err(_) => walk.keys(),
     }
 }
 

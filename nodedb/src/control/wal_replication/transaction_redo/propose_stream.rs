@@ -14,11 +14,11 @@ use std::sync::Arc;
 use crate::control::state::SharedState;
 use crate::control::wal_replication::encode::{
     RedoChunkSlot, RedoEntryTarget, chunk_count, chunk_entry, chunk_room, chunked_final_entry,
-    chunks_complete, chunks_overrun, final_entry_stream,
+    chunks_complete, chunks_overrun, declare_final_keys, final_entry_stream,
 };
 use crate::control::wal_replication::propose_replicated_entry;
 use crate::control::wal_replication::{AppliedOutput, AsyncRaftProposer, ReplicatedEntry};
-use crate::wal::RedoStreamId;
+use crate::wal::{RedoStreamId, StreamKeysWalk};
 
 use super::apply::RedoTarget;
 use super::payload::TransactionRedoPayload;
@@ -35,6 +35,8 @@ pub(crate) struct RedoStreamProposal<'s> {
     deadline: tokio::time::Instant,
     /// Bytes one chunk carries.
     room: usize,
+    /// Bytes one entry holds at most. The final entry's keys fit in it.
+    max_entry_bytes: usize,
     /// The declared byte length of the content.
     len: u64,
     /// The declared chunk count.
@@ -43,6 +45,8 @@ pub(crate) struct RedoStreamProposal<'s> {
     held: Vec<u8>,
     next_index: u32,
     proposed: u64,
+    /// The keys of every pushed record. The final entry declares them.
+    keys: StreamKeysWalk,
 }
 
 impl<'s> RedoStreamProposal<'s> {
@@ -63,6 +67,7 @@ impl<'s> RedoStreamProposal<'s> {
             vshard_id: target.vshard_id,
         };
         let count = chunk_count(len, max_entry_bytes)?;
+        // The pushes walk the content, and `finish` declares its keys.
         let last = chunked_final_entry(target, payload, count, len, |last| RedoStreamId::Session {
             vshard: target.vshard_id.as_u32(),
             idempotency_key: last.idempotency_key,
@@ -77,17 +82,20 @@ impl<'s> RedoStreamProposal<'s> {
             event_source: payload.event_source,
             deadline,
             room: chunk_room(max_entry_bytes)?,
+            max_entry_bytes,
             len,
             count,
             held: Vec::new(),
             next_index: 0,
             proposed: 0,
+            keys: StreamKeysWalk::new(),
         })
     }
 
-    /// Append `bytes` to the content and propose every full chunk. On error
-    /// the caller abandons the stream.
+    /// Append `bytes`, a run of whole records, to the content and propose
+    /// every full chunk. On error the caller abandons the stream.
     pub(crate) async fn push(&mut self, bytes: &[u8]) -> crate::Result<()> {
+        self.keys.walk(bytes)?;
         self.held.extend_from_slice(bytes);
         while self.held.len() >= self.room {
             let rest = self.held.split_off(self.room);
@@ -147,6 +155,12 @@ impl<'s> RedoStreamProposal<'s> {
         }
         if !chunks_complete(self.proposed, self.next_index, self.len, self.count) {
             let error = self.length_error(self.proposed);
+            self.abandon().await;
+            return Err(error);
+        }
+        if let Err(error) =
+            declare_final_keys(&mut self.last, self.keys.keys(), self.max_entry_bytes)
+        {
             self.abandon().await;
             return Err(error);
         }

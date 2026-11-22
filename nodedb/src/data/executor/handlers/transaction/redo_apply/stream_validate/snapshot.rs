@@ -13,13 +13,12 @@
 //! whole-record check names.
 //!
 //! Each read is checked once. A row that moves after its chunk passed is
-//! not seen again, so a yielding install fences the collection of every
-//! read it checked before the slice ends (`StreamWalk::read_keys`). A read
-//! that names no collection reads its whole vShard: it checks only on the
-//! task's own vShard, whose writes the fence holds from before the
-//! validate.
-
-use nodedb_types::QualifiedCollection;
+//! not seen again. So a yielding install fences the collection of each
+//! read from before the validate, as its marker declares, and checks the
+//! collection of every read it checked before the slice ends
+//! (`StreamWalk::read_keys`). A read that names no collection reads its
+//! whole vShard: it checks only on the task's own vShard, whose writes the
+//! fence holds from before the validate.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::install_fence::FenceKey;
@@ -88,16 +87,11 @@ impl CoreLoop {
             return;
         }
         let db = input.task.request.database_id;
-        for read in reads.iter().filter(|read| !read.collection.is_empty()) {
-            // A name that is no collection name of `db` names no collection
-            // any write stores to.
-            if let Ok(qualified) = QualifiedCollection::from_request(db, &read.collection) {
-                walk.read_keys.insert(FenceKey::Collection {
-                    db,
-                    name: qualified.as_str().to_owned(),
-                });
-            }
-        }
+        walk.read_keys.extend(
+            reads
+                .iter()
+                .filter_map(|read| FenceKey::of_read(db, &read.collection)),
+        );
         let vshard = input.task.request.vshard_id.as_u32();
         match self.txn_reads_unchanged(input.task, input.tid, &reads, snapshot) {
             Ok(true) => {}

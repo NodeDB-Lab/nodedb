@@ -588,6 +588,7 @@ fn marker_wal() -> MarkerWal {
         publish_position: None,
         entry: None,
         stamp_floor: None,
+        keys: Default::default(),
     };
     let marker = wal
         .appender(9)

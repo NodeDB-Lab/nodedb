@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! A parked install holds back the tasks whose keys only the core's
-//! registries or the install's walk name: a sorted index by name, a sync
-//! stream, a transaction's overlay, a CRDT referent, a MATCH's node
+//! registries or the marker's declared keys name: a sorted index by name, a
+//! sync stream, a transaction's overlay, a CRDT referent, a MATCH's node
 //! collection, and the tenant's graph when the install writes it.
 
 use nodedb_physical::physical_plan::{CrdtOp, GraphOp, GraphReadScope, KvOp, MetaOp, PhysicalPlan};

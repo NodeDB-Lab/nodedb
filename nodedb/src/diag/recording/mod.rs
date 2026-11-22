@@ -81,7 +81,7 @@ pub use ingest::{
     ilp_invalid_utf8_drop, ilp_killed_session_lines_refused, ilp_line_read_drop,
     wal_catchup_record_misnamed,
 };
-pub use install_fence::stored_collection_name_malformed;
+pub use install_fence::{stored_collection_name_malformed, stream_key_undeclared};
 pub use kv_expiry::kv_reap_entry_unusable;
 pub use lease::{
     ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,

@@ -221,6 +221,7 @@ mod tests {
             publish_position: None,
             entry: None,
             stamp_floor: None,
+            keys: Default::default(),
         }
     }
 

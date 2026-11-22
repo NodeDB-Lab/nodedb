@@ -30,6 +30,24 @@ impl CoreLoop {
         }
     }
 
+    /// Arm `keys`, and return each one the fence did not hold before.
+    pub(in crate::data::executor) fn arm_install_keys_unheld(
+        &mut self,
+        keys: BTreeSet<FenceKey>,
+    ) -> Vec<FenceKey> {
+        match self.install_fence.as_mut() {
+            Some(fence) => keys
+                .into_iter()
+                .filter(|key| fence.keys.insert(key.clone()))
+                .collect(),
+            None => {
+                let unheld = keys.iter().cloned().collect();
+                self.install_fence = Some(InstallFence::new(keys));
+                unheld
+            }
+        }
+    }
+
     /// Disarm the fence. Maintenance that came due while it was armed runs
     /// first, so back-to-back installs never starve it. Its waiters then
     /// return to the front of the queue in arrival order.

@@ -105,6 +105,7 @@ mod tests {
             },
             count: 4,
             len: 1 << 20,
+            keys: Default::default(),
         }
     }
 

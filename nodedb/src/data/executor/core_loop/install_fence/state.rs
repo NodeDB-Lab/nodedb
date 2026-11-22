@@ -10,6 +10,9 @@
 //! - a waiting core task holds every later task with a footprint
 //! - a waiting ordered read holds every later internal task
 //! - background core work waits and holds nothing
+//! - a stream marker's install waits while any fence is armed, since one
+//!   install parks at a time. While it waits it holds later tasks of its
+//!   keys and later writes of its event vShard, as a waiting write does
 //!
 //! A client task also waits while an earlier task of its connection and
 //! vShard waits, so each client stream keeps its FIFO order. A task with an
@@ -22,6 +25,7 @@ use nodedb_types::{NodeDbError, QualifiedCollection};
 use crate::bridge::envelope::{ClientStream, Request};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, RequestId, TenantId, TxnId, VShardId};
+use crate::wal::RedoSyncStream;
 
 use super::footprint::Footprint;
 
@@ -78,9 +82,29 @@ impl FenceKey {
     pub(in crate::data::executor) fn sync_stream(
         provenance: &nodedb_types::sync::wire::SyncProvenance,
     ) -> Option<Self> {
-        (provenance.producer_id != 0).then_some(FenceKey::SyncStream {
-            producer_id: provenance.producer_id,
-            stream_id: provenance.stream_id,
+        RedoSyncStream::of(provenance).map(Self::of_sync_stream)
+    }
+
+    /// The key of the mark of `stream`, a sync stream a marker declares.
+    pub(in crate::data::executor) fn of_sync_stream(stream: RedoSyncStream) -> Self {
+        FenceKey::SyncStream {
+            producer_id: stream.producer_id,
+            stream_id: stream.stream_id,
+        }
+    }
+
+    /// The key of the collection `name` a read of database `db` names. A
+    /// read that names no collection reads its whole vShard, which the
+    /// vShard key holds. A name that is no collection name of `db` names
+    /// no collection any write stores to. Neither has a key.
+    pub(in crate::data::executor) fn of_read(db: DatabaseId, name: &str) -> Option<Self> {
+        if name.is_empty() {
+            return None;
+        }
+        let qualified = QualifiedCollection::from_request(db, name).ok()?;
+        Some(FenceKey::Collection {
+            db,
+            name: qualified.as_str().to_owned(),
         })
     }
 
@@ -137,7 +161,8 @@ impl Blocked {
     fn add(&mut self, footprint: &Footprint) {
         match footprint {
             Footprint::Keys(keys) => self.keys.extend(keys.iter().cloned()),
-            Footprint::Write { keys, vshard } => {
+            // A waiting marker holds what it declares, not the core.
+            Footprint::Write { keys, vshard } | Footprint::WriteAfterPark { keys, vshard } => {
                 self.keys.extend(keys.iter().cloned());
                 self.vshards.insert(*vshard);
             }
@@ -207,7 +232,12 @@ impl InstallFence {
             Footprint::WholeDatabase { db, vshard } => {
                 self.admits_database(*db) && self.admits_vshard(*vshard)
             }
-            Footprint::Core | Footprint::Ordered | Footprint::Background => false,
+            // One install parks at a time: a marker's install waits for
+            // the armed fence to release.
+            Footprint::WriteAfterPark { .. }
+            | Footprint::Core
+            | Footprint::Ordered
+            | Footprint::Background => false,
         }
     }
 
@@ -422,6 +452,24 @@ mod tests {
     #[test]
     fn a_core_task_never_passes_an_armed_fence() {
         assert!(!fence(&[]).admits(&Footprint::Core));
+    }
+
+    /// A marker's install never passes an armed fence, even of disjoint
+    /// keys. While it waits it holds its keys and vShard, and no other
+    /// later task.
+    #[test]
+    fn a_waiting_marker_install_holds_its_keys_and_vshard_alone() {
+        let mut fence = fence(&[collection("fill")]);
+        let marker = Footprint::WriteAfterPark {
+            keys: vec![collection("b")],
+            vshard: VShardId::new(1),
+        };
+        assert!(!fence.admits(&marker), "a disjoint marker waits");
+        fence.blocked.add(&marker);
+        assert!(!fence.admits(&write(vec![collection("b")], 2)));
+        assert!(!fence.admits(&write(vec![collection("c")], 1)));
+        assert!(fence.admits(&write(vec![collection("c")], 2)));
+        assert!(fence.admits(&Footprint::Keys(vec![collection("c")])));
     }
 
     #[test]

@@ -3,15 +3,18 @@
 //! The start of a stream install that gives the core back between its
 //! slices.
 //!
-//! The install fence is armed before the validate, over every collection
-//! the record writes, every materialized-sum source and target, and the
-//! vShard the record's events carry. A stream marker names no op. So the
-//! graph state of the task's tenant and each sync stream join the fence in
-//! the slice that walks the ops writing them (see `stream_job`). The
-//! content header names the content's sum targets, and they join the fence
-//! in the slice that walks the header. So no write lands on what the record
-//! reads or writes between the validate's verdict and the install's first
-//! batch.
+//! The install fence is armed before the validate, over:
+//! - every collection the record writes
+//! - every materialized-sum source and target the plan names
+//! - the vShard the record's events carry
+//! - the keys the marker declares: the collection of each read, each sum
+//!   source and target its header names, each sync stream its ops advance,
+//!   and the graph state of the task's tenant when an op writes it
+//!
+//! Each validate slice checks the keys it walks against the fence (see
+//! `stream_job`). A marker whose keys passed the final entry's room
+//! declares none: each slice arms the keys it walks. So no write lands on what the record reads or writes
+//! between the validate's verdict and the install's first batch.
 //!
 //! The job opens validating, and its first slice runs inside the task.
 //! When the job has more to run, its ambient state leaves the core, the
@@ -36,6 +39,7 @@ use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, Lsn};
+use crate::wal::RedoStreamKeys;
 
 use super::super::super::state::TsInstalled;
 use super::super::super::stream_validate::StreamValidateInput;
@@ -97,7 +101,12 @@ impl CoreLoop {
         } = stream;
         let task = install.task;
         let lsn = install.lsn;
-        let fenced = self.arm_stream_fence(task, install.collections, sum_targets);
+        let fenced = self.arm_stream_fence(
+            task,
+            install.collections,
+            sum_targets,
+            &validate.reference.keys,
+        );
         // A test panics here: the fence is armed, and nothing is validated.
         crate::fail_point!(self.fail_scope, "redo_apply::batched::before_validate");
         if !fenced {
@@ -116,15 +125,16 @@ impl CoreLoop {
         self.run_first_slice(job, task, lsn, ts_installs)
     }
 
-    /// Arm the install fence over what the record of `task` writes: the
-    /// stored `collections`, the sources and targets of `sum_targets`, and
-    /// the vShard its events carry. `false`
-    /// when a name is no stored collection name: nothing is armed.
+    /// Arm the install fence over what the record of `task` touches: the
+    /// stored `collections`, the sources and targets of `sum_targets`, the
+    /// vShard its events carry, and the keys `declared` names. `false` when
+    /// a written or summed name is no collection name: nothing is armed.
     fn arm_stream_fence(
         &mut self,
         task: &ExecutionTask,
         collections: &[String],
         sum_targets: &[RedoSumTargets],
+        declared: &RedoStreamKeys,
     ) -> bool {
         let db = task.request.database_id;
         let mut keys = BTreeSet::new();
@@ -145,6 +155,35 @@ impl CoreLoop {
         }
         if !sum_target_keys(db, sum_targets, &mut keys) {
             return false;
+        }
+        // A marker that declares no key arms what its walk keys, slice by
+        // slice, before the core runs another task.
+        let RedoStreamKeys::Declared(declared) = declared else {
+            self.arm_install_fence(keys);
+            return true;
+        };
+        let declared_sums = declared.sum_collections.iter().map(String::as_str);
+        if !sum_name_keys(db, declared_sums, &mut keys) {
+            return false;
+        }
+        keys.extend(
+            declared
+                .reads
+                .iter()
+                .filter_map(|name| FenceKey::of_read(db, name)),
+        );
+        keys.extend(
+            declared
+                .sync_streams
+                .iter()
+                .copied()
+                .map(FenceKey::of_sync_stream),
+        );
+        if declared.graph {
+            keys.insert(FenceKey::Graph {
+                db,
+                tenant: task.request.tenant_id,
+            });
         }
         self.arm_install_fence(keys);
         true
@@ -339,17 +378,26 @@ pub(super) fn sum_target_keys(
     sum_targets: &[RedoSumTargets],
     keys: &mut BTreeSet<FenceKey>,
 ) -> bool {
-    let names: BTreeSet<&str> = sum_targets
-        .iter()
-        .flat_map(|targets| {
-            std::iter::once(targets.collection.as_str()).chain(
-                targets
-                    .resolved
-                    .iter()
-                    .map(|target| target.target_collection.as_str()),
-            )
-        })
-        .collect();
+    let names = sum_targets.iter().flat_map(|targets| {
+        std::iter::once(targets.collection.as_str()).chain(
+            targets
+                .resolved
+                .iter()
+                .map(|target| target.target_collection.as_str()),
+        )
+    });
+    sum_name_keys(db, names, keys)
+}
+
+/// Add the key of each materialized-sum source or target collection
+/// `names` names, in database `db`, to `keys`. `false` when a name is no
+/// collection name of `db`: its report is filed.
+fn sum_name_keys<'n>(
+    db: DatabaseId,
+    names: impl IntoIterator<Item = &'n str>,
+    keys: &mut BTreeSet<FenceKey>,
+) -> bool {
+    let names: BTreeSet<&str> = names.into_iter().collect();
     for name in names {
         match QualifiedCollection::from_request(db, name) {
             Ok(qualified) => {

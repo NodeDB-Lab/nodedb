@@ -24,10 +24,10 @@ use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::wal_replication::ReplicatedEntry;
 use crate::control::wal_replication::encode::{
     RedoChunkSlot, chunk_count, chunk_entry, chunk_room, chunked_final_entry, chunks_complete,
-    chunks_overrun, fits_inline, redo_header_frames, stamp_calvin_final,
+    chunks_overrun, declare_final_keys, fits_inline, redo_header_frames, stamp_calvin_final,
 };
 use crate::control::wal_replication::types::RedoContent;
-use crate::wal::RedoStreamId;
+use crate::wal::{RedoStreamId, StreamKeysWalk};
 use nodedb_physical::physical_plan::CalvinResolvedPart;
 
 /// How a committed slice's redo travels.
@@ -63,6 +63,9 @@ pub(in crate::control::cluster::calvin::scheduler::driver) struct StreamProgress
     parts_done: bool,
     /// Whether the node admitted the stream's bytes.
     admitted: bool,
+    /// The keys of every record read so far. The final entry declares
+    /// them.
+    keys: StreamKeysWalk,
 }
 
 impl StreamProgress {
@@ -129,10 +132,15 @@ impl Scheduler {
             };
             owed.attempts = owed.attempts.saturating_add(1);
             let count = chunk_count(len, max_entry_bytes)?;
+            // The parts are walked as they arrive, and the final proposal
+            // declares their keys.
             let last = stamp_calvin_final(
                 chunked_final_entry(owed.target, &owed.payload, count, len, |_| stream),
                 &owed.stamps,
             );
+            let mut keys = StreamKeysWalk::new();
+            keys.walk(&header)?;
+            keys.walk(&answer.part.bytes)?;
             let mut held = header;
             held.extend_from_slice(&answer.part.bytes);
             owed.body = OwedBody::Streamed(Some(Box::new(StreamProgress {
@@ -147,6 +155,7 @@ impl Scheduler {
                 next_part: 1,
                 parts_done: answer.part.done,
                 admitted: false,
+                keys,
             })));
         }
         if let Some(pending) = self.pending.get_mut(&txn_id) {
@@ -184,6 +193,7 @@ impl Scheduler {
                 ),
             });
         }
+        progress.keys.walk(&answer.part.bytes)?;
         progress.held.extend_from_slice(&answer.part.bytes);
         progress.next_part += 1;
         progress.parts_done = answer.part.done;
@@ -306,6 +316,9 @@ impl Scheduler {
                 progress.next_index
             )));
         }
+        let max_entry_bytes = self.shared.redo_chunks.limits().max_entry_bytes;
+        declare_final_keys(&mut progress.last, progress.keys.keys(), max_entry_bytes)
+            .map_err(unbuildable)?;
         let last = progress.last.encode().map_err(unbuildable)?;
         self.propose_entries(vec![last]).map(StreamStep::Final)
     }

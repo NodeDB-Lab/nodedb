@@ -83,7 +83,7 @@ pub(in crate::diag) use index_rebuild::{
 };
 pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
-pub(in crate::diag) use install_fence::StoredCollectionNameMalformed;
+pub(in crate::diag) use install_fence::{StoredCollectionNameMalformed, StreamKeyUndeclared};
 pub(in crate::diag) use kv_expiry::KvReapEntryUnusable;
 pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,

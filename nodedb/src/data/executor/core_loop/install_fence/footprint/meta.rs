@@ -10,9 +10,9 @@
 //! staging, resolve, savepoint and overlay drop key its overlay (see
 //! `txn`). A list of a tenant's collections or aggregates is an unkeyed
 //! read: a client's holds its own stream, internal work holds the core.
-//! A committed redo that holds its content inline keys what its install
-//! writes and reads (see `redo`). A Calvin slice and a stream marker are
-//! core tasks. Every other meta op checkpoints, snapshots, purges or
+//! A committed redo keys what its install writes and reads, and a stream
+//! marker keys what it declares for its content (see `redo`). A Calvin
+//! slice is a core task. Every other meta op checkpoints, snapshots, purges or
 //! installs across collections, so it is a core task. A sampler, a checkpoint
 //! or a version purge keeps no client order, so it waits for the install
 //! and holds no later task. A cancel and a redo stream page read touch no
@@ -332,7 +332,10 @@ mod tests {
         use super::class;
         use crate::data::executor::core_loop::install_fence::FenceKey;
         use crate::data::executor::handlers::transaction::redo_apply::test_commit::doc_put_sub_record;
-        use crate::wal::{RedoRecord, RedoStreamId, RedoStreamRef, RedoSubRecord};
+        use crate::wal::{
+            DeclaredStreamKeys, RedoRecord, RedoStreamId, RedoStreamKeys, RedoStreamRef,
+            RedoSubRecord, RedoSyncStream,
+        };
 
         /// What a committed redo plan names beside its record.
         #[derive(Default)]
@@ -398,10 +401,28 @@ mod tests {
                     keys.into_iter().collect()
                 }
                 other @ (Footprint::Keys(_)
+                | Footprint::WriteAfterPark { .. }
                 | Footprint::WholeDatabase { .. }
                 | Footprint::Core
                 | Footprint::Ordered
                 | Footprint::Background) => panic!("a write footprint, got {other:?}"),
+            }
+        }
+
+        /// The keys a marker install's footprint holds, on the request's
+        /// vShard.
+        fn parked(footprint: Footprint) -> BTreeSet<FenceKey> {
+            match footprint {
+                Footprint::WriteAfterPark { keys, vshard } => {
+                    assert_eq!(vshard, VSHARD, "the install carries the request's vShard");
+                    keys.into_iter().collect()
+                }
+                other @ (Footprint::Keys(_)
+                | Footprint::Write { .. }
+                | Footprint::WholeDatabase { .. }
+                | Footprint::Core
+                | Footprint::Ordered
+                | Footprint::Background) => panic!("a marker install, got {other:?}"),
             }
         }
 
@@ -498,8 +519,8 @@ mod tests {
             assert_eq!(class(op), Footprint::Core);
         }
 
-        #[test]
-        fn a_stream_marker_is_core() {
+        /// A stream marker that declares `keys`.
+        fn marker_of(keys: RedoStreamKeys) -> RedoRecord {
             let reference = RedoStreamRef {
                 stream: RedoStreamId::Session {
                     vshard: 1,
@@ -510,9 +531,95 @@ mod tests {
                 publish_position: None,
                 entry: None,
                 stamp_floor: None,
+                keys,
             };
-            let marker = reference.marker(None, None, Vec::new()).expect("marker");
+            reference.marker(None, None, Vec::new()).expect("marker")
+        }
+
+        /// A marker's footprint is an install that parks. It holds its
+        /// written collections and every key it declares, on the request's
+        /// vShard.
+        #[test]
+        fn a_stream_marker_keys_what_it_declares() {
+            let marker = marker_of(RedoStreamKeys::Declared(DeclaredStreamKeys {
+                reads: vec!["r".into()],
+                sum_collections: vec!["a".into(), "totals".into()],
+                sync_streams: vec![RedoSyncStream {
+                    producer_id: 7,
+                    stream_id: 42,
+                }],
+                graph: true,
+            }));
+            assert_eq!(
+                parked(class(apply(&marker, &["a"]))),
+                BTreeSet::from([
+                    key("a"),
+                    key("totals"),
+                    key("r"),
+                    graph(),
+                    FenceKey::SyncStream {
+                        producer_id: 7,
+                        stream_id: 42,
+                    },
+                ])
+            );
+        }
+
+        /// A marker that declares nothing beside its plan keys its written
+        /// collections alone.
+        #[test]
+        fn a_stream_marker_with_no_declared_state_keys_its_collections() {
+            let marker = marker_of(RedoStreamKeys::default());
+            assert_eq!(
+                parked(class(apply(&marker, &["a", "b"]))),
+                BTreeSet::from([key("a"), key("b")])
+            );
+        }
+
+        /// A declared read of no collection reads the whole vShard, and a
+        /// declared name that is no collection name files a report.
+        #[test]
+        fn a_stream_marker_with_a_whole_vshard_or_malformed_read_is_core() {
+            for read in ["", "x/y/z"] {
+                let marker = marker_of(RedoStreamKeys::Declared(DeclaredStreamKeys {
+                    reads: vec![read.into()],
+                    ..DeclaredStreamKeys::default()
+                }));
+                assert_eq!(class(apply(&marker, &["a"])), Footprint::Core, "{read:?}");
+            }
+        }
+
+        /// A marker whose keys passed the final entry's room declares none,
+        /// so it is a core task.
+        #[test]
+        fn a_stream_marker_with_unbounded_keys_is_core() {
+            let marker = marker_of(RedoStreamKeys::Unbounded);
             assert_eq!(class(apply(&marker, &["a"])), Footprint::Core);
+        }
+
+        /// A Calvin slice's marker stays a core task, whatever it declares.
+        #[test]
+        fn a_calvin_stream_marker_is_core() {
+            let marker = marker_of(RedoStreamKeys::Declared(DeclaredStreamKeys {
+                reads: vec!["r".into()],
+                ..DeclaredStreamKeys::default()
+            }));
+            let op = plan(
+                marker.to_bytes().expect("encode marker"),
+                &["a"],
+                Named {
+                    calvin: Some(CalvinInstall {
+                        epoch: 1,
+                        position: 0,
+                        epoch_system_ms: 0,
+                        reply: CalvinReplySpec::Count(Vec::new()),
+                        user_write: true,
+                        mirror: false,
+                    }),
+                    ..Named::default()
+                },
+            );
+            assert_eq!(class(op), Footprint::Core);
         }
 
         #[test]

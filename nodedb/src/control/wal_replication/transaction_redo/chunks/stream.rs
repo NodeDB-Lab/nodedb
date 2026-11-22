@@ -8,7 +8,7 @@
 //! those references on, and every reader reads the bytes back from the WAL.
 
 use crate::wal::manager::WalFloorHold;
-use crate::wal::{RedoChunkRef, RedoStreamId, RedoStreamRef};
+use crate::wal::{RedoChunkRef, RedoStreamId, RedoStreamKeys, RedoStreamRef};
 
 use super::error::RedoChunkError;
 
@@ -51,7 +51,9 @@ impl OpenStream {
         Ok(self.reference())
     }
 
-    /// The reference of the chunks the stream holds now.
+    /// The reference of the chunks the stream holds now. The final entry
+    /// declares the content's keys, so a reference of the chunks alone
+    /// names none.
     pub(super) fn reference(&self) -> RedoStreamRef {
         RedoStreamRef {
             stream: self.stream,
@@ -60,6 +62,7 @@ impl OpenStream {
             publish_position: None,
             entry: None,
             stamp_floor: None,
+            keys: RedoStreamKeys::default(),
         }
     }
 

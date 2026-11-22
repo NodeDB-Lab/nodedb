@@ -192,6 +192,7 @@ mod tests {
             publish_position: None,
             entry: None,
             stamp_floor: None,
+            keys: Default::default(),
         };
         let mut reader =
             RedoStreamReader::<UringWalCursor>::open(&wal.read_source(), reference).expect("open");

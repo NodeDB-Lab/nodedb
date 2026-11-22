@@ -357,6 +357,7 @@ mod tests {
                 stream: stream(),
                 count: 2,
                 len: 4,
+                keys: Default::default(),
             },
             collections: Vec::new(),
             event_source: ReplicatedEventSource::User,

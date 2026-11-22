@@ -134,11 +134,11 @@ pub(super) struct StreamWalk {
     /// walked it.
     pub(super) reads: Vec<VersionedReadEntry>,
     /// The collections of the reads checked so far. A yielding install
-    /// fences each before its slice ends.
+    /// checks each against its fence before its slice ends.
     pub(super) read_keys: BTreeSet<FenceKey>,
     /// The keys of the state the walked ops write beside their
     /// collections: sync streams and the tenant's graph. A yielding
-    /// install fences each before its slice ends.
+    /// install checks each against its fence before its slice ends.
     pub(super) op_keys: BTreeSet<FenceKey>,
     /// The instant the KV key images read at, in ms since the Unix epoch.
     pub(super) kv_now_ms: u64,

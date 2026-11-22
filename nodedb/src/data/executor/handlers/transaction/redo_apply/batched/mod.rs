@@ -23,7 +23,11 @@ mod crash_tests;
 #[cfg(test)]
 mod equivalence_tests;
 #[cfg(test)]
+mod isolation_admit_tests;
+#[cfg(test)]
 mod isolation_keys_tests;
+#[cfg(test)]
+mod isolation_marker_tests;
 #[cfg(test)]
 mod isolation_stream_tests;
 #[cfg(test)]

@@ -27,6 +27,7 @@ pub use entry::to_replicated_entry;
 pub use transaction_redo::{
     CHUNK_ENTRY_ENVELOPE_BYTES, CalvinEntryStamps, RedoChunkSlot, RedoEntryTarget, RedoProposal,
     calvin_redo_proposal, chunk_count, chunk_entry, chunk_room, chunked_final_entry,
-    chunks_complete, chunks_overrun, final_entry_stream, fits_inline, redo_abandon_entry,
-    redo_header_frames, session_redo_proposal, stamp_calvin_final, transaction_redo_entry,
+    chunks_complete, chunks_overrun, declare_final_keys, final_entry_stream, fits_inline,
+    redo_abandon_entry, redo_header_frames, session_redo_proposal, stamp_calvin_final,
+    transaction_redo_entry,
 };

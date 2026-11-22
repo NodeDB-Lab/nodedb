@@ -5,7 +5,7 @@
 use nodedb_physical::physical_plan::{RedoPins, RedoSumTargets};
 
 use super::transaction_redo_wire::ReplicatedIdentity;
-use crate::wal::RedoStreamId;
+use crate::wal::{RedoStreamId, RedoStreamKeys};
 
 /// The row-sized part of a committed redo: what a chunked redo splits.
 /// A chunk stream carries it framed: `RedoContent::to_framed`.
@@ -48,10 +48,13 @@ pub enum RedoBody {
     /// The entry carries the content.
     Inline(Box<RedoContent>),
     /// Earlier `RedoChunk` entries of `stream` carry the content: `count`
-    /// chunks of `len` bytes in all, one framed [`RedoContent`].
+    /// chunks of `len` bytes in all, one framed [`RedoContent`]. `keys` is
+    /// what the content touches beside the entry's collections, as the
+    /// proposer walked it.
     Chunked {
         stream: RedoStreamId,
         count: u32,
         len: u64,
+        keys: RedoStreamKeys,
     },
 }

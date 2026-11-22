@@ -41,8 +41,9 @@ impl CoreLoop {
     ) -> Result<(), ErrorCode> {
         let op = walk.ops;
         walk.ops += 1;
-        // Every op's keys join the fence, whatever the verdict holds: the
-        // slice that walked it arms them before the core runs another task.
+        // Every op's keys are checked against the fence, whatever the
+        // verdict holds. The slice that walked the op arms a key the fence
+        // lacks before the core runs another task.
         add_sub_record_keys(
             &sub,
             input.task.request.database_id,

@@ -177,8 +177,8 @@ fn a_small_redo_whose_sum_target_is_the_installs_collection_waits() {
     ring.tick_until_answered(SMALL);
 }
 
-/// A second stream marker keeps its core footprint: it waits for the
-/// parked install, though it writes another collection. Once the first
+/// A second stream marker waits for the parked install, though it writes
+/// another collection: one install parks at a time. Once the first
 /// install ends, the second installs.
 #[test]
 fn a_second_stream_marker_waits_for_the_parked_install() {

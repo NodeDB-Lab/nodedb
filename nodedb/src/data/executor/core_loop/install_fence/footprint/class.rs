@@ -20,6 +20,14 @@ pub(in crate::data::executor) enum Footprint {
         keys: Vec<FenceKey>,
         vshard: VShardId,
     },
+    /// A stream marker's install, which writes these keys with events on
+    /// `vshard` and parks under its own fence. One install parks at a time,
+    /// so it waits while any fence is armed. While it waits it holds later
+    /// tasks of its keys and of its vShard alone.
+    WriteAfterPark {
+        keys: Vec<FenceKey>,
+        vshard: VShardId,
+    },
     /// Any state of database `db`, by a task whose events carry `vshard`.
     /// An op the plan cannot bound to keys gets this class.
     WholeDatabase { db: DatabaseId, vshard: VShardId },
@@ -105,6 +113,7 @@ impl Footprint {
             Footprint::Keys(keys) => !keys.is_empty(),
             Footprint::Background => false,
             Footprint::Write { .. }
+            | Footprint::WriteAfterPark { .. }
             | Footprint::WholeDatabase { .. }
             | Footprint::Core
             | Footprint::Ordered => true,
@@ -118,9 +127,10 @@ impl Footprint {
     /// The footprint of a task that does both.
     ///
     /// Keys and writes union their keys. Two writes join only on one
-    /// vShard. A whole database absorbs keys of that database only. Every
-    /// other pair joins to `Core`, the one class that covers both. An
-    /// ordered read joined with any state is `Core` too.
+    /// vShard. A marker's install absorbs keys. A whole database absorbs
+    /// keys of that database only. Every other pair joins to `Core`, the
+    /// one class that covers both. An ordered read joined with any state is
+    /// `Core` too.
     pub(in crate::data::executor) fn join(self, other: Footprint) -> Footprint {
         match (self, other) {
             (Footprint::Keys(mut a), Footprint::Keys(b)) => {
@@ -137,6 +147,17 @@ impl Footprint {
             ) => {
                 a.extend(keys);
                 Footprint::Write { keys: a, vshard }
+            }
+            (Footprint::Keys(mut a), Footprint::WriteAfterPark { keys, vshard })
+            | (
+                Footprint::WriteAfterPark {
+                    keys: mut a,
+                    vshard,
+                },
+                Footprint::Keys(keys),
+            ) => {
+                a.extend(keys);
+                Footprint::WriteAfterPark { keys: a, vshard }
             }
             (
                 Footprint::Write {
@@ -189,6 +210,8 @@ impl Footprint {
             | (Footprint::Write { .. }, Footprint::WholeDatabase { .. })
             | (Footprint::WholeDatabase { .. }, Footprint::Write { .. })
             | (Footprint::WholeDatabase { .. }, Footprint::WholeDatabase { .. })
+            | (Footprint::WriteAfterPark { .. }, _)
+            | (_, Footprint::WriteAfterPark { .. })
             | (Footprint::Background, _)
             | (_, Footprint::Background)
             | (Footprint::Ordered, _)
@@ -281,6 +304,24 @@ mod tests {
         );
         assert_eq!(Footprint::Background.in_txn(txn), Footprint::Background);
         assert_eq!(whole(0, 1).in_txn(None), whole(0, 1));
+    }
+
+    /// A marker's install absorbs keys and joins any other write as `Core`.
+    #[test]
+    fn a_marker_install_absorbs_keys_alone() {
+        let parked = |keys: Vec<FenceKey>| Footprint::WriteAfterPark {
+            keys,
+            vshard: VShardId::new(1),
+        };
+        assert_eq!(
+            parked(vec![key(0, "a")]).join(Footprint::Keys(vec![key(0, "b")])),
+            parked(vec![key(0, "a"), key(0, "b")])
+        );
+        assert_eq!(
+            parked(vec![key(0, "a")]).join(write(vec![key(0, "b")], 1)),
+            Footprint::Core
+        );
+        assert_eq!(parked(Vec::new()).join(whole(0, 1)), Footprint::Core);
     }
 
     #[test]

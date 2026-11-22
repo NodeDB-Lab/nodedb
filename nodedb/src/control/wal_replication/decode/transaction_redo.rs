@@ -15,7 +15,7 @@ use super::super::types::{
     CalvinRedoMeta, RedoBody, RedoContent, ReplicatedEventSource, ReplicatedWrite,
 };
 use crate::control::surrogate::CarriedIdentity;
-use crate::wal::RedoStreamId;
+use crate::wal::{RedoStreamId, RedoStreamKeys};
 
 /// A decoded `TransactionRedo` entry.
 #[derive(Debug, Clone)]
@@ -35,6 +35,9 @@ pub struct ChunkedRedo {
     pub count: u32,
     /// How many bytes the chunks hold in all.
     pub len: u64,
+    /// What the content touches beside `collections`, as the proposer
+    /// declared it.
+    keys: RedoStreamKeys,
     collections: Vec<String>,
     event_source: ReplicatedEventSource,
     origin: RedoOrigin,
@@ -68,6 +71,11 @@ impl ChunkedRedo {
     /// Every collection the transaction wrote.
     pub fn collections(&self) -> &[String] {
         &self.collections
+    }
+
+    /// What the content touches beside the collections it wrote.
+    pub fn keys(&self) -> &RedoStreamKeys {
+        &self.keys
     }
 
     /// The Calvin meta of a committed Calvin slice's redo.
@@ -135,18 +143,22 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             calvin.clone(),
             *snapshot_ordinal,
         ))),
-        RedoBody::Chunked { stream, count, len } => {
-            DecodedTransactionRedo::Chunked(Box::new(ChunkedRedo {
-                stream: *stream,
-                count: *count,
-                len: *len,
-                collections: collections.clone(),
-                event_source: *event_source,
-                origin: *origin,
-                calvin: calvin.clone(),
-                snapshot_ordinal: *snapshot_ordinal,
-            }))
-        }
+        RedoBody::Chunked {
+            stream,
+            count,
+            len,
+            keys,
+        } => DecodedTransactionRedo::Chunked(Box::new(ChunkedRedo {
+            stream: *stream,
+            count: *count,
+            len: *len,
+            keys: keys.clone(),
+            collections: collections.clone(),
+            event_source: *event_source,
+            origin: *origin,
+            calvin: calvin.clone(),
+            snapshot_ordinal: *snapshot_ordinal,
+        })),
     })
 }
 
@@ -382,6 +394,17 @@ mod tests {
                 other => panic!("expected a chunk, got {other:?}"),
             })
             .collect();
+        assert_eq!(
+            *chunked.keys(),
+            crate::wal::StreamKeysWalk::of_frames(&joined).expect("walk"),
+            "the decoded entry declares the keys its content walks to"
+        );
+        let declared = chunked.keys().declared().expect("the keys fit the entry");
+        assert_eq!(declared.reads, vec!["accounts".to_string()]);
+        assert_eq!(
+            declared.sum_collections,
+            vec!["accounts".to_string(), "entries".to_string()]
+        );
         let content = RedoContent::from_framed(&joined).expect("content");
         assert_eq!(content.redo, original.redo);
         assert_eq!(content.sum_targets, original.sum_targets);

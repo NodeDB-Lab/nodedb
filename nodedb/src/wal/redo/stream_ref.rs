@@ -21,6 +21,7 @@ use nodedb_wal::record::RecordType;
 
 use super::chunk::RedoStreamId;
 use super::record::{PublishPosition, RedoRecord, RedoSubRecord};
+use super::stream_keys::RedoStreamKeys;
 
 /// Where one chunk of a stream sits in the WAL.
 #[derive(
@@ -92,6 +93,9 @@ pub struct RedoStreamRef {
     /// The ordinal every version of the content stamps at least. The funnel
     /// sets it for a session commit before the record is appended.
     pub stamp_floor: Option<i64>,
+    /// What the content touches beside the plan's collections, as the
+    /// proposer declared it. The apply of the final entry sets it.
+    pub keys: RedoStreamKeys,
 }
 
 /// The CRC32C of one chunk's bytes.
@@ -289,6 +293,15 @@ mod tests {
             publish_position: None,
             entry: None,
             stamp_floor: Some(5),
+            keys: RedoStreamKeys::Declared(super::super::stream_keys::DeclaredStreamKeys {
+                reads: vec!["ledger".into()],
+                sum_collections: vec!["totals".into()],
+                sync_streams: vec![super::super::stream_keys::RedoSyncStream {
+                    producer_id: 7,
+                    stream_id: 42,
+                }],
+                graph: true,
+            }),
         }
     }
 

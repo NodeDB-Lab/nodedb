@@ -64,7 +64,9 @@ fn staged(plans: &[PhysicalPlan], txn: Option<TxnId>, scope: &Scope) -> Footprin
 /// `footprint` with its writes read: a staged plan emits no event.
 fn as_read(footprint: Footprint) -> Footprint {
     match footprint {
-        Footprint::Write { keys, .. } => Footprint::Keys(keys),
+        Footprint::Write { keys, .. } | Footprint::WriteAfterPark { keys, .. } => {
+            Footprint::Keys(keys)
+        }
         Footprint::Keys(_)
         | Footprint::WholeDatabase { .. }
         | Footprint::Core

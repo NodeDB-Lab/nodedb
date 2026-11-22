@@ -25,3 +25,17 @@ pub fn stored_collection_name_malformed(
     .with_backtrace()
     .emit();
 }
+
+/// Report fence keys a stream install's validate walk found that its
+/// marker did not declare. `lsn` is the marker's, and `keys` lists the
+/// undeclared keys. Called from the slice of the walk that found them.
+pub fn stream_key_undeclared(site: &'static str, lsn: u64, keys: &str) {
+    let ctx = context::StreamKeyUndeclared { site, lsn, keys };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "install fence: a stream install walks a key its marker did not declare",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

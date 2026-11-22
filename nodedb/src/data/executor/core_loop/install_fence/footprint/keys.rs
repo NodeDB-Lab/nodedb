@@ -168,6 +168,18 @@ impl<'s> KeySet<'s> {
         }
     }
 
+    /// A stream marker's install of the keys, by a task whose events carry
+    /// its vShard. A malformed name leaves a core task.
+    pub(super) fn write_after_park_or_core(self) -> Footprint {
+        if self.malformed {
+            return Footprint::Core;
+        }
+        Footprint::WriteAfterPark {
+            keys: self.keys,
+            vshard: self.scope.vshard,
+        }
+    }
+
     /// The footprint a malformed name leaves: the request's whole
     /// database, or every state of the core when a key spans databases.
     fn malformed_footprint(&self) -> Footprint {

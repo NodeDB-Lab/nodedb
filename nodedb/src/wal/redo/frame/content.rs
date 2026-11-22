@@ -247,6 +247,7 @@ mod tests {
             }),
             entry: None,
             stamp_floor: None,
+            keys: Default::default(),
         }
     }
 

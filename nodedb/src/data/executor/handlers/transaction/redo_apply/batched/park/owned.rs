@@ -48,9 +48,21 @@ impl OwnedStream {
         }
     }
 
+    /// The marker's LSN.
+    pub(super) fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+
+    /// Whether the marker declares its keys. Keys that passed the final
+    /// entry's room are not declared.
+    pub(super) fn declares_keys(&self) -> bool {
+        self.reference.keys.declared().is_some()
+    }
+
     /// An estimate of the RAM the inputs hold: the marker's ops, row
-    /// changes, roles and sum targets, and the collection names. A marker's
-    /// content holds the rest of its record.
+    /// changes, roles and sum targets, the reference's chunks and keys, and
+    /// the collection names. A marker's content holds the rest of its
+    /// record.
     pub(super) fn held_bytes(&self) -> usize {
         let marker = &self.marker;
         let ops: usize = marker
@@ -71,7 +83,10 @@ impl OwnedStream {
             .map(|role| string_bytes(role))
             .sum();
         let collections: usize = self.collections.iter().map(|name| string_bytes(name)).sum();
+        let reference = std::mem::size_of_val(self.reference.chunks.as_slice())
+            + self.reference.keys.heap_bytes();
         std::mem::size_of::<Self>()
+            + reference
             + ops
             + changes
             + roles

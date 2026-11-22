@@ -15,7 +15,7 @@ use super::super::types::{
 };
 use crate::control::surrogate::CarriedIdentity;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::RedoStreamId;
+use crate::wal::{RedoStreamId, RedoStreamKeys, StreamKeysWalk};
 
 /// Room a chunk entry keeps for its envelope beside the chunk bytes: the
 /// routing fields, the stream header, and the stamps the proposer adds.
@@ -214,7 +214,12 @@ fn redo_proposal(
         )));
     }
     let count = chunk_count(bytes.len() as u64, max_entry_bytes)?;
-    let last = chunked_final_entry(target, payload, count, bytes.len() as u64, stream_of);
+    let mut last = chunked_final_entry(target, payload, count, bytes.len() as u64, stream_of);
+    declare_final_keys(
+        &mut last,
+        StreamKeysWalk::of_frames(&bytes)?,
+        max_entry_bytes,
+    )?;
     let stream = final_entry_stream(&last)?;
     let room = chunk_room(max_entry_bytes)?;
     let len = bytes.len() as u64;
@@ -270,7 +275,8 @@ pub fn redo_header_frames(payload: &TransactionRedoPayload) -> crate::Result<Vec
 }
 
 /// The final entry of a chunked redo of `count` chunks and `len` bytes,
-/// under the stream `stream_of` names for it.
+/// under the stream `stream_of` names for it. It declares no key until
+/// [`declare_final_keys`] declares the keys of the walked content.
 pub fn chunked_final_entry(
     target: RedoEntryTarget,
     payload: &TransactionRedoPayload,
@@ -290,11 +296,16 @@ pub fn chunked_final_entry(
             },
             count,
             len,
+            keys: RedoStreamKeys::default(),
         },
     );
-    let stream = stream_of(&last);
-    if let ReplicatedWrite::TransactionRedo { body, .. } = &mut last.write {
-        *body = RedoBody::Chunked { stream, count, len };
+    let named = stream_of(&last);
+    if let ReplicatedWrite::TransactionRedo {
+        body: RedoBody::Chunked { stream, .. },
+        ..
+    } = &mut last.write
+    {
+        *stream = named;
     }
     last
 }
@@ -308,6 +319,45 @@ pub fn final_entry_stream(last: &ReplicatedEntry) -> crate::Result<RedoStreamId>
         } => Ok(*stream),
         other => Err(crate::Error::Internal {
             detail: format!("a chunked redo's final entry carries {other:?}, not a chunked body"),
+        }),
+    }
+}
+
+/// Declare `walked`, the keys of the whole content, on `last`, the final
+/// entry of a chunked redo whose entries hold at most `max_entry_bytes`.
+///
+/// The keys get the room the entry leaves beside its other fields and the
+/// stamps the proposer adds. Keys past that room are not declared: the
+/// entry declares [`RedoStreamKeys::Unbounded`], and the marker waits as a
+/// core task.
+pub fn declare_final_keys(
+    last: &mut ReplicatedEntry,
+    walked: RedoStreamKeys,
+    max_entry_bytes: usize,
+) -> crate::Result<()> {
+    set_final_keys(last, walked)?;
+    let declared_bytes = last.encode()?.len().saturating_add(ENTRY_STAMP_BYTES);
+    if declared_bytes > max_entry_bytes {
+        set_final_keys(last, RedoStreamKeys::Unbounded)?;
+    }
+    Ok(())
+}
+
+/// Replace the keys the chunked body of `last` declares with `declared`.
+fn set_final_keys(last: &mut ReplicatedEntry, declared: RedoStreamKeys) -> crate::Result<()> {
+    match &mut last.write {
+        ReplicatedWrite::TransactionRedo {
+            body: RedoBody::Chunked { keys, .. },
+            ..
+        } => {
+            *keys = declared;
+            Ok(())
+        }
+        other => Err(crate::Error::Internal {
+            detail: format!(
+                "the keys of a chunked redo go on its final entry, which carries {other:?}, not \
+                 a chunked body"
+            ),
         }),
     }
 }
@@ -630,6 +680,135 @@ mod tests {
                 ReplicatedWrite::TransactionRedo { adds_storage: flag, .. } if flag == adds_storage
             ));
         }
+    }
+
+    /// The final entry of a chunked redo declares the keys its content
+    /// walks to, and the keys survive the entry's encode and decode.
+    #[test]
+    fn a_chunked_final_entry_carries_the_keys_of_its_content() {
+        let mut redo = payload(300_000);
+        redo.sum_targets = vec![nodedb_physical::physical_plan::RedoSumTargets {
+            collection: "orders".into(),
+            resolved: vec![nodedb_physical::physical_plan::ResolvedSumTarget::new(
+                "totals",
+                "k",
+                nodedb_types::Surrogate::new(5),
+            )],
+        }];
+        redo.reads = vec![nodedb_types::calvin::VersionedReadEntry {
+            engine: nodedb_types::calvin::EngineTag::Document,
+            collection: "ledger".into(),
+            key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+            home_vshard: None,
+        }];
+        let RedoProposal::Chunked { chunks, last, .. } =
+            session_redo_proposal(target(), &redo, 64 * 1024).expect("build")
+        else {
+            panic!("a 300 KB redo travels chunked");
+        };
+        let joined: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| match &chunk.write {
+                ReplicatedWrite::RedoChunk { bytes, .. } => bytes.clone(),
+                other => panic!("expected a chunk, got {other:?}"),
+            })
+            .collect();
+        let walked = StreamKeysWalk::of_frames(&joined).expect("walk");
+        let declared = walked.declared().expect("the keys fit the entry");
+        assert_eq!(declared.reads, vec!["ledger".to_string()]);
+        assert_eq!(
+            declared.sum_collections,
+            vec!["orders".to_string(), "totals".to_string()]
+        );
+        let decoded =
+            ReplicatedEntry::from_bytes(&last.encode().expect("encode")).expect("decode entry");
+        let ReplicatedWrite::TransactionRedo {
+            body: RedoBody::Chunked { keys, .. },
+            ..
+        } = decoded.write
+        else {
+            panic!("the final entry names its stream");
+        };
+        assert_eq!(keys, walked);
+    }
+
+    /// The keys `last`'s chunked body declares.
+    fn final_keys(last: &ReplicatedEntry) -> &RedoStreamKeys {
+        match &last.write {
+            ReplicatedWrite::TransactionRedo {
+                body: RedoBody::Chunked { keys, .. },
+                ..
+            } => keys,
+            other => panic!("a chunked final entry, got {other:?}"),
+        }
+    }
+
+    /// Declared keys that read `reads` collections of 32-byte names.
+    fn reading(reads: usize) -> RedoStreamKeys {
+        RedoStreamKeys::Declared(crate::wal::DeclaredStreamKeys {
+            reads: (0..reads).map(|index| format!("{index:032}")).collect(),
+            ..crate::wal::DeclaredStreamKeys::default()
+        })
+    }
+
+    /// The keys a streamed proposal walks replace the ones its final entry
+    /// opened with. An inline entry has none to replace.
+    #[test]
+    fn declared_keys_land_on_a_chunked_final_entry_alone() {
+        let limit = 64 * 1024;
+        let mut last = chunked_final_entry(target(), &payload(10), 1, 10, |_| calvin_stream());
+        assert_eq!(*final_keys(&last), RedoStreamKeys::default());
+        let walked = reading(1);
+        declare_final_keys(&mut last, walked.clone(), limit).expect("declare");
+        assert_eq!(*final_keys(&last), walked);
+        let mut inline = transaction_redo_entry(
+            target().tenant_id,
+            target().database_id,
+            target().vshard_id,
+            &payload(10),
+        );
+        assert!(declare_final_keys(&mut inline, walked, limit).is_err());
+    }
+
+    /// Keys that fit the room the final entry leaves them are declared, and
+    /// the entry with its stamps stays within the limit. Past that room the
+    /// entry declares the keys unbounded, and still fits.
+    #[test]
+    fn keys_past_the_entry_room_are_declared_unbounded() {
+        let limit = 64 * 1024;
+        let fresh = || chunked_final_entry(target(), &payload(10), 1, 10, |_| calvin_stream());
+        // Each read name takes 32 bytes and its framing: 1500 fit 64 KiB,
+        // and 3000 do not.
+        let mut fitting = fresh();
+        declare_final_keys(&mut fitting, reading(1500), limit).expect("declare");
+        assert_eq!(*final_keys(&fitting), reading(1500));
+        assert!(fitting.encode().expect("encode").len() + ENTRY_STAMP_BYTES <= limit);
+
+        let mut past = fresh();
+        declare_final_keys(&mut past, reading(3000), limit).expect("declare");
+        assert_eq!(*final_keys(&past), RedoStreamKeys::Unbounded);
+        assert!(past.encode().expect("encode").len() + ENTRY_STAMP_BYTES <= limit);
+    }
+
+    /// A whole content whose keys pass the room declares them unbounded on
+    /// its chunked final entry.
+    #[test]
+    fn a_proposal_with_keys_past_the_room_declares_them_unbounded() {
+        let mut redo = payload(300_000);
+        redo.reads = (0..3000)
+            .map(|index| nodedb_types::calvin::VersionedReadEntry {
+                engine: nodedb_types::calvin::EngineTag::Document,
+                collection: format!("{index:032}"),
+                key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+                home_vshard: None,
+            })
+            .collect();
+        let RedoProposal::Chunked { last, .. } =
+            session_redo_proposal(target(), &redo, 64 * 1024).expect("build")
+        else {
+            panic!("a 300 KB redo travels chunked");
+        };
+        assert_eq!(*final_keys(&last), RedoStreamKeys::Unbounded);
     }
 
     #[test]

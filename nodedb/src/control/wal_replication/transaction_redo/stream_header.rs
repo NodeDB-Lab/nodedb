@@ -221,9 +221,12 @@ pub(crate) async fn streamed_payload(
 ) -> crate::Result<(TransactionRedoPayload, StreamedChanges)> {
     let StreamedFinal {
         chunked,
-        reference,
+        mut reference,
         mirror_database,
     } = streamed;
+    // The marker carries the keys the final entry declares, so its plan
+    // and its WAL record name them.
+    reference.keys = chunked.keys().clone();
     let stream = reference.stream;
     let mut changes = StreamedChanges::of_reference(&reference)?;
     let mut header: Option<RedoContentHeader> = None;
@@ -434,6 +437,7 @@ mod tests {
             publish_position: None,
             entry: None,
             stamp_floor: None,
+            keys: Default::default(),
         }
     }
 

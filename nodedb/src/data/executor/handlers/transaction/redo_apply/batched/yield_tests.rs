@@ -160,15 +160,28 @@ impl Ring {
 
     /// The install of `redo` as a stream marker whose plan and content name
     /// what `spec` names.
-    fn marker_plan_of(
+    pub(super) fn marker_plan_of(
         &mut self,
         redo: &RedoRecord,
         collections: Vec<String>,
         spec: MarkerSpec,
     ) -> PhysicalPlan {
-        let reference = self
+        self.marker_plan_declaring(redo, collections, spec, |_| {})
+    }
+
+    /// [`Self::marker_plan_of`] whose marker declares what `declare` leaves
+    /// of the keys the proposer's walk of its content declares.
+    pub(super) fn marker_plan_declaring(
+        &mut self,
+        redo: &RedoRecord,
+        collections: Vec<String>,
+        spec: MarkerSpec,
+        declare: impl FnOnce(&mut crate::wal::RedoStreamKeys),
+    ) -> PhysicalPlan {
+        let mut reference = self
             .wal
             .write(&framed(redo, &spec.header_targets, &spec.reads));
+        declare(&mut reference.keys);
         let marker = reference.marker(None, None, Vec::new()).expect("marker");
         PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
             redo: marker.to_bytes().expect("encode marker"),
@@ -224,16 +237,16 @@ impl Ring {
 
 /// What a marker's plan and content name beside its ops.
 #[derive(Default)]
-struct MarkerSpec {
+pub(super) struct MarkerSpec {
     /// The sum targets the plan names, which the fence keys before the
     /// validate.
-    plan_targets: Vec<RedoSumTargets>,
+    pub(super) plan_targets: Vec<RedoSumTargets>,
     /// The sum targets the content header names.
-    header_targets: Vec<RedoSumTargets>,
+    pub(super) header_targets: Vec<RedoSumTargets>,
     /// The read set the content holds.
-    reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
+    pub(super) reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
     /// The snapshot the read set validates at.
-    snapshot: Option<i64>,
+    pub(super) snapshot: Option<i64>,
 }
 
 /// A request of `plan`. A waiter behind the fence answers that it expired

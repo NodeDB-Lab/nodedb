@@ -6,12 +6,25 @@
 //! The job opens validating, under the fence its task armed. Each validate
 //! slice walks one batch and writes nothing, so a yield point there needs
 //! no cursor: a crash leaves the record as it stood, and boot replays it
-//! from op 0. The content header is the stream's first record, so the
-//! slice that walks it fences the header's sum targets before any other
-//! task runs. A header whose names the fence cannot key runs the rest of
-//! the job to its end in that slice. Each slice also fences the collection
-//! of every read it checked, and the sync streams and graph state its ops
-//! write.
+//! from op 0.
+//!
+//! The fence holds the keys the marker declares from before the validate.
+//! Each slice checks against the fence what it walked: the header's sum
+//! targets, the collection of every read it checked, and the sync streams
+//! and graph state its ops write. A full declaration leaves nothing to
+//! arm. A key the fence does not hold is a defect of the declaration. Its
+//! report is filed, and the slice arms the key before any other task runs.
+//! The job keeps parking:
+//! - one install parks at a time, so no other install's state is part way
+//! - the slice that reads a key's state arms the key, so no task changes
+//!   that state between the read and the install
+//! - no op installs before the walk ends, so no task sees the record's
+//!   writes part way
+//!
+//! A task that touched the key before its slice ran is ordered before the
+//! record. A header whose names the fence cannot key runs the rest of the
+//! job to its end in that slice. A marker that declares no key arms each
+//! key as it walks it, and files no report.
 //!
 //! The slice that finds the stream ended takes the verdict. A refusal
 //! answers, and the caller releases the fence. Content that passed opens
@@ -21,6 +34,7 @@ use std::collections::BTreeSet;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::install_fence::FenceKey;
 use crate::data::executor::task::ExecutionTask;
 
 use super::super::super::state::{RedoApplyScope, TsInstalled};
@@ -29,6 +43,10 @@ use super::super::install::job::StreamInstallJob;
 use super::super::install::job_stage::{ParkPoint, StepOutcome};
 use super::owned::OwnedStream;
 use super::start::sum_target_keys;
+
+/// The site an undeclared key is reported at, and what the install does.
+const UNDECLARED_SITE: &str =
+    "install_fence: the stream install arms the undeclared key and keeps parking";
 
 /// A parking stream install.
 pub(in crate::data::executor::handlers::transaction::redo_apply::batched) enum StreamJob {
@@ -49,6 +67,8 @@ pub(in crate::data::executor::handlers::transaction::redo_apply::batched) struct
     /// The job gives the core back between slices. `false` once a header
     /// sum target cannot be keyed.
     parks: bool,
+    /// The report of an undeclared key is filed.
+    undeclared_reported: bool,
 }
 
 impl StreamJob {
@@ -65,6 +85,7 @@ impl StreamJob {
             validation,
             targets_fenced: false,
             parks: true,
+            undeclared_reported: false,
         })))
     }
 
@@ -173,31 +194,28 @@ impl StreamJob {
 }
 
 impl ValidatingJob {
-    /// Fence the collection of every read the slice checked. Each read is
-    /// checked once, so a write to its row after the check would go unseen.
-    /// Every slice checks the reads it walked, so the end of the stream
-    /// leaves none to check.
+    /// Check the collection of every read the slice checked against the
+    /// fence. Each read is checked once, so a write to its row after the
+    /// check goes unseen. Every slice checks the reads it walked, so
+    /// the end of the stream leaves none to check.
     fn fence_checked_reads(&mut self, core: &mut CoreLoop) {
         let keys = self.validation.take_read_keys();
-        if !keys.is_empty() {
-            core.arm_install_fence(keys);
-        }
+        self.check_declared(core, keys);
     }
 
-    /// Fence the state the slice's ops write beside their collections: the
-    /// sync stream of each sync frame, and the tenant's graph when an op
-    /// writes an edge, an edge cut or a node label. No op installs before
-    /// the walk ends, so each key is armed before its state is written.
+    /// Check against the fence the state the slice's ops write beside
+    /// their collections: the sync stream of each sync frame, and the
+    /// tenant's graph when an op writes an edge, an edge cut or a node
+    /// label. No op installs before the walk ends, so each key is armed
+    /// before its state is written.
     fn fence_walked_ops(&mut self, core: &mut CoreLoop) {
         let keys = self.validation.take_op_keys();
-        if !keys.is_empty() {
-            core.arm_install_fence(keys);
-        }
+        self.check_declared(core, keys);
     }
 
-    /// Fence the sum targets the content header names, once a batch held
-    /// it. A name the fence cannot key stops the job from parking: its
-    /// report is filed.
+    /// Check the sum targets the content header names against the fence,
+    /// once a batch held it. A name the fence cannot key stops the job
+    /// from parking: its report is filed.
     fn fence_header_targets(&mut self, core: &mut CoreLoop, task: &ExecutionTask) {
         if self.targets_fenced {
             return;
@@ -208,9 +226,32 @@ impl ValidatingJob {
         self.targets_fenced = true;
         let mut targets = BTreeSet::new();
         if sum_target_keys(task.request.database_id, &header.sum_targets, &mut targets) {
-            core.arm_install_fence(targets);
+            self.check_declared(core, targets);
         } else {
             self.parks = false;
+        }
+    }
+
+    /// Arm `walked`, keys the slice walked. A marker that declares its keys
+    /// declared each one, so the fence holds it already. A key the fence
+    /// does not hold is a defect of the declaration: the first one files a
+    /// report. A marker that declares none arms each key as it walks it.
+    fn check_declared(&mut self, core: &mut CoreLoop, walked: BTreeSet<FenceKey>) {
+        if walked.is_empty() {
+            return;
+        }
+        if !self.stream.declares_keys() {
+            core.arm_install_fence(walked);
+            return;
+        }
+        let undeclared = core.arm_install_keys_unheld(walked);
+        if !undeclared.is_empty() && !self.undeclared_reported {
+            self.undeclared_reported = true;
+            crate::diag::stream_key_undeclared(
+                UNDECLARED_SITE,
+                self.stream.lsn().as_u64(),
+                &format!("{undeclared:?}"),
+            );
         }
     }
 }
