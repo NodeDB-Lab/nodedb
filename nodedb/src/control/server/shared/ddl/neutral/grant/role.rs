@@ -74,9 +74,9 @@ pub async fn grant_role(
         return Err(DdlError::new("42601", "GRANT: missing role name"));
     }
 
-    if super::super::role_checks::visible_user(state, grantee).is_some() {
+    if super::super::role_checks::visible_user_in(state, identity, grantee).is_some() {
         grant_roles_to_user(state, identity, roles, grantee).await
-    } else if super::super::role_checks::visible_roles(state).contains_key(grantee) {
+    } else if super::super::role_checks::role_in_caller_tenant(state, identity, grantee) {
         grant_role_to_role(state, identity, roles, grantee).await
     } else {
         Err(DdlError::new(
@@ -174,9 +174,9 @@ pub async fn revoke_role(
         ));
     }
 
-    if super::super::role_checks::visible_user(state, grantee).is_some() {
+    if super::super::role_checks::visible_user_in(state, identity, grantee).is_some() {
         revoke_roles_from_user(state, identity, roles, grantee).await
-    } else if super::super::role_checks::visible_roles(state).contains_key(grantee) {
+    } else if super::super::role_checks::role_in_caller_tenant(state, identity, grantee) {
         revoke_role_from_role(state, identity, roles, grantee).await
     } else {
         Err(DdlError::new(

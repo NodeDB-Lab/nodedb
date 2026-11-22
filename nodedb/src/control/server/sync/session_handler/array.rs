@@ -347,6 +347,9 @@ mod tests {
         let mut session = SyncSession::new("s".into());
         session.authenticated = true;
         session
+            .tenant_id
+            .get_or_insert(crate::types::TenantId::new(1));
+        session
     }
 
     /// A frame naming another database, a stray `/`, or no array never reaches

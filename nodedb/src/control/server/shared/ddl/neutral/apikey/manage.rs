@@ -42,7 +42,10 @@ pub async fn revoke_api_key(
     }
 
     // Pre-check existence locally so "key not found" doesn't touch raft.
-    let exists_before = state.api_keys.get_key(key_id).is_some();
+    let exists_before = state
+        .api_keys
+        .get_key(key_id)
+        .is_some_and(|k| identity.is_superuser || k.tenant_id == identity.tenant_id);
     if !exists_before {
         return Err(err("42704", format!("API key '{key_id}' not found")));
     }
@@ -87,11 +90,15 @@ pub fn list_api_keys(
         identity.username.clone()
     };
 
-    let keys = if identity.is_superuser && target_username == identity.username {
+    let mut keys = if identity.is_superuser && target_username == identity.username {
         state.api_keys.list_all_keys()
     } else {
         state.api_keys.list_keys_for_user(&target_username)
     };
+    // A caller without the superuser flag lists keys of its own tenant only.
+    if !identity.is_superuser {
+        keys.retain(|k| k.tenant_id == identity.tenant_id);
+    }
 
     let columns = vec![
         "key_id".to_string(),

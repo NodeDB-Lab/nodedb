@@ -84,6 +84,7 @@ pub mod synonym_group;
 pub mod system_ddl;
 mod system_notice;
 pub mod tenant;
+mod tenant_visibility;
 pub mod timeseries;
 pub mod topic;
 pub mod topic_subscribe;

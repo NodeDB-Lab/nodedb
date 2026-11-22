@@ -447,6 +447,9 @@ mod tests {
         session.identity = Some(identity);
         session.authenticated = true;
         session
+            .tenant_id
+            .get_or_insert(crate::types::TenantId::new(1));
+        session
     }
 
     /// An array push needs a read grant on the array. A definition frame
@@ -521,6 +524,9 @@ mod tests {
         session.tenant_id = Some(identity.tenant_id);
         session.identity = Some(identity);
         session.authenticated = true;
+        session
+            .tenant_id
+            .get_or_insert(crate::types::TenantId::new(1));
 
         let (mut rx, _crx) =
             state

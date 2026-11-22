@@ -47,7 +47,12 @@ impl KvEngine {
         // an unnamed collection gets no checkpoint file — which would drop this
         // registration from the checkpoint while WAL truncation deleted the
         // record that carries it.
-        self.register_table_identity(tkey, database_id, tenant_id, collection);
+        if self
+            .register_table_identity(tkey, database_id, tenant_id, collection)
+            .is_err()
+        {
+            return 0;
+        }
 
         let entries = self.collection_rows(database_id, tenant_id, collection, now_ms);
         self.sorted_indexes

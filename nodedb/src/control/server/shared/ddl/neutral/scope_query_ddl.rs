@@ -156,7 +156,7 @@ pub fn show_my_scopes(
 /// SHOW SCOPES FOR USER '<id>' / SHOW SCOPES FOR ORG '<id>'
 pub fn show_scopes_for(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     // SHOW SCOPES FOR <USER|ORG> '<id>'
@@ -166,6 +166,12 @@ pub fn show_scopes_for(
 
     let grantee_type = parts[3].to_lowercase();
     let grantee_id = parts[4].trim_matches('\'');
+    if !super::tenant_visibility::grantee_visible(state, identity, &grantee_type, grantee_id) {
+        return Err(err(
+            "42704",
+            format!("{grantee_type} '{grantee_id}' not found"),
+        ));
+    }
 
     let scopes = match grantee_type.as_str() {
         "user" => {

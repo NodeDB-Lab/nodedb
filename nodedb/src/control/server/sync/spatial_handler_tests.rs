@@ -183,6 +183,9 @@ async fn unauthenticated_insert_returns_fenced_without_dispatch() {
 async fn authenticated_insert_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, inserts, _) = MockDispatcher::ok();
     let msg = make_insert_msg("places", "loc", "d1");
 
@@ -199,6 +202,9 @@ async fn authenticated_insert_dispatches_and_acks() {
 async fn unknown_insert_dispatch_outcome_requires_reconnect() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let mock = MockDispatcher::err();
     let msg = make_insert_msg("places", "loc", "d1");
 
@@ -210,6 +216,9 @@ async fn unknown_insert_dispatch_outcome_requires_reconnect() {
 async fn authenticated_delete_dispatches_and_acks() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
     let msg = make_delete_msg("places", "loc", "d1");
 
@@ -238,6 +247,9 @@ async fn unauthenticated_delete_returns_fenced_without_dispatch() {
 async fn unreadable_geometry_requires_reconnect_without_dispatch() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, inserts, _) = MockDispatcher::ok();
 
     let msg = SpatialInsertMsg {
@@ -261,6 +273,9 @@ async fn unreadable_geometry_requires_reconnect_without_dispatch() {
 async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mock, _, deletes) = MockDispatcher::ok();
 
     let frame = session
@@ -280,6 +295,9 @@ async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
 async fn delete_of_a_bound_key_carries_the_home_surrogate() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.bound = Some(Surrogate::new(7));
 
@@ -296,6 +314,9 @@ async fn delete_of_a_bound_key_carries_the_home_surrogate() {
 async fn unreadable_core_and_unknown_delete_outcomes_require_reconnect() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.payload = Some(b"invalid msgpack".to_vec());
     assert!(
@@ -326,6 +347,9 @@ async fn unreadable_core_and_unknown_delete_outcomes_require_reconnect() {
 async fn surrogate_errors_require_reconnect_without_an_ack() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     assert!(
         session
             .handle_spatial_insert(
@@ -351,6 +375,9 @@ async fn typed_core_payloads_and_errors_preserve_exact_spatial_frontiers() {
     use crate::bridge::envelope::ErrorCode;
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     for typed_error in [false, true] {
         let (mut mock, _, _) = MockDispatcher::ok();
         if typed_error {
@@ -396,6 +423,9 @@ async fn typed_core_payloads_and_errors_preserve_exact_spatial_frontiers() {
 async fn pre_admission_authorization_refusals_are_fenced_without_a_frontier() {
     let mut session = make_session();
     session.authenticated = true;
+    session
+        .tenant_id
+        .get_or_insert(crate::types::TenantId::new(1));
     let (mut mock, _, _) = MockDispatcher::ok();
     mock.error_code = Some(crate::bridge::envelope::ErrorCode::RejectedAuthz {
         resource: "not authorized".to_owned(),

@@ -175,7 +175,7 @@ fn drop_org(
 /// SHOW ORGS [IN TENANT <id>]
 pub fn show_orgs(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let tenant_filter = parts
@@ -183,6 +183,12 @@ pub fn show_orgs(
         .position(|p| p.to_uppercase() == "TENANT")
         .and_then(|i| parts.get(i + 1))
         .and_then(|s| s.parse::<u64>().ok());
+    // A caller without the superuser flag lists its own tenant only.
+    let tenant_filter = if identity.is_superuser {
+        tenant_filter
+    } else {
+        Some(identity.tenant_id.as_u64())
+    };
 
     let orgs = state.orgs.list(tenant_filter);
 
@@ -214,7 +220,7 @@ pub fn show_orgs(
 /// SHOW MEMBERS OF ORG '<org_id>'
 pub fn show_members(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     // SHOW MEMBERS OF ORG '<id>'
@@ -225,6 +231,9 @@ pub fn show_members(
         .map(|s| s.trim_matches('\''))
         .ok_or_else(|| err("42601", "syntax: SHOW MEMBERS OF ORG '<org_id>'"))?;
 
+    if !super::tenant_visibility::org_visible(state, identity, org_id) {
+        return Err(err("42704", format!("org '{org_id}' not found")));
+    }
     let members = state.orgs.members_of(org_id);
 
     let columns = vec![

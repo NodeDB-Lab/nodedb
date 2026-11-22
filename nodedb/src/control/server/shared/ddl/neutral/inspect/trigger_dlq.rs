@@ -103,6 +103,14 @@ pub fn requeue_trigger_dlq(
     identity: &AuthenticatedIdentity,
     entry_id: u64,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    if !identity.is_superuser
+        && !identity.has_role(&crate::control::security::identity::Role::TenantAdmin)
+    {
+        return Err(ddl_err(
+            "42501",
+            "permission denied: only superuser or tenant_admin can requeue trigger dead letters",
+        ));
+    }
     let Some(dlq) = state.trigger_dlq.get() else {
         return Err(ddl_err(
             "55000",

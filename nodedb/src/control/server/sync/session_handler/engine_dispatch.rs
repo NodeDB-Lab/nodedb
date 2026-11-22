@@ -267,6 +267,9 @@ mod tests {
         let mut ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
         let mut session = SyncSession::new("fts-outcomes".to_owned());
         session.authenticated = true;
+        session
+            .tenant_id
+            .get_or_insert(crate::types::TenantId::new(1));
         for kind in [
             SyncMessageType::ColumnarInsert,
             SyncMessageType::TimeseriesPush,

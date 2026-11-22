@@ -27,8 +27,9 @@ pub use batch_put::KvBatchPutParams;
 pub use clock::current_ms;
 pub use counter_refit::fitted_counter_f64;
 pub use engine::{
-    DueExpiry, KvEngine, KvEntryImage, KvHistoryOverlap, KvKeyRef, KvVersionRow, KvVersionedScan,
-    KvWriteScope, KvWriteScopeGuard, RestoreCompositeIndexParams, RestoreFieldIndexParams,
+    DueExpiry, KvEngine, KvEntryImage, KvHistoryOverlap, KvIdentityConflict, KvKeyRef,
+    KvVersionRow, KvVersionedScan, KvWriteScope, KvWriteScopeGuard, RestoreCompositeIndexParams,
+    RestoreFieldIndexParams,
 };
 pub use engine_atomic::{
     AtomicError, AtomicImageGate, AtomicKeyCtx, CasResult, GetSetResult, IncrStep, Incremented,

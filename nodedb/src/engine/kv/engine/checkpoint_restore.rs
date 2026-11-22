@@ -60,7 +60,9 @@ impl KvEngine {
             coverage,
             entries,
         } = params;
-        let tkey = self.name_collection(database_id, tenant_id, collection);
+        let Ok(tkey) = self.name_collection(database_id, tenant_id, collection) else {
+            return;
+        };
 
         let idx_set = self.indexes.entry(tkey).or_default();
         idx_set.add_index(field, field_position, coverage);
@@ -86,7 +88,9 @@ impl KvEngine {
             coverage,
             entries,
         } = params;
-        let tkey = self.name_collection(database_id, tenant_id, collection);
+        let Ok(tkey) = self.name_collection(database_id, tenant_id, collection) else {
+            return;
+        };
 
         let idx_set = self.indexes.entry(tkey).or_default();
         idx_set.add_composite_index(fields.to_vec(), field_positions.to_vec(), coverage);
@@ -106,7 +110,12 @@ impl KvEngine {
         def: SortedIndexDef,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) {
-        self.name_collection(database_id, tenant_id, &def.collection);
+        if self
+            .name_collection(database_id, tenant_id, &def.collection)
+            .is_err()
+        {
+            return;
+        }
         self.sorted_indexes
             .restore(database_id, tenant_id, def, entries);
     }
@@ -117,9 +126,14 @@ impl KvEngine {
     /// A restored collection may have no rows at all — the checkpoint carries
     /// index-only collections — and the reverse maps are what let the NEXT
     /// checkpoint find and name it again.
-    fn name_collection(&mut self, database_id: u64, tenant_id: u64, collection: &str) -> u64 {
+    fn name_collection(
+        &mut self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) -> Result<u64, super::KvIdentityConflict> {
         let tkey = table_key(database_id, tenant_id, collection);
-        self.register_table_identity(tkey, database_id, tenant_id, collection);
-        tkey
+        self.register_table_identity(tkey, database_id, tenant_id, collection)?;
+        Ok(tkey)
     }
 }

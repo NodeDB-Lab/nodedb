@@ -15,8 +15,10 @@ use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::super::auth_support::{parse_role, require_tenant_admin, status};
-use super::super::role_checks::visible_user_or_missing;
+use super::super::auth_support::{
+    parse_role, require_superuser_for_role, require_tenant_admin, status,
+};
+use super::super::role_checks::visible_user_in_or_missing;
 use super::iso8601::parse_iso8601_to_unix;
 
 /// ALTER USER <name> ... — typed dispatch for all AlterUserOp forms.
@@ -51,7 +53,7 @@ pub async fn alter_user(
                     "password must be a non-empty single-quoted string",
                 ));
             }
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_user_update_from(base, Some(password.as_str()), None)
@@ -77,7 +79,8 @@ pub async fn alter_user(
                 return Err(DdlError::new("42601", "expected role name after SET ROLE"));
             }
             let parsed_role: Role = parse_role(role);
-            let base = visible_user_or_missing(state, username)?;
+            require_superuser_for_role(identity, &parsed_role)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let tenant_id = crate::types::TenantId::new(base.tenant_id);
             let new_roles = vec![parsed_role.clone()];
             super::super::role_checks::check_user_roles(state, &new_roles, tenant_id)?;
@@ -102,7 +105,7 @@ pub async fn alter_user(
 
         AlterUserOp::MustChangePassword => {
             require_tenant_admin(identity, "set must_change_password")?;
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_set_must_change_password_from(base, true);
@@ -119,7 +122,7 @@ pub async fn alter_user(
 
         AlterUserOp::PasswordNeverExpires => {
             require_tenant_admin(identity, "set password expiry")?;
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_set_password_expires_at_from(base, 0);
@@ -142,7 +145,7 @@ pub async fn alter_user(
                     format!("invalid ISO-8601 datetime '{iso8601}': {e}"),
                 )
             })?;
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_set_password_expires_at_from(base, expires_at);
@@ -166,7 +169,7 @@ pub async fn alter_user(
                 ));
             }
             let expires_at = crate::control::security::time::now_secs() + (*days as u64) * 86400;
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_set_password_expires_at_from(base, expires_at);
@@ -203,7 +206,7 @@ pub async fn alter_user(
                 .ok_or_else(|| {
                     DdlError::new("42704", format!("database '{db_name}' does not exist"))
                 })?;
-            let base = visible_user_or_missing(state, username)?;
+            let base = visible_user_in_or_missing(state, identity, username)?;
             let stored = state
                 .credentials
                 .prepare_set_default_database_from(base, db_id.as_u64());

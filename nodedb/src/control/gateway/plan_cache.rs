@@ -27,9 +27,15 @@ use super::version_set::GatewayVersionSet;
 /// Default maximum number of cached plans.
 pub const DEFAULT_CAPACITY: usize = 1024;
 
-/// Cache key: SQL hash + placeholder-type hash + descriptor version set.
+/// Cache key: tenant + database + SQL hash + placeholder-type hash +
+/// descriptor version set. Two callers share a plan only when tenant and
+/// database match.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlanCacheKey {
+    /// Tenant the plan was built for.
+    pub tenant_id: u64,
+    /// Database the plan was built for.
+    pub database_id: u64,
     /// FNV-1a hash of the SQL text.
     pub sql_text_hash: u64,
     /// Hash of the placeholder type list (0 if no placeholders).
@@ -285,6 +291,8 @@ mod tests {
         PlanCacheKey {
             sql_text_hash: hash_sql(sql),
             placeholder_types_hash: 0,
+            tenant_id: 1,
+            database_id: 0,
             version_set: GatewayVersionSet::from_pairs(vec![(collection.into(), version)]),
         }
     }
@@ -364,6 +372,8 @@ mod tests {
                 let k = PlanCacheKey {
                     sql_text_hash: i,
                     placeholder_types_hash: 0,
+                    tenant_id: 1,
+                    database_id: 0,
                     version_set: GatewayVersionSet::from_pairs(vec![(format!("col{i}"), i)]),
                 };
                 c.insert(k.clone(), kv_plan("col"));

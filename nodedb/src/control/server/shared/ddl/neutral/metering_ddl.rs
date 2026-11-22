@@ -62,16 +62,20 @@ pub fn define_dimension(
 /// SHOW USAGE FOR AUTH USER '<id>' / SHOW USAGE FOR ORG '<id>'
 pub fn show_usage(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (user_filter, org_filter) = parse_for_clause(parts);
 
-    let events = state.usage_store.query(
+    let mut events = state.usage_store.query(
         user_filter.as_deref(),
         org_filter.as_deref(),
         0, // All time.
     );
+    // A caller without the superuser flag sees events of its own tenant only.
+    if !identity.is_superuser {
+        events.retain(|e| e.tenant_id == identity.tenant_id.as_u64());
+    }
 
     let columns = vec![
         "auth_user_id".to_string(),
@@ -117,13 +121,17 @@ pub fn show_usage(
 /// SHOW QUOTA FOR AUTH USER '<id>' / SHOW QUOTA FOR ORG '<id>'
 pub fn show_quota(
     state: &SharedState,
-    _identity: &AuthenticatedIdentity,
+    identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (user_filter, _org_filter) = parse_for_clause(parts);
     let grantee_id = user_filter.as_deref().unwrap_or("");
 
-    let quotas = state.quota_manager.list_quotas();
+    let mut quotas = state.quota_manager.list_quotas();
+    // A grantee outside the caller's tenant yields no rows.
+    if !super::tenant_visibility::auth_user_visible(state, identity, grantee_id) {
+        quotas.clear();
+    }
     let now_secs = crate::control::security::time::now_secs();
 
     let columns = vec![

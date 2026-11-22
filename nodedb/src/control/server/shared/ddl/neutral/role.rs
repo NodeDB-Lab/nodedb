@@ -102,7 +102,7 @@ pub async fn drop_role(
     }
 
     let name = parts[2];
-    let exists_before = super::role_checks::visible_roles(state).contains_key(name);
+    let exists_before = super::role_checks::role_in_caller_tenant(state, identity, name);
     if !exists_before {
         // `IF EXISTS`: dropping a missing role is a no-op success.
         if if_exists {
@@ -162,7 +162,7 @@ pub async fn alter_role_typed(
 
     // The role must exist before we mutate it: committed, or created earlier
     // in this transaction.
-    if !super::role_checks::visible_roles(state).contains_key(role_name) {
+    if !super::role_checks::role_in_caller_tenant(state, identity, role_name) {
         return Err(DdlError::new(
             "42704",
             format!("role '{role_name}' not found"),
