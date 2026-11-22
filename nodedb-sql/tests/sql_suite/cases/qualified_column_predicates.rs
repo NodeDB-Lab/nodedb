@@ -111,3 +111,43 @@ fn a_foreign_qualifier_is_refused_in_every_predicate_shape() {
         assert!(error.contains("wrong"), "{sql}: {error}");
     }
 }
+
+/// A single-table `UPDATE` (no `FROM`) and `DELETE` share the same own-table
+/// qualifier bug `SELECT` had: the WHERE's compound identifier never went
+/// through any stripping walk, so `WHERE u1.n = 1` built a filter keyed
+/// literally `"u1.n"`, matching no stored row -- an `UPDATE`/`DELETE` that
+/// silently touches nothing, not an error.
+#[test]
+fn update_and_delete_strip_an_own_table_qualifier() {
+    for sql in [
+        "UPDATE u1 SET label = 'x' WHERE u1.n = 1",
+        "DELETE FROM u1 WHERE u1.n = 1",
+    ] {
+        assert!(!still_qualified(sql), "{sql}");
+    }
+}
+
+/// Once aliased, the alias is the valid qualifier (the original table name
+/// is not) -- the same rule the FROM-joined UPDATE and MERGE already follow.
+#[test]
+fn update_and_delete_strip_an_alias_qualifier() {
+    for sql in [
+        "UPDATE u1 AS z SET label = 'x' WHERE z.n = 1",
+        "DELETE FROM u1 AS z WHERE z.n = 1",
+    ] {
+        assert!(!still_qualified(sql), "{sql}");
+    }
+}
+
+/// A qualifier naming neither the table nor its alias is a typed error for
+/// `UPDATE`/`DELETE` too, never a silent no-op.
+#[test]
+fn update_and_delete_refuse_a_foreign_qualifier() {
+    for sql in [
+        "UPDATE u1 SET label = 'x' WHERE wrong.n = 1",
+        "DELETE FROM u1 WHERE wrong.n = 1",
+    ] {
+        let error = plan_sql(sql, &Catalog).expect_err(sql).to_string();
+        assert!(error.contains("wrong"), "{sql}: {error}");
+    }
+}
