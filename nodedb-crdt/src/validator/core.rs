@@ -2,7 +2,7 @@
 
 //! Validator struct, constructors, and accessors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::constraint::{Constraint, ConstraintSet};
 use crate::dead_letter::DeadLetterQueue;
@@ -28,10 +28,6 @@ pub struct Validator {
     /// Optional delta signature verifier. When set, signed deltas are
     /// verified before constraint validation.
     pub(super) delta_verifier: Option<DeltaSigner>,
-    /// Collections known to be bitemporal. UNIQUE checks for rows in these
-    /// collections scope to currently-live rows (open `_ts_valid_until`)
-    /// so superseded versions don't falsely collide with live writes.
-    pub(super) bitemporal_collections: HashSet<String>,
 }
 
 impl Validator {
@@ -54,7 +50,6 @@ impl Validator {
             deferred: DeferredQueue::new(deferred_capacity),
             suffix_counter: HashMap::new(),
             delta_verifier: None,
-            bitemporal_collections: HashSet::new(),
         }
     }
 
@@ -72,22 +67,6 @@ impl Validator {
     /// Read the constraints currently scoped to `collection`.
     pub fn constraints_for(&self, collection: &str) -> Vec<&Constraint> {
         self.constraints.for_collection(collection)
-    }
-
-    /// Set whether `collection` is bitemporal. UNIQUE constraints on a
-    /// bitemporal collection count only currently-live rows. `false` clears
-    /// the mark.
-    pub fn set_bitemporal(&mut self, collection: &str, bitemporal: bool) {
-        if bitemporal {
-            self.bitemporal_collections.insert(collection.to_owned());
-        } else {
-            self.bitemporal_collections.remove(collection);
-        }
-    }
-
-    /// Is the given collection registered as bitemporal?
-    pub fn is_bitemporal(&self, collection: &str) -> bool {
-        self.bitemporal_collections.contains(collection)
     }
 
     /// Access the dead-letter queue.

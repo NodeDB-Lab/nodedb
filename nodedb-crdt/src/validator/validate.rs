@@ -77,6 +77,14 @@ impl Validator {
         change: &ProposedChange,
         crs: &nodedb_crs::CrsContext<'_>,
     ) -> ValidationOutcome {
+        // The server owns the audit temporal fields on every collection, so a
+        // row naming one is refused before any constraint runs.
+        if let Some(violation) = crate::reserved_fields::reserved_field_violation(
+            &change.collection,
+            change.fields.iter().map(|(name, _)| name.as_str()),
+        ) {
+            return ValidationOutcome::Rejected(vec![violation]);
+        }
         let constraints = self.constraints.for_collection(&change.collection);
         let mut violations = Vec::new();
 

@@ -3,7 +3,6 @@
 //! Delta apply paths: Raft-committed import and peer-validated upsert.
 
 use loro::LoroValue;
-use nodedb_types::columnar::schema::TS_SYSTEM;
 
 use nodedb_crdt::pre_validate::{self, PreValidationResult};
 use nodedb_crdt::validator::ProposedChange;
@@ -47,11 +46,6 @@ impl TenantCrdtEngine {
     ///
     /// If constraints are violated, the delta is routed to the DLQ.
     /// Returns `Ok(())` on success, or the constraint violation error.
-    ///
-    /// For bitemporal collections, `_ts_system` is always stamped with the
-    /// receiving node's clock, overwriting any value the sender supplied.
-    /// This keeps system-time receiver-authoritative so convergence does
-    /// not depend on clock agreement between peers.
     pub fn validate_and_apply(
         &mut self,
         peer_id: u64,
@@ -74,32 +68,16 @@ impl TenantCrdtEngine {
                 .map_err(crate::Error::Crdt)?;
         }
 
-        let is_bitemporal = self.validator.is_bitemporal(&change.collection);
-        // no-determinism: peer delta validation path, not Calvin apply_committed_delta path
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-
-        let mut fields: Vec<(&str, LoroValue)> = change
+        let fields: Vec<(&str, LoroValue)> = change
             .fields
             .iter()
-            .filter(|(k, _)| !(is_bitemporal && k == TS_SYSTEM))
             .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
 
         let root = loro_root(&change.collection);
-        let state = self.state_mut(&change.collection)?;
-        if is_bitemporal {
-            fields.push((TS_SYSTEM, LoroValue::I64(now_ms)));
-            state
-                .upsert_versioned(root, &change.row_id, &fields)
-                .map_err(crate::Error::Crdt)
-        } else {
-            state
-                .upsert(root, &change.row_id, &fields)
-                .map_err(crate::Error::Crdt)
-        }
+        self.state_mut(&change.collection)?
+            .upsert(root, &change.row_id, &fields)
+            .map_err(crate::Error::Crdt)
     }
 }
 

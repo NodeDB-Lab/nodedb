@@ -123,6 +123,10 @@ pub const TS_SYSTEM: &str = "_ts_system";
 pub const TS_VALID_FROM: &str = "_ts_valid_from";
 pub const TS_VALID_UNTIL: &str = "_ts_valid_until";
 
+/// The three audit temporal column names. The server owns them on every
+/// engine, so no client write names one.
+pub const TS_AUDIT_COLUMNS: [&str; 3] = [TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL];
+
 /// The series id of a timeseries row: the id the collection's series
 /// catalog gave the row's metric and tags at ingest. Every timeseries row
 /// stores it, so a flushed row names its series without its metric. It is

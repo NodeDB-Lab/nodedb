@@ -144,20 +144,11 @@ impl Validator {
 
         let value = &field_value.1;
 
-        // Bitemporal collections: only consider live (non-superseded) rows,
-        // so a new version of the same logical row with the same value does
-        // not spuriously collide with its prior version.
-        // Exclude the row's own already-committed version so re-validating a
-        // committed row does not falsely collide with itself; a second, distinct
-        // row carrying the same value still collides.
+        // Loro holds one entry per row id, so every present row counts. The
+        // row's own committed entry is excluded so re-validation does not
+        // collide with itself. A distinct row with the same value collides.
         let exclude = Some(change.row_id.as_str());
-        let exists = if self.is_bitemporal(&change.collection) {
-            state.field_value_exists_live(&change.collection, &constraint.field, value, exclude)
-        } else {
-            state.field_value_exists(&change.collection, &constraint.field, value, exclude)
-        };
-
-        if exists {
+        if state.field_value_exists(&change.collection, &constraint.field, value, exclude) {
             let value_str = render_value(value);
             Some(Violation {
                 constraint_name: constraint.name.clone(),
@@ -284,16 +275,6 @@ mod bitemporal_fk_tests {
         ) -> bool {
             self.state
                 .field_value_exists(collection, field, value, exclude_row_id)
-        }
-        fn field_value_exists_live(
-            &self,
-            collection: &str,
-            field: &str,
-            value: &LoroValue,
-            exclude_row_id: Option<&str>,
-        ) -> bool {
-            self.state
-                .field_value_exists_live(collection, field, value, exclude_row_id)
         }
     }
 

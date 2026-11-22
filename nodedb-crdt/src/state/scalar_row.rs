@@ -44,7 +44,8 @@ impl ScalarRowBase {
     /// With `replace` (`Upsert`) a scalar key the write does not name goes
     /// and a container-valued key stays. Without it (`SetFields`) every other
     /// key stays. An absent `base` is a new row. A field that names a
-    /// container-valued key is refused.
+    /// container-valued key is refused. A reserved field is refused, as the
+    /// write refuses it.
     pub fn predict(
         base: Option<&Self>,
         collection: &str,
@@ -52,6 +53,10 @@ impl ScalarRowBase {
         fields: &[(&str, LoroValue)],
         replace: bool,
     ) -> Result<LoroValue> {
+        crate::reserved_fields::refuse_reserved_fields(
+            collection,
+            fields.iter().map(|(field, _)| *field),
+        )?;
         let empty = Self::default();
         let base = base.unwrap_or(&empty);
         if let Some((field, _)) = fields

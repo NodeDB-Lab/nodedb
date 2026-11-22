@@ -266,12 +266,10 @@ impl CoreLoop {
                         .load_crdt_dead_letters(database_id.as_u64(), tenant_id.as_u64())?,
                 )?;
                 // Every registered collection's Loro peer id derives from its
-                // catalog incarnation. A bitemporal CRDT collection scopes its
-                // UNIQUE checks to live rows.
+                // catalog incarnation.
                 for ((db, tid, collection), config) in &self.doc_configs {
                     if *db == database_id && *tid == tenant_id {
                         engine.bind_incarnation(collection, config.incarnation)?;
-                        engine.set_bitemporal(collection, config.crdt_enabled && config.bitemporal);
                     }
                 }
                 Ok(slot.insert(engine))

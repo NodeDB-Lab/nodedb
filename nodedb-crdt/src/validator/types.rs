@@ -53,11 +53,7 @@ pub struct ProposedChange {
     /// and FK checks key on this when non-zero, so cross-engine bitmap
     /// joins reference the same row identity.
     pub surrogate: Surrogate,
-    /// Field values being set.
-    ///
-    /// For bitemporal collections, the reserved columns `_ts_valid_from`
-    /// and `_ts_valid_until` appear in this vec alongside user fields;
-    /// constraint validation inspects them via
-    /// [`crate::validator::bitemporal`] helpers.
+    /// Field values being set. A reserved audit field here refuses the
+    /// change, see [`crate::reserved_fields`].
     pub fields: Vec<(String, LoroValue)>,
 }

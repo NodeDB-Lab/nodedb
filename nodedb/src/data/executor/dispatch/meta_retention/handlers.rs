@@ -237,10 +237,10 @@ impl CoreLoop {
     }
 
     /// `MetaOp::TemporalPurgeCrdt`: remove a CRDT collection's history below
-    /// `cutoff_system_ms`. The history has two homes: the Loro archive, and
-    /// the sparse row versions a write materializes, which `AS OF SYSTEM TIME`
-    /// reads. The live row stays in both. Returns a u64 LE count of the entries
-    /// removed. A tenant with no CRDT engine still has sparse versions to purge.
+    /// `cutoff_system_ms`. The history lives in the sparse row versions a
+    /// write materializes, which `AS OF SYSTEM TIME` reads. Loro holds only
+    /// the current merged state. The live row stays. Returns a u64 LE count
+    /// of the entries removed.
     pub(in crate::data::executor::dispatch) fn meta_temporal_purge_crdt(
         &mut self,
         task: &ExecutionTask,
@@ -248,22 +248,11 @@ impl CoreLoop {
         collection: &str,
         cutoff_system_ms: i64,
     ) -> Response {
-        let tid = TenantId::new(tenant_id);
-        let archived = match self.crdt_engines.get(&(task.request.database_id, tid)) {
-            Some(engine) => match engine.purge_history_before(collection, cutoff_system_ms) {
-                Ok(n) => n as u64,
-                Err(e) => {
-                    return self.response_error(task, ErrorCode::from(e));
-                }
-            },
-            None => 0,
-        };
-        let versions =
+        let purged =
             match self.purge_document_history(task, tenant_id, collection, cutoff_system_ms) {
                 Ok((docs, idx)) => (docs + idx) as u64,
                 Err(e) => return self.response_error(task, ErrorCode::from(e)),
             };
-        let purged = archived + versions;
         if purged > 0 {
             tracing::info!(
                 tenant = tenant_id,

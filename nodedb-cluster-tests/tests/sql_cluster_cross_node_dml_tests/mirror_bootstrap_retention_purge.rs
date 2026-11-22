@@ -165,7 +165,7 @@ async fn a_mirror_bootstrap_purges_the_history_its_source_purges() {
     source.shutdown().await;
 }
 
-/// A CRDT collection's archived versions leave both clusters. The live row stays.
+/// A CRDT collection's sparse row versions leave both clusters. The live row stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_mirror_bootstrap_purges_the_crdt_history_its_source_purges() {
     const DATABASE: &str = "retention_crdt";

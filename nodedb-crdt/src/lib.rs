@@ -34,6 +34,7 @@ pub mod list_ops;
 pub mod loro_value;
 pub mod policy;
 pub mod pre_validate;
+pub mod reserved_fields;
 pub mod row_lookup;
 pub mod signing;
 pub mod state;

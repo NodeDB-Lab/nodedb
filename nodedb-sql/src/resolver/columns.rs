@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use nodedb_types::DatabaseId;
+use nodedb_types::columnar::schema::TS_AUDIT_COLUMNS;
 
 use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
@@ -13,11 +14,6 @@ use crate::temporal::TemporalScope;
 use crate::types::{CollectionInfo, ColumnInfo, EngineType, SqlCatalog};
 
 pub use super::column_naming::{BareColumn, ColumnNaming};
-
-/// Synthetic temporal columns an audit read injects into every version row.
-/// They are not declared columns, so a bitemporal relation resolves them by
-/// name.
-const BITEMPORAL_AUDIT_COLUMNS: [&str; 3] = ["_ts_system", "_ts_valid_from", "_ts_valid_until"];
 
 /// Resolved table reference: name, alias, and catalog info.
 #[derive(Debug, Clone)]
@@ -124,7 +120,10 @@ impl TableScope {
         if table.info.open_schema {
             return true;
         }
-        if table.info.bitemporal && BITEMPORAL_AUDIT_COLUMNS.contains(&column) {
+        // An audit read injects the temporal columns into every version row.
+        // They are not declared columns, so a bitemporal relation resolves
+        // them by name.
+        if table.info.bitemporal && TS_AUDIT_COLUMNS.contains(&column) {
             return true;
         }
         let rules = crate::engine_rules::resolve_engine_rules(table.info.engine);

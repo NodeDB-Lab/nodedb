@@ -7,7 +7,6 @@
 //! committed state. If any constraint is violated, the delta is rejected
 //! with a compensation hint.
 
-pub mod bitemporal;
 mod core;
 pub mod incoming;
 mod policy_dispatch;

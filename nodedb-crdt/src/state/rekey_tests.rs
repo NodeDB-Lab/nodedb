@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use loro::{LoroMap, LoroValue};
+use loro::LoroValue;
 
-use super::super::bitemporal_archive::HISTORY_ROOT;
 use super::CrdtState;
 
 const OLD_PEER: u64 = 7;
@@ -55,45 +54,6 @@ fn deleting_the_last_row_preserves_the_empty_collection_root_during_rekey() {
     assert_eq!(rekeyed.state.collection_names(), ["users"]);
     assert!(rekeyed.rows.is_empty());
     assert_eq!(rekeyed.state.local_op_counter(), 0);
-}
-
-#[test]
-fn empty_archive_root_rekeys_without_materializing_an_absent_collection() {
-    let source = CrdtState::new(OLD_PEER).unwrap();
-    source.doc.get_map(HISTORY_ROOT);
-    let rekeyed = checked_rekey(&source, "users");
-    assert_eq!(rekeyed.state.collection_names(), [HISTORY_ROOT]);
-    assert!(rekeyed.rows.is_empty());
-}
-
-#[test]
-fn archive_only_rows_rekey_and_replay_without_materializing_an_absent_collection() {
-    let source = CrdtState::new(OLD_PEER).unwrap();
-    let key = super::super::bitemporal_archive::archive_key("users", "a", 100);
-    let slot = source
-        .doc
-        .get_map(HISTORY_ROOT)
-        .insert_container(&key, LoroMap::new())
-        .unwrap();
-    slot.insert("v", LoroValue::I64(1)).unwrap();
-    source.doc.commit();
-    let rekeyed = checked_rekey(&source, "users");
-    assert_eq!(rekeyed.state.collection_names(), [HISTORY_ROOT]);
-    assert_eq!(rekeyed.rows.len(), 1);
-    assert_eq!(rekeyed.rows[0].row_id, "a");
-    let receiver = CrdtState::new(1234).unwrap();
-    for row in &rekeyed.rows {
-        let delta = rekeyed
-            .state
-            .export_local_range(row.from_counter, row.to_counter)
-            .unwrap();
-        receiver.import(&delta).unwrap();
-    }
-    assert_eq!(
-        receiver.doc.get_deep_value(),
-        rekeyed.state.doc.get_deep_value()
-    );
-    assert_eq!(receiver.collection_names(), [HISTORY_ROOT]);
 }
 
 #[test]
@@ -164,49 +124,6 @@ fn rekeyed_state_preserves_nested_containers() {
             .list_length("pages", "p1", "blocks")
             .expect("length"),
         2
-    );
-}
-
-#[test]
-fn rekeyed_state_preserves_the_bitemporal_archive() {
-    let state = CrdtState::new(OLD_PEER).expect("state");
-    state
-        .upsert_versioned(
-            "readings",
-            "r1",
-            &[
-                ("value", LoroValue::I64(1)),
-                ("_ts_system", LoroValue::I64(1_000)),
-            ],
-        )
-        .expect("v1");
-    state
-        .upsert_versioned(
-            "readings",
-            "r1",
-            &[
-                ("value", LoroValue::I64(2)),
-                ("_ts_system", LoroValue::I64(2_000)),
-            ],
-        )
-        .expect("v2");
-    assert_eq!(state.archive_version_count("readings", "r1"), 1);
-
-    let rekeyed = state.rekey("readings", NEW_PEER).expect("rekey").state;
-
-    assert!(
-        rekeyed.collection_names().iter().any(|n| n == HISTORY_ROOT),
-        "the archive root must be rebuilt, not just the live rows"
-    );
-    assert_eq!(
-        rekeyed.archive_version_count("readings", "r1"),
-        1,
-        "archived versions must survive a rekey"
-    );
-    assert_eq!(
-        rekeyed.read_row_as_of("readings", "r1", 1_500),
-        state.read_row_as_of("readings", "r1", 1_500),
-        "as-of reads must agree across the rekey"
     );
 }
 
@@ -296,44 +213,6 @@ fn each_row_gets_its_own_applicable_delta() {
         receiver.row_ids("users").len(),
         3,
         "the spans must reconstruct the whole collection"
-    );
-}
-
-#[test]
-fn rows_surviving_only_as_history_are_rekeyed() {
-    let state = CrdtState::new(OLD_PEER).expect("state");
-    state
-        .upsert_versioned(
-            "readings",
-            "r1",
-            &[
-                ("value", LoroValue::I64(1)),
-                ("_ts_system", LoroValue::I64(1_000)),
-            ],
-        )
-        .expect("v1");
-    state
-        .upsert_versioned(
-            "readings",
-            "r1",
-            &[
-                ("value", LoroValue::I64(2)),
-                ("_ts_system", LoroValue::I64(2_000)),
-            ],
-        )
-        .expect("v2");
-    state.delete("readings", "r1").expect("delete");
-
-    let rekeyed = state.rekey("readings", NEW_PEER).expect("rekey");
-
-    assert_eq!(
-        rekeyed.state.archive_version_count("readings", "r1"),
-        1,
-        "a deleted row's history must not be dropped by the rekey"
-    );
-    assert!(
-        rekeyed.rows.iter().any(|r| r.row_id == "r1"),
-        "the archived-only row must still get a delta so Origin receives it"
     );
 }
 

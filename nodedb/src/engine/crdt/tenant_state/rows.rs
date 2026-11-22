@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Row reads, bitemporal history access, and collection purge.
+//! Row reads and collection purge.
 
 use loro::LoroValue;
 
@@ -26,45 +26,6 @@ impl TenantCrdtEngine {
         self.collections
             .get(collection)
             .is_some_and(|state| state.row_exists(loro_root(collection), row_id))
-    }
-
-    /// Read the row as it was at `asof_ms` (system-time). Returns `None` when
-    /// the collection is absent or no version existed at or before that time.
-    pub fn read_row_as_of(
-        &self,
-        collection: &str,
-        row_id: &str,
-        asof_ms: i64,
-    ) -> Option<LoroValue> {
-        self.collections
-            .get(collection)
-            .and_then(|state| state.read_row_as_of(loro_root(collection), row_id, asof_ms))
-    }
-
-    /// Count archived (superseded) bitemporal versions for a row.
-    /// Returns `0` when the collection has no local state.
-    pub fn archive_version_count(&self, collection: &str, row_id: &str) -> usize {
-        self.collections
-            .get(collection)
-            .map(|state| state.archive_version_count(loro_root(collection), row_id))
-            .unwrap_or(0)
-    }
-
-    /// Drop archived bitemporal versions older than `cutoff_system_ms`
-    /// for the given collection. The live row is never touched. Called
-    /// from the Data Plane purge handler. A collection with no local state
-    /// purges nothing.
-    pub fn purge_history_before(
-        &self,
-        collection: &str,
-        cutoff_system_ms: i64,
-    ) -> crate::Result<usize> {
-        match self.collections.get(collection) {
-            Some(state) => state
-                .purge_history_before(loro_root(collection), cutoff_system_ms)
-                .map_err(crate::Error::Crdt),
-            None => Ok(0),
-        }
     }
 
     /// Number of entries in the dead-letter queue.
@@ -99,7 +60,6 @@ impl TenantCrdtEngine {
         self.apply_candidates.remove(collection);
         self.validator.policies_mut().remove(collection);
         self.validator.clear_collection_constraints(collection);
-        self.validator.set_bitemporal(collection, false);
         self.constraint_versions.remove(collection);
         let dlq_dropped = self
             .validator

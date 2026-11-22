@@ -44,6 +44,12 @@ impl Validator {
             delta_bytes,
             hlc_timestamp,
         } = incoming;
+        // A reserved-field write is refused outright. No conflict policy
+        // resolves it.
+        crate::reserved_fields::refuse_reserved_fields(
+            &change.collection,
+            change.fields.iter().map(|(name, _)| name.as_str()),
+        )?;
         match self.validate(state, change, crs) {
             ValidationOutcome::Accepted => {
                 // No violation; return synthetic "auto-resolved" to maintain API consistency

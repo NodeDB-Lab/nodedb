@@ -45,7 +45,7 @@ pub enum RetentionOp {
         cutoff_system_ms: i64,
         decided_ms: i64,
     },
-    /// Purge a CRDT collection's archived versions below the cutoff.
+    /// Purge a CRDT collection's sparse row versions below the cutoff.
     TemporalCrdt {
         collection: String,
         cutoff_system_ms: i64,

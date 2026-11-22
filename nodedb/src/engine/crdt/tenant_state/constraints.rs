@@ -162,20 +162,6 @@ impl TenantCrdtEngine {
             .collect()
     }
 
-    /// Set whether `collection` is bitemporal on this tenant's validator.
-    /// `collection` is the stored name. `false` clears the mark.
-    ///
-    /// Bitemporal collections get (a) UNIQUE constraints scoped to live
-    /// rows only and (b) receiver-stamped `_ts_system` on apply.
-    pub fn set_bitemporal(&mut self, collection: &str, bitemporal: bool) {
-        self.validator.set_bitemporal(collection, bitemporal);
-    }
-
-    /// Is the named collection bitemporal?
-    pub fn is_bitemporal(&self, collection: &str) -> bool {
-        self.validator.is_bitemporal(collection)
-    }
-
     /// Install the tenant's registered user/device signing keys.
     pub fn set_delta_verifier(&mut self, verifier: nodedb_crdt::DeltaSigner) {
         self.validator.set_delta_verifier(verifier);

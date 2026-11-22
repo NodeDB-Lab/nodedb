@@ -9,23 +9,10 @@ use std::marker::PhantomData;
 use loro::{LoroDoc, LoroMap, LoroValue, ValueOrContainer};
 
 use crate::error::{CrdtError, Result};
+use crate::reserved_fields::refuse_reserved_fields;
 use crate::row_lookup::RowLookup;
-use crate::validator::bitemporal::{VALID_UNTIL, VALID_UNTIL_OPEN};
 
 use super::document_cell::DocumentCell;
-
-/// A row is live when its `_ts_valid_until` field is absent, null, or the
-/// open sentinel (`i64::MAX`). Rows with any finite `_ts_valid_until` are
-/// treated as superseded, independent of wall-clock time — the write path
-/// sets finite `_ts_valid_until` only when explicitly terminating a version.
-fn row_is_live(row: &LoroMap) -> bool {
-    match row.get(VALID_UNTIL) {
-        None => true,
-        Some(ValueOrContainer::Value(LoroValue::Null)) => true,
-        Some(ValueOrContainer::Value(LoroValue::I64(n))) => n == VALID_UNTIL_OPEN,
-        _ => true,
-    }
-}
 
 /// True when `key` currently holds a container (map/list/text/etc.) value
 /// on `row`, rather than a plain scalar. Shared by `upsert`'s delete-set
@@ -129,10 +116,7 @@ impl CrdtState {
     }
 
     /// The body of [`CrdtState::upsert`], run inside an open mutation.
-    ///
-    /// `upsert_versioned` calls it in the same mutation as its archive
-    /// write, so the archive entry and the new row commit together.
-    pub(in crate::state) fn replace_row_fields(
+    fn replace_row_fields(
         doc: &LoroDoc,
         collection: &str,
         row_id: &str,
@@ -174,13 +158,15 @@ impl CrdtState {
     /// `fields: &[(&str, LoroValue)]` at all — they are structurally out of
     /// scope for this replace and must survive across every call.
     ///
-    /// The write commits on return, on success and on error.
+    /// The write commits on return, on success and on error. A reserved
+    /// field in `fields` refuses the write before the document changes.
     pub fn upsert(
         &self,
         collection: &str,
         row_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<()> {
+        refuse_reserved_fields(collection, fields.iter().map(|(field, _)| *field))?;
         self.doc
             .mutate(|doc| Self::replace_row_fields(doc, collection, row_id, fields))
     }
@@ -190,13 +176,15 @@ impl CrdtState {
     /// key intact. This is `upsert` WITHOUT the full-projection prune step —
     /// the UPDATE-SET semantic for `CrdtOp::DocUpsert { partial: true }`.
     ///
-    /// The write commits on return, on success and on error.
+    /// The write commits on return, on success and on error. A reserved
+    /// field in `fields` refuses the write before the document changes.
     pub fn set_fields(
         &self,
         collection: &str,
         row_id: &str,
         fields: &[(&str, LoroValue)],
     ) -> Result<()> {
+        refuse_reserved_fields(collection, fields.iter().map(|(field, _)| *field))?;
         self.doc.mutate(|doc| {
             let row_container = Self::row_container(doc, collection, row_id)?;
             Self::write_scalar_fields(&row_container, collection, row_id, fields)
@@ -392,60 +380,6 @@ impl CrdtState {
         false
     }
 
-    /// Bitemporal variant of [`field_value_exists`]: only considers rows
-    /// whose `_ts_valid_until` is open (absent or `i64::MAX`).
-    ///
-    /// A UNIQUE collision between a superseded version and a new live row
-    /// is not a violation — both may share the same value because they
-    /// represent the same logical entity at different valid-times.
-    pub fn field_value_exists_live(
-        &self,
-        collection: &str,
-        field: &str,
-        value: &LoroValue,
-        exclude_row_id: Option<&str>,
-    ) -> bool {
-        let coll = self.doc.get_map(collection);
-        for key in coll.keys() {
-            if exclude_row_id == Some(key.as_ref()) {
-                continue;
-            }
-            let row_map = match coll.get(&key) {
-                Some(ValueOrContainer::Container(loro::Container::Map(m))) => m,
-                _ => continue,
-            };
-            if !row_is_live(&row_map) {
-                continue;
-            }
-            let field_val = match row_map.get(field) {
-                Some(ValueOrContainer::Value(v)) => v,
-                _ => continue,
-            };
-            if &field_val == value {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Return row IDs currently "live" in a bitemporal collection
-    /// (rows whose `_ts_valid_until` is open). For non-bitemporal
-    /// collections every row is returned.
-    pub fn live_row_ids(&self, collection: &str) -> Vec<String> {
-        let coll = self.doc.get_map(collection);
-        let mut out = Vec::new();
-        for key in coll.keys() {
-            let row_map = match coll.get(&key) {
-                Some(ValueOrContainer::Container(loro::Container::Map(m))) => m,
-                _ => continue,
-            };
-            if row_is_live(&row_map) {
-                out.push(key.to_string());
-            }
-        }
-        out
-    }
-
     /// Peer ID of this state.
     pub fn peer_id(&self) -> u64 {
         self.peer_id
@@ -475,16 +409,6 @@ impl RowLookup for CrdtState {
         exclude_row_id: Option<&str>,
     ) -> bool {
         self.field_value_exists(collection, field, value, exclude_row_id)
-    }
-
-    fn field_value_exists_live(
-        &self,
-        collection: &str,
-        field: &str,
-        value: &LoroValue,
-        exclude_row_id: Option<&str>,
-    ) -> bool {
-        self.field_value_exists_live(collection, field, value, exclude_row_id)
     }
 }
 
@@ -637,29 +561,6 @@ mod tests {
 
         // With no exclusion the value is plainly present.
         assert!(state.field_value_exists("users", "email", &value, None));
-    }
-
-    #[test]
-    fn field_value_exists_live_self_exclusion() {
-        let state = CrdtState::new(1).unwrap();
-        // Live rows (no `_ts_valid_until`) — the live probe treats them as active.
-        state
-            .upsert(
-                "users",
-                "u1",
-                &[("email", LoroValue::String("a@example.com".into()))],
-            )
-            .unwrap();
-
-        let value = LoroValue::String("a@example.com".into());
-
-        // Excluding the holder row → no self-collision.
-        assert!(!state.field_value_exists_live("users", "email", &value, Some("u1")));
-
-        // A distinct row with the same value → collision against the live u1.
-        assert!(state.field_value_exists_live("users", "email", &value, Some("u2")));
-
-        assert!(state.field_value_exists_live("users", "email", &value, None));
     }
 
     #[test]
@@ -1114,22 +1015,10 @@ mod tests {
             .unwrap();
         ops = committed(&state, ops, "restore_row_image");
 
-        for sys_ms in [10, 20] {
-            state
-                .upsert_versioned(
-                    "hist",
-                    "h",
-                    &[
-                        ("_ts_system", LoroValue::I64(sys_ms)),
-                        ("v", LoroValue::I64(sys_ms)),
-                    ],
-                )
-                .unwrap();
-            ops = committed(&state, ops, "upsert_versioned");
-        }
-        assert_eq!(state.archive_version_count("hist", "h"), 1);
-        assert_eq!(state.purge_history_before("hist", 15).unwrap(), 1);
-        ops = committed(&state, ops, "purge_history_before");
+        state
+            .upsert("hist", "h", &[("v", LoroValue::I64(10))])
+            .unwrap();
+        ops = committed(&state, ops, "upsert");
 
         state
             .upsert("docs", "r2", &[("v", LoroValue::I64(1))])

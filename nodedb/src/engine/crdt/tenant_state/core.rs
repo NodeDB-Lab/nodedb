@@ -66,18 +66,6 @@ impl RowLookup for TenantRowLookup<'_> {
             s.field_value_exists(loro_root(collection), field, value, exclude_row_id)
         })
     }
-
-    fn field_value_exists_live(
-        &self,
-        collection: &str,
-        field: &str,
-        value: &LoroValue,
-        exclude_row_id: Option<&str>,
-    ) -> bool {
-        self.collections.get(collection).is_some_and(|s| {
-            s.field_value_exists_live(loro_root(collection), field, value, exclude_row_id)
-        })
-    }
 }
 
 /// Per-tenant CRDT engine state.
