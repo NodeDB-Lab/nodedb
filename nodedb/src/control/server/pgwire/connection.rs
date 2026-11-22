@@ -112,10 +112,17 @@ pub(crate) fn run(
 ) -> BoxFuture<'static, ConnectionOutcome> {
     // Session slots are installed for the whole connection, not per statement:
     // a transaction's statements are polled on whichever worker tokio picks,
-    // so the DDL buffer must follow the task across every await.
-    Box::pin(crate::control::server::shared::session::conn_scope::scoped(
-        isolate_connection_future(run_inner(stream, tls_acceptor, factory, context)),
-    ))
+    // so the DDL buffer must follow the task across every await. The stream
+    // scope puts every request of the connection on its own stream.
+    let id = context.id;
+    Box::pin(
+        crate::control::server::shared::session::connection_stream::scoped(
+            id,
+            crate::control::server::shared::session::conn_scope::scoped(isolate_connection_future(
+                run_inner(stream, tls_acceptor, factory, context),
+            )),
+        ),
+    )
 }
 
 async fn isolate_connection_future<F>(future: F) -> ConnectionOutcome

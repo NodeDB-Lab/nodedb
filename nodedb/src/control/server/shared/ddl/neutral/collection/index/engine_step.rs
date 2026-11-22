@@ -74,6 +74,7 @@ pub(crate) async fn propose_index_step_as(
             tenant_id,
             database_id,
             vshard_id: nodedb_types::CollectionKey::from_bare(database_id, collection).vshard(),
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan,
             trace_id: TraceId::ZERO,
             event_source,

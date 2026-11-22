@@ -2,6 +2,7 @@
 
 //! The classes of state a task can touch, and how two of them join.
 
+use crate::bridge::envelope::RequestStream;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
 
@@ -24,6 +25,11 @@ pub(in crate::data::executor) enum Footprint {
     WholeDatabase { db: DatabaseId, vshard: VShardId },
     /// Any state of the core.
     Core,
+    /// A client read the plan cannot bound to keys, such as a list of a
+    /// tenant's collections. It waits while a fence is armed, like `Core`.
+    /// While it waits it holds only later tasks of its own connection and
+    /// vShard, and every later internal task.
+    Ordered,
     /// Core work with no client order to keep, such as a sampler or a
     /// checkpoint. It waits while a fence is armed, so it never sees an
     /// install part way, and holds no later task.
@@ -41,6 +47,8 @@ pub(in crate::data::executor) struct Scope<'c> {
     pub(in crate::data::executor) vshard: VShardId,
     /// The transaction the request runs in. Its overlay keys by it.
     pub(in crate::data::executor) txn: Option<TxnId>,
+    /// The ordered stream the request belongs to.
+    pub(in crate::data::executor) stream: RequestStream,
     /// The core state that names what an op touches beyond its plan.
     pub(in crate::data::executor) registry: &'c dyn FenceRegistry,
 }
@@ -56,7 +64,18 @@ impl<'c> Scope<'c> {
             tenant: task.request.tenant_id,
             vshard: task.request.vshard_id,
             txn: task.request.txn_id,
+            stream: task.request.stream,
             registry,
+        }
+    }
+
+    /// A read of core state the plan cannot bound to keys. A client's
+    /// read keeps the order of its own stream alone. Internal work holds
+    /// every later task.
+    pub(in crate::data::executor) fn unkeyed_read(&self) -> Footprint {
+        match self.stream {
+            RequestStream::Connection(_) => Footprint::Ordered,
+            RequestStream::Internal => Footprint::Core,
         }
     }
 
@@ -85,7 +104,10 @@ impl Footprint {
         let touches_overlay = match &self {
             Footprint::Keys(keys) => !keys.is_empty(),
             Footprint::Background => false,
-            Footprint::Write { .. } | Footprint::WholeDatabase { .. } | Footprint::Core => true,
+            Footprint::Write { .. }
+            | Footprint::WholeDatabase { .. }
+            | Footprint::Core
+            | Footprint::Ordered => true,
         };
         if !touches_overlay {
             return self;
@@ -97,7 +119,8 @@ impl Footprint {
     ///
     /// Keys and writes union their keys. Two writes join only on one
     /// vShard. A whole database absorbs keys of that database only. Every
-    /// other pair joins to `Core`, the one class that covers both.
+    /// other pair joins to `Core`, the one class that covers both. An
+    /// ordered read joined with any state is `Core` too.
     pub(in crate::data::executor) fn join(self, other: Footprint) -> Footprint {
         match (self, other) {
             (Footprint::Keys(mut a), Footprint::Keys(b)) => {
@@ -168,6 +191,8 @@ impl Footprint {
             | (Footprint::WholeDatabase { .. }, Footprint::WholeDatabase { .. })
             | (Footprint::Background, _)
             | (_, Footprint::Background)
+            | (Footprint::Ordered, _)
+            | (_, Footprint::Ordered)
             | (Footprint::Core, _)
             | (_, Footprint::Core) => Footprint::Core,
         }

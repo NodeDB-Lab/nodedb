@@ -310,6 +310,8 @@ pub struct SharedState {
     pub raft_propose_leader_change_retries: AtomicU64,
     /// Per-node monotonic request ID allocator. Starts at 1 (0 is sentinel).
     pub request_id_counter: AtomicU64,
+    /// The one allocator of client connection ids, shared by every protocol.
+    pub connection_ids: crate::control::server::shared::session::ConnectionIdAllocator,
     /// Per-node monotonic distributed-shuffle ID allocator. Starts at 1 (0 is
     /// a sentinel). Each `ExchangeMode::Shuffle` join allocates one `shuffle_id`,
     /// scoping fan-out inboxes and consumer barriers on every part-owner node.
@@ -338,8 +340,7 @@ pub struct SharedState {
     /// Plane `CoreLoop` so all cores draw from the same per-database window.
     /// Populated from `ALTER DATABASE … SET QUOTA (maintenance_cpu_pct = N)`.
     pub maintenance_budget: Arc<crate::control::maintenance::MaintenanceBudgetTracker>,
-    /// Durable producer registry for Lite client fencing.  `None` when the
-    /// system catalog is unavailable (in-memory / test configurations).
+    /// Durable producer registry for Lite client fencing. `None` with no system catalog.
     pub producer_registry:
         Option<Arc<crate::control::sync_producer::registry::SyncProducerRegistry>>,
     /// L2 cold storage client (None when not configured).
@@ -361,10 +362,9 @@ pub struct SharedState {
     /// refcounts. Drain starts hold it while publishing their local state.
     /// Lease grants happen later under `lease_grant_gate`.
     pub lease_admission_gate: Mutex<()>,
-    /// Serializes this node's descriptor lease grants and releases after
-    /// admission has completed. It is independent of `lease_admission_gate`
-    /// and is held across the metadata proposal and its apply, so it is an
-    /// async mutex: a waiter yields its worker instead of parking it.
+    /// Serializes this node's descriptor lease grants and releases after admission
+    /// has completed. Independent of `lease_admission_gate`, it is held across the
+    /// metadata proposal and its apply: an async mutex, so a waiter yields its worker.
     pub lease_grant_gate: Arc<tokio::sync::Mutex<()>>,
     /// Replicated descriptor lease drain state (written by metadata applier).
     pub lease_drain: Arc<crate::control::lease::DescriptorDrainTracker>,

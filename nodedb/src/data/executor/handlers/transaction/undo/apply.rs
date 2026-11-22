@@ -675,6 +675,7 @@ mod tests {
                 tenant_id: TenantId::new(TID),
                 database_id: crate::types::DatabaseId::new(DB),
                 vshard_id: VShardId::new(0),
+                stream: crate::bridge::envelope::RequestStream::Internal,
                 plan: PhysicalPlan::Meta(MetaOp::Cancel {
                     target_request_id: RequestId::new(0),
                 }),

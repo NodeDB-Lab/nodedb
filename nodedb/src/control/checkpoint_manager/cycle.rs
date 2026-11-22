@@ -111,6 +111,7 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
                 tenant_id: TenantId::new(0), // System-level checkpoint.
                 database_id: DatabaseId::DEFAULT,
                 vshard_id,
+                stream: crate::bridge::envelope::RequestStream::Internal,
                 plan: PhysicalPlan::Meta(MetaOp::Checkpoint),
                 deadline: std::time::Instant::now() + timeout,
                 priority: Priority::Background,

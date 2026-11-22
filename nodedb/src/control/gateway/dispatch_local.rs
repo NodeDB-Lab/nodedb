@@ -202,6 +202,8 @@ async fn dispatch_local_plan(local: LocalPlan<'_>) -> Result<Response, Error> {
             tenant_id,
             database_id,
             vshard_id,
+            // The connection the statement runs on, or internal work.
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan,
             trace_id,
             event_source: crate::event::EventSource::User,

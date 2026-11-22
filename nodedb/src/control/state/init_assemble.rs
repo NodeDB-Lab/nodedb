@@ -304,6 +304,7 @@ impl SharedState {
             connections_accepted: AtomicU64::new(0),
             raft_propose_leader_change_retries: AtomicU64::new(0),
             request_id_counter: AtomicU64::new(1),
+            connection_ids: crate::control::server::shared::session::ConnectionIdAllocator::new(),
             shuffle_id_counter: AtomicU64::new(1),
             system_metrics: Some(system_metrics),
             database_metrics: Arc::new(crate::control::metrics::DatabaseMetricsRegistry::new()),

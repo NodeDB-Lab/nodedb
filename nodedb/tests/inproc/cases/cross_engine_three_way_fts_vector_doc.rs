@@ -65,6 +65,7 @@ fn make_req(plan: PhysicalPlan) -> Request {
         request_id: RequestId::new(1),
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(0),
+        stream: nodedb::bridge::envelope::RequestStream::Internal,
         database_id: nodedb::types::DatabaseId::DEFAULT,
         plan,
         deadline: Instant::now() + Duration::from_secs(5),

@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
 use crate::control::server::shared::response_payload::payload_or_typed_error;
-use crate::control::server::shared::session::{StatementDeadline, statement_deadline};
+use crate::control::server::shared::session::{
+    StatementDeadline, connection_stream, statement_deadline,
+};
 use crate::control::server::shared::write_admission::{check_mirror_writable, plan_is_write};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, ReadConsistency, TenantId, TraceId, VShardId};
@@ -236,6 +238,7 @@ async fn send_plan_until(
         tenant_id,
         database_id,
         vshard_id,
+        stream: connection_stream::current(),
         plan,
         deadline,
         priority: Priority::Normal,

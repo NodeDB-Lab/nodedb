@@ -152,6 +152,8 @@ pub(crate) async fn dispatch_on_this_node(
         tenant_id,
         vshard_id,
         database_id,
+        // Maintenance orders against no client connection.
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan,
         deadline: deadline.instant(),
         priority: Priority::Normal,

@@ -63,6 +63,7 @@ pub(super) fn make_request(plan: PhysicalPlan, vshard: u32, wal_lsn: Option<Lsn>
         request_id: RequestId::new(1),
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(vshard),
+        stream: nodedb::bridge::envelope::RequestStream::Internal,
         database_id: DatabaseId::DEFAULT,
         plan,
         deadline: Instant::now() + Duration::from_secs(5),

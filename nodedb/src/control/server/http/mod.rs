@@ -5,6 +5,7 @@ pub mod auth;
 mod failure_count;
 pub mod peer;
 pub(crate) mod rate_limit_headers;
+mod request_stream;
 pub mod routes;
 pub mod server;
 pub mod startup_gate;

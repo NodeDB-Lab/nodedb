@@ -267,6 +267,7 @@ async fn dispatch_counter_write(
             tenant_id,
             database_id: DatabaseId::DEFAULT,
             vshard_id: vshard,
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan,
             trace_id: TraceId::ZERO,
             event_source: crate::event::EventSource::User,

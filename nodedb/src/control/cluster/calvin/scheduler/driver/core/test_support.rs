@@ -305,6 +305,7 @@ fn filler_request(request_id: RequestId, tenant_id: TenantId) -> Request {
         tenant_id,
         database_id: DatabaseId::DEFAULT,
         vshard_id: VShardId::new(0),
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan: PhysicalPlan::Document(DocumentOp::PointGet {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "filler"),
             document_id: "d".into(),

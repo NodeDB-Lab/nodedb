@@ -68,6 +68,7 @@ fn as_read(footprint: Footprint) -> Footprint {
         Footprint::Keys(_)
         | Footprint::WholeDatabase { .. }
         | Footprint::Core
+        | Footprint::Ordered
         | Footprint::Background => footprint,
     }
 }

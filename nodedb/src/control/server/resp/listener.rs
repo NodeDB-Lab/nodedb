@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::control::security::sessions::session_ended;
 use crate::control::server::conn_stream::ConnStream;
+use crate::control::server::shared::session::connection_stream;
 use crate::control::state::SharedState;
 
 use super::codec::RespParser;
@@ -107,11 +108,20 @@ impl RespListener {
                                 }
                             };
 
+                            // The connection's requests run on the stream of
+                            // the id it takes from the shared allocator.
+                            let connection_id = match state.connection_ids.allocate() {
+                                Ok(id) => id,
+                                Err(error) => {
+                                    warn!(%peer, %error, "RESP connection rejected: identifier allocation failed");
+                                    continue;
+                                }
+                            };
                             let state = Arc::clone(&state);
 
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
-                                connections.spawn(async move {
+                                connections.spawn(connection_stream::scoped(connection_id, async move {
                                     match tokio::time::timeout(
                                         std::time::Duration::from_secs(10),
                                         acceptor.accept(stream),
@@ -132,15 +142,15 @@ impl RespListener {
                                         }
                                     }
                                     drop(permit);
-                                });
+                                }));
                             } else {
-                                connections.spawn(async move {
+                                connections.spawn(connection_stream::scoped(connection_id, async move {
                                     let cs = ConnStream::plain(stream);
                                     if let Err(e) = handle_connection(cs, peer, &state).await {
                                         debug!(%peer, error = %e, "RESP connection error");
                                     }
                                     drop(permit);
-                                });
+                                }));
                             }
                         }
                         Err(e) => {

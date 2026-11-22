@@ -17,6 +17,7 @@ pub(crate) fn make_request(vshard: u32) -> envelope::Request {
         tenant_id: TenantId::new(1),
         database_id: DatabaseId::DEFAULT,
         vshard_id: VShardId::new(vshard),
+        stream: envelope::RequestStream::Internal,
         plan: PhysicalPlan::Document(DocumentOp::PointGet {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
             document_id: "u1".into(),
@@ -52,6 +53,7 @@ pub(crate) fn make_request_for_db(vshard: u32, db: u64, req_id: u64) -> envelope
         tenant_id: TenantId::new(1),
         database_id: DatabaseId::new(db),
         vshard_id: VShardId::new(vshard),
+        stream: envelope::RequestStream::Internal,
         plan: PhysicalPlan::Document(DocumentOp::PointGet {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::new(db), "c"),
             document_id: "d".into(),

@@ -57,6 +57,7 @@ impl TestClusterNode {
             tenant_id: tenant,
             database_id: database,
             vshard_id,
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Crdt(CrdtOp::ReadConstraints {
                 collection: nodedb_types::QualifiedCollection::new(database, collection),
             }),
@@ -132,6 +133,7 @@ impl TestClusterNode {
             tenant_id: tenant,
             database_id: DatabaseId::DEFAULT,
             vshard_id,
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Crdt(CrdtOp::DropConstraints {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection),
                 constraint_version,

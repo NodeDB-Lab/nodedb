@@ -102,6 +102,7 @@ async fn dispatch_unlogged(
             tenant_id,
             database_id,
             vshard_id,
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan,
             trace_id,
             event_source: crate::event::EventSource::User,

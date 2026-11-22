@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::auth::AuthMode;
 use crate::control::server::conn_stream::ConnStream;
+use crate::control::server::shared::session::connection_stream;
 use crate::control::server::shared::{ConnectionFutureOutcome, isolate_connection_future};
 use crate::control::state::SharedState;
 
@@ -110,13 +111,22 @@ impl IlpListener {
                                     continue;
                                 }
                             };
+                            // The connection's writes run on the stream of the
+                            // id it takes from the shared allocator.
+                            let connection_id = match state.connection_ids.allocate() {
+                                Ok(id) => id,
+                                Err(error) => {
+                                    warn!(%peer, %error, "ILP connection rejected: identifier allocation failed");
+                                    continue;
+                                }
+                            };
                             let state = Arc::clone(&state);
                             let auth_mode = auth_mode.clone();
 
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
                                         let _permit = permit;
                                         match tokio::time::timeout(
                                             std::time::Duration::from_secs(10),
@@ -138,7 +148,7 @@ impl IlpListener {
                                             }
                                         }
                                         peer
-                                    })
+                                    }))
                                     .await;
                                     if matches!(outcome, ConnectionFutureOutcome::Panicked) {
                                         warn!(%peer, "ILP TLS connection panicked");
@@ -147,14 +157,14 @@ impl IlpListener {
                                 });
                             } else {
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
                                         let _permit = permit;
                                         let cs = ConnStream::plain(stream);
                                         if let Err(e) = handle_ilp_connection(cs, peer, &state, &auth_mode).await {
                                             warn!(%peer, error = %e, "ILP connection error (data may be lost)");
                                         }
                                         peer
-                                    })
+                                    }))
                                     .await;
                                     if matches!(outcome, ConnectionFutureOutcome::Panicked) {
                                         warn!(%peer, "ILP connection panicked");

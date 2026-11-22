@@ -23,6 +23,8 @@ mod equivalence_tests;
 #[cfg(test)]
 mod isolation_keys_tests;
 #[cfg(test)]
+mod isolation_stream_tests;
+#[cfg(test)]
 mod isolation_tests;
 #[cfg(test)]
 mod partial_flush_tests;

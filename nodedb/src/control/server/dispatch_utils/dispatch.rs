@@ -6,8 +6,9 @@
 
 use futures::future::BoxFuture;
 
-use crate::bridge::envelope::{PhysicalPlan, Response};
+use crate::bridge::envelope::{PhysicalPlan, RequestStream, Response};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
+use crate::control::server::shared::session::connection_stream;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
@@ -37,6 +38,7 @@ pub async fn dispatch_authorized_to_data_plane(
             tenant_id: task.tenant_id,
             database_id: task.database_id,
             vshard_id: task.vshard_id,
+            stream: connection_stream::current(),
             plan: task.plan,
             trace_id,
             event_source: crate::event::EventSource::User,
@@ -71,6 +73,7 @@ pub async fn dispatch_authorized_autocommit_write(
             tenant_id: task.tenant_id,
             database_id: task.database_id,
             vshard_id: task.vshard_id,
+            stream: connection_stream::current(),
             plan: task.plan,
             trace_id,
             event_source: crate::event::EventSource::User,
@@ -114,6 +117,7 @@ pub(crate) async fn dispatch_authorized_autocommit_write_with_source(
             tenant_id: task.tenant_id,
             database_id: task.database_id,
             vshard_id: task.vshard_id,
+            stream: connection_stream::current(),
             plan: task.plan,
             trace_id,
             event_source,
@@ -178,6 +182,8 @@ pub(crate) async fn dispatch_to_data_plane_with_source(
             tenant_id,
             database_id,
             vshard_id,
+            // A statement's internal plumbing keeps its connection's stream.
+            stream: connection_stream::current(),
             plan,
             trace_id,
             event_source,
@@ -234,6 +240,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
             tenant_id,
             database_id,
             vshard_id,
+            stream: connection_stream::current(),
             plan,
             trace_id,
             event_source,
@@ -281,6 +288,8 @@ pub(crate) async fn dispatch_replayed_write_to_data_plane(
             tenant_id,
             database_id,
             vshard_id,
+            // A replay orders against no client connection.
+            stream: RequestStream::Internal,
             plan,
             trace_id,
             event_source,
@@ -319,6 +328,7 @@ pub(crate) async fn dispatch_autocommit_write(
         tenant_id,
         database_id,
         vshard_id,
+        stream,
         plan,
         trace_id,
         event_source,
@@ -331,6 +341,7 @@ pub(crate) async fn dispatch_autocommit_write(
             tenant_id,
             database_id,
             vshard_id,
+            stream,
             plan,
             trace_id,
             event_source,
@@ -373,6 +384,7 @@ async fn dispatch_step(shared: &SharedState, params: DataPlaneDispatch) -> crate
         tenant_id,
         database_id,
         vshard_id,
+        stream,
         plan,
         trace_id,
         event_source,
@@ -461,6 +473,7 @@ async fn dispatch_step(shared: &SharedState, params: DataPlaneDispatch) -> crate
             tenant_id,
             database_id,
             vshard_id,
+            stream,
             plan,
             trace_id,
             event_source,
@@ -1058,6 +1071,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             trace_id: crate::types::TraceId::ZERO,
             event_source: crate::event::EventSource::User,

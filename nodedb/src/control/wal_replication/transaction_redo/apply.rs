@@ -119,6 +119,8 @@ pub(crate) async fn enqueue_transaction_redo(
             tenant_id: target.tenant_id,
             database_id: target.database_id,
             vshard_id: target.vshard_id,
+            // A replicated redo apply orders against no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             trace_id: TraceId::generate(),
             event_source: payload.event_source,

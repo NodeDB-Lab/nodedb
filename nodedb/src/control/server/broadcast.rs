@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sonic_rs;
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
-use crate::control::server::shared::session::statement_deadline;
+use crate::control::server::shared::session::{connection_stream, statement_deadline};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
 
@@ -178,6 +178,7 @@ pub(crate) async fn broadcast_count_to_all_cores_until(
             tenant_id,
             database_id,
             vshard_id,
+            stream: connection_stream::current(),
             plan: plan.clone(),
             deadline,
             priority: Priority::Normal,
@@ -311,6 +312,7 @@ pub async fn broadcast_register_to_all_cores(
             tenant_id,
             database_id,
             vshard_id,
+            stream: connection_stream::current(),
             plan: plan.clone(),
             deadline: statement_deadline(shared.tuning.network.default_deadline_secs),
             priority: Priority::Normal,

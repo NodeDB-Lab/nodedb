@@ -104,6 +104,7 @@ fn startup_replay_recovers_all_wal_data() {
             request_id: RequestId::new(1),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             database_id: nodedb::types::DatabaseId::DEFAULT,
             plan: scan_plan,
             deadline: std::time::Instant::now() + Duration::from_secs(10),

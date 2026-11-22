@@ -91,6 +91,8 @@ impl CoreLoop {
                 tenant_id,
                 database_id,
                 vshard_id,
+                // A replay orders against no client connection.
+                stream: crate::bridge::envelope::RequestStream::Internal,
                 plan,
                 deadline: std::time::Instant::now()
                     + crate::data::executor::deadline::REPLAY_DEADLINE,

@@ -62,6 +62,7 @@ pub async fn dispatch_unregister_collection(
                 tenant_id: tenant,
                 database_id: database,
                 vshard_id: VShardId::new(core_id as u32),
+                stream: crate::control::server::shared::session::connection_stream::current(),
                 plan: PhysicalPlan::Meta(MetaOp::UnregisterCollection {
                     tenant_id,
                     // The Data Plane keys the collection's state by its

@@ -20,7 +20,7 @@ use crate::control::server::exchange::core_outcome::{
 };
 use crate::control::server::exchange::read_scope::ReadScope;
 use crate::control::server::result_stream::ResultStream;
-use crate::control::server::shared::session::statement_deadline;
+use crate::control::server::shared::session::{connection_stream, statement_deadline};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, ReadConsistency, TenantId, TraceId, TxnId, VShardId};
 
@@ -155,6 +155,7 @@ pub(crate) fn eager_dispatch_to_cores(
             tenant_id,
             database_id,
             vshard_id,
+            stream: connection_stream::current(),
             plan: plan_for_core(core_id),
             deadline,
             priority: Priority::Normal,

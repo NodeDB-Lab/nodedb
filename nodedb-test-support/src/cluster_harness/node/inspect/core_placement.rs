@@ -85,6 +85,7 @@ impl TestClusterNode {
             tenant_id: tenant,
             database_id: DatabaseId::DEFAULT,
             vshard_id: nodedb::types::VShardId::new(core_id as u32),
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
                 tenant_id: tenant.as_u64(),
                 cut_watermark: None,

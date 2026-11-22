@@ -186,6 +186,10 @@ pub(super) fn build_router(state: AppState) -> Router {
             state.clone(),
             super::failure_count::count_failed_requests,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            super::request_stream::scope_request_stream,
+        ))
         .with_state(state)
 }
 

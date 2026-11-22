@@ -39,6 +39,7 @@ impl TestClusterNode {
             tenant_id: tenant,
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(vshard.as_u32()),
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection),
                 time_range: UNBOUNDED_TIME_RANGE,

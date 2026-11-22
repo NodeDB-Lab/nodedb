@@ -145,6 +145,7 @@ mod tests {
             tenant_id: TenantId::new(TID),
             database_id: DatabaseId::DEFAULT,
             vshard_id: vshard,
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::Compact),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
             priority: Priority::Normal,

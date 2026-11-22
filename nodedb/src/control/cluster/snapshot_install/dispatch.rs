@@ -44,6 +44,8 @@ pub async fn install_on_every_core(
             // `dispatch_to_core` bypasses vShard routing. The share names its
             // own database, tenant, and collection per entry.
             vshard_id: VShardId::new(core_id as u32),
+            // A snapshot install orders against no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             deadline,
             priority: Priority::Normal,

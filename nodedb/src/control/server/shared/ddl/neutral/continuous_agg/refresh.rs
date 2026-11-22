@@ -34,7 +34,7 @@ use crate::control::server::shared::ddl::user_dispatch::{
     DispatchRequest, RequestAdmission, dispatch_for_identity,
 };
 use crate::control::server::shared::response_payload::payload_or_typed_error;
-use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::{StatementDeadline, connection_stream};
 use crate::control::state::SharedState;
 use crate::engine::timeseries::continuous_agg::ContinuousAggregateDef;
 use crate::types::{DatabaseId, TenantId, TraceId};
@@ -132,6 +132,7 @@ pub(crate) async fn propose_refresh_cut(
                     tenant_id,
                     database_id,
                     vshard_id,
+                    stream: connection_stream::current(),
                     plan,
                     trace_id: TraceId::ZERO,
                     event_source: crate::event::EventSource::User,

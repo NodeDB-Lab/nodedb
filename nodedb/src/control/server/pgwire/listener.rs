@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::config::auth::AuthMode;
 use crate::control::state::SharedState;
 
-use super::connection_identity::{ConnectionIdAllocator, PgConnectionContext};
+use super::connection_identity::PgConnectionContext;
 use super::factory::NodeDbPgHandlerFactory;
 
 /// PostgreSQL wire protocol listener.
@@ -121,7 +121,6 @@ impl PgListener {
         );
 
         let mut connections = JoinSet::new();
-        let connection_ids = ConnectionIdAllocator::new();
         // Owned exclusively by this listener task. IDs remain authoritative
         // when an aborted task cannot return its completion value.
         let mut active_connections = HashMap::new();
@@ -138,7 +137,7 @@ impl PgListener {
                                     continue;
                                 }
                             };
-                            let connection_id = match connection_ids.allocate() {
+                            let connection_id = match conn_state.connection_ids.allocate() {
                                 Ok(id) => id,
                                 Err(error) => {
                                     warn!(%peer_addr, %error, "pgwire connection rejected: identifier allocation failed");

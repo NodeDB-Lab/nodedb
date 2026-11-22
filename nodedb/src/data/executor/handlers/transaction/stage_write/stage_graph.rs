@@ -532,6 +532,7 @@ mod tests {
                 tenant_id: TenantId::new(1),
                 database_id: DatabaseId::DEFAULT,
                 vshard_id: VShardId::new(0),
+                stream: crate::bridge::envelope::RequestStream::Internal,
                 plan: plan.clone(),
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
                 priority: Priority::Normal,

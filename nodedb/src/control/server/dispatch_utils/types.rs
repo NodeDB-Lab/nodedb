@@ -3,7 +3,7 @@
 //! Request-identity types passed into the dispatch core: the write's target
 //! coordinates plus its WAL-durability handling.
 
-use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::envelope::{PhysicalPlan, RequestStream};
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
 /// Identity of a single autocommit write whose WAL append the core owns. Unlike
@@ -14,6 +14,8 @@ pub(crate) struct AutocommitWrite {
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
     pub vshard_id: VShardId,
+    /// The ordered stream the write joins on its core.
+    pub stream: RequestStream,
     pub plan: PhysicalPlan,
     pub trace_id: TraceId,
     pub event_source: crate::event::EventSource,
@@ -57,6 +59,8 @@ pub(super) struct DataPlaneDispatch {
     pub(super) tenant_id: TenantId,
     pub(super) database_id: DatabaseId,
     pub(super) vshard_id: VShardId,
+    /// The ordered stream the request joins on its core.
+    pub(super) stream: RequestStream,
     pub(super) plan: PhysicalPlan,
     pub(super) trace_id: TraceId,
     pub(super) event_source: crate::event::EventSource,

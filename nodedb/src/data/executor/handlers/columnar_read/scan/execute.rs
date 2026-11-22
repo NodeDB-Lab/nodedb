@@ -461,6 +461,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: crate::bridge::envelope::RequestStream::Internal,
             // Plan is irrelevant: `execute_columnar_scan` is called directly
             // with `ColumnarScanParams` and only reads `database_id`/`tenant_id`.
             plan: PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::Compact),

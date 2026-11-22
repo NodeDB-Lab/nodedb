@@ -132,6 +132,8 @@ pub(super) fn send_to_every_core(
                 tenant_id: TenantId::new(target.tenant_id),
                 database_id: DatabaseId::new(target.database_id),
                 vshard_id: VShardId::new(core_id as u32),
+                // A catalog post-apply orders against no client connection.
+                stream: crate::bridge::envelope::RequestStream::Internal,
                 plan: plan.clone(),
                 deadline,
                 priority: Priority::Background,

@@ -8,6 +8,8 @@ mod commit_calvin;
 mod commit_fence;
 pub mod conn_scope;
 pub mod connection;
+pub mod connection_alloc;
+pub mod connection_stream;
 pub mod cross_shard_mode;
 mod cursor;
 pub mod cursor_spill;
@@ -59,6 +61,7 @@ pub mod prepared_cache;
 pub use self::connection::{
     ConnectionId, ConnectionIdError, ConnectionMetadata, ConnectionRegistrationError, SessionId,
 };
+pub use self::connection_alloc::{ConnectionAllocationError, ConnectionIdAllocator};
 pub use self::cross_shard_mode::{CrossShardTxnMode, parse_value as parse_cross_shard_value};
 pub use self::deadline::{
     StatementDeadline, statement_budget, statement_deadline, statement_deadline_ms,

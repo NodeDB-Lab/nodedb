@@ -16,6 +16,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::RequestId;
 
+use super::state::stream_of;
 use super::{FenceKey, InstallFence, footprint};
 
 impl CoreLoop {
@@ -80,9 +81,10 @@ impl CoreLoop {
     }
 
     /// Hold `task` when the armed fence stops it. Returns the task when it
-    /// proceeds. The footprint, and the registry lookups it makes, run only
-    /// while a fence is armed. The waiter keeps the footprint it was held
-    /// by, so a registry change while it waits never changes what it holds.
+    /// proceeds. The footprint, the stream check and the registry lookups
+    /// run only while a fence is armed. The waiter keeps the footprint it
+    /// was held by, so a registry change while it waits never changes what
+    /// it holds.
     pub(in crate::data::executor) fn hold_fenced(
         &mut self,
         task: ExecutionTask,
@@ -94,7 +96,7 @@ impl CoreLoop {
         let Some(fence) = self.install_fence.as_mut() else {
             return Some(task);
         };
-        if fence.admits(&footprint) {
+        if fence.admits_task(&footprint, stream_of(&task.request)) {
             return Some(task);
         }
         fence.hold(task, footprint);
@@ -319,6 +321,54 @@ mod tests {
         core.release_install_fence();
         core.tick();
         assert_eq!(ids(&answered(&mut rx)), vec![1, 2, 3]);
+    }
+
+    /// A task of client connection `connection`.
+    fn on_connection(connection: u64, id: u64, plan: PhysicalPlan) -> ExecutionTask {
+        let connection = crate::control::server::shared::session::ConnectionId::new(connection)
+            .expect("non-zero id");
+        ExecutionTask::new(Request {
+            stream: crate::bridge::envelope::RequestStream::Connection(connection),
+            ..request(id, plan)
+        })
+    }
+
+    /// A client's list waits. A write of another connection runs past it,
+    /// and a later write of the list's connection waits. Release keeps the
+    /// list's connection in order.
+    #[test]
+    fn a_waiting_client_list_holds_its_connection_alone() {
+        let (mut core, _tx, mut rx, _dir) = make_core();
+        core.arm_install_fence(BTreeSet::new());
+        let list = MetaOp::ListTenantCollections { tenant_id: 1 };
+        core.task_queue
+            .push(on_connection(1, 1, PhysicalPlan::Meta(list)));
+        core.task_queue.push(on_connection(2, 2, put("c")));
+        core.task_queue.push(on_connection(1, 3, put("b")));
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![2]);
+        assert_eq!(core.fence_waiter_count(), 2);
+
+        core.release_install_fence();
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![1, 3]);
+    }
+
+    /// A read and a write pipelined on one connection keep their order,
+    /// though the write touches no fenced key.
+    #[test]
+    fn a_pipelined_read_and_write_keep_their_connection_order() {
+        let (mut core, _tx, mut rx, _dir) = make_core();
+        core.arm_install_fence(keys(&["a"]));
+        core.task_queue.push(on_connection(1, 1, get("a")));
+        core.task_queue.push(on_connection(1, 2, put("b")));
+        core.tick();
+        assert!(answered(&mut rx).is_empty());
+        assert_eq!(core.fence_waiter_count(), 2);
+
+        core.release_install_fence();
+        core.tick();
+        assert_eq!(ids(&answered(&mut rx)), vec![1, 2]);
     }
 
     /// A checkpoint keeps no client order: it waits for the release, and a

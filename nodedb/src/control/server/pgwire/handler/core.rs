@@ -152,6 +152,15 @@ impl NodeDbPgHandler {
         self.state.next_request_id()
     }
 
+    /// The stream every request of this connection joins. A handler with no
+    /// accepted connection sends internal work.
+    pub(super) fn request_stream(&self) -> crate::bridge::envelope::RequestStream {
+        match self.session_id {
+            SessionId::Connection(id) => crate::bridge::envelope::RequestStream::Connection(id),
+            SessionId::LegacySocket(_) => crate::bridge::envelope::RequestStream::Internal,
+        }
+    }
+
     /// Resolve the authenticated identity from pgwire client metadata, then
     /// overlay the session's superuser tenant override (if any) onto the
     /// resolved `tenant_id`.

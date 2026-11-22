@@ -213,6 +213,8 @@ fn judge_task(record: &WalRecord, judged: &JudgedRedo) -> ExecutionTask {
         tenant_id: TenantId::new(header.tenant_id),
         database_id: DatabaseId::new(header.database_id),
         vshard_id: VShardId::new(header.vshard_id),
+        // A boot judge replays a redo and orders against no client connection.
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan,
         deadline: Instant::now() + JUDGE_DEADLINE,
         priority: Priority::Normal,

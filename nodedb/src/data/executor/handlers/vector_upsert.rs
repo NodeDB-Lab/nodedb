@@ -408,6 +408,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Vector(VectorOp::Search {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
                 query_vector: Vec::new(),

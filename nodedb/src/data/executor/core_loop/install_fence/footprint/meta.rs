@@ -8,8 +8,10 @@
 //! collection. An aggregate op keys the aggregate and the root collection
 //! of its chain, which the core's aggregate graph names. A transaction's
 //! staging, resolve, savepoint and overlay drop key its overlay (see
-//! `txn`). Every other meta op checkpoints, snapshots, purges, installs or
-//! lists across collections, so it is a core task. A sampler, a checkpoint
+//! `txn`). A list of a tenant's collections or aggregates is an unkeyed
+//! read: a client's holds its own stream, internal work holds the core.
+//! Every other meta op checkpoints, snapshots, purges or installs across
+//! collections, so it is a core task. A sampler, a checkpoint
 //! or a version purge keeps no client order, so it waits for the install
 //! and holds no later task. A cancel and a redo stream page read touch no
 //! state an install writes.
@@ -52,9 +54,7 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::TemporalPurgeColumnar { collection, .. }
         | MetaOp::TemporalPurgeCrdt { collection, .. }
         | MetaOp::EnforceTimeseriesRetention { collection, .. }
-        | MetaOp::AwaitContinuousAggregateRefresh { collection, .. } => {
-            write_of(collection, scope)
-        }
+        | MetaOp::AwaitContinuousAggregateRefresh { collection, .. } => write_of(collection, scope),
         // A definition's source is a collection or another aggregate. The
         // core's aggregate graph names the root a chain reads.
         MetaOp::RegisterContinuousAggregate { def } => {
@@ -112,13 +112,13 @@ pub(super) fn meta_footprint(op: &MetaOp, scope: &Scope) -> Footprint {
         | MetaOp::CalvinDrop { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
-        | MetaOp::RestoreRedo(_)
-        // A client's read of a tenant's collections or aggregates keeps its
-        // order against the client's later writes. The envelope names no
-        // connection, so each holds every later task.
-        | MetaOp::ListTenantCollections { .. }
+        | MetaOp::RestoreRedo(_) => Footprint::Core,
+        // A read of a tenant's collections or aggregates keeps its order
+        // against later tasks of its own stream. A client's read holds its
+        // own connection's later tasks. Internal work holds every later task.
+        MetaOp::ListTenantCollections { .. }
         | MetaOp::ListContinuousAggregates
-        | MetaOp::ContinuousAggregatesRegistered => Footprint::Core,
+        | MetaOp::ContinuousAggregatesRegistered => scope.unkeyed_read(),
         // Work with no client order to keep, each correct after any later
         // write:
         // - the storage, graph and expiry samplers, each sent only by its
@@ -147,7 +147,8 @@ fn aggregate_write(root: Option<String>, db: DatabaseId, name: &str, scope: &Sco
 }
 
 /// A cluster event read of one database's binds or streams is a task of
-/// that whole database. A tenant mark or metadata wait spans databases.
+/// that whole database. A tenant mark or metadata wait spans databases, so
+/// it is an unkeyed read of its stream.
 pub(super) fn cluster_event_footprint(op: &ClusterEventOp, scope: &Scope) -> Footprint {
     match op {
         ClusterEventOp::ConsumeStream { database_id, .. }
@@ -156,7 +157,7 @@ pub(super) fn cluster_event_footprint(op: &ClusterEventOp, scope: &Scope) -> Foo
             scope.whole_database_of(*database_id)
         }
         ClusterEventOp::TenantWriteMarks { .. } | ClusterEventOp::MetadataApplied { .. } => {
-            Footprint::Core
+            scope.unkeyed_read()
         }
     }
 }
@@ -296,8 +297,34 @@ mod tests {
     }
 
     #[test]
-    fn a_metadata_wait_is_core() {
+    fn an_internal_metadata_wait_is_core() {
         let wait = PhysicalPlan::ClusterEvent(ClusterEventOp::MetadataApplied { index: 1 });
         assert_eq!(plan_footprint(&wait, &scope()), Footprint::Core);
+    }
+
+    /// A client's unkeyed read orders against its own stream alone.
+    #[test]
+    fn a_client_unkeyed_read_is_ordered() {
+        let connection =
+            crate::control::server::shared::session::ConnectionId::new(1).expect("non-zero id");
+        let client = Scope {
+            stream: crate::bridge::envelope::RequestStream::Connection(connection),
+            ..scope()
+        };
+        let reads = [
+            PhysicalPlan::Meta(MetaOp::ListTenantCollections { tenant_id: 1 }),
+            PhysicalPlan::Meta(MetaOp::ListContinuousAggregates),
+            PhysicalPlan::Meta(MetaOp::ContinuousAggregatesRegistered),
+            PhysicalPlan::ClusterEvent(ClusterEventOp::MetadataApplied { index: 1 }),
+        ];
+        for read in &reads {
+            assert_eq!(plan_footprint(read, &client), Footprint::Ordered);
+            assert_eq!(plan_footprint(read, &scope()), Footprint::Core);
+        }
+        assert_eq!(
+            plan_footprint(&PhysicalPlan::Meta(MetaOp::Compact), &client),
+            Footprint::Core,
+            "a client's core op stays core"
+        );
     }
 }

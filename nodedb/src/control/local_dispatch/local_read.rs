@@ -68,6 +68,7 @@ pub(crate) async fn dispatch_local_read(
         tenant_id,
         database_id,
         vshard_id,
+        stream: crate::control::server::shared::session::connection_stream::current(),
         plan: read.into_plan(),
         deadline,
         priority: Priority::Normal,

@@ -35,6 +35,7 @@ pub fn dispatch_maintenance_to_all_cores(
         tenant_id,
         database_id,
         vshard_id: VShardId::new(0),
+        stream: crate::control::server::shared::session::connection_stream::current(),
         plan: PhysicalPlan::Meta(op),
         deadline: std::time::Instant::now() + MAINTENANCE_DEADLINE,
         priority: Priority::Background,

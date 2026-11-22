@@ -122,6 +122,8 @@ pub(super) async fn submit_array_write(
             tenant_id,
             database_id,
             vshard_id: vshard,
+            // A Raft apply orders against no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             trace_id: TraceId::generate(),
             event_source,
@@ -251,6 +253,8 @@ pub(super) fn build_array_request(
         tenant_id,
         database_id,
         vshard_id,
+        // A Raft apply orders against no client connection.
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan,
         deadline: std::time::Instant::now()
             + Duration::from_secs(state.tuning.network.default_deadline_secs),

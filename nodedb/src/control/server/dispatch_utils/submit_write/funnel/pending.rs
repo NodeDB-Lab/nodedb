@@ -114,6 +114,7 @@ fn timeseries_retry(params: &SubmitWrite) -> Option<SubmitWrite> {
         tenant_id: params.tenant_id,
         database_id: params.database_id,
         vshard_id: params.vshard_id,
+        stream: params.stream,
         plan: params.plan.clone(),
         trace_id: params.trace_id,
         event_source: params.event_source,

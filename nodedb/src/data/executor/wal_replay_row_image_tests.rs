@@ -105,6 +105,7 @@ fn request(plan: PhysicalPlan, wal_lsn: Option<crate::types::Lsn>) -> Request {
         tenant_id: TenantId::new(TID),
         database_id: DatabaseId::DEFAULT,
         vshard_id: VShardId::new(0),
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan,
         deadline: Instant::now() + Duration::from_secs(5),
         priority: Priority::Normal,

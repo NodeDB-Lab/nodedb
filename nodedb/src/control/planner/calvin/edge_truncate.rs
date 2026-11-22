@@ -244,6 +244,7 @@ async fn dispatch_rows_plan(state: &SharedState, task: &PhysicalTask) -> crate::
             tenant_id: task.tenant_id,
             database_id: task.database_id,
             vshard_id: task.vshard_id,
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan: task.plan.clone(),
             trace_id: TraceId::ZERO,
             event_source: crate::event::EventSource::User,

@@ -173,6 +173,8 @@ impl RegistryShuffleConsumer {
             tenant_id: TenantId::new(req.tenant_id),
             database_id: DatabaseId::from(req.database_id),
             vshard_id: crate::types::VShardId::new(0),
+            // A shuffle hop another node sent carries no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             deadline: hop_deadline,
             priority: Priority::Normal,

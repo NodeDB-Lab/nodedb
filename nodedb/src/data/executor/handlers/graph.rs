@@ -496,6 +496,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id: "a".to_string(),
                 edge_labels: Vec::new(),

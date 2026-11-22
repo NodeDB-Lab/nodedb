@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::bridge::dispatch::JournalGroup;
-use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request};
+use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request, RequestStream};
 use crate::control::server::shared::write_admission::{
     AdmissionTicket, WriteAdmissionGuard, WriteOrder,
 };
@@ -37,6 +37,7 @@ pub(super) struct DispatchTarget {
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
     pub vshard_id: VShardId,
+    pub stream: RequestStream,
     pub plan: PhysicalPlan,
     pub deadline: Instant,
     pub trace_id: TraceId,
@@ -97,6 +98,7 @@ pub(super) async fn dispatch_to_data_plane(
         tenant_id: target.tenant_id,
         database_id: target.database_id,
         vshard_id: target.vshard_id,
+        stream: target.stream,
         plan: target.plan,
         deadline: target.deadline,
         priority: Priority::Normal,

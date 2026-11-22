@@ -126,6 +126,8 @@ fn local_request(
         tenant_id: array_id.tenant_id,
         database_id: array_id.database_id,
         vshard_id: local_vshard_id,
+        // A leg another node forwarded carries no client connection.
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan,
         deadline: Instant::now() + LOCAL_DISPATCH_TIMEOUT,
         priority: Priority::Normal,

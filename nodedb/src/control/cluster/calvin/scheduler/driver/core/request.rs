@@ -66,6 +66,8 @@ impl Scheduler {
             tenant_id,
             database_id,
             vshard_id: VShardId::new(self.vshard_id),
+            // A Calvin apply orders against no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             deadline: self.request_deadline(),
             priority: Priority::Normal,

@@ -97,19 +97,33 @@ pub async fn ws_handler(
             return crate::control::server::http::auth::ApiError::from(error).into_response();
         }
     };
+    // The connection takes one id from the shared allocator. Every request it
+    // sends runs on that id's stream.
+    let connection_id = match state.shared.connection_ids.allocate() {
+        Ok(id) => id,
+        Err(error) => {
+            return crate::control::server::http::auth::ApiError::Internal(error.to_string())
+                .into_response();
+        }
+    };
     let trace_id = crate::control::trace_context::extract_from_headers(&headers);
     ws.on_upgrade(move |socket| async move {
-        match isolate_connection_future(handle_ws_connection(
-            socket,
-            state,
-            WsSession {
-                identity,
-                binding,
-                database_id,
-                trace_id,
-                peer_addr,
-            },
-        ))
+        match isolate_connection_future(
+            crate::control::server::shared::session::connection_stream::scoped(
+                connection_id,
+                handle_ws_connection(
+                    socket,
+                    state,
+                    WsSession {
+                        identity,
+                        binding,
+                        database_id,
+                        trace_id,
+                        peer_addr,
+                    },
+                ),
+            ),
+        )
         .await
         {
             ConnectionFutureOutcome::Completed(()) => {}

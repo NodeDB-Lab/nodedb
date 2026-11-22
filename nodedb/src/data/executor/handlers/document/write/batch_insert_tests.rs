@@ -45,6 +45,7 @@ fn batch_task(documents: &[(String, Vec<u8>)], surrogates: &[Surrogate]) -> Exec
         tenant_id: TenantId::new(TID),
         database_id: DatabaseId::DEFAULT,
         vshard_id: VShardId::new(0),
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan: PhysicalPlan::Document(DocumentOp::BatchInsert {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
             documents: documents.to_vec(),

@@ -255,6 +255,8 @@ async fn enqueue_generic_entry<'a>(
             tenant_id,
             database_id,
             vshard_id,
+            // A Raft apply orders against no client connection.
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan,
             trace_id: TraceId::generate(),
             // Cluster mode has exactly ONE write-apply path: this loop. The

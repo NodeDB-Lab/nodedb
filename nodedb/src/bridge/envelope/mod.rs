@@ -11,6 +11,7 @@ pub mod response;
 pub mod row_context;
 pub mod stage_vote;
 pub mod status;
+pub mod stream;
 pub mod sync_hold;
 
 pub use error_code::ErrorCode;
@@ -22,4 +23,5 @@ pub use response::{EdgeImage, Response, RowEffect, RowVersion, WriteSetEntry};
 pub use row_context::describe_row_context;
 pub use stage_vote::StageVote;
 pub use status::{Priority, Status};
+pub use stream::RequestStream;
 pub use sync_hold::SyncHold;

@@ -305,6 +305,7 @@ pub(super) async fn dispatch_data_plane_raw(
         tenant_id,
         vshard_id,
         database_id,
+        stream: crate::control::server::shared::session::connection_stream::current(),
         plan,
         deadline: deadline.instant(),
         priority: Priority::Normal,

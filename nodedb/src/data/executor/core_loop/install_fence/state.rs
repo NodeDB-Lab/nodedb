@@ -8,14 +8,19 @@
 //! - a waiting whole-database task holds every later task of that database
 //! - a waiting write holds every later write of its event vShard
 //! - a waiting core task holds every later task with a footprint
+//! - a waiting ordered read holds every later internal task
 //! - background core work waits and holds nothing
 //!
-//! A task with an empty footprint always proceeds.
+//! A client task also waits while an earlier task of its connection and
+//! vShard waits, so each client stream keeps its FIFO order. A task with an
+//! empty footprint always proceeds.
 
 use std::collections::{BTreeSet, VecDeque};
 
 use nodedb_types::{NodeDbError, QualifiedCollection};
 
+use crate::bridge::envelope::Request;
+use crate::control::server::shared::session::ConnectionId;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, RequestId, TenantId, TxnId, VShardId};
 
@@ -92,7 +97,19 @@ impl FenceKey {
     }
 }
 
-/// The union of the footprints of every waiting task.
+/// The ordered stream of one client task: its connection and its vShard.
+pub(in crate::data::executor) type StreamKey = (ConnectionId, VShardId);
+
+/// The stream of `request`. `None` for internal work, which orders against
+/// no client stream.
+pub(in crate::data::executor) fn stream_of(request: &Request) -> Option<StreamKey> {
+    request
+        .stream
+        .connection()
+        .map(|connection| (connection, request.vshard_id))
+}
+
+/// The union of the footprints and streams of every waiting task.
 #[derive(Debug, Default)]
 pub(in crate::data::executor) struct Blocked {
     /// The keys of the waiting reads and writes.
@@ -101,10 +118,22 @@ pub(in crate::data::executor) struct Blocked {
     databases: BTreeSet<DatabaseId>,
     /// The event vShards of the waiting writes and whole-database tasks.
     vshards: BTreeSet<VShardId>,
+    /// The client streams of every waiting task.
+    streams: BTreeSet<StreamKey>,
     core: bool,
+    /// An ordered read waits. It holds every later internal task.
+    ordered: bool,
 }
 
 impl Blocked {
+    /// Note a waiter of `footprint` on `stream`.
+    fn add_waiter(&mut self, footprint: &Footprint, stream: Option<StreamKey>) {
+        if let Some(stream) = stream {
+            self.streams.insert(stream);
+        }
+        self.add(footprint);
+    }
+
     fn add(&mut self, footprint: &Footprint) {
         match footprint {
             Footprint::Keys(keys) => self.keys.extend(keys.iter().cloned()),
@@ -117,6 +146,8 @@ impl Blocked {
                 self.vshards.insert(*vshard);
             }
             Footprint::Core => self.core = true,
+            // Its own stream holds its connection's later tasks.
+            Footprint::Ordered => self.ordered = true,
             // It orders against no later task.
             Footprint::Background => {}
         }
@@ -176,8 +207,27 @@ impl InstallFence {
             Footprint::WholeDatabase { db, vshard } => {
                 self.admits_database(*db) && self.admits_vshard(*vshard)
             }
-            Footprint::Core | Footprint::Background => false,
+            Footprint::Core | Footprint::Ordered | Footprint::Background => false,
         }
+    }
+
+    /// Whether a task of `footprint` on `stream` proceeds now. It passes
+    /// the footprint check, and no earlier task of its stream waits. An
+    /// internal task waits while an ordered read waits. A task with an
+    /// empty footprint touches no fenced state and always proceeds.
+    pub(in crate::data::executor) fn admits_task(
+        &self,
+        footprint: &Footprint,
+        stream: Option<StreamKey>,
+    ) -> bool {
+        if matches!(footprint, Footprint::Keys(keys) if keys.is_empty()) {
+            return true;
+        }
+        let stream_free = match stream {
+            Some(stream) => !self.blocked.streams.contains(&stream),
+            None => !self.blocked.ordered,
+        };
+        stream_free && self.admits(footprint)
     }
 
     /// Whether a task of `key` proceeds now. Neither the fence nor a
@@ -206,15 +256,17 @@ impl InstallFence {
     /// Hold `task`, whose footprint is `footprint`, behind every task
     /// already waiting.
     pub(in crate::data::executor) fn hold(&mut self, task: ExecutionTask, footprint: Footprint) {
-        self.blocked.add(&footprint);
+        self.blocked
+            .add_waiter(&footprint, stream_of(&task.request));
         self.waiting.push_back(Waiter { task, footprint });
     }
 
-    /// Rebuild `blocked` from the footprints of the tasks still waiting.
+    /// Rebuild `blocked` from the footprints and streams of the tasks still
+    /// waiting.
     fn recompute_blocked(&mut self) {
         let mut blocked = Blocked::default();
         for waiter in &self.waiting {
-            blocked.add(&waiter.footprint);
+            blocked.add_waiter(&waiter.footprint, stream_of(&waiter.task.request));
         }
         self.blocked = blocked;
     }
@@ -438,5 +490,104 @@ mod tests {
         );
         assert!(fence.remove_waiter(request_id));
         assert!(fence.admits(&Footprint::Keys(vec![collection("b")])));
+    }
+
+    fn connection(id: u64) -> ConnectionId {
+        ConnectionId::new(id).expect("non-zero id")
+    }
+
+    /// A task of `connection` on `vshard`, or internal work with `None`.
+    fn task_on(connection_id: Option<u64>, vshard: u32) -> ExecutionTask {
+        use crate::bridge::envelope::RequestStream;
+        let stream = connection_id.map_or(RequestStream::Internal, |id| {
+            RequestStream::Connection(connection(id))
+        });
+        ExecutionTask::new(Request {
+            stream,
+            vshard_id: VShardId::new(vshard),
+            ..crate::data::executor::core_loop::tests::make_request(
+                crate::bridge::envelope::PhysicalPlan::Meta(
+                    nodedb_physical::physical_plan::MetaOp::Compact,
+                ),
+            )
+        })
+    }
+
+    fn stream(connection_id: u64, vshard: u32) -> Option<StreamKey> {
+        Some((connection(connection_id), VShardId::new(vshard)))
+    }
+
+    fn read(name: &str) -> Footprint {
+        Footprint::Keys(vec![collection(name)])
+    }
+
+    /// A waiting client list holds its own connection's later task on its
+    /// vShard. Another connection's task and another vShard's task run.
+    #[test]
+    fn a_waiting_client_list_holds_its_own_stream_alone() {
+        let mut fence = fence(&[]);
+        assert!(!fence.admits_task(&Footprint::Ordered, stream(1, 0)));
+        fence.hold(task_on(Some(1), 0), Footprint::Ordered);
+        assert!(!fence.admits_task(&read("b"), stream(1, 0)));
+        assert!(!fence.admits_task(&write(vec![collection("b")], 0), stream(1, 0)));
+        assert!(fence.admits_task(&read("b"), stream(2, 0)));
+        assert!(fence.admits_task(&write(vec![collection("b")], 0), stream(2, 0)));
+        assert!(fence.admits_task(&read("b"), stream(1, 1)));
+    }
+
+    /// A waiting ordered read holds every later internal task, which no
+    /// connection orders.
+    #[test]
+    fn a_waiting_ordered_read_holds_later_internal_tasks() {
+        let mut fence = fence(&[]);
+        fence.hold(task_on(Some(1), 0), Footprint::Ordered);
+        assert!(!fence.admits_task(&read("b"), None));
+        assert!(!fence.admits_task(&whole(7, 1), None));
+    }
+
+    /// An internal unkeyed read is a core task: it holds every later task
+    /// of every stream.
+    #[test]
+    fn a_waiting_internal_meta_read_holds_every_later_task() {
+        let mut fence = fence(&[]);
+        fence.hold(task_on(None, 0), Footprint::Core);
+        assert!(!fence.admits_task(&read("b"), stream(2, 0)));
+        assert!(!fence.admits_task(&read("b"), stream(1, 3)));
+        assert!(!fence.admits_task(&read("b"), None));
+    }
+
+    /// A read and a later write pipelined on one connection and vShard keep
+    /// their order, though the write touches no key the read holds.
+    #[test]
+    fn a_read_and_a_write_pipelined_on_one_stream_keep_their_order() {
+        let mut fence = fence(&[collection("a")]);
+        fence.hold(task_on(Some(1), 0), read("a"));
+        let later_write = write(vec![collection("b")], 0);
+        assert!(fence.admits(&later_write), "the footprints are disjoint");
+        assert!(!fence.admits_task(&later_write, stream(1, 0)));
+        assert!(fence.admits_task(&later_write, stream(2, 0)));
+        assert!(fence.admits_task(&later_write, None));
+    }
+
+    /// A cancel touches no fenced state: it reaches a waiter of its own
+    /// stream.
+    #[test]
+    fn an_empty_footprint_passes_a_waiter_of_its_stream() {
+        let mut fence = fence(&[]);
+        fence.hold(task_on(Some(1), 0), Footprint::Ordered);
+        assert!(fence.admits_task(&Footprint::Keys(Vec::new()), stream(1, 0)));
+        assert!(fence.admits_task(&Footprint::Keys(Vec::new()), None));
+    }
+
+    /// A removed waiter no longer holds its stream.
+    #[test]
+    fn a_removed_waiter_frees_its_stream() {
+        let mut fence = fence(&[]);
+        let task = task_on(Some(1), 0);
+        let request_id = task.request_id();
+        fence.hold(task, Footprint::Ordered);
+        assert!(fence.remove_waiter(request_id));
+        assert!(fence.admits_task(&read("b"), stream(1, 0)));
+        assert!(fence.admits_task(&read("b"), None));
     }
 }

@@ -61,6 +61,7 @@ impl TestClusterNode {
             tenant_id: tenant,
             database_id: DatabaseId::DEFAULT,
             vshard_id,
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
                 tenant_id: tenant.as_u64(),
                 cut_watermark: None,
@@ -129,6 +130,7 @@ impl TestClusterNode {
             tenant_id: TenantId::new(0),
             database_id: DatabaseId::DEFAULT,
             vshard_id,
+            stream: nodedb::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {
                 tenant_id: 0,
                 snapshot: snapshot_bytes,

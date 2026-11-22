@@ -71,6 +71,7 @@ pub(super) fn make_stub_request(id: u64) -> Request {
         tenant_id: TenantId::new(1),
         database_id: DatabaseId::DEFAULT,
         vshard_id: VShardId::new(0),
+        stream: crate::bridge::envelope::RequestStream::Internal,
         plan: PhysicalPlan::Vector(VectorOp::Insert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "test"),
             vector: vec![0.1],

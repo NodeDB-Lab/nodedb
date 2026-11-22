@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::admission::AdmissionRegistry;
 use super::native::session::{NativeConnectionResources, NativeSession};
-use crate::control::server::shared::session::ConnectionId;
+use crate::control::server::shared::session::connection_stream;
 use crate::control::server::shared::{ConnectionFutureOutcome, isolate_connection_future};
 use crate::control::state::SharedState;
 
@@ -117,7 +117,6 @@ impl Listener {
 
         let mut connections = JoinSet::new();
         let mut cleanups = HashMap::new();
-        let next_connection_id = AtomicU64::new(0);
 
         loop {
             tokio::select! {
@@ -141,22 +140,11 @@ impl Listener {
                                 }
                             };
 
-                            let Some(raw_connection_id) = next_connection_id
-                                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                                    current.checked_add(1)
-                                })
-                                .ok()
-                                .and_then(|previous| previous.checked_add(1))
-                            else {
-                                state.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                                warn!(%peer_addr, "native connection identity exhausted, rejecting");
-                                continue;
-                            };
-                            let connection_id = match ConnectionId::new(raw_connection_id) {
+                            let connection_id = match state.connection_ids.allocate() {
                                 Ok(connection_id) => connection_id,
-                                Err(_) => {
+                                Err(error) => {
                                     state.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                                    warn!(%peer_addr, "native connection identity invalid, rejecting");
+                                    warn!(%peer_addr, %error, "native connection rejected: identifier allocation failed");
                                     continue;
                                 }
                             };
@@ -172,7 +160,7 @@ impl Listener {
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
                                         let _permit = permit;
                                         match tokio::time::timeout(
                                             Duration::from_secs(10),
@@ -197,7 +185,7 @@ impl Listener {
                                             Ok(Err(e)) => warn!(%peer_addr, error = %e, "native TLS handshake failed"),
                                             Err(_) => warn!(%peer_addr, "native TLS handshake timed out"),
                                         }
-                                    })
+                                    }))
                                     .await;
                                     if matches!(outcome, ConnectionFutureOutcome::Panicked) {
                                         warn!(%peer_addr, "native TLS connection panicked");
@@ -207,7 +195,7 @@ impl Listener {
                                 });
                             } else {
                                 connections.spawn(async move {
-                                    let outcome = isolate_connection_future(async move {
+                                    let outcome = isolate_connection_future(connection_stream::scoped(connection_id, async move {
                                         let _permit = permit;
                                         let session = NativeSession::new(
                                             stream,
@@ -221,7 +209,7 @@ impl Listener {
                                         if let Err(e) = session.run().await {
                                             warn!(%peer_addr, error = %e, "session terminated with error");
                                         }
-                                    })
+                                    }))
                                     .await;
                                     if matches!(outcome, ConnectionFutureOutcome::Panicked) {
                                         warn!(%peer_addr, "native connection panicked");

@@ -147,6 +147,8 @@ pub(crate) struct SubmitWrite {
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
     pub vshard_id: VShardId,
+    /// The ordered stream the request joins on its core.
+    pub stream: crate::bridge::envelope::RequestStream,
     pub plan: PhysicalPlan,
     pub trace_id: TraceId,
     pub event_source: crate::event::EventSource,

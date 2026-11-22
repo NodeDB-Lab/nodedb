@@ -8,6 +8,7 @@ use std::time::Instant;
 use nodedb_physical::physical_plan::{PhysicalPlan, RedoPins};
 
 use super::status::Priority;
+use super::stream::RequestStream;
 use crate::event::types::EventSource;
 use crate::types::{
     DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, TxnId, VShardId,
@@ -30,6 +31,11 @@ pub struct Request {
 
     /// Target virtual shard.
     pub vshard_id: VShardId,
+
+    /// The ordered stream the request belongs to. Requests of one
+    /// `(stream, vshard_id)` keep their arrival order on a core. It has no
+    /// default, so every construction site names its stream.
+    pub stream: RequestStream,
 
     /// Opaque plan digest identifying the physical operation to execute.
     pub plan: PhysicalPlan,
@@ -225,6 +231,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: RequestStream::Internal,
             plan: PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
                 document_id: "doc-1".into(),
@@ -288,6 +295,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: RequestStream::Internal,
             plan: PhysicalPlan::Meta(MetaOp::Cancel {
                 target_request_id: RequestId::new(42),
             }),

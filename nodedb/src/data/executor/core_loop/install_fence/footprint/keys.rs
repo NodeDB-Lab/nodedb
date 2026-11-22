@@ -206,6 +206,7 @@ pub(super) mod tests {
             tenant: TENANT,
             vshard: VSHARD,
             txn: None,
+            stream: crate::bridge::envelope::RequestStream::Internal,
             registry: &NO_REGISTRY,
         }
     }

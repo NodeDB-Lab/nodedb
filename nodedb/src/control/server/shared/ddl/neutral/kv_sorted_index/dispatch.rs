@@ -131,6 +131,7 @@ async fn dispatch_durable(
             tenant_id: target.tenant_id,
             database_id: target.database_id,
             vshard_id: target.vshard(),
+            stream: crate::control::server::shared::session::connection_stream::current(),
             plan,
             trace_id: TraceId::ZERO,
             event_source: crate::event::EventSource::User,

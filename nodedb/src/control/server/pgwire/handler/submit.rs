@@ -76,6 +76,7 @@ impl NodeDbPgHandler {
                 tenant_id,
                 database_id,
                 vshard_id,
+                stream: self.request_stream(),
                 plan,
                 trace_id: TraceId::generate(),
                 event_source: crate::event::EventSource::User,

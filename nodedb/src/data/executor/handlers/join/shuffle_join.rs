@@ -202,6 +202,7 @@ mod tests {
             tenant_id: TenantId::new(0),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(0),
+            stream: crate::bridge::envelope::RequestStream::Internal,
             plan: PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "t"),
                 document_id: "d".into(),

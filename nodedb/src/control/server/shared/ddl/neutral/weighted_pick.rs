@@ -217,6 +217,7 @@ pub async fn weighted_pick(
                     "_system_random_audit",
                 )
                 .vshard(),
+                stream: crate::control::server::shared::session::connection_stream::current(),
                 plan: audit_plan,
                 trace_id: TraceId::ZERO,
                 event_source: crate::event::EventSource::User,
