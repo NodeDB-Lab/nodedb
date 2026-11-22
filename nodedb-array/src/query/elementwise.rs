@@ -7,6 +7,9 @@
 //! in only one operand contribute a Null on the other side, which
 //! propagates as Null through the op (SQL-style null semantics).
 //!
+//! A cell present in both operands with a NULL op attr yields Null. A cell
+//! present in one operand only takes that operand's value.
+//!
 //! The op reads one named attr. Every other attr passes through from the
 //! left operand. A non-numeric value (String, Bytes) in the named attr also
 //! passes through, since the op is undefined for it. Division by zero yields
@@ -68,7 +71,11 @@ pub fn elementwise(
             let l = lhs.map(|v| v[i].clone()).unwrap_or(CellValue::Null);
             let r = rhs.map(|v| v[i].clone()).unwrap_or(CellValue::Null);
             out.push(if i == attr_idx {
-                apply(&l, &r, op)?
+                if lhs.is_some() && rhs.is_some() && (l.is_null() || r.is_null()) {
+                    CellValue::Null
+                } else {
+                    apply(&l, &r, op)?
+                }
             } else {
                 passthrough(&l, &r)
             });
@@ -260,6 +267,22 @@ mod tests {
         let v1 = &out.attr_cols[0][1];
         assert!(matches!(v0, CellValue::Int64(1) | CellValue::Int64(2)));
         assert!(matches!(v1, CellValue::Int64(1) | CellValue::Int64(2)));
+    }
+
+    #[test]
+    fn a_null_cell_present_in_both_operands_yields_null() {
+        let s = schema();
+        let mut ab = SparseTileBuilder::new(&s);
+        ab.push(&[CoordValue::Int64(0)], &[CellValue::Null])
+            .unwrap();
+        let a = ab.build();
+        let b = tile(&[(0, 10)]);
+        for op in [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div] {
+            let out = elementwise(&s, &a, &b, op, 0).unwrap();
+            assert_eq!(out.attr_cols[0][0], CellValue::Null, "{op:?}, left NULL");
+            let out = elementwise(&s, &b, &a, op, 0).unwrap();
+            assert_eq!(out.attr_cols[0][0], CellValue::Null, "{op:?}, right NULL");
+        }
     }
 
     #[test]
