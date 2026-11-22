@@ -60,7 +60,7 @@ pub(super) async fn import_csv(
             None => return Ok(0),
             Some(h) => {
                 let reserved = reserve_row(ctx.memory, path, 1, h, Some(delimiter))?;
-                (parse_csv_row(h, delimiter), Some(reserved))
+                (parse_csv_headers(h, delimiter), Some(reserved))
             }
         }
     } else {
@@ -139,13 +139,13 @@ fn csv_row_fields(
         headers
             .iter()
             .zip(values.iter())
-            .map(|(h, v)| (h.clone(), coerce_csv_value(v)))
+            .map(|(h, v)| (h.clone(), coerce_csv_field(v)))
             .collect()
     } else {
         values
             .iter()
             .enumerate()
-            .map(|(i, v)| (format!("col_{i}"), coerce_csv_value(v)))
+            .map(|(i, v)| (format!("col_{i}"), coerce_csv_field(v)))
             .collect()
     };
     // Inject a unique row number as id if the field map has no id.
@@ -160,12 +160,35 @@ fn csv_row_fields(
     Ok(fields)
 }
 
+/// One parsed CSV field. `quoted` is true when any part of the field sat in
+/// double quotes; `empty` is true when the field had no characters at all.
+#[derive(Debug, PartialEq)]
+struct CsvField {
+    text: String,
+    quoted: bool,
+    empty: bool,
+}
+
+/// Header names of `line`, quotes removed.
+fn parse_csv_headers(line: &str, delimiter: char) -> Vec<String> {
+    parse_csv_row(line, delimiter)
+        .into_iter()
+        .map(|f| f.text)
+        .collect()
+}
+
 /// Parse a single CSV row respecting double-quote quoting and escaped quotes (`""`).
-fn parse_csv_row(line: &str, delimiter: char) -> Vec<String> {
+fn parse_csv_row(line: &str, delimiter: char) -> Vec<CsvField> {
     let mut fields = Vec::new();
     let mut current = String::new();
+    let mut quoted = false;
     let mut in_quotes = false;
     let mut chars = line.chars().peekable();
+    let finish = |current: &mut String, quoted: &mut bool| CsvField {
+        empty: current.is_empty() && !*quoted,
+        text: std::mem::take(current).trim().to_string(),
+        quoted: std::mem::take(quoted),
+    };
 
     while let Some(ch) = chars.next() {
         if in_quotes {
@@ -181,15 +204,25 @@ fn parse_csv_row(line: &str, delimiter: char) -> Vec<String> {
             }
         } else if ch == '"' {
             in_quotes = true;
+            quoted = true;
         } else if ch == delimiter {
-            fields.push(current.trim().to_string());
-            current = String::new();
+            fields.push(finish(&mut current, &mut quoted));
         } else {
             current.push(ch);
         }
     }
-    fields.push(current.trim().to_string());
+    fields.push(finish(&mut current, &mut quoted));
     fields
+}
+
+/// An unquoted empty field is NULL, as in PostgreSQL `COPY ... CSV`. A quoted
+/// empty field is the empty string.
+fn coerce_csv_field(field: &CsvField) -> nodedb_types::Value {
+    if field.empty {
+        nodedb_types::Value::Null
+    } else {
+        coerce_csv_value(&field.text)
+    }
 }
 
 /// Coerce a CSV string value to a `nodedb_types::Value`.
@@ -272,5 +305,44 @@ mod tests {
         let fields = csv_row_fields("a;b", 9, opts, &[]).expect("valid");
         assert_eq!(fields.get("id"), Some(&nodedb_types::Value::Integer(9)));
         assert_eq!(fields.len(), 3);
+    }
+
+    fn first_values(line: &str) -> Vec<nodedb_types::Value> {
+        parse_csv_row(line, ',')
+            .iter()
+            .map(coerce_csv_field)
+            .collect()
+    }
+
+    #[test]
+    fn an_unquoted_empty_csv_field_is_null() {
+        use nodedb_types::Value;
+        assert_eq!(
+            first_values("1,,x"),
+            vec![Value::Integer(1), Value::Null, Value::String("x".into())]
+        );
+        assert_eq!(
+            first_values("a,"),
+            vec![Value::String("a".into()), Value::Null]
+        );
+    }
+
+    #[test]
+    fn a_quoted_empty_csv_field_stays_the_empty_string() {
+        use nodedb_types::Value;
+        assert_eq!(
+            first_values("2,\"\",x"),
+            vec![
+                Value::Integer(2),
+                Value::String(String::new()),
+                Value::String("x".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn the_text_null_in_a_csv_field_stays_text() {
+        use nodedb_types::Value;
+        assert_eq!(first_values("NULL"), vec![Value::String("NULL".into())]);
     }
 }
