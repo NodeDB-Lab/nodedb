@@ -84,13 +84,15 @@ impl SortKeyEncoder {
     /// The sort key of a document. Backfill and write maintenance both build
     /// keys here.
     ///
-    /// `None` when `document` is not an object or lacks a sort column.
+    /// `None` when `document` is not an object, or a sort column is missing
+    /// or holds NULL. A NULL column leaves the index the same as a missing one.
     pub fn key_for_document(&self, document: &serde_json::Value) -> Option<Vec<u8>> {
         let fields = document.as_object()?;
         let mut key = Vec::new();
         for col in &self.columns {
             let flip = col.direction.flip();
-            key.extend(encode_json(fields.get(&col.name)?).iter().map(|b| b ^ flip));
+            let value = fields.get(&col.name).filter(|v| !v.is_null())?;
+            key.extend(encode_json(value).iter().map(|b| b ^ flip));
         }
         Some(key)
     }
@@ -223,6 +225,20 @@ mod tests {
             None
         );
         assert_eq!(enc.key_for_document(&serde_json::json!([1, 2])), None);
+    }
+
+    /// An explicit NULL sort column leaves the index, as a missing column does.
+    #[test]
+    fn key_for_document_treats_a_null_sort_column_as_missing() {
+        let enc = score_and_ts(SortDirection::Desc);
+        assert_eq!(
+            enc.key_for_document(&serde_json::json!({ "score": null, "ts": "2024-05-02" })),
+            None
+        );
+        assert_eq!(
+            enc.key_for_document(&serde_json::json!({ "score": 1, "ts": null })),
+            None
+        );
     }
 
     /// Strings order bytewise, not by length, in either direction.

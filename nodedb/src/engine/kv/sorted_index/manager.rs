@@ -171,7 +171,7 @@ impl SortedIndexManager {
     /// this collection.
     ///
     /// `document` is the stored value decoded from MessagePack, `None` when it
-    /// does not decode. A value without a sort column leaves the index.
+    /// does not decode. A value whose sort column is missing or NULL leaves the index.
     pub fn on_put(
         &mut self,
         table_key: u64,
