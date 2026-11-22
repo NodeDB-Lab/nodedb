@@ -141,7 +141,19 @@ fn convert(expr: &Expr) -> Result<MetadataFilter, SqlError> {
         Expr::UnaryOp {
             op: UnaryOperator::Not,
             expr,
-        } => Ok(MetadataFilter::Not(Box::new(convert(expr)?))),
+        } => {
+            // SQL's `NOT UNKNOWN` is `UNKNOWN`, not `TRUE`: a `NOT` directly
+            // around a comparison against the NULL literal must still never
+            // admit, not flip to admitting every row. `never_admits()`'s
+            // shape stays self-negating here for exactly that reason — see
+            // its own doc.
+            let inner = convert(expr)?;
+            if is_never_admits(&inner) {
+                Ok(inner)
+            } else {
+                Ok(MetadataFilter::Not(Box::new(inner)))
+            }
+        }
         Expr::BinaryOp { left, op, right } => comparison(left, op, right),
         Expr::InList {
             expr,
@@ -187,6 +199,12 @@ fn comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<Metadata
         (Err(e), Err(_)) => return Err(e),
     };
     Ok(match op {
+        // `field = NULL` and `field <> NULL` compare against a NULL
+        // literal. SQL three-valued logic reads that comparison as always
+        // unknown, so it never admits, whether the property is missing,
+        // holds NULL, or holds a value. `IS NULL` / `IS NOT NULL` convert
+        // through a separate branch above and keep their own behavior.
+        BinaryOperator::Eq | BinaryOperator::NotEq if value.is_null() => never_admits(),
         BinaryOperator::Eq => MetadataFilter::Eq { field, value },
         BinaryOperator::NotEq => MetadataFilter::Ne { field, value },
         BinaryOperator::Gt => MetadataFilter::Gt { field, value },
@@ -199,6 +217,29 @@ fn comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Result<Metadata
             )));
         }
     })
+}
+
+/// A filter for a comparison SQL three-valued logic reads as always
+/// UNKNOWN (a comparison against the NULL literal): it never admits, like a
+/// bare `FALSE` term, but unlike `FALSE` it must stay non-admitting under
+/// `NOT` too — `NOT UNKNOWN` is `UNKNOWN`, not `TRUE`. Shaped differently
+/// from the plain `Or(Vec::new())` a literal `FALSE` converts to
+/// ([`convert`]'s `Expr::Value` arm) so `convert`'s `Not` arm can tell the
+/// two apart and keep this one self-negating; both shapes evaluate to
+/// "never admits" everywhere else, so nothing outside a direct `NOT`
+/// wrapper can observe the difference.
+///
+/// Nested `Or`, not `And`: [`parse_edge_predicate`] flattens a top-level
+/// `And` into its own AND-ed clause list, which would strip an `And`-shaped
+/// marker exactly when the NULL comparison is the whole predicate. `Or`
+/// gets no such top-level treatment.
+fn never_admits() -> MetadataFilter {
+    MetadataFilter::Or(vec![MetadataFilter::Or(Vec::new())])
+}
+
+/// Whether `filter` is exactly the shape [`never_admits`] builds.
+fn is_never_admits(filter: &MetadataFilter) -> bool {
+    matches!(filter, MetadataFilter::Or(children) if children.as_slice() == [MetadataFilter::Or(Vec::new())])
 }
 
 /// The operator that keeps `literal OP field` true as `field OP' literal`.
@@ -359,6 +400,50 @@ mod tests {
                     value: Value::Null,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn eq_and_ne_against_a_null_literal_never_admit() {
+        let never_admits = vec![MetadataFilter::Or(vec![MetadataFilter::Or(Vec::new())])];
+        assert_eq!(traverse("w = NULL"), never_admits);
+        assert_eq!(traverse("NULL = w"), never_admits);
+        assert_eq!(traverse("w <> NULL"), never_admits);
+        assert_eq!(traverse("NULL <> w"), never_admits);
+        // `IS NULL` / `IS NOT NULL` convert through their own branch and
+        // keep the missing-or-null-matches / present-and-not-null rules.
+        assert_eq!(
+            traverse("w IS NULL"),
+            vec![MetadataFilter::Eq {
+                field: "w".into(),
+                value: Value::Null,
+            }]
+        );
+        assert_eq!(
+            traverse("w IS NOT NULL"),
+            vec![MetadataFilter::Ne {
+                field: "w".into(),
+                value: Value::Null,
+            }]
+        );
+    }
+
+    #[test]
+    fn not_around_a_null_comparison_still_never_admits() {
+        // `NOT UNKNOWN` is `UNKNOWN`: a NOT directly around `= NULL` /
+        // `<> NULL` stays never-admitting, never flips to admitting every
+        // row.
+        let never_admits = vec![MetadataFilter::Or(vec![MetadataFilter::Or(Vec::new())])];
+        assert_eq!(traverse("NOT (w = NULL)"), never_admits);
+        assert_eq!(traverse("NOT (w <> NULL)"), never_admits);
+        assert_eq!(traverse("NOT (NOT (w = NULL))"), never_admits);
+        // An ordinary `NOT FALSE` is unaffected: still wraps as `Not`, not
+        // the `never_admits` shape, and still evaluates true.
+        assert_eq!(
+            traverse("NOT FALSE"),
+            vec![MetadataFilter::Not(Box::new(
+                MetadataFilter::Or(Vec::new())
+            ))]
         );
     }
 

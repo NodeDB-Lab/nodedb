@@ -273,6 +273,128 @@ async fn the_last_level_records_its_edges_among_admitted_nodes() {
     );
 }
 
+/// `= NULL` and `<> NULL` compare against the `NULL` literal: SQL
+/// three-valued logic reads that comparison as always unknown, so it never
+/// admits an edge, whether `w` is missing, holds `NULL`, or holds a value.
+/// `IS NULL` / `IS NOT NULL` keep their own, separate behavior.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eq_and_ne_against_a_null_literal_never_admit() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION ep_null_eq").await.unwrap();
+    server
+        .exec("GRAPH INSERT EDGE IN 'ep_null_eq' FROM 'a' TO 'missing' TYPE 'L'")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "GRAPH INSERT EDGE IN 'ep_null_eq' FROM 'a' TO 'present_null' TYPE 'L' \
+             PROPERTIES '{\"w\": null}'",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "GRAPH INSERT EDGE IN 'ep_null_eq' FROM 'a' TO 'present_value' TYPE 'L' \
+             PROPERTIES '{\"w\": 5}'",
+        )
+        .await
+        .unwrap();
+
+    let eq_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_eq' FROM 'a' DEPTH 1 EDGE WHERE w = NULL",
+    )
+    .await;
+    assert_eq!(node_ids(&eq_null), set(&["a"]), "{eq_null}");
+
+    let ne_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_eq' FROM 'a' DEPTH 1 EDGE WHERE w <> NULL",
+    )
+    .await;
+    assert_eq!(node_ids(&ne_null), set(&["a"]), "{ne_null}");
+
+    // IS NULL / IS NOT NULL keep their documented, separate behavior.
+    let is_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_eq' FROM 'a' DEPTH 1 EDGE WHERE w IS NULL",
+    )
+    .await;
+    assert_eq!(
+        node_ids(&is_null),
+        set(&["a", "missing", "present_null"]),
+        "{is_null}"
+    );
+
+    let is_not_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_eq' FROM 'a' DEPTH 1 EDGE WHERE w IS NOT NULL",
+    )
+    .await;
+    assert_eq!(
+        node_ids(&is_not_null),
+        set(&["a", "present_value"]),
+        "{is_not_null}"
+    );
+}
+
+/// `IN` and `NOT IN` never admit a property that holds `NULL`. `NOT IN`
+/// also never admits once its list holds a `NULL` element, even for a
+/// property that matches nothing else in that list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_and_not_in_never_admit_through_a_null() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION ep_null_in").await.unwrap();
+    server
+        .exec(
+            "GRAPH INSERT EDGE IN 'ep_null_in' FROM 'a' TO 'present_null' TYPE 'L' \
+             PROPERTIES '{\"w\": null}'",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "GRAPH INSERT EDGE IN 'ep_null_in' FROM 'a' TO 'present_five' TYPE 'L' \
+             PROPERTIES '{\"w\": 5}'",
+        )
+        .await
+        .unwrap();
+
+    // IN (1, NULL): a present-NULL property is never admitted by IN.
+    let in_list = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_in' FROM 'a' DEPTH 1 EDGE WHERE w IN (1, NULL)",
+    )
+    .await;
+    assert_eq!(node_ids(&in_list), set(&["a"]), "{in_list}");
+
+    // NOT IN (1, NULL): the NULL in the list excludes every edge, even the
+    // one whose property matches nothing else in the list.
+    let not_in_with_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_in' FROM 'a' DEPTH 1 EDGE WHERE w NOT IN (1, NULL)",
+    )
+    .await;
+    assert_eq!(
+        node_ids(&not_in_with_null),
+        set(&["a"]),
+        "{not_in_with_null}"
+    );
+
+    // NOT IN (1), no NULL in the list: a present-NULL property is still
+    // never admitted, while a present non-matching value is.
+    let not_in_no_null = result_json(
+        &server,
+        "GRAPH TRAVERSE IN 'ep_null_in' FROM 'a' DEPTH 1 EDGE WHERE w NOT IN (1)",
+    )
+    .await;
+    assert_eq!(
+        node_ids(&not_in_no_null),
+        set(&["a", "present_five"]),
+        "{not_in_no_null}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn edge_where_is_refused_outside_traverse_and_path() {
     let server = TestServer::start().await;
