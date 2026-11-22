@@ -17,6 +17,7 @@ use sqlparser::ast;
 use crate::error::{Result, SqlError};
 use crate::functions::registry::{FunctionCategory, FunctionRegistry};
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_ident};
+use crate::planner::select::helpers::unaliased_item_name;
 use crate::planner::sort::{sort_ascending, sort_nulls_first};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
@@ -37,7 +38,10 @@ pub fn extract_window_functions(
     let mut specs = Vec::new();
     for item in &select.projection {
         let (expr, alias) = match item {
-            ast::SelectItem::UnnamedExpr(e) => (e, format!("{e}")),
+            // The projection names an unaliased item by `unaliased_item_name`
+            // (`select/helpers.rs`). The window spec must carry the same
+            // name, or its column never matches the projection.
+            ast::SelectItem::UnnamedExpr(e) => (e, unaliased_item_name(e)),
             ast::SelectItem::ExprWithAlias { expr, alias } => (expr, normalize_ident(alias)),
             _ => continue,
         };
@@ -289,6 +293,27 @@ mod tests {
                 }
                 other => panic!("{sql}: expected the refusal, got {other:?}"),
             }
+        }
+    }
+
+    /// An unaliased window call carries the name the projection gives it.
+    #[test]
+    fn an_unaliased_window_call_is_named_by_its_lowered_text() {
+        let reg = FunctionRegistry::new();
+        for (sql, name) in [
+            (
+                "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM t",
+                "row_number() over (order by id)",
+            ),
+            (
+                "SELECT RANK() OVER (ORDER BY id) FROM t",
+                "rank() over (order by id)",
+            ),
+        ] {
+            let select = select_of(sql);
+            let specs = extract_window_functions(&select, &reg, &open_scope("t")).unwrap();
+            assert_eq!(specs.len(), 1, "{sql}");
+            assert_eq!(specs[0].alias, name, "{sql}");
         }
     }
 
