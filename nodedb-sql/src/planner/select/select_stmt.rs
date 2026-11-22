@@ -40,6 +40,15 @@ pub(super) fn plan_select(
     tail: &QueryTail<'_>,
     statement_output: bool,
 ) -> Result<PlannedSelect> {
+    // `DISTINCT ON (...)` keeps the first row per key. The planner has no such
+    // operator and would run a plain `DISTINCT`, which returns other rows.
+    if matches!(select.distinct, Some(sqlparser::ast::Distinct::On(_))) {
+        return Err(SqlError::FeatureNotSupported {
+            detail: "DISTINCT ON is not supported: use DISTINCT, or GROUP BY with an aggregate"
+                .into(),
+        });
+    }
+
     // 0. Intercept array table-valued functions before catalog resolution
     //    so a name like `ARRAY_SLICE` is not looked up as a collection.
     if let Some(planned) =
