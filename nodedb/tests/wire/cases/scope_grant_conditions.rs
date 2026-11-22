@@ -28,6 +28,31 @@ async fn show_scope_grants(server: &TestServer) -> Vec<String> {
         .expect("SHOW SCOPE GRANTS")
 }
 
+/// `SHOW SCOPE GRANTS` on a second connection, each row's columns joined by
+/// tab -- the second-connection counterpart of `TestServer::query_text_joined`,
+/// which only runs on the server's own superuser client.
+async fn show_scope_grants_as(client: &tokio_postgres::Client) -> Vec<String> {
+    let messages = client
+        .simple_query("SHOW SCOPE GRANTS")
+        .await
+        .expect("SHOW SCOPE GRANTS");
+    let mut rows = Vec::new();
+    for message in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = message {
+            let n = row.len();
+            let mut joined = String::new();
+            for i in 0..n {
+                if i > 0 {
+                    joined.push('\t');
+                }
+                joined.push_str(row.get(i).unwrap_or(""));
+            }
+            rows.push(joined);
+        }
+    }
+    rows
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn conditional_grant_is_shown_and_survives_a_restart() {
     let server = TestServer::start().await;
@@ -111,5 +136,47 @@ async fn malformed_conditions_are_rejected() {
     assert!(
         !rows.iter().any(|row| row.contains("ops:all")),
         "a rejected statement must not leave a grant behind: {rows:?}"
+    );
+}
+
+/// GRANT SCOPE accepts `ORG`, `USER`, `ROLE` and `TEAM` as the grantee type.
+/// A non-superuser must see a `ROLE`-type grant in their own tenant the same
+/// as a `USER`-type one -- the tenant-visibility filter must resolve a
+/// tenant for every grantee type GRANT SCOPE itself accepts, not only `org`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_role_grant_in_the_callers_own_tenant_is_shown_to_a_non_superuser() {
+    let server = TestServer::start().await;
+    const PASSWORD: &str = "scope-grant-role-secret-42";
+
+    server
+        .exec("CREATE ROLE sgr_role")
+        .await
+        .expect("CREATE ROLE");
+    server
+        .exec("GRANT SCOPE 'sgr:all' TO ROLE 'sgr_role'")
+        .await
+        .expect("GRANT SCOPE TO ROLE");
+    server
+        .exec(&format!("CREATE USER sgr_viewer PASSWORD '{PASSWORD}'"))
+        .await
+        .expect("CREATE USER");
+    server
+        .exec("GRANT ROLE readwrite TO sgr_viewer")
+        .await
+        .expect("GRANT ROLE readwrite");
+
+    let (client, handle) = server
+        .connect_as("sgr_viewer", PASSWORD)
+        .await
+        .expect("connect as sgr_viewer");
+    let rows = show_scope_grants_as(&client).await;
+    drop(client);
+    handle.abort();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("sgr:all") && row.contains("sgr_role")),
+        "a role-type scope grant in the caller's own tenant must be visible to a \
+         non-superuser, got: {rows:?}"
     );
 }

@@ -46,8 +46,10 @@ pub(super) fn org_visible(
             .is_some_and(|o| o.tenant_id == identity.tenant_id.as_u64())
 }
 
-/// True when the grantee of a scope grant (`org` or an auth user) belongs to
-/// the caller's tenant.
+/// True when the grantee of a scope grant (`org`, `role`, `team` or an auth
+/// user) belongs to the caller's tenant. GRANT SCOPE accepts all four
+/// grantee types (`scope_ddl/grant.rs`), so this must resolve a tenant for
+/// each, not only `org`.
 pub(super) fn grantee_visible(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -56,6 +58,12 @@ pub(super) fn grantee_visible(
 ) -> bool {
     if grantee_type.eq_ignore_ascii_case("org") {
         org_visible(state, identity, grantee_id)
+    } else if grantee_type.eq_ignore_ascii_case("role") {
+        super::role_checks::role_in_caller_tenant(state, identity, grantee_id)
+    } else if grantee_type.eq_ignore_ascii_case("team") {
+        // No team registry exists yet: a team grantee carries no tenant to
+        // compare against, so only a superuser can see it.
+        identity.is_superuser
     } else {
         auth_user_visible(state, identity, grantee_id)
     }
