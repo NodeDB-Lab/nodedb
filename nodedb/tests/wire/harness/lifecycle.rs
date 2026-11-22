@@ -98,6 +98,20 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// Spawn a single-core server with `[auth] ddl_authorization` set to
+    /// `mode` (`"open"`, `"tenant_admin"`, `"permission"`, `"owner"` or
+    /// `"mix"`), so a test can exercise a DDL permission check.
+    pub async fn start_with_ddl_authorization(mode: &'static str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::ddl_authorization(mode),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Spawn a single-core server in pgwire password mode (SCRAM-SHA-256)
     /// with the credential lockout policy enabled (`5` failures -> `300s`).
     /// The harness user `nodedb` keeps password `nodedb`.

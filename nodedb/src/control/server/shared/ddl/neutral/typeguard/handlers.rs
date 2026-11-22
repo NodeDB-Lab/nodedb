@@ -136,6 +136,13 @@ pub async fn create_typeguard(
     let or_replace = find_ascii_case_insensitive(sql, "OR REPLACE").is_some();
 
     let coll_name = extract_collection_name(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change type guards",
+    )?;
     let field_list = extract_outer_parens(sql)?;
     let guards = parse_field_list(&field_list)?;
 
@@ -177,6 +184,13 @@ pub async fn alter_typeguard_add(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = extract_collection_name(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change type guards",
+    )?;
 
     let add_pos = find_ascii_case_insensitive(sql, " ADD ")
         .ok_or_else(|| err("42601", "ALTER TYPEGUARD requires ADD <field> <type>"))?;
@@ -212,6 +226,13 @@ pub async fn alter_typeguard_drop(
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = extract_collection_name(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change type guards",
+    )?;
 
     let drop_pos = find_ascii_case_insensitive(sql, " DROP ")
         .ok_or_else(|| err("42601", "ALTER TYPEGUARD requires DROP <field>"))?;
@@ -273,6 +294,13 @@ pub async fn drop_typeguard(
     let if_exists = upper.contains("IF EXISTS");
 
     let coll_name = extract_collection_name(sql)?;
+    crate::control::server::shared::ddl::neutral::object_permission::require_owner_or_admin(
+        state,
+        identity,
+        database_id,
+        &coll_name,
+        "change type guards",
+    )?;
 
     let mut coll = load_collection(state, identity, database_id, &coll_name)?;
 
