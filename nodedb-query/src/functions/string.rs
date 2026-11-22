@@ -22,6 +22,9 @@ pub(super) fn try_eval(name: &str, args: &[Value]) -> Option<Value> {
             str_arg(args, 0).map_or(Value::Null, |s| Value::Integer(s.len() as i64))
         }
         "substr" | "substring" => {
+            if args.iter().any(|a| matches!(a, Value::Null)) {
+                return Some(Value::Null);
+            }
             let Some(s) = str_arg(args, 0) else {
                 return Some(Value::Null);
             };
@@ -39,6 +42,9 @@ pub(super) fn try_eval(name: &str, args: &[Value]) -> Option<Value> {
             Value::String(parts.join(""))
         }
         "replace" => {
+            if args.iter().any(|a| matches!(a, Value::Null)) {
+                return Some(Value::Null);
+            }
             let Some(s) = str_arg(args, 0) else {
                 return Some(Value::Null);
             };
