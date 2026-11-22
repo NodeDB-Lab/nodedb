@@ -198,6 +198,49 @@ mod tests {
         }
     }
 
+    fn make_doc_null(field: &str) -> Vec<u8> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(field.to_string(), Value::Null);
+        nodedb_types::value_to_msgpack(&Value::Object(map)).expect("encode doc")
+    }
+
+    #[test]
+    fn array_agg_keeps_null_elements() {
+        let spec = make_spec("array_agg", "x");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut a = AggAccum::new(&spec).unwrap();
+        a.feed(&spec, &make_doc_i64("x", 1), &crs).unwrap();
+        a.feed(&spec, &make_doc_null("x"), &crs).unwrap();
+        a.feed(&spec, &make_doc_i64("x", 2), &crs).unwrap();
+        assert_eq!(
+            a.finalize(&spec).unwrap(),
+            Value::Array(vec![Value::Integer(1), Value::Null, Value::Integer(2)])
+        );
+    }
+
+    #[test]
+    fn array_agg_distinct_keeps_one_null_element() {
+        let spec = make_spec("array_agg_distinct", "x");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut a = AggAccum::new(&spec).unwrap();
+        a.feed(&spec, &make_doc_i64("x", 1), &crs).unwrap();
+        a.feed(&spec, &make_doc_null("x"), &crs).unwrap();
+        a.feed(&spec, &make_doc_null("x"), &crs).unwrap();
+        assert_eq!(
+            a.finalize(&spec).unwrap(),
+            Value::Array(vec![Value::Integer(1), Value::Null])
+        );
+    }
+
+    #[test]
+    fn array_agg_over_no_input_is_null() {
+        for func in ["array_agg", "array_agg_distinct"] {
+            let spec = make_spec(func, "x");
+            let a = AggAccum::new(&spec).unwrap();
+            assert_eq!(a.finalize(&spec).unwrap(), Value::Null, "{func}");
+        }
+    }
+
     /// A distinct array merged from two runs dedups by each value's own key,
     /// so a value both runs saw appears once and no value is paired with
     /// another value's key.

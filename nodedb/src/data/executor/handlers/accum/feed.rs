@@ -79,17 +79,25 @@ impl AggAccum {
                 }
             }
             AggAccum::ArrayAgg { values } => {
-                if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && !v.is_null()
-                {
-                    values.push(v);
-                }
+                // A NULL element is kept, as in SQL.
+                let v = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
+                    .unwrap_or(nodedb_types::Value::Null);
+                values.push(v);
             }
             AggAccum::ArrayAggDistinct { seen, values } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
-                    && !seen.contains(&bytes)
-                    && let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
-                {
+                // NULL is one distinct value. Its key is the empty byte string,
+                // which no encoded value produces.
+                let bytes =
+                    ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?.unwrap_or_default();
+                if !seen.contains(&bytes) {
+                    let v = if bytes.is_empty() {
+                        nodedb_types::Value::Null
+                    } else {
+                        match ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)? {
+                            Some(v) => v,
+                            None => return Ok(()),
+                        }
+                    };
                     seen.insert(bytes.clone());
                     values.push((bytes, v));
                 }
