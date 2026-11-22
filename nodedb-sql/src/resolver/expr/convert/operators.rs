@@ -146,6 +146,14 @@ pub(super) fn convert_any_op(
     }
     let left_expr = convert_expr_depth(left, depth, scope)?;
     let right_expr = convert_expr_depth(right, depth, scope)?;
+    // A column holds an array, so `x = ANY(col)` is membership in that array.
+    if matches!(right_expr, SqlExpr::Column { .. }) {
+        return Ok(SqlExpr::Function {
+            name: "array_contains".into(),
+            args: vec![right_expr, left_expr],
+            distinct: false,
+        });
+    }
     // Expand the right-hand side into a list if it is an array literal;
     // otherwise wrap as a single-element list so InList still evaluates.
     let list = match right_expr {
@@ -163,6 +171,21 @@ pub(super) fn convert_any_op(
 mod tests {
     use crate::resolver::expr::convert::entry::tests::{select_expr_lowered, where_sql_expr};
     use crate::types::*;
+
+    /// `2 = ANY(tags)` over an array column lowers to membership in the array,
+    /// `array_contains(tags, 2)`, not to `2 IN (tags)`.
+    #[test]
+    fn any_over_a_column_lowers_to_array_contains() {
+        let expr = where_sql_expr("SELECT * FROM t WHERE 2 = ANY(tags)");
+        match expr {
+            SqlExpr::Function { name, args, .. } => {
+                assert_eq!(name, "array_contains");
+                assert!(matches!(&args[0], SqlExpr::Column { name, .. } if name == "tags"));
+                assert!(matches!(&args[1], SqlExpr::Literal(SqlValue::Int(2))));
+            }
+            other => panic!("expected array_contains, got {other:?}"),
+        }
+    }
 
     /// `"col" = 'literal'` — double-quoted identifier on the left, single-quoted
     /// string literal on the right — must lower to `BinaryOp(Column("col"), Eq,
