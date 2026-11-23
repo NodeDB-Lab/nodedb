@@ -45,12 +45,12 @@ pub(super) fn parse_collection_body(
     src: &str,
 ) -> Result<CollectionBody, SqlError> {
     let mut type_engine = read_leading_kind(c)?;
-    let columns = read_column_list(c, src)?;
+    let (columns, column_list_flags) = read_column_list(c, src)?;
     let mut with_engine: Option<String> = None;
     let mut options: Vec<(String, String)> = Vec::new();
     let mut suffix_engine: Option<String> = None;
     let mut balanced_raw: Option<String> = None;
-    let mut flags = [false; FLAGS.len()];
+    let mut flags = column_list_flags;
 
     while !c.at_end() {
         if c.eat_keyword("WITH") {
@@ -147,6 +147,20 @@ mod tests {
 
     fn ok(sql: &str) -> CollectionBody {
         parse(sql).expect("collection body should parse")
+    }
+
+    #[test]
+    fn column_list_bitemporal_and_append_only_flags_match_trailing_flags() {
+        let (_, _, _, flags, _) = ok(
+            "CREATE COLLECTION u2 (id TEXT PRIMARY KEY, n INT, BITEMPORAL) \
+             WITH (engine='document_strict')",
+        );
+        assert_eq!(flags, vec!["BITEMPORAL"]);
+        let (_, _, _, flags, _) = ok(
+            "CREATE COLLECTION u4 (id TEXT PRIMARY KEY, n INT, APPEND_ONLY) \
+             WITH (engine='document_strict')",
+        );
+        assert_eq!(flags, vec!["APPEND_ONLY"]);
     }
 
     #[test]

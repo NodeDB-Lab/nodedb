@@ -5,6 +5,7 @@
 //! The reader works on tokens, so a parenthesis, comma, or keyword inside a
 //! string literal or quoted identifier never changes the list's boundaries.
 
+use super::flags::{FLAGS, flag_index, is_truthy};
 use crate::ddl_ast::parse::clause::{ClauseCursor, Tok, Token};
 use crate::error::SqlError;
 use crate::reserved::check_identifier;
@@ -55,6 +56,13 @@ pub(super) fn matching_close(
     None
 }
 
+/// One entry from a parenthesised column list: a column definition or a
+/// collection modifier flag written among the columns (legacy syntax).
+enum ColumnListItem {
+    Column(String, String),
+    Flag(usize),
+}
+
 /// Read the column list at the cursor, with any words that introduce it
 /// (`COLUMNS`, `FIELDS`, `STRICT`, `TYPE DOCUMENT STRICT`).
 ///
@@ -65,10 +73,10 @@ pub(super) fn matching_close(
 pub(super) fn read_column_list(
     c: &mut ClauseCursor<'_, '_>,
     src: &str,
-) -> Result<Vec<(String, String)>, SqlError> {
+) -> Result<(Vec<(String, String)>, [bool; FLAGS.len()]), SqlError> {
     let toks = c.remaining_tokens();
     let Some(open) = toks.iter().position(|t| t.tok == Tok::Punct('(')) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), [false; FLAGS.len()]));
     };
     let owned_by_clause = toks[..open].iter().any(|t| {
         matches!(t.tok, Tok::Word(w) if PAREN_OWNING_CLAUSE_KEYWORDS
@@ -76,14 +84,14 @@ pub(super) fn read_column_list(
             .any(|kw| w.eq_ignore_ascii_case(kw)))
     });
     if owned_by_clause {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), [false; FLAGS.len()]));
     }
     let is_options = matches!(
         toks.get(open + 1).map(|t| &t.tok),
         Some(Tok::Word(w)) if OPTION_KEYS.iter().any(|k| w.eq_ignore_ascii_case(k))
     );
     if is_options {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), [false; FLAGS.len()]));
     }
     let close =
         matching_close(toks, open, '(', ')').ok_or_else(|| c.error("column list: unclosed '('"))?;
@@ -91,6 +99,7 @@ pub(super) fn read_column_list(
     c.skip(close + 1);
 
     let mut pairs = Vec::new();
+    let mut list_flags = [false; FLAGS.len()];
     let mut depth = 0i32;
     let mut start = 0usize;
     for (i, tok) in inner.iter().enumerate() {
@@ -98,18 +107,24 @@ pub(super) fn read_column_list(
             Tok::Punct('(') => depth += 1,
             Tok::Punct(')') => depth -= 1,
             Tok::Punct(',') if depth == 0 => {
-                if let Some(pair) = parse_column(src, &inner[start..i])? {
-                    pairs.push(pair);
+                if let Some(item) = parse_column_entry(src, &inner[start..i])? {
+                    match item {
+                        ColumnListItem::Column(name, ty) => pairs.push((name, ty)),
+                        ColumnListItem::Flag(i) => list_flags[i] = true,
+                    }
                 }
                 start = i + 1;
             }
             _ => {}
         }
     }
-    if let Some(pair) = parse_column(src, &inner[start..])? {
-        pairs.push(pair);
+    if let Some(item) = parse_column_entry(src, &inner[start..])? {
+        match item {
+            ColumnListItem::Column(name, ty) => pairs.push((name, ty)),
+            ColumnListItem::Flag(i) => list_flags[i] = true,
+        }
     }
-    Ok(pairs)
+    Ok((pairs, list_flags))
 }
 
 /// The source text of `toks`, with each gap between tokens written as one
@@ -197,15 +212,9 @@ fn named_constraint(kind: &str) -> SqlError {
     }
 }
 
-/// Parse one column definition such as `id BIGINT NOT NULL` into
-/// `(name, type_str)`.
-///
-/// `type_str` is the rest of the definition: the type plus modifiers such as
-/// `NOT NULL`, `DEFAULT expr`, `PRIMARY KEY`, or `GENERATED ALWAYS AS (...)`.
-/// Downstream builders strip it to the bare type. A table-level constraint,
-/// or an inline UNIQUE / CHECK / FOREIGN / REFERENCES / CONSTRAINT before
-/// `GENERATED`, is a typed error. An empty definition gives `None`.
-fn parse_column(src: &str, toks: &[Token<'_>]) -> Result<Option<(String, String)>, SqlError> {
+/// Parse one column definition such as `id BIGINT NOT NULL`, or a bare
+/// collection modifier flag among the columns.
+fn parse_column_entry(src: &str, toks: &[Token<'_>]) -> Result<Option<ColumnListItem>, SqlError> {
     let Some(first) = toks.first() else {
         return Ok(None);
     };
@@ -259,9 +268,39 @@ fn parse_column(src: &str, toks: &[Token<'_>]) -> Result<Option<(String, String)
     }
 
     if rest.is_empty() {
-        return Ok(None);
+        if let Some(i) = flag_index(&name) {
+            return Ok(Some(ColumnListItem::Flag(i)));
+        }
+        return Err(SqlError::Parse {
+            detail: format!(
+                "column definition for '{name}' requires a type; \
+                 use a recognised collection flag or declare a column type"
+            ),
+        });
     }
-    Ok(Some((name, joined_text(src, rest))))
+
+    if let Some(i) = flag_index(&name) {
+        let rest_joined = joined_text(src, rest);
+        let assigned = rest_joined.trim_start();
+        if assigned.starts_with('=') {
+            let value = assigned.trim_start_matches('=').trim();
+            if is_truthy(value) {
+                return Ok(Some(ColumnListItem::Flag(i)));
+            }
+            return Err(SqlError::Parse {
+                detail: format!(
+                    "collection flag '{name}' in the column list must use a true value when assigned \
+                     (got '{value}'); use WITH ({key}=true) instead",
+                    key = FLAGS[i].to_ascii_lowercase()
+                ),
+            });
+        }
+    }
+
+    Ok(Some(ColumnListItem::Column(
+        name,
+        joined_text(src, rest),
+    )))
 }
 
 #[cfg(test)]
@@ -270,6 +309,14 @@ mod tests {
     use crate::ddl_ast::parse::clause::tokenize;
 
     fn columns(body: &str) -> Result<Vec<(String, String)>, SqlError> {
+        let toks = tokenize(body);
+        let mut c = ClauseCursor::new(body, &toks, "CREATE COLLECTION");
+        read_column_list(&mut c, body).map(|(cols, _)| cols)
+    }
+
+    fn columns_and_flags(
+        body: &str,
+    ) -> Result<(Vec<(String, String)>, [bool; FLAGS.len()]), SqlError> {
         let toks = tokenize(body);
         let mut c = ClauseCursor::new(body, &toks, "CREATE COLLECTION");
         read_column_list(&mut c, body)
@@ -388,5 +435,32 @@ mod tests {
     #[test]
     fn unclosed_column_list_is_an_error() {
         assert!(matches!(columns("(id INT"), Err(SqlError::Parse { .. })));
+    }
+
+    #[test]
+    fn bare_collection_flags_in_the_column_list_set_flags() {
+        let (cols, flags) = columns_and_flags("(id TEXT PRIMARY KEY, n INT, BITEMPORAL)")
+            .expect("list");
+        assert_eq!(cols.len(), 2);
+        assert!(flags[flag_index("BITEMPORAL").unwrap()]);
+        let (_, flags) = columns_and_flags("(id TEXT PRIMARY KEY, APPEND_ONLY, HASH_CHAIN)")
+            .expect("list");
+        assert!(flags[flag_index("APPEND_ONLY").unwrap()]);
+        assert!(flags[flag_index("HASH_CHAIN").unwrap()]);
+    }
+
+    #[test]
+    fn unknown_bare_token_in_column_list_is_an_error() {
+        assert!(matches!(
+            columns("(id TEXT, NOT_A_FLAG)"),
+            Err(SqlError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn flag_name_with_a_column_type_declares_a_column() {
+        let cols = columns("(id INT PRIMARY KEY, append_only BOOL)").expect("list");
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[1].0, "append_only");
     }
 }
