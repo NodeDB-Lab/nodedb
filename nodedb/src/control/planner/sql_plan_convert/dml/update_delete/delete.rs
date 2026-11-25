@@ -122,6 +122,22 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
     // rejected — no silent fallthrough that will bypass CRDT convergence.
     let is_crdt = super::super::crdt_gate::document_collection_is_crdt(ctx, collection_key)?;
     if is_crdt && target_keys.is_empty() {
+        if crate::control::planner::sql_plan_convert::filter::filters_match_no_row(filters) {
+            return Ok(vec![PhysicalTask {
+                tenant_id,
+                vshard_id: vshard,
+                database_id: ctx.database_id,
+                plan: PhysicalPlan::Crdt(CrdtOp::DocDelete {
+                    collection: qualified_collection,
+                    document_id: String::new(),
+                    surrogate: None,
+                    returning: None,
+                    rls_filters: Vec::new(),
+                }),
+                post_set_op: PostSetOp::None,
+                txn_id: None,
+            }]);
+        }
         return Err(crate::Error::BadRequest {
             detail: format!(
                 "predicate (non-primary-key) DELETE on CRDT collection '{collection}' is not \

@@ -332,3 +332,41 @@ fn lowercase_string_value(v: &SqlValue) -> SqlValue {
         v.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready_index(field: &str) -> IndexSpec {
+        IndexSpec {
+            name: format!("idx_{field}"),
+            field: format!("$.{field}"),
+            state: IndexState::Ready,
+            predicate: None,
+            case_insensitive: false,
+            unique: false,
+        }
+    }
+
+    #[test]
+    fn comparison_filter_with_null_offers_no_indexed_equality() {
+        let indexes = vec![ready_index("tag")];
+        let null_cmp = vec![Filter {
+            expr: FilterExpr::Comparison {
+                field: "tag".into(),
+                op: CompareOp::Eq,
+                value: SqlValue::Null,
+            },
+        }];
+        assert!(find_indexed_equality(&null_cmp, &indexes).is_none());
+
+        let str_cmp = vec![Filter {
+            expr: FilterExpr::Comparison {
+                field: "tag".into(),
+                op: CompareOp::Eq,
+                value: SqlValue::String("x".into()),
+            },
+        }];
+        assert!(find_indexed_equality(&str_cmp, &indexes).is_some());
+    }
+}

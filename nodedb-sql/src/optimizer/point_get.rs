@@ -96,6 +96,11 @@ fn extract_pk_equality(filter: &Filter, pk: Option<&str>) -> Option<(String, Sql
         },
         _ => return None,
     };
+    // `pk = NULL` is unknown and matches no row. A point lookup on the NULL
+    // key would read the real key `''`.
+    if matches!(value, SqlValue::Null) {
+        return None;
+    }
     key_column_named(column, pk).map(|key| (key, value.clone()))
 }
 
@@ -341,5 +346,64 @@ mod tests {
             let plan = optimize(equality_scan("sku", engine), &SkuCatalog).unwrap();
             assert!(matches!(plan, SqlPlan::Scan { .. }), "{plan:?}");
         }
+    }
+
+    #[test]
+    fn a_key_equality_against_null_stays_a_scan() {
+        let make = |expr: FilterExpr| -> SqlPlan {
+            let SqlPlan::Scan {
+                collection,
+                alias,
+                engine,
+                projection,
+                sort_keys,
+                limit,
+                offset,
+                distinct,
+                window_functions,
+                temporal,
+                ..
+            } = id_scan()
+            else {
+                panic!("id_scan is a scan");
+            };
+            SqlPlan::Scan {
+                collection,
+                alias,
+                engine,
+                filters: vec![Filter { expr }],
+                projection,
+                sort_keys,
+                limit,
+                offset,
+                distinct,
+                window_functions,
+                temporal,
+            }
+        };
+        let cmp_plan = optimize(
+            make(FilterExpr::Comparison {
+                field: "id".into(),
+                op: CompareOp::Eq,
+                value: SqlValue::Null,
+            }),
+            &UsersCatalog,
+        )
+        .unwrap();
+        assert!(matches!(cmp_plan, SqlPlan::Scan { .. }), "{cmp_plan:?}");
+
+        let expr_plan = optimize(
+            make(FilterExpr::Expr(SqlExpr::BinaryOp {
+                left: Box::new(SqlExpr::Column {
+                    table: None,
+                    name: "id".into(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(SqlExpr::Literal(SqlValue::Null)),
+            })),
+            &UsersCatalog,
+        )
+        .unwrap();
+        assert!(matches!(expr_plan, SqlPlan::Scan { .. }), "{expr_plan:?}");
     }
 }

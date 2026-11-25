@@ -12,7 +12,10 @@ mod expr_lower;
 mod serialize;
 mod system_time;
 
-pub(super) use expr_lower::{expr_filter, expr_filter_qualified};
+pub(super) use expr_lower::{
+    expr_filter, expr_filter_qualified, filters_match_no_row, is_null_literal_equality,
+    never_match_filter,
+};
 pub(super) use serialize::{
     encode_scan_filters, filter_to_scan_filters, serialize_join_post_filters,
 };

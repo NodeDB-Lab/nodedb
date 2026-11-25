@@ -72,13 +72,7 @@ fn collect_pk_equalities(
             } else {
                 return false;
             };
-            match expr_to_sql_value(value, crs) {
-                Ok(v) => {
-                    keys.push(v);
-                    true
-                }
-                Err(_) => false,
-            }
+            push_key(value, keys, crs)
         }
         ast::Expr::BinaryOp {
             left,
@@ -92,14 +86,24 @@ fn collect_pk_equalities(
             expr: inner,
             list,
             negated: false,
-        } if is_column(inner, pk) => list.iter().all(|item| match expr_to_sql_value(item, crs) {
-            Ok(v) => {
-                keys.push(v);
-                true
-            }
-            Err(_) => false,
-        }),
+        } if is_column(inner, pk) => list.iter().all(|item| push_key(item, keys, crs)),
         _ => false,
+    }
+}
+
+/// Push the literal `expr` as a key. Skips NULL (returns `true` without
+/// pushing): `pk = NULL` is unknown and matches no row, so `pk IN ('a', NULL)`
+/// matches only `'a'` and `pk = NULL` / `pk IN (NULL)` produce an empty key
+/// list rather than looking up the key `''`. Returns `false` for any
+/// non-literal so the statement falls back to the predicate path.
+fn push_key(expr: &ast::Expr, keys: &mut Vec<SqlValue>, crs: &nodedb_crs::CrsContext<'_>) -> bool {
+    match expr_to_sql_value(expr, crs) {
+        Ok(SqlValue::Null) => true,
+        Err(_) => false,
+        Ok(v) => {
+            keys.push(v);
+            true
+        }
     }
 }
 
@@ -112,5 +116,83 @@ fn is_column(expr: &ast::Expr, name: &str) -> bool {
             normalize_ident(&parts[1]) == name
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    fn keys_for(where_sql: &str) -> Vec<SqlValue> {
+        let expr = Parser::new(&GenericDialect {})
+            .try_with_sql(where_sql)
+            .expect("tokenize")
+            .parse_expr()
+            .expect("parse");
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut keys = Vec::new();
+        if collect_pk_equalities(&expr, "id", &mut keys, &crs) {
+            keys
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn pk_equal_null_is_not_a_point_key() {
+        assert!(keys_for("id = NULL").is_empty());
+        assert!(keys_for("NULL = id").is_empty());
+    }
+
+    #[test]
+    fn pk_in_list_with_null_drops_only_null() {
+        assert!(keys_for("id IN (NULL)").is_empty());
+        assert_eq!(
+            keys_for("id IN ('a', NULL)"),
+            vec![SqlValue::String("a".into())]
+        );
+    }
+
+    #[test]
+    fn pk_equal_literal_stays_a_point_key() {
+        assert_eq!(keys_for("id = 'a'"), vec![SqlValue::String("a".into())]);
+        assert_eq!(
+            keys_for("id IN ('a', 'b')"),
+            vec![SqlValue::String("a".into()), SqlValue::String("b".into())]
+        );
+    }
+
+    fn bound_selection_yields_key(sql: &str, params: &[crate::params::ParamValue]) -> bool {
+        let mut stmt = crate::parser::statement::parse_sql(sql)
+            .expect("parse")
+            .remove(0);
+        crate::params::bind_params(&mut stmt, params);
+        let selection = match &stmt {
+            ast::Statement::Delete(d) => d.selection.clone(),
+            ast::Statement::Update(u) => u.selection.clone(),
+            other => panic!("not a DML statement: {other}"),
+        };
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        let mut keys = Vec::new();
+        collect_pk_equalities(&selection.expect("WHERE"), "id", &mut keys, &crs) && !keys.is_empty()
+    }
+
+    #[test]
+    fn bound_null_param_is_not_a_point_key() {
+        use crate::params::ParamValue;
+        assert!(!bound_selection_yields_key(
+            "DELETE FROM t WHERE id = $1",
+            &[ParamValue::Null]
+        ));
+        assert!(!bound_selection_yields_key(
+            "UPDATE t SET v = 1 WHERE id = $1",
+            &[ParamValue::Null]
+        ));
+        assert!(bound_selection_yields_key(
+            "DELETE FROM t WHERE id = $1",
+            &[ParamValue::Text("a".into())]
+        ));
     }
 }
