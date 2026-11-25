@@ -8,7 +8,10 @@
 
 use nodedb_sql::types::{Filter, FilterExpr};
 
-use super::filter::{encode_scan_filters, expr_filter, filter_to_scan_filters};
+use super::filter::{
+    encode_scan_filters, expr_filter, filter_to_scan_filters, is_null_literal_equality,
+    never_match_filter,
+};
 
 /// Serialize one join side's own `WHERE` predicates for a scan of that side's
 /// collection.
@@ -46,7 +49,13 @@ fn side_filter_to_scan_filters(expr: &FilterExpr) -> Vec<nodedb_query::scan_filt
                 .collect(),
             expr: None,
         }],
-        FilterExpr::Expr(sql_expr) => vec![expr_filter(sql_expr)],
+        FilterExpr::Expr(sql_expr) => {
+            if is_null_literal_equality(sql_expr) {
+                vec![never_match_filter()]
+            } else {
+                vec![expr_filter(sql_expr)]
+            }
+        }
         other => filter_to_scan_filters(other),
     }
 }

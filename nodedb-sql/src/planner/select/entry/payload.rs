@@ -84,11 +84,14 @@ pub(super) fn apply_vector_payload(
                         field,
                         op: CompareOp::Eq,
                         value,
-                    } if is_indexed(field) => {
+                    } if is_indexed(field) && !matches!(value, SqlValue::Null) => {
                         peeled.push(SqlPayloadAtom::Eq(field.clone(), value.clone()));
                         false
                     }
-                    FilterExpr::InList { field, values } if is_indexed(field) => {
+                    FilterExpr::InList { field, values }
+                        if is_indexed(field)
+                            && !values.iter().any(|v| matches!(v, SqlValue::Null)) =>
+                    {
                         peeled.push(SqlPayloadAtom::In(field.clone(), values.clone()));
                         false
                     }
@@ -124,11 +127,15 @@ pub(super) fn apply_vector_payload(
                         op: BinaryOp::Eq,
                         right,
                     }) => match (&**left, &**right) {
-                        (SqlExpr::Column { name, .. }, SqlExpr::Literal(v)) if is_indexed(name) => {
+                        (SqlExpr::Column { name, .. }, SqlExpr::Literal(v))
+                            if is_indexed(name) && !matches!(v, SqlValue::Null) =>
+                        {
                             peeled.push(SqlPayloadAtom::Eq(name.clone(), v.clone()));
                             false
                         }
-                        (SqlExpr::Literal(v), SqlExpr::Column { name, .. }) if is_indexed(name) => {
+                        (SqlExpr::Literal(v), SqlExpr::Column { name, .. })
+                            if is_indexed(name) && !matches!(v, SqlValue::Null) =>
+                        {
                             peeled.push(SqlPayloadAtom::Eq(name.clone(), v.clone()));
                             false
                         }
@@ -141,15 +148,17 @@ pub(super) fn apply_vector_payload(
                     }) => match &**expr {
                         SqlExpr::Column { name, .. } if is_indexed(name) => {
                             let mut lits = Vec::with_capacity(list.len());
-                            let all_lit = list.iter().all(|e| {
-                                if let SqlExpr::Literal(v) = e {
+                            let all_non_null_lit = list.iter().all(|e| {
+                                if let SqlExpr::Literal(v) = e
+                                    && !matches!(v, SqlValue::Null)
+                                {
                                     lits.push(v.clone());
                                     true
                                 } else {
                                     false
                                 }
                             });
-                            if all_lit {
+                            if all_non_null_lit {
                                 peeled.push(SqlPayloadAtom::In(name.clone(), lits));
                                 false
                             } else {

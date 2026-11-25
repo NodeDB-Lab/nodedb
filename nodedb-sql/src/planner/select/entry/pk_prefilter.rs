@@ -108,7 +108,8 @@ fn join_conjuncts(conjuncts: Vec<SqlExpr>) -> Option<SqlExpr> {
 }
 
 /// The keys of `pk = literal` or `pk IN (literal, ...)`. `None` for any other
-/// predicate, including an `IN` list holding a non-literal.
+/// predicate, including a NULL equality or an `IN` list holding a non-literal.
+/// NULL literals are excluded from `IN` lists; an all-NULL `IN` list yields `None`.
 fn pk_keys(expr: &SqlExpr, pk: &str) -> Option<Vec<SqlValue>> {
     let is_pk = |e: &SqlExpr| matches!(e, SqlExpr::Column { name, .. } if name == pk);
     match expr {
@@ -118,7 +119,7 @@ fn pk_keys(expr: &SqlExpr, pk: &str) -> Option<Vec<SqlValue>> {
             right,
         } => match (left.as_ref(), right.as_ref()) {
             (column, SqlExpr::Literal(value)) | (SqlExpr::Literal(value), column)
-                if is_pk(column) =>
+                if is_pk(column) && !matches!(value, SqlValue::Null) =>
             {
                 Some(vec![value.clone()])
             }
@@ -128,13 +129,17 @@ fn pk_keys(expr: &SqlExpr, pk: &str) -> Option<Vec<SqlValue>> {
             expr,
             list,
             negated: false,
-        } if is_pk(expr) => list
-            .iter()
-            .map(|item| match item {
-                SqlExpr::Literal(value) => Some(value.clone()),
-                _ => None,
-            })
-            .collect(),
+        } if is_pk(expr) => {
+            let mut out = Vec::with_capacity(list.len());
+            for item in list {
+                match item {
+                    SqlExpr::Literal(SqlValue::Null) => {}
+                    SqlExpr::Literal(value) => out.push(value.clone()),
+                    _ => return None,
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
         _ => None,
     }
 }

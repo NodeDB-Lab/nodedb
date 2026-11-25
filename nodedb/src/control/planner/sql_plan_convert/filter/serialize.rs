@@ -8,7 +8,9 @@
 
 use nodedb_sql::types::{Filter, FilterExpr};
 
-use super::expr_lower::{sql_expr_to_join_scan_filters, sql_expr_to_scan_filters};
+use super::expr_lower::{
+    never_match_filter, sql_expr_to_join_scan_filters, sql_expr_to_scan_filters,
+};
 use crate::control::planner::sql_plan_convert::value::sql_value_to_nodedb_value;
 
 /// Convert SqlPlan filters to ScanFilter msgpack bytes.
@@ -96,6 +98,11 @@ pub(crate) fn filter_to_scan_filters(
 
     match expr {
         FilterExpr::Comparison { field, op, value } => {
+            if matches!(op, nodedb_sql::types::CompareOp::Eq)
+                && matches!(value, nodedb_sql::types::SqlValue::Null)
+            {
+                return vec![never_match_filter()];
+            }
             let filter_op = match op {
                 nodedb_sql::types::CompareOp::Eq => FilterOp::Eq,
                 nodedb_sql::types::CompareOp::Ne => FilterOp::Ne,
@@ -113,7 +120,14 @@ pub(crate) fn filter_to_scan_filters(
             }]
         }
         FilterExpr::InList { field, values } => {
-            let arr = values.iter().map(sql_value_to_nodedb_value).collect();
+            let arr: Vec<nodedb_types::Value> = values
+                .iter()
+                .map(sql_value_to_nodedb_value)
+                .filter(|v| !v.is_null())
+                .collect();
+            if arr.is_empty() {
+                return vec![never_match_filter()];
+            }
             vec![ScanFilter {
                 field: field.clone(),
                 op: FilterOp::In,

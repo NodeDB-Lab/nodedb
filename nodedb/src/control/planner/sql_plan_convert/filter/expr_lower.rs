@@ -18,6 +18,54 @@ use crate::control::planner::sql_plan_convert::expr::{
 };
 use crate::control::planner::sql_plan_convert::value::sql_value_to_nodedb_value;
 
+/// Build a `ScanFilter` that matches no row without inspecting any document field.
+pub(in crate::control::planner::sql_plan_convert) fn never_match_filter()
+-> nodedb_query::scan_filter::ScanFilter {
+    nodedb_query::scan_filter::ScanFilter {
+        field: String::new(),
+        op: nodedb_query::scan_filter::FilterOp::Expr,
+        value: nodedb_types::Value::Null,
+        clauses: Vec::new(),
+        expr: Some(nodedb_query::expr::SqlExpr::Literal(
+            nodedb_types::Value::Bool(false),
+        )),
+    }
+}
+
+pub(in crate::control::planner::sql_plan_convert) fn is_null_literal_equality(
+    expr: &SqlExpr,
+) -> bool {
+    matches!(
+        expr,
+        SqlExpr::BinaryOp {
+            left,
+            op: nodedb_sql::types::BinaryOp::Eq,
+            right,
+        } if matches!(left.as_ref(), SqlExpr::Literal(SqlValue::Null))
+            || matches!(right.as_ref(), SqlExpr::Literal(SqlValue::Null))
+    )
+}
+
+pub(in crate::control::planner::sql_plan_convert) fn filters_match_no_row(
+    filters: &[nodedb_sql::types::Filter],
+) -> bool {
+    filters.iter().any(|f| {
+        super::serialize::filter_to_scan_filters(&f.expr)
+            .iter()
+            .any(is_never_match)
+    })
+}
+
+fn is_never_match(filter: &nodedb_query::scan_filter::ScanFilter) -> bool {
+    filter.op == nodedb_query::scan_filter::FilterOp::Expr
+        && matches!(
+            filter.expr,
+            Some(nodedb_query::expr::SqlExpr::Literal(
+                nodedb_types::Value::Bool(false)
+            ))
+        )
+}
+
 /// Build a `ScanFilter` carrying a full expression predicate. Used whenever
 /// the planner cannot reduce the WHERE expression to a simple
 /// `(field, op, value)` tuple.
@@ -81,7 +129,8 @@ pub(super) fn sql_expr_to_join_scan_filters(
         }],
         _ => {
             let filters = sql_expr_to_scan_filters(root);
-            if filters.len() == 1 && filters[0].op == FilterOp::Expr {
+            if filters.len() == 1 && filters[0].op == FilterOp::Expr && !is_never_match(&filters[0])
+            {
                 vec![expr_filter_qualified(root)]
             } else {
                 filters
@@ -121,6 +170,12 @@ pub(super) fn sql_expr_to_scan_filters(
             }]
         }
         SqlExpr::BinaryOp { left, op, right } => {
+            if matches!(op, nodedb_sql::types::BinaryOp::Eq)
+                && (matches!(left.as_ref(), SqlExpr::Literal(SqlValue::Null))
+                    || matches!(right.as_ref(), SqlExpr::Literal(SqlValue::Null)))
+            {
+                return vec![never_match_filter()];
+            }
             let field = match left.as_ref() {
                 SqlExpr::Column { table, name } => qualified_name(table.as_deref(), name),
                 SqlExpr::Function { name, args, .. } => {
@@ -222,13 +277,23 @@ pub(super) fn sql_expr_to_scan_filters(
                     _ => None,
                 })
                 .collect();
+            if !*negated {
+                let known: Vec<nodedb_types::Value> =
+                    values.into_iter().filter(|v| !v.is_null()).collect();
+                if known.is_empty() {
+                    return vec![never_match_filter()];
+                }
+                return vec![ScanFilter {
+                    field,
+                    op: FilterOp::In,
+                    value: nodedb_types::Value::Array(known),
+                    clauses: Vec::new(),
+                    expr: None,
+                }];
+            }
             vec![ScanFilter {
                 field,
-                op: if *negated {
-                    FilterOp::NotIn
-                } else {
-                    FilterOp::In
-                },
+                op: FilterOp::NotIn,
                 value: nodedb_types::Value::Array(values),
                 clauses: Vec::new(),
                 expr: None,
@@ -382,5 +447,64 @@ mod tests {
         let filters = sql_expr_to_scan_filters(&like_expr(true, true));
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].op, FilterOp::NotIlike);
+    }
+
+    #[test]
+    fn equality_with_null_literal_lowers_to_never_match() {
+        let col = SqlExpr::Column {
+            table: None,
+            name: "id".into(),
+        };
+        let null = SqlExpr::Literal(SqlValue::Null);
+        let right_null = SqlExpr::BinaryOp {
+            left: Box::new(col.clone()),
+            op: nodedb_sql::types::BinaryOp::Eq,
+            right: Box::new(null.clone()),
+        };
+        let left_null = SqlExpr::BinaryOp {
+            left: Box::new(null),
+            op: nodedb_sql::types::BinaryOp::Eq,
+            right: Box::new(col),
+        };
+        for expr in [&right_null, &left_null] {
+            let filters = sql_expr_to_scan_filters(expr);
+            assert_eq!(filters.len(), 1);
+            assert!(is_never_match(&filters[0]));
+            let join_filters = sql_expr_to_join_scan_filters(expr);
+            assert_eq!(join_filters.len(), 1);
+            assert!(is_never_match(&join_filters[0]));
+        }
+    }
+
+    #[test]
+    fn positive_in_list_strips_null_and_never_matches_all_null() {
+        let col = SqlExpr::Column {
+            table: None,
+            name: "id".into(),
+        };
+        let only_null = SqlExpr::InList {
+            expr: Box::new(col.clone()),
+            list: vec![SqlExpr::Literal(SqlValue::Null)],
+            negated: false,
+        };
+        let f = sql_expr_to_scan_filters(&only_null);
+        assert_eq!(f.len(), 1);
+        assert!(is_never_match(&f[0]));
+
+        let mixed = SqlExpr::InList {
+            expr: Box::new(col),
+            list: vec![
+                SqlExpr::Literal(SqlValue::String("a".into())),
+                SqlExpr::Literal(SqlValue::Null),
+            ],
+            negated: false,
+        };
+        let f = sql_expr_to_scan_filters(&mixed);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].op, FilterOp::In);
+        assert_eq!(
+            f[0].value,
+            nodedb_types::Value::Array(vec![nodedb_types::Value::String("a".into())])
+        );
     }
 }

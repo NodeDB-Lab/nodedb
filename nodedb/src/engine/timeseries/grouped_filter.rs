@@ -61,6 +61,16 @@ pub fn eval_filters_to_bitmask<'a>(
         if f.op == FilterOp::MatchAll {
             continue;
         }
+        if f.op == FilterOp::Expr
+            && matches!(
+                f.expr,
+                Some(nodedb_query::expr::SqlExpr::Literal(
+                    nodedb_types::Value::Bool(false)
+                ))
+            )
+        {
+            return Ok(vec![0u64; simd_filter::words_for(row_count)]);
+        }
         if !f.clauses.is_empty() {
             return Err(UnsupportedPredicate::new(f, "OR clauses"));
         }
